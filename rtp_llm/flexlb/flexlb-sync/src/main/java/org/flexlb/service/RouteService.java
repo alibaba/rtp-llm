@@ -3,28 +3,30 @@ package org.flexlb.service;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.balance.scheduler.AbstractScheduler;
 import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.DirectScheduler;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.InflightItem;
 import org.flexlb.balance.scheduler.InflightStore;
-import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.config.ConfigService;
-import org.flexlb.constant.MetricConstant;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 
 import java.util.concurrent.CompletableFuture;
@@ -33,12 +35,11 @@ import java.util.concurrent.CompletableFuture;
 public class RouteService {
 
     private final ConfigService configService;
-    private final FlexlbBatchScheduler flexlbBatchScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
     private final EndpointRegistry endpointRegistry;
     private final BatchSchedulerReporter reporter;
 
-    // --- Phase 3: thin-wrapper schedulers + global inflight store ---
+    // --- the three scheduling paths + global inflight store ---
 
     private final BatchScheduler batchScheduler;
     private final QueueScheduler queueScheduler;
@@ -46,16 +47,15 @@ public class RouteService {
     private final InflightStore globalInflightStore;
 
     public RouteService(ConfigService configService,
-                        DefaultRouter defaultScheduler,
-                        QueueManager queueManager,
-                        FlexlbBatchScheduler flexlbBatchScheduler,
+                        DefaultRouter router,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
                         FlexMonitor flexMonitor,
                         InflightStore globalInflightStore,
                         EndpointRegistry endpointRegistry,
-                        BatchSchedulerReporter reporter) {
+                        BatchSchedulerReporter reporter,
+                        RoutingQueueReporter routingQueueReporter,
+                        DynamicWorkerManager dynamicWorkerManager) {
         this.configService = configService;
-        this.flexlbBatchScheduler = flexlbBatchScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
         this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
@@ -65,10 +65,20 @@ public class RouteService {
         batchHelper.register();
         FlexlbMetricHelper queueHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_QUEUE);
         queueHelper.register();
+        FlexlbMetricHelper directHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_DIRECT);
+        directHelper.register();
 
-        this.batchScheduler = new BatchScheduler(flexlbBatchScheduler, globalInflightStore, batchHelper);
-        this.queueScheduler = new QueueScheduler(queueManager, globalInflightStore, queueHelper);
-        this.directScheduler = new DirectScheduler(defaultScheduler);
+        this.batchScheduler = new BatchScheduler(configService, router, endpointRegistry,
+                reporter, globalInflightStore, batchHelper);
+        this.queueScheduler = new QueueScheduler(router, configService, routingQueueReporter,
+                dynamicWorkerManager, globalInflightStore, queueHelper);
+        this.directScheduler = new DirectScheduler(router, globalInflightStore, directHelper);
+    }
+
+    /** Start the queue consumer worker pool. */
+    @PostConstruct
+    public void start() {
+        queueScheduler.start();
     }
 
     /**
@@ -84,8 +94,7 @@ public class RouteService {
         balanceContext.setScheduleMode(mode);
 
         AbstractScheduler scheduler;
-        if (mode == ScheduleModeEnum.BATCH
-                && (flexlbBatchScheduler == null || !hasValidGenerateInput(balanceContext))) {
+        if (mode == ScheduleModeEnum.BATCH && !hasValidGenerateInput(balanceContext)) {
             Logger.warn("BATCH mode cannot process this request, falling back to DIRECT");
             balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
             scheduler = directScheduler;
@@ -120,7 +129,7 @@ public class RouteService {
      *
      * <p>Looks up the {@link InflightItem} in the global inflight store and
      * atomically cancels it via CAS. Returns {@code false} if the request was
-     * not found (already completed or never tracked, e.g. DIRECT mode).
+     * not found (already completed or never tracked).
      *
      * @param requestId string-form request ID
      * @return {@code true} if the request was found and cancelled
@@ -155,6 +164,22 @@ public class RouteService {
     }
 
     /**
+     * Current routing queue length (QUEUE path). Exposed for the HTTP
+     * master-info endpoint.
+     */
+    public int queueLength() {
+        return queueScheduler.queueSize();
+    }
+
+    /**
+     * Dump the routing queue to a JSON snapshot file (QUEUE path). Exposed
+     * for the HTTP queue-snapshot diagnostic endpoint.
+     */
+    public QueueSnapshotResponse snapshotQueue() {
+        return queueScheduler.snapshotQueue();
+    }
+
+    /**
      * Periodically trigger scheduler-level and per-worker batch metrics
      * reporting.
      *
@@ -181,6 +206,8 @@ public class RouteService {
 
     @PreDestroy
     public void shutdown() {
+        queueScheduler.shutdown();
         globalInflightStore.shutdown();
+        endpointRegistry.close();
     }
 }

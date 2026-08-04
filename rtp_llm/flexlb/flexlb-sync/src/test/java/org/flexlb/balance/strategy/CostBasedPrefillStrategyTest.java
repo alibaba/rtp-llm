@@ -1,11 +1,12 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -15,6 +16,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -42,7 +44,6 @@ class CostBasedPrefillStrategyTest {
     private CacheAwareService cacheAwareService;
     private ResourceMeasureFactory resourceMeasureFactory;
     private EngineHealthReporter engineHealthReporter;
-    private FlexlbBatchScheduler batchScheduler;
     private EndpointRegistry endpointRegistry;
     private CostBasedPrefillStrategy strategy;
 
@@ -55,11 +56,10 @@ class CostBasedPrefillStrategyTest {
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
-        batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
 
-        // Create registry first to break circular dependency
-        endpointRegistry = new EndpointRegistry(configService, () -> batchScheduler,
-                Mockito.mock(BatchSchedulerReporter.class));
+        endpointRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
+                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchSchedulerReporter.class), null);
         engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
 
         PrefillResourceMeasure prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);

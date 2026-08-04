@@ -2,6 +2,7 @@ package org.flexlb.balance.resource;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -26,14 +27,16 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     private final long fullSpeedThreshold;
     private final long stopThreshold;
     private final long concurrencyLimit;
+    private final EndpointRegistry endpointRegistry;
 
-    public DecodeResourceMeasure(ConfigService configService) {
+    public DecodeResourceMeasure(ConfigService configService, EndpointRegistry endpointRegistry) {
         FlexlbConfig config = configService.loadBalanceConfig();
         this.availableThreshold = config.getDecodeAvailableMemoryThreshold();
         this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
         this.fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
         this.stopThreshold = config.getDecodeStopThreshold();
         this.concurrencyLimit = config.getDecodeConcurrencyLimit();
+        this.endpointRegistry = endpointRegistry;
     }
 
     @Override
@@ -48,14 +51,14 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
-        long totalLoad = endpoint.getTotalLoad();
+        long totalLoad = endpoint.decodeTotalLoad();
         if (concurrencyLimit > 0 && totalLoad >= concurrencyLimit) {
             Logger.warn("Decode worker {} resource unavailable: totalLoad={}, limit={}",
                     endpoint.ipPort(), totalLoad, concurrencyLimit);
             return false;
         }
-        long used = endpoint.realKvUsed();
-        long total = endpoint.realKvTotal();
+        long used = endpoint.decodeRealKvUsed();
+        long total = endpoint.decodeKvTotal();
         if (total == 0) {
             endpoint.getStatus().getResourceAvailable().set(true);
             return true;
@@ -83,8 +86,8 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         double totalWaterLevel = 0;
         int count = 0;
 
-        for (WorkerStatus worker : workerStatusMap.values()) {
-            double waterLevel = calculateWaterLevel(worker);
+        for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
+            double waterLevel = calculateWaterLevel(entry.getKey(), entry.getValue());
             totalWaterLevel += waterLevel;
             count++;
         }
@@ -92,19 +95,37 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         return count > 0 ? totalWaterLevel / count : 0.0;
     }
 
-    private double calculateWaterLevel(WorkerStatus workerStatus) {
+    /**
+     * Water level for a single worker, preferring the {@link DecodeEndpoint} real*() views
+     * (engine-reported state + local inflight reservations) over raw {@link WorkerStatus}
+     * fields. The real view is inflight-aware, so the resulting water level is more
+     * conservative (never lower) than the raw view. Thresholds are unchanged — only the
+     * data source differs.
+     *
+     * <p>Falls back to raw WorkerStatus fields when no DecodeEndpoint is registered for
+     * the key (e.g., this measure is configured for a non-decode role, or the endpoint
+     * has not been created yet).
+     */
+    private double calculateWaterLevel(String ipPort, WorkerStatus workerStatus) {
         if (workerStatus == null) {
             return 0.0;
         }
 
-        return Math.max(calculateKvCacheWaterLevel(workerStatus), calculateConcurrencyWaterLevel(workerStatus));
+        DecodeEndpoint endpoint = endpointRegistry != null ? endpointRegistry.getDecode(ipPort) : null;
+        if (endpoint != null) {
+            return Math.max(
+                    calculateKvCacheWaterLevel(endpoint.decodeRealKvUsed(), endpoint.decodeKvTotal()),
+                    calculateConcurrencyWaterLevel(endpoint.decodeTotalLoad()));
+        }
+
+        long total = workerStatus.getTotalKvCacheTokens().get();
+        long used = total - workerStatus.getAvailableKvCacheTokens().get();
+        return Math.max(
+                calculateKvCacheWaterLevel(used, total),
+                calculateConcurrencyWaterLevel(calculateDecodeConcurrency(workerStatus)));
     }
 
-    private double calculateKvCacheWaterLevel(WorkerStatus workerStatus) {
-        long total = workerStatus.getTotalKvCacheTokens().get();
-        long available = workerStatus.getAvailableKvCacheTokens().get();
-        long used = total - available;
-
+    private double calculateKvCacheWaterLevel(long used, long total) {
         if (total == 0) {
             return 0.0;
         }
@@ -121,12 +142,11 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         }
     }
 
-    private double calculateConcurrencyWaterLevel(WorkerStatus workerStatus) {
+    private double calculateConcurrencyWaterLevel(long currentConcurrency) {
         if (concurrencyLimit <= 0) {
             return 0.0;
         }
 
-        long currentConcurrency = calculateDecodeConcurrency(workerStatus);
         if (currentConcurrency <= 0) {
             return 0.0;
         }

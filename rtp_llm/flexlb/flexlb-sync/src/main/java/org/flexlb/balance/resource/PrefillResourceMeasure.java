@@ -46,7 +46,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
-        long queueSize = endpoint.realPendingCount();
+        long queueSize = endpoint.prefillPendingRequestCount();
         boolean available = endpoint.getStatus().updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
         if (!available) {
             Logger.warn("Prefill worker {} resource unavailable: queueSize={}, threshold={}, alive={}",

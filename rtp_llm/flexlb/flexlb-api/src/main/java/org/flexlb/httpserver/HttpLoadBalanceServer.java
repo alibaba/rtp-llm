@@ -3,7 +3,6 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -42,7 +41,6 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 @Component
 public class HttpLoadBalanceServer {
     private final LBStatusConsistencyService lbStatusConsistencyService;
-    private final QueueManager queueManager;
     private final ConfigService configService;
     private final RouteService routeService;
     private final EndpointRegistry endpointRegistry;
@@ -50,7 +48,6 @@ public class HttpLoadBalanceServer {
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
-                                 QueueManager queueManager,
                                  ConfigService configService,
                                  RouteService routeService,
                                  EndpointRegistry endpointRegistry,
@@ -58,7 +55,6 @@ public class HttpLoadBalanceServer {
                                  MasterEngineSynchronizer masterEngineSynchronizer,
                                  ServerScheduleLatencyRecorder serverLatencyRecorder) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
-        this.queueManager = queueManager;
         this.configService = configService;
         this.routeService = routeService;
         this.endpointRegistry = endpointRegistry;
@@ -143,7 +139,7 @@ public class HttpLoadBalanceServer {
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    result.setQueueLength(queueManager.queueSize());
+                    result.setQueueLength(routeService.queueLength());
                     result.setCode(200);
                     result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());
@@ -195,7 +191,7 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            QueueSnapshotResponse response = queueManager.snapshotQueue();
+            QueueSnapshotResponse response = routeService.snapshotQueue();
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Mono.just(response), QueueSnapshotResponse.class);
@@ -218,7 +214,8 @@ public class HttpLoadBalanceServer {
             for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("inflight_batches", entry.getValue().getInflightBatchCount());
+                ep.put("inflight_batches", entry.getValue().prefillInflightCount()
+                        + entry.getValue().prefillEngineTaskCount());
                 prefillList.add(ep);
             }
             result.put("prefill_endpoints", prefillList);
@@ -227,7 +224,7 @@ public class HttpLoadBalanceServer {
             for (Map.Entry<String, DecodeEndpoint> entry : endpointRegistry.getDecodeEndpoints().entrySet()) {
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("inflight_requests", entry.getValue().getInflightCount());
+                ep.put("inflight_requests", entry.getValue().decodeInflightCount());
                 decodeList.add(ep);
             }
             result.put("decode_endpoints", decodeList);

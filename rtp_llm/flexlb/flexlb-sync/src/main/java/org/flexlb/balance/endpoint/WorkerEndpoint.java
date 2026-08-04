@@ -100,13 +100,4 @@ public abstract class WorkerEndpoint {
         // No resources by default. Stateful endpoints override when needed.
     }
 
-    // ==================== monitoring (EP-authoritative) ====================
-
-    /**
-     * Role-specific load metric for monitoring.
-     * <p>Prefill: estimated queue wait time (ms).
-     * <p>Decode: total active task count (confirmed running + inflight).
-     */
-    public abstract long getLoadMetric();
-
 }

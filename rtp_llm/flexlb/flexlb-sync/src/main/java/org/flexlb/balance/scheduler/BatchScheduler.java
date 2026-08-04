@@ -1,82 +1,230 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.FlexlbMetricHelper;
+import org.flexlb.util.Logger;
 
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Thin-wrapper scheduler for BATCH mode.
+ * Scheduler for BATCH mode — the request admission front door for FlexLB
+ * disaggregated inference.
  *
- * <p>Delegates request submission to the existing {@link FlexlbBatchScheduler},
- * which registers the {@link InflightItem} in the global {@link InflightStore}
- * atomically inside {@code submit()}. This wrapper wires the metric helper and
- * the terminal transition onto that item. The InflightItem shares the same
- * {@code CompletableFuture} as the delegate, so CAS-guarded terminal state
- * ensures cancel and normal completion never conflict.
+ * <p>Responsibilities:
+ * <ul>
+ *   <li>Request admission: capacity gate and atomic duplicate detection via
+ *       the global {@link InflightStore} (base-class {@code register})</li>
+ *   <li>Routing: pick prefill/decode workers through the {@link Router}</li>
+ *   <li>Hand-off: build a {@link BatchItem} and offer it to the target
+ *       {@link PrefillEndpoint}'s {@link WorkerBatcher}</li>
+ * </ul>
  *
- * <p>EP references are {@code null} in the InflightItem because the delegate
- * owns the full EP lifecycle (route, commit, rollback, release). The
- * InflightItem is purely for cancel lookup via {@link InflightStore}.
+ * <p>Everything past the hand-off lives on the endpoint side: batching
+ * ({@link WorkerBatcher}), commit + gRPC dispatch
+ * ({@link PrefillEndpoint#submitBatch}), and per-item settlement
+ * ({@link BatchItem} terminal transitions). The scheduler keeps only a
+ * {@code whenComplete} safety net that releases EP resources on any
+ * non-success completion (TTL expiry, cancel); both operations are
+ * idempotent, so overlapping with the endpoint-side paths is safe.
  *
- * <p>On terminal transition the item is NOT removed from the global store —
- * it remains as a tombstone (terminal {@link InflightState}) for late
- * cancel detection. The {@link InflightStore} TTL evictor cleans up
- * tombstones after the safety TTL.
+ * <p>TTL expiry of a batch item keeps the batch error semantics:
+ * {@link StrategyErrorType#BATCH_SLO_EXPIRED} (see {@link #ttlExpiryErrorType()}).
  */
 public class BatchScheduler extends AbstractScheduler {
 
-    private final FlexlbBatchScheduler delegate;
-    private final InflightStore globalStore;
-    private final FlexlbMetricHelper metricHelper;
+    private final ConfigService configService;
+    private final Router router;
+    private final EndpointRegistry endpointRegistry;
+    private final BatchSchedulerReporter reporter;
 
-    public BatchScheduler(FlexlbBatchScheduler delegate, InflightStore globalStore,
+    public BatchScheduler(ConfigService configService,
+                          Router router,
+                          EndpointRegistry endpointRegistry,
+                          BatchSchedulerReporter reporter,
+                          InflightStore globalStore,
                           FlexlbMetricHelper metricHelper) {
-        this.delegate = delegate;
-        this.globalStore = globalStore;
-        this.metricHelper = metricHelper;
+        super(globalStore, metricHelper);
+        this.configService = configService;
+        this.router = router;
+        this.endpointRegistry = endpointRegistry;
+        this.reporter = reporter;
     }
+
+    // ==================== Request submission ====================
 
     @Override
     public CompletableFuture<Response> submit(BalanceContext ctx) {
-        CompletableFuture<Response> future = delegate.submit(ctx);
-        ctx.setFuture(future);
+        CompletableFuture<Response> future = new CompletableFuture<>();
+        try {
+            if (ctx == null || ctx.getRequest() == null) {
+                completeError(future, StrategyErrorType.INVALID_REQUEST, null);
+                return future;
+            }
 
-        // The delegate registers the InflightItem atomically inside submit()
-        // (InflightStore.putIfAbsent) — no separate registration here. Retrieve
-        // it for metric wiring and terminal transition; the future identity
-        // guard skips items owned by an earlier submit (duplicate request ID).
-        InflightItem item = globalStore.get(String.valueOf(ctx.getRequestId()));
-        if (item != null && item.future() == future) {
-            item.setMetricHelper(metricHelper);
-            future.whenComplete((response, throwable) -> {
-                if (throwable == null) {
-                    item.complete(response);
+            // BATCH-only admission gate: count only items this scheduler
+            // registered — DIRECT/QUEUE traffic must not consume the budget.
+            int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
+            if (maxInflight > 0 && globalStore.activeCount(this) >= maxInflight) {
+                completeError(future, StrategyErrorType.QUEUE_FULL, null);
+                return future;
+            }
+
+            // Atomic registration — duplicate request IDs (active or tombstone
+            // within TTL) are rejected here without a check-then-act window.
+            InflightItem existing = register(ctx, future);
+            if (existing != null) {
+                completeError(future, StrategyErrorType.INVALID_REQUEST,
+                        "duplicate request_id: " + ctx.getRequestId());
+                return future;
+            }
+
+            Response routeResponse = router.route(ctx);
+            if (routeResponse == null || !routeResponse.isSuccess()) {
+                if (routeResponse != null) {
+                    future.complete(routeResponse);
                 } else {
-                    item.fail(throwable);
+                    completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER, null);
+                }
+                return future;
+            }
+
+            ServerStatus prefill = findServer(routeResponse, RoleType.PREFILL);
+            ServerStatus decode = findServer(routeResponse, RoleType.DECODE);
+            if (prefill == null) {
+                rollback(routeResponse);
+                completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
+                return future;
+            }
+
+            String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+            PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
+            if (prefillEp == null) {
+                rollback(routeResponse);
+                completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
+                return future;
+            }
+
+            DecodeEndpoint decodeEp = null;
+            if (decode != null) {
+                String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
+                decodeEp = endpointRegistry.getDecode(decodeIpPort);
+            }
+
+            BatchItem item = new BatchItem(ctx, future, routeResponse,
+                    BatchItem.copyOf(prefill), BatchItem.copyOf(decode),
+                    prefillEp, decodeEp, System.currentTimeMillis());
+
+            // Safety net: any non-success completion (dispatch failure, timeout,
+            // TTL expiry, cancel) releases the decode reservation and repacks the
+            // prefill batch. Both operations are idempotent (CAS / computeIfPresent),
+            // so overlapping with the endpoint-side terminal paths is safe.
+            future.whenComplete((response, throwable) -> {
+                if (throwable != null || response == null || !response.isSuccess()) {
+                    item.rollbackOnce();
+                    item.removeFromPrefillBatch();
                 }
             });
-        }
 
+            WorkerBatcher batcher = prefillEp.getBatcher();
+            ctx.setRouteSubmittedNanos(System.nanoTime());
+            batcher.offer(item);
+
+            // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
+            reporter.reportRouteSubmitTimeMs(
+                    RoleType.PREFILL.name(),
+                    prefillEp.getIp(),
+                    System.currentTimeMillis() - ctx.getStartTime());
+        } catch (Throwable t) {
+            Logger.error("BatchScheduler submit failed for request id: {}",
+                    ctx == null ? null : ctx.getRequestId(), t);
+            completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Submit failed: " + t.getMessage());
+        }
         return future;
     }
 
-    @Override
-    public boolean cancel(String requestId) {
-        InflightItem item = globalStore.get(requestId);
-        if (item == null) {
-            return false;
-        }
-        return item.cancel();
-    }
+    // ==================== TTL expiry semantics ====================
 
     /**
-     * Report BATCH-specific metrics: the delegate's internal inflight size
-     * (requests currently in the BATCH dispatch pipeline).
+     * Batch items that hit the inflight TTL safety net expire with the batch
+     * SLO error, keeping the pre-refactor batch error semantics.
+     */
+    @Override
+    protected StrategyErrorType ttlExpiryErrorType() {
+        return StrategyErrorType.BATCH_SLO_EXPIRED;
+    }
+
+    // ==================== Internal: resource rollback (pre-BatchItem paths) ====================
+
+    /**
+     * Rollback using route response — used only in submit() early-return paths
+     * where BatchItem has not been created yet.
+     */
+    private void rollback(Response routeResponse) {
+        if (routeResponse == null || routeResponse.getServerStatus() == null) {
+            return;
+        }
+        for (ServerStatus serverStatus : routeResponse.getServerStatus()) {
+            rollback(serverStatus);
+        }
+    }
+
+    private void rollback(ServerStatus serverStatus) {
+        if (serverStatus == null) {
+            return;
+        }
+        if (serverStatus.getRole() == RoleType.DECODE) {
+            String ipPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+            DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
+            if (ep != null) {
+                ep.release(serverStatus.getRequestId());
+            }
+        }
+    }
+
+    private static void completeError(CompletableFuture<Response> future,
+                                      StrategyErrorType errorType,
+                                      String message) {
+        if (future.isDone()) {
+            return;
+        }
+        Response errorResp = Response.error(errorType);
+        errorResp.setErrorMessage(message == null ? errorType.getErrorMsg() : message);
+        future.complete(errorResp);
+    }
+
+    // ==================== Internal: static utilities ====================
+
+    private static ServerStatus findServer(Response response, RoleType roleType) {
+        if (response.getServerStatus() == null) {
+            return null;
+        }
+        for (ServerStatus serverStatus : response.getServerStatus()) {
+            if (serverStatus != null && roleType == serverStatus.getRole()) {
+                return serverStatus;
+            }
+        }
+        return null;
+    }
+
+    // ==================== Metrics ====================
+
+    /**
+     * Report BATCH-specific metrics: the number of active (non-terminal)
+     * requests registered by this scheduler in the global inflight store —
+     * the same count gating admission via {@code flexlbBatchMaxInflight}.
      */
     @Override
     public void reportMetrics() {
-        metricHelper.reportInflightSize("PREFILL", "scheduler", delegate.getInflightSize());
+        metricHelper.reportInflightSize("PREFILL", "scheduler", globalStore.activeCount(this));
     }
 }

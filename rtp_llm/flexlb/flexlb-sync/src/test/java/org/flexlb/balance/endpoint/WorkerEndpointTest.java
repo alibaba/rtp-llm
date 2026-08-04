@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.BatchIdGenerator;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -8,6 +9,7 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,7 +38,8 @@ class WorkerEndpointTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setCostFormula("sum(computeTokens)");
         endpoint = new PrefillEndpoint(status, config,
-                head -> { }, (items, meta) -> { }, (item, error) -> { },
+                Mockito.mock(EngineGrpcClient.class), Mockito.mock(BatchDispatchExecutor.class),
+                new BatchIdGenerator("127.0.0.1", 7001), () -> 0,
                 Mockito.mock(BatchSchedulerReporter.class));
     }
 
@@ -75,13 +78,17 @@ class WorkerEndpointTest {
         endpoint.commitBatch(1L, 100, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
         endpoint.releaseBatch(1L);
         endpoint.releaseBatch(1L);
-        assertEquals(0, endpoint.realWaitTimeMs());
+        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
     }
 
     private void assertWaitTimeNear(long expectedMs) {
-        long actualMs = endpoint.realWaitTimeMs();
+        long actualMs = endpoint.prefillEstimatedWaitTimeMs();
         assertTrue(actualMs <= expectedMs && actualMs >= expectedMs - 50,
                 "Expected wait time near " + expectedMs + "ms but got " + actualMs + "ms");
+    }
+
+    private int trackedEntryCount() {
+        return endpoint.prefillInflightCount() + endpoint.prefillEngineTaskCount();
     }
 
     @Test
@@ -92,8 +99,8 @@ class WorkerEndpointTest {
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
-        assertEquals(0, endpoint.realWaitTimeMs());
-        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
+        assertEquals(0, trackedEntryCount());
     }
 
     @Test
@@ -107,8 +114,8 @@ class WorkerEndpointTest {
         t2.setErrorCode(0);
         calibrate(Map.of("100", t1, "101", t2), null);
 
-        assertEquals(0, endpoint.realWaitTimeMs());
-        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
+        assertEquals(0, trackedEntryCount());
     }
 
     @Test
@@ -123,8 +130,8 @@ class WorkerEndpointTest {
         success.setErrorCode(0);
         calibrate(Map.of("100", failed, "101", success), null);
 
-        assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realWaitTimeMs());
+        assertEquals(0, trackedEntryCount());
+        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
     }
 
     @Test
@@ -136,10 +143,10 @@ class WorkerEndpointTest {
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
-        assertEquals(1, endpoint.getInflightBatchCount());
-        // realWaitTimeMs = predictMs - elapsedMs; allow small timing delta
-        assertTrue(Math.abs(endpoint.realWaitTimeMs() - 2000) < 50,
-                "Expected ~2000ms but got " + endpoint.realWaitTimeMs());
+        assertEquals(1, trackedEntryCount());
+        // layer-1 entries count at full predicted value; allow small timing delta
+        assertTrue(Math.abs(endpoint.prefillEstimatedWaitTimeMs() - 2000) < 50,
+                "Expected ~2000ms but got " + endpoint.prefillEstimatedWaitTimeMs());
     }
 
     @Test
@@ -150,7 +157,7 @@ class WorkerEndpointTest {
                 new BatchItem(ctx(102L, 3000), null, null, null, null, null, null, 0)));
         endpoint.repackBatch(5L, java.util.Set.of(101L));
 
-        assertEquals(2, endpoint.realPendingCount());
+        assertEquals(2, endpoint.prefillPendingRequestCount());
     }
 
     @Test
@@ -159,8 +166,8 @@ class WorkerEndpointTest {
 
         endpoint.repackBatch(5L, java.util.Set.of(100L));
 
-        assertEquals(0, endpoint.getInflightBatchCount());
-        assertEquals(0, endpoint.realWaitTimeMs());
+        assertEquals(0, trackedEntryCount());
+        assertEquals(0, endpoint.prefillEstimatedWaitTimeMs());
     }
 
     @Test

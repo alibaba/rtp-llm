@@ -2,9 +2,7 @@ package org.flexlb.cases;
 
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.http.MediaType;
@@ -12,13 +10,10 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.BodyInserters;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
-import java.lang.reflect.Field;
 import java.time.Duration;
-import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -55,19 +50,6 @@ public class QueueStressTest {
         environmentVariables.set("DOMAIN_ADDRESS:com.prefill.hosts.address", "127.0.0.100:8080,127.0.0.101:8080");
         environmentVariables.set("DOMAIN_ADDRESS:com.decode.hosts.address", "127.0.0.102:8080,127.0.0.103:8080");
         return new QueueStressTest(webClient, configService);
-    }
-
-    public QueueStressTest resetQueue(QueueManager queueManager, int size) {
-        try {
-            Field queueField = QueueManager.class.getDeclaredField("queue");
-            queueField.setAccessible(true);
-            BlockingDeque<BalanceContext> newQueue = new LinkedBlockingDeque<>(size);
-            queueField.set(queueManager, newQueue);
-            log.info("Queue reset to size: {}", size);
-            return this;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to reset queue size", e);
-        }
     }
 
     /**

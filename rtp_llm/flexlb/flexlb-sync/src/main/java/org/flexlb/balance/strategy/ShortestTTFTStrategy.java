@@ -23,7 +23,6 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -46,8 +45,9 @@ import java.util.Map;
  *   <li>If all CAS attempts fail, fall back to the lowest-TTFT candidate</li>
  * </ol>
  *
- * <p>Intended for the non-batch routing path (Direct/Queue).
- * Batch path inflight is managed by {@code FlexlbBatchScheduler}.
+ * <p>Intended for the non-batch routing path (Direct/Queue). Batch path
+ * inflight is managed by {@code BatchScheduler} and the endpoint-side batch
+ * pipeline ({@code PrefillEndpoint} / {@code WorkerBatcher}).
  */
 @Component("shortestTtftStrategy")
 public class ShortestTTFTStrategy implements LoadBalanceStrategy {
@@ -81,7 +81,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
         // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by FlexlbBatchScheduler — no-op here.
+        // Batch path inflight is settled by BatchScheduler / PrefillEndpoint
+        // (BatchItem terminal transitions) — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
             pe.releaseBatch(requestId);
         }
@@ -212,7 +213,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             }
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
             long prefillMs = predictor.estimateMs(seqLen, cacheHit);
-            long queueMs = ep.realWaitTimeMs();
+            long queueMs = ep.prefillEstimatedWaitTimeMs();
             long ttft = prefillMs + queueMs;
             Logger.debug("ShortestTTFT score - ip: {}, hitCache: {}, prefillMs: {}, queueMs: {}, ttft: {}",
                     ep.getIp(), cacheHit, prefillMs, queueMs, ttft);
@@ -321,9 +322,9 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         long bestCacheHit = selected.hitCache();
 
         // Non-batch path: reserve prefill inflight for load-aware scoring.
-        // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
+        // Batch path commits via PrefillEndpoint.submitBatch() instead — skip here to avoid double-counting.
         if (isNonBatchPath(config)) {
-            ep.commitBatch(requestId, ttft, Collections.emptyList());
+            ep.commitRequest(requestId, ttft);
         }
 
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
@@ -346,7 +347,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
     /**
      * Whether batch dispatching is globally disabled.
-     * <p>When batch mode is active, FlexlbBatchScheduler handles all inflight tracking;
+     * <p>When batch mode is active, inflight tracking is owned by the batch
+     * pipeline (BatchScheduler → WorkerBatcher → PrefillEndpoint);
      * placeholders are only needed when the schedule mode is not BATCH.
      */
     private static boolean isNonBatchPath(FlexlbConfig config) {

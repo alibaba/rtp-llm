@@ -1,12 +1,15 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -15,7 +18,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -146,8 +148,9 @@ class EngineSyncRunnerTest {
     void should_remove_status_and_endpoint_when_service_discovery_is_empty() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        EndpointRegistry registry = new EndpointRegistry(
-                configService, () -> Mockito.mock(FlexlbBatchScheduler.class), Mockito.mock(BatchSchedulerReporter.class));
+        EndpointRegistry registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
+                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchSchedulerReporter.class), null);
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
         String ipPort = "127.0.0.1:8080";
         WorkerStatus status = new WorkerStatus();

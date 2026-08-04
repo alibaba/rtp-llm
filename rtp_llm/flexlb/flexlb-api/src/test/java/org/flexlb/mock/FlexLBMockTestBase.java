@@ -1,17 +1,18 @@
 package org.flexlb.mock;
 
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -24,6 +25,7 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -46,7 +48,7 @@ import static org.mockito.Mockito.when;
 /**
  * Base class for mock-worker integration tests.
  *
- * <p>Sets up a real {@link FlexlbBatchScheduler} backed by a real
+ * <p>Sets up a real {@link BatchScheduler} backed by a real
  * {@link EngineGrpcClient} that creates real Netty gRPC channels to
  * mock workers.  No Spring Boot context, no model loading, no GPU.
  *
@@ -55,13 +57,13 @@ import static org.mockito.Mockito.when;
  *
  * <p>Architecture:
  * <pre>
- * Real FlexlbBatchScheduler (direct construction)
- *   ├── Real DefaultBatchDispatcher
- *   │     └── Real EngineGrpcClient (real Netty channels)
- *   │           ↕  real gRPC (Netty)
- *   │     MockPrefillWorker (gRPC server, no model)
- *   │     MockDecodeWorker  (gRPC server, no model)
+ * Real BatchScheduler (direct construction)
  *   ├── Real EndpointRegistry
+ *   │     └── Real PrefillEndpoint (owns dispatch via submitBatch)
+ *   │           └── Real EngineGrpcClient (real Netty channels)
+ *   │                 ↕  real gRPC (Netty)
+ *   │           MockPrefillWorker (gRPC server, no model)
+ *   │           MockDecodeWorker  (gRPC server, no model)
  *   └── Mock Router (returns mock worker addresses)
  * </pre>
  */
@@ -73,13 +75,14 @@ public abstract class FlexLBMockTestBase {
 
     protected MockPrefillWorker mockPrefillWorker;
     protected MockDecodeWorker mockDecodeWorker;
-    protected FlexlbBatchScheduler scheduler;
+    protected BatchScheduler scheduler;
+    protected InflightStore inflightStore;
     protected EndpointRegistry endpointRegistry;
     protected FlexlbConfig config;
     protected ConfigService configService;
     protected Router router;
     protected EngineGrpcClient grpcClient;
-    protected DefaultBatchDispatcher dispatcher;
+    protected BatchDispatchExecutor dispatchExecutor;
     protected BatchSchedulerReporter reporter;
     protected EngineWorkerStatus engineWorkerStatus;
 
@@ -149,14 +152,16 @@ public abstract class FlexLBMockTestBase {
                 nameResolver, grpcExecutor, eventLoopGroup,
                 engineLocalView, globalCacheIndex, grpcReporter);
 
-        // 4. Create real dispatcher
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
+        // 4. Create real dispatch executor (process-wide pool shared by endpoints)
+        dispatchExecutor = new BatchDispatchExecutor(configService, null);
 
         // 5. Mock reporter (metrics no-op)
         reporter = mock(BatchSchedulerReporter.class);
 
-        // 6. Create real EndpointRegistry (scheduler=null for now, replaced below)
-        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
+        // 6. Create real EndpointRegistry (endpoints own dispatch via submitBatch)
+        inflightStore = new InflightStore(reporter, configService);
+        endpointRegistry = new EndpointRegistry(configService, grpcClient, dispatchExecutor,
+                inflightStore, reporter, null);
 
         // 7. Engine status is mocked by default; E2E subclasses can use the real registry-backed view.
         engineWorkerStatus = createEngineWorkerStatus();
@@ -191,11 +196,11 @@ public abstract class FlexLBMockTestBase {
         router = createRouter();
 
         // 11. Create real scheduler
-        scheduler = new FlexlbBatchScheduler(
-                configService, router,
-                endpointRegistry, dispatcher, reporter, new InflightStore(reporter), null);
+        scheduler = new BatchScheduler(
+                configService, router, endpointRegistry, reporter, inflightStore,
+                new FlexlbMetricHelper(null, MetricConstant.PATH_BATCH));
 
-        // 12. Register prefill endpoint wired to the real scheduler's callback methods
+        // 12. Register prefill endpoint (dispatch pipeline lives in the endpoint itself)
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
 
         // 13. Register in EngineWorkerStatus static map for completeness
@@ -221,8 +226,14 @@ public abstract class FlexLBMockTestBase {
         }
         additionalDecodeIpPorts.clear();
 
-        if (scheduler != null) {
-            scheduler.shutdown();
+        if (inflightStore != null) {
+            inflightStore.shutdown();
+        }
+        if (endpointRegistry != null) {
+            endpointRegistry.close();
+        }
+        if (dispatchExecutor != null) {
+            dispatchExecutor.shutdown();
         }
         if (mockPrefillWorker != null) {
             mockPrefillWorker.stop();
@@ -305,10 +316,10 @@ public abstract class FlexLBMockTestBase {
     }
 
     /**
-     * Trigger inflight TTL cleanup manually (simulates @Scheduled in production).
+     * Trigger inflight TTL cleanup manually (simulates the store's evictor thread in production).
      */
     protected void triggerTtlCleanup() {
-        scheduler.cleanupInflight();
+        inflightStore.evict();
         endpointRegistry.scheduledEviction();
     }
 

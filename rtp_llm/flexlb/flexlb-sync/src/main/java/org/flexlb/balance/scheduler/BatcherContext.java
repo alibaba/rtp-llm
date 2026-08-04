@@ -10,51 +10,38 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 
 /**
  * Controlled access to shared {@link WorkerBatcher} infrastructure.
  *
  * <p>Passed to {@link FixedWindowBatcherAlgorithm} methods so the algorithm can
- * inspect and mutate the queue, read config, and invoke callbacks
- * without directly depending on WorkerBatcher internals.
+ * inspect and mutate the queue, read config, and settle batching decisions
+ * without directly depending on WorkerBatcher internals. Ready batches go
+ * straight to {@link PrefillEndpoint#submitBatch}; rejected or expired items
+ * settle themselves through {@link BatchItem} terminal transitions.
  */
 public class BatcherContext {
 
     private final String key;
     private final PrefillEndpoint prefillEp;
     private final FlexlbConfig cfg;
-    private final Consumer<BatchItem> onExpired;
-    private final BiConsumer<List<BatchItem>, DispatchMeta> onBatchReady;
-    private final BiConsumer<BatchItem, Throwable> onOfferFailure;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth;
     private final BatchSchedulerReporter reporter;
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   Consumer<BatchItem> onExpired,
-                   BiConsumer<List<BatchItem>, DispatchMeta> onBatchReady,
-                   BiConsumer<BatchItem, Throwable> onOfferFailure,
                    PriorityBlockingQueue<BatchItem> queue,
                    BatchSchedulerReporter reporter) {
-        this(key, prefillEp, cfg, onExpired, onBatchReady, onOfferFailure,
-                queue, new AtomicInteger(queue.size()), reporter);
+        this(key, prefillEp, cfg, queue, new AtomicInteger(queue.size()), reporter);
     }
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                   Consumer<BatchItem> onExpired,
-                   BiConsumer<List<BatchItem>, DispatchMeta> onBatchReady,
-                   BiConsumer<BatchItem, Throwable> onOfferFailure,
                    PriorityBlockingQueue<BatchItem> queue,
                    AtomicInteger queueDepth,
                    BatchSchedulerReporter reporter) {
         this.key = key;
         this.prefillEp = prefillEp;
         this.cfg = cfg;
-        this.onExpired = onExpired;
-        this.onBatchReady = onBatchReady;
-        this.onOfferFailure = onOfferFailure;
         this.queue = queue;
         this.queueDepth = queueDepth;
         this.reporter = reporter;
@@ -163,7 +150,7 @@ public class BatcherContext {
 
     void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
         if (remove(item)) {
-            onOfferFailure.accept(item, new IllegalArgumentException(
+            item.failOffer(new IllegalArgumentException(
                     "request seq_len=" + item.seqLen()
                             + " cannot fit strict padded batch token capacity=" + capacity));
         }
@@ -176,7 +163,7 @@ public class BatcherContext {
     // ---- dispatch helpers (shared infrastructure) ----
 
     /**
-     * Remove items from queue and notify the batch-ready callback.
+     * Remove items from queue and hand the ready batch to the endpoint.
      * Caller is responsible for algorithm-specific logging and state cleanup
      * (e.g. {@code lastParkByRequest.remove()}) before calling this.
      */
@@ -184,16 +171,16 @@ public class BatcherContext {
         for (BatchItem item : items) {
             remove(item);
         }
-        onBatchReady.accept(items, meta);
+        prefillEp.submitBatch(items, meta);
     }
 
     /**
-     * Remove head from queue and notify the expiry callback.
+     * Remove head from queue and settle it as expired.
      * Only called by algorithms that support deadline-based expiry.
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
         remove(head);
-        onExpired.accept(head);
+        head.failExpired();
     }
 }

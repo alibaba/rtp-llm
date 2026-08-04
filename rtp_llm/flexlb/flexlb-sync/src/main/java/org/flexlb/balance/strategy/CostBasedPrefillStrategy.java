@@ -20,7 +20,6 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
@@ -59,7 +58,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     @Override
     public void rollBack(WorkerEndpoint ep, long requestId) {
         // Release non-batch prefill inflight reservation on routing failure.
-        // Batch path inflight is managed by FlexlbBatchScheduler — no-op here.
+        // Batch path inflight is settled by BatchScheduler / PrefillEndpoint
+        // (BatchItem terminal transitions) — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
             pe.releaseBatch(requestId);
         }
@@ -225,14 +225,14 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
             long singlePrefillMs = formulaEstimateMemo.estimate(predictor, cacheHit);
 
-            long endpointWaitMs = ep.realWaitTimeMs();
+            long endpointWaitMs = ep.prefillEstimatedWaitTimeMs();
 
             if (sloFilterEnabled && endpointWaitMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
                 rejections.merge("SLO_VIOLATION", 1, Integer::sum);
                 continue;
             }
 
-            long pendingCount = ep.realPendingCount();
+            long pendingCount = ep.prefillPendingRequestCount();
             long batcherWaitMs = ep.batcherWaitMs();
             feasible.setCandidate(feasibleCount++, ep, cacheHit,
                     singlePrefillMs + endpointWaitMs + batcherWaitMs,
@@ -386,9 +386,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score,
                                             FlexlbConfig config, long bestCacheHit) {
         // Non-batch path: reserve prefill inflight for load-aware scoring.
-        // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
+        // Batch path commits via PrefillEndpoint.submitBatch() instead — skip here to avoid double-counting.
         if (isNonBatchPath(config)) {
-            ep.commitBatch(requestId, score, Collections.emptyList());
+            ep.commitRequest(requestId, score);
         }
 
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics
@@ -411,7 +411,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     /**
      * Whether batch dispatching is globally disabled.
-     * <p>When batch mode is active, FlexlbBatchScheduler handles all inflight tracking;
+     * <p>When batch mode is active, inflight tracking is owned by the batch
+     * pipeline (BatchScheduler → WorkerBatcher → PrefillEndpoint);
      * placeholders are only needed when the schedule mode is not BATCH.
      */
     private static boolean isNonBatchPath(FlexlbConfig config) {

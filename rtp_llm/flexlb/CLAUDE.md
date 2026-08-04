@@ -53,16 +53,16 @@ Core load balancing logic, scheduling strategies, and worker status synchronizat
 Key concepts:
 - **Router pattern**: `Router` interface + `DefaultRouter` implementation for multi-role request routing
 - **LoadBalanceStrategy pattern**: Strategy interface for worker selection (Random, WeightedCache, ShortestTTFT)
-- **Queue-based scheduling**: `QueueManager` + `RequestScheduler` for async request processing
+- **Queue-based scheduling**: `QueueScheduler` + composed `QueueingComponent` for async request processing
 - **Dynamic resource management**: `DynamicWorkerManager` for adaptive capacity control
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
 - **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
 - **Graceful lifecycle**: Hook-based online/shutdown management
 
 Queue scheduling components:
-- `QueueManager`: Manages request queue with configurable capacity, timeout handling, and request cancellation
-- `RequestScheduler`: Worker thread pool that consumes queue and routes requests (configurable pool size)
-- `RouteService`: High-level routing service supporting queue/direct routing modes
+- `QueueScheduler`: QUEUE-mode scheduler extending `DirectScheduler`; wraps requests in a reactive pipeline (generate-timeout, queue-exception mapping) and registers them in the global `InflightStore`
+- `QueueingComponent`: Composed queueing capability — bounded deque with configurable capacity plus a permit-gated consumer worker pool, timeout handling, and head re-queue for retries
+- `RouteService`: High-level routing service selecting the scheduler by mode (direct/queue/batch)
 
 Resource management components:
 - `DynamicWorkerManager`: Adjusts worker capacity based on resource water levels
@@ -181,34 +181,32 @@ FlexLB supports two routing modes controlled by `FLEXLB_CONFIG.enableQueueing`:
 
 **Direct Mode** (queue disabled): Requests route directly to workers, returning immediate success/failure.
 
-**Queue Mode** (queue enabled): Requests enter a blocking queue and are processed asynchronously by worker threads:
+**Queue Mode** (queue enabled): Requests enter a bounded queue and are processed asynchronously by a permit-gated worker pool:
 
-- `QueueManager`:
-  - Manages `BlockingDeque<BalanceContext>` with max capacity `FLEXLB_CONFIG.maxQueueSize`
-  - `tryRouteAsync()`: Non-blocking attempt to enqueue with timeout
-  - `offerToHead()`: Priority insertion for retries (e.g., DECODE retry after PREFILL success)
-  - `takeRequest()`: Worker thread consumption
-  - `snapshotQueue()`: Debugging snapshot of queue state
-  - Handles request cancellation and timeout
+- `QueueingComponent` (composed inside `QueueScheduler`):
+  - Manages a bounded `BlockingDeque<BalanceContext>` with max capacity `FLEXLB_CONFIG.maxQueueSize`
+  - `enqueue()`: Non-blocking tail insertion; a full queue fails the request with `QUEUE_FULL`
+  - `requeueHead()`: Priority head insertion for retries (e.g., DECODE retry after PREFILL success), with a configurable retry cap
+  - Consumer worker pool (size: `FLEXLB_CONFIG.scheduleWorkerSize`) drains the queue, gated by `DynamicWorkerManager` permits
+  - `queueSize()` / queue snapshot support for debugging
 
-- `RequestScheduler`:
-  - Fixed worker thread pool (size: `FLEXLB_CONFIG.scheduleWorkerSize`)
-  - Polls queue and calls `RouteService.routeRequest()`
-  - Retry mechanism for resource-unavailable errors (NO_X_WORKER)
-  - Graceful shutdown with 10-second timeout
+- `QueueScheduler` (extends `DirectScheduler`):
+  - `submit()`: Wraps the raw worker future in a reactive pipeline (generate-timeout, queue-exception mapping, route-time reporting) and registers it in the global `InflightStore`
+  - Reuses `DirectScheduler`'s route-and-complete logic on the worker consume path
+  - Overrides `onRouteResult` to intercept retryable failures (NO_X_WORKER) and re-queue at the head
+  - Graceful shutdown follows the scheduler lifecycle (`start()` / `shutdown()`)
 
 - `RouteService`:
-  - `routeRequest()`: Main routing entry point
-  - Supports queue mode (async) and direct mode (sync)
-  - `cancelRequest()`: Request cancellation via sequence ID
+  - Main routing entry point; selects the scheduler by schedule mode (direct/queue/batch)
+  - Cancel is handled through the scheduler's global `InflightStore` (`AbstractScheduler.cancel`)
 
 **Request Lifecycle in Queue Mode**:
-1. Client submits request → `QueueManager.tryRouteAsync()`
-2. Request enqueued with `enqueueTime` and `sequenceId`
-3. Worker thread dequeues → `RequestScheduler` processes
+1. Client submits request → `QueueScheduler.submit()` registers it in the `InflightStore`
+2. Request enqueued via `QueueingComponent.enqueue()` with `enqueueTime` and `sequenceId`
+3. Consumer worker dequeues and routes through `DirectScheduler`'s route path
 4. Routes through `DefaultRouter`
-5. If resource unavailable → retry via `offerToHead()`
-6. Response completes the `CompletableFuture<BalanceContext>`
+5. If resource unavailable → retry via `QueueingComponent.requeueHead()`
+6. Response completes the request future (terminal transition recorded in the `InflightStore`)
 
 ### Dynamic Resource Management
 
@@ -315,8 +313,8 @@ FlexLB reads configuration from environment variables:
 
 New configuration fields:
 - `enableQueueing`: Enable/disable queue-based routing (default: true)
-- `maxQueueSize`: Maximum queue capacity for `QueueManager`
-- `scheduleWorkerSize`: Worker thread pool size for `RequestScheduler`
+- `maxQueueSize`: Maximum queue capacity for `QueueingComponent`
+- `scheduleWorkerSize`: Consumer worker pool size for `QueueingComponent`
 - `resourceCheckIntervalMs`: Resource check interval for `DynamicWorkerManager`
 
 ### MODEL_SERVICE_CONFIG (required)

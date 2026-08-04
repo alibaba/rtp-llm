@@ -13,9 +13,9 @@ import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.InflightStore;
-import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
@@ -39,6 +39,7 @@ import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -86,7 +87,7 @@ import static org.mockito.Mockito.withSettings;
  *
  * <p>The exercised path is:
  * client stub -> Netty Master gRPC server -> FlexlbServiceImpl -> RouteService
- * -> FlexlbBatchScheduler -> WorkerBatcher -> EngineGrpcClient -> Netty mock engine.
+ * -> BatchScheduler -> WorkerBatcher -> EngineGrpcClient -> Netty mock engine.
  * The worker capacities are fixed by the fixture, while worker selection uses the
  * production DefaultRouter and cost-based prefill/decode strategies. The 750-engine
  * selection topology has its own focused performance regression test.
@@ -178,7 +179,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     protected Router createRouter() {
         ResourceMeasureFactory resourceMeasureFactory = new ResourceMeasureFactory(List.of(
                 new PrefillResourceMeasure(configService),
-                new DecodeResourceMeasure(configService)));
+                new DecodeResourceMeasure(configService, endpointRegistry)));
         new CostBasedPrefillStrategy(
                 engineWorkerStatus,
                 new EmptyCacheAwareService(),
@@ -209,13 +210,13 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         RouteService routeService = new RouteService(
                 configService,
                 (DefaultRouter) router,
-                mock(QueueManager.class, withSettings().stubOnly()),
-                scheduler,
                 mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()),
                 NoOpFlexMonitor.getInstance(),
-                new InflightStore(reporter),
+                inflightStore,
                 endpointRegistry,
-                reporter);
+                reporter,
+                mock(RoutingQueueReporter.class, withSettings().stubOnly()),
+                mock(DynamicWorkerManager.class, withSettings().stubOnly()));
 
         LBStatusConsistencyService consistencyService =
                 mock(LBStatusConsistencyService.class, withSettings().stubOnly());
@@ -267,8 +268,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         if (masterServer != null) {
             masterServer.shutdown();
         }
-        if (dispatcher != null) {
-            dispatcher.shutdown();
+        if (dispatchExecutor != null) {
+            dispatchExecutor.shutdown();
         }
         restoreRequestPathLogs();
     }

@@ -1,15 +1,16 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 
 import java.util.Map;
@@ -30,8 +31,9 @@ class EndpointRegistryRoleTest {
     void setUp() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        registry = new EndpointRegistry(
-                configService, () -> Mockito.mock(FlexlbBatchScheduler.class), Mockito.mock(BatchSchedulerReporter.class));
+        registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
+                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchSchedulerReporter.class), null);
     }
 
     @AfterEach
@@ -85,7 +87,7 @@ class EndpointRegistryRoleTest {
         SimpleWorkerEndpoint endpoint = (SimpleWorkerEndpoint) registry.ensureEndpoint(
                 RoleType.VIT, "127.0.0.1:8080", status);
 
-        assertEquals(2, endpoint.getLoadMetric());
+        assertEquals(2, endpoint.runningTaskCount());
     }
 
     @Test

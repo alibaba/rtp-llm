@@ -11,23 +11,21 @@ import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 
 /**
  * Per-worker request batcher that owns the queue and lifecycle, delegating
  * dispatch decision logic to {@link FixedWindowBatcherAlgorithm}.
  *
  * <p>One instance per Prefill worker. Requests are submitted via
- * {@link #offer(BatchItem)} and batched by the algorithm. Batching decisions
- * are reported through the three functional callbacks supplied at
- * construction ({@code onExpired}, {@code onBatchReady}, {@code onOfferFailure}).
+ * {@link #offer(BatchItem)} and batched by the algorithm. Ready batches go
+ * to {@link PrefillEndpoint#submitBatch} via the {@link BatcherContext};
+ * rejected or expired items settle themselves through {@link BatchItem}
+ * terminal transitions.
  */
 public class WorkerBatcher {
 
     private final String key;
     private final FlexlbConfig cfg;
-    private final BiConsumer<BatchItem, Throwable> onOfferFailure;
     private final PriorityBlockingQueue<BatchItem> queue =
             new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
     private final AtomicInteger queueDepth = new AtomicInteger();
@@ -37,17 +35,11 @@ public class WorkerBatcher {
     private final BatcherContext ctx;
 
     public WorkerBatcher(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
-                         Consumer<BatchItem> onExpired,
-                         BiConsumer<List<BatchItem>, DispatchMeta> onBatchReady,
-                         BiConsumer<BatchItem, Throwable> onOfferFailure,
                          BatchSchedulerReporter reporter) {
         this.key = key;
         this.cfg = cfg;
-        this.onOfferFailure = onOfferFailure;
         this.algorithm = new FixedWindowBatcherAlgorithm();
-        this.ctx = new BatcherContext(
-                key, prefillEp, cfg, onExpired, onBatchReady, onOfferFailure,
-                queue, queueDepth, reporter);
+        this.ctx = new BatcherContext(key, prefillEp, cfg, queue, queueDepth, reporter);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
@@ -60,12 +52,12 @@ public class WorkerBatcher {
 
     public void offer(BatchItem item) {
         if (stopped) {
-            onOfferFailure.accept(item, new IllegalStateException("FlexLB batcher stopped"));
+            item.failOffer(new IllegalStateException("FlexLB batcher stopped"));
             return;
         }
         int maxSize = cfg.getFlexlbBatchQueueMaxSize();
         if (!reserveQueueSlot(maxSize)) {
-            onOfferFailure.accept(item,
+            item.failOffer(
                     new IllegalStateException("FlexLB batcher queue full, maxSize=" + maxSize));
             return;
         }
@@ -99,7 +91,7 @@ public class WorkerBatcher {
         List<BatchItem> remaining = new ArrayList<>();
         ctx.drainTo(remaining);
         for (BatchItem item : remaining) {
-            onOfferFailure.accept(item,
+            item.failOffer(
                     new CancellationException("FlexLB batcher stopped: " + key));
         }
     }

@@ -1,6 +1,9 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.SimpleWorkerEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.cache.service.CacheAwareService;
@@ -183,38 +186,58 @@ public class EngineSyncRunner implements Runnable {
 
             if (size >= 2) {
                 double sumStepLatency = 0.0;
-                double sumRunningLoad = 0.0;
+                double sumEndpointLoad = 0.0;
                 for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
                     WorkerStatus workerStatus = entry.getValue();
                     sumStepLatency += workerStatus.getStepLatencyMs();
                     WorkerEndpoint ep = endpointRegistry != null
                             ? endpointRegistry.get(roleType, entry.getKey()) : null;
-                    sumRunningLoad += ep != null ? ep.getLoadMetric() : 0;
+                    sumEndpointLoad += endpointLoad(ep);
                 }
                 double meanStepLatency = sumStepLatency / size;
-                double meanRunningLoad = sumRunningLoad / size;
+                double meanEndpointLoad = sumEndpointLoad / size;
 
                 // Calculate variance (sample variance using Bessel correction)
                 double sumStepLatencyOfSquaredDiffs = 0.0;
-                double sumRunningLoadOfSquaredDiffs = 0.0;
+                double sumEndpointLoadOfSquaredDiffs = 0.0;
                 for (Map.Entry<String, WorkerStatus> entry : workerStatusMap.entrySet()) {
                     WorkerStatus workerStatus = entry.getValue();
                     double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
                     WorkerEndpoint ep = endpointRegistry != null
                             ? endpointRegistry.get(roleType, entry.getKey()) : null;
-                    double diff2 = (ep != null ? ep.getLoadMetric() : 0) - meanRunningLoad;
+                    double diff2 = endpointLoad(ep) - meanEndpointLoad;
                     sumStepLatencyOfSquaredDiffs += diff * diff;
-                    sumRunningLoadOfSquaredDiffs += diff2 * diff2;
+                    sumEndpointLoadOfSquaredDiffs += diff2 * diff2;
                 }
-                double variance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
-                double variance2 = sumRunningLoadOfSquaredDiffs / (size - 1);
+                double stepLatencyVariance = sumStepLatencyOfSquaredDiffs / (size - 1); // Sample variance
+                double endpointLoadVariance = sumEndpointLoadOfSquaredDiffs / (size - 1);
 
-                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(), variance, variance2);
+                engineHealthReporter.reportLatencyMetric(modelName, this.roleType.toString(),
+                        stepLatencyVariance, endpointLoadVariance);
                 logger.info("EngineSyncRunner finished for model: {}, role: {}", modelName, roleType);
             } else {
                 logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
             }
         }
+    }
+
+    /**
+     * Role-specific endpoint load for variance statistics. All endpoints in one
+     * runner share the same role, so values are homogeneous within a report:
+     * prefill = estimated wait time (ms), decode = active task count,
+     * other roles = engine-reported running task count.
+     */
+    private double endpointLoad(WorkerEndpoint ep) {
+        if (ep instanceof PrefillEndpoint prefill) {
+            return prefill.prefillEstimatedWaitTimeMs();
+        }
+        if (ep instanceof DecodeEndpoint decode) {
+            return decode.decodeTotalLoad();
+        }
+        if (ep instanceof SimpleWorkerEndpoint simple) {
+            return simple.runningTaskCount();
+        }
+        return 0;
     }
 
     private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {

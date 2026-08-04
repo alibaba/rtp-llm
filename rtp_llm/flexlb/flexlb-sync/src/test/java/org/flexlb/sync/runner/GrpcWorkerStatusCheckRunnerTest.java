@@ -1,17 +1,19 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 
 import java.util.Map;
@@ -75,7 +77,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
                 org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
-        // Act — pass null for FlexlbBatchScheduler and EndpointRegistry (not needed in unit test)
+        // Act — pass null for InflightStore and EndpointRegistry (not needed in unit test)
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
                 RoleType.PREFILL,
@@ -227,8 +229,9 @@ class GrpcWorkerStatusCheckRunnerTest {
     private static EndpointRegistry registry() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-        return new EndpointRegistry(
-                configService, () -> Mockito.mock(FlexlbBatchScheduler.class), Mockito.mock(BatchSchedulerReporter.class));
+        return new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
+                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchSchedulerReporter.class), null);
     }
 
     private static WorkerStatus status(int port) {

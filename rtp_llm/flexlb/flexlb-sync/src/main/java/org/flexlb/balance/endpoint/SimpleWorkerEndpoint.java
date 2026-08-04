@@ -12,8 +12,10 @@ public class SimpleWorkerEndpoint extends WorkerEndpoint {
         super(status);
     }
 
-    @Override
-    public long getLoadMetric() {
+    /**
+     * Number of running tasks reported by the engine status.
+     */
+    public long runningTaskCount() {
         return status.getRunningTaskList() == null ? 0 : status.getRunningTaskList().size();
     }
 }

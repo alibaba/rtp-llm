@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -12,7 +13,9 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,14 +40,16 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class FlexlbBatchSchedulerTest {
+class BatchSchedulerTest {
 
     private ConfigService configService;
     private Router router;
     private EngineGrpcClient grpcClient;
     private BatchSchedulerReporter reporter;
-    private FlexlbBatchScheduler scheduler;
+    private BatchScheduler scheduler;
+    private BatchDispatchExecutor dispatchExecutor;
     private EndpointRegistry endpointRegistry;
+    private InflightStore inflightStore;
     private FlexlbConfig config;
     private final List<EngineRpcService.EnqueueBatchRequestPB> sentBatches = new CopyOnWriteArrayList<>();
     private final List<String> sentEndpoints = new CopyOnWriteArrayList<>();
@@ -74,10 +79,13 @@ class FlexlbBatchSchedulerTest {
                     sentBatches.add(request);
                     return CompletableFuture.completedFuture(ackFor(request));
                 });
-        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
-        DefaultBatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-        scheduler = new FlexlbBatchScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, new InflightStore(reporter), null);
+        dispatchExecutor = new BatchDispatchExecutor(configService, null);
+        inflightStore = new InflightStore(reporter, configService);
+        endpointRegistry = new EndpointRegistry(configService, grpcClient, dispatchExecutor,
+                inflightStore, reporter, null);
+        scheduler = new BatchScheduler(configService, router,
+                endpointRegistry, reporter, inflightStore,
+                new FlexlbMetricHelper(null, MetricConstant.PATH_BATCH));
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -95,7 +103,9 @@ class FlexlbBatchSchedulerTest {
 
     @AfterEach
     void tearDown() {
-        scheduler.shutdown();
+        inflightStore.shutdown();
+        endpointRegistry.close();
+        dispatchExecutor.shutdown();
     }
 
     @Test

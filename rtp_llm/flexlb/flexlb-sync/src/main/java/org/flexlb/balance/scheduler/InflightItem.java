@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 
 import java.util.concurrent.CompletableFuture;
@@ -290,6 +291,36 @@ public final class InflightItem implements InflightEntry {
      */
     public boolean timeout() {
         return terminate(TerminalReason.TIMED_OUT);
+    }
+
+    /**
+     * Time out the request with an error {@link Response} delivered through
+     * the future — TTL safety net for requests that never reached a terminal
+     * state (e.g. a lost ACK). The error type is owned by the scheduler that
+     * registered the item ({@link AbstractScheduler#ttlExpiryErrorType()}):
+     * BATCH items expire with {@link StrategyErrorType#BATCH_SLO_EXPIRED},
+     * QUEUE/DIRECT items with {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED}.
+     * Items registered without a scheduler fall back to
+     * {@link StrategyErrorType#BATCH_SLO_EXPIRED} (legacy placeholder
+     * semantics).
+     *
+     * <p>The future completes with the error response first, then the
+     * CAS-guarded {@link #timeout()} performs the terminal transition and
+     * resource release (its completeExceptionally on the already-done future
+     * is a no-op, so the error response is preserved).
+     *
+     * @return {@code true} if this call won the CAS
+     */
+    public boolean timeoutWithError() {
+        if (!future.isDone()) {
+            StrategyErrorType errorType = scheduler == null
+                    ? StrategyErrorType.BATCH_SLO_EXPIRED
+                    : scheduler.ttlExpiryErrorType();
+            Response errorResp = Response.error(errorType);
+            errorResp.setErrorMessage("inflight TTL expired");
+            future.complete(errorResp);
+        }
+        return timeout();
     }
 
     // ---- terminal metric reporting ----

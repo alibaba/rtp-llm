@@ -1,10 +1,12 @@
 package org.flexlb.balance.strategy;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -13,13 +15,13 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 
 import java.util.HashMap;
@@ -55,8 +57,9 @@ class CostBasedDecodeStrategyTest {
 
     /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
     private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
-        EndpointRegistry registry = new EndpointRegistry(configService, () -> Mockito.mock(FlexlbBatchScheduler.class),
-                Mockito.mock(BatchSchedulerReporter.class));
+        EndpointRegistry registry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
+                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchSchedulerReporter.class), null);
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
             ws.setGrpcPort(9090);
@@ -70,11 +73,12 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
-        EndpointRegistry emptyRegistry = new EndpointRegistry(configService, () -> Mockito.mock(FlexlbBatchScheduler.class),
-                Mockito.mock(BatchSchedulerReporter.class));
+        EndpointRegistry emptyRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
+                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchSchedulerReporter.class), null);
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
-        DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService);
+        DecodeResourceMeasure decodeResourceMeasure = new DecodeResourceMeasure(configService, emptyRegistry);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
 

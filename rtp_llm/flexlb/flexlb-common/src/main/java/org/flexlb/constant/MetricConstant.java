@@ -123,9 +123,29 @@ public class MetricConstant {
     public static final String ACK_TO_RESPONSE_TIME_MS = "app.flexlb.ack.to.response.time.ms";
 
     /**
-     * Engine running queue time (from EP authoritative value)
+     * Prefill estimated queue wait time in milliseconds (EP authoritative,
+     * {@code PrefillEndpoint#prefillEstimatedWaitTimeMs}). Prefill/PDFusion roles only.
      */
-    public static final String ENGINE_RUNNING_QUEUE_TIME = "app.engine.health.check.running.queue.time";
+    public static final String ENGINE_PREFILL_WAIT_TIME_MS = "app.engine.health.check.prefill.wait.time.ms";
+
+    /**
+     * Prefill engine-accepted tasks currently in the WAITING phase
+     * ({@code PrefillEndpoint#prefillEngineWaitingCount}). Prefill/PDFusion roles only.
+     */
+    public static final String ENGINE_PREFILL_WAITING_COUNT = "app.engine.health.check.prefill.engine.waiting.count";
+
+    /**
+     * Prefill engine-accepted tasks currently in the RUNNING phase
+     * ({@code PrefillEndpoint#prefillEngineRunningCount}). Prefill/PDFusion roles only.
+     */
+    public static final String ENGINE_PREFILL_RUNNING_COUNT = "app.engine.health.check.prefill.engine.running.count";
+
+    /**
+     * Active task count (EP authoritative). Decode: confirmed running + inflight
+     * ({@code DecodeEndpoint#decodeTotalLoad}); other roles: engine-reported running
+     * task count ({@code SimpleWorkerEndpoint#runningTaskCount}). Differentiated by role tag.
+     */
+    public static final String ENGINE_ACTIVE_TASK_COUNT = "app.engine.health.check.active.task.count";
 
     /**
      * FlexLB scheduler inflight size — the scheduler's own inflight request count.
@@ -189,9 +209,12 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_INFO_STEP_LATENCY_VAR = "app.engine.worker.info.step.latency.var";
 
     /**
-     * Engine worker info running query length variance
+     * Engine worker load variance across workers of the same role.
+     * Input is the role-specific endpoint load — Prefill: estimated wait time (ms);
+     * Decode: active task count; other roles: running task count — so the unit
+     * differs per role tag and values are only comparable within one role.
      */
-    public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
+    public static final String ENGINE_WORKER_INFO_LOAD_VAR = "app.engine.worker.info.load.var";
 
     /* ------------------------ Cache Health Monitoring -------------------------- */
 

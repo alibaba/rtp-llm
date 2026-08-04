@@ -1,15 +1,20 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.BatchIdGenerator;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.springframework.beans.factory.ObjectFactory;
+import org.flexlb.util.Logger;
+import org.springframework.core.env.Environment;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
@@ -22,15 +27,47 @@ public class EndpointRegistry {
     private final ConcurrentHashMap<String, PrefillEndpoint> pdFusionEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, SimpleWorkerEndpoint> vitEndpoints = new ConcurrentHashMap<>();
     private final ConfigService configService;
-    private final ObjectFactory<FlexlbBatchScheduler> batchSchedulerFactory;
+    private final EngineGrpcClient grpcClient;
+    private final BatchDispatchExecutor dispatchExecutor;
+    private final InflightStore inflightStore;
     private final BatchSchedulerReporter reporter;
+    private final BatchIdGenerator batchIdGenerator;
 
     public EndpointRegistry(ConfigService configService,
-                            ObjectFactory<FlexlbBatchScheduler> batchSchedulerFactory,
-                            BatchSchedulerReporter reporter) {
+                            EngineGrpcClient grpcClient,
+                            BatchDispatchExecutor dispatchExecutor,
+                            InflightStore inflightStore,
+                            BatchSchedulerReporter reporter,
+                            Environment environment) {
         this.configService = configService;
-        this.batchSchedulerFactory = batchSchedulerFactory;
+        this.grpcClient = grpcClient;
+        this.dispatchExecutor = dispatchExecutor;
+        this.inflightStore = inflightStore;
         this.reporter = reporter;
+        // Initialize Snowflake batch ID generator with master identity;
+        // one shared instance for all prefill endpoints.
+        this.batchIdGenerator = new BatchIdGenerator(detectLocalIp(), detectPort(environment));
+    }
+
+    private static String detectLocalIp() {
+        try {
+            return InetAddress.getLocalHost().getHostAddress();
+        } catch (UnknownHostException e) {
+            Logger.warn("Failed to detect local IP, using 127.0.0.1 as fallback", e);
+            return "127.0.0.1";
+        }
+    }
+
+    private static int detectPort(Environment environment) {
+        String portStr = environment == null ? null : environment.getProperty("server.port");
+        if (portStr == null) {
+            portStr = System.getProperty("server.port", "7001");
+        }
+        try {
+            return Integer.parseInt(portStr);
+        } catch (NumberFormatException e) {
+            return 7001;
+        }
     }
 
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
@@ -194,12 +231,8 @@ public class EndpointRegistry {
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType) {
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
-        // Lazily resolve the scheduler bean here (not in the constructor) to
-        // break the Spring circular dependency: scheduler -> registry -> endpoint.
-        FlexlbBatchScheduler scheduler = batchSchedulerFactory.getObject();
-        return new PrefillEndpoint(status, config,
-                scheduler::onExpired, scheduler::onBatchReady, scheduler::onOfferFailure,
-                reporter);
+        return new PrefillEndpoint(status, config, grpcClient, dispatchExecutor,
+                batchIdGenerator, inflightStore::activeCount, reporter);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {
@@ -248,7 +281,10 @@ public class EndpointRegistry {
      */
     private void evictExpiredAll(long ttlMs) {
         prefillEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
-        decodeEndpoints.values().forEach(ep -> ep.evictExpiredRequests(ttlMs));
+        decodeEndpoints.values().forEach(ep -> {
+            ep.evictExpiredRequests(ttlMs);
+            ep.evictExpiredEngineTasks(ttlMs);
+        });
         pdFusionEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
     }
 

@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -30,17 +32,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class InflightStoreActiveCountTest {
 
+    private static InflightStore newStore() {
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        return new InflightStore(Mockito.mock(BatchSchedulerReporter.class), configService);
+    }
+
     private static InflightItem newItem(long requestId) {
+        return newItem(requestId, null);
+    }
+
+    private static InflightItem newItem(long requestId, AbstractScheduler scheduler) {
         Request request = new Request();
         request.setRequestId(requestId);
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
-        return new InflightItem(ctx, new CompletableFuture<Response>(), null);
+        return new InflightItem(ctx, new CompletableFuture<Response>(), scheduler);
+    }
+
+    /** Minimal scheduler stub for the per-scheduler bucket tests. */
+    private static AbstractScheduler newScheduler() {
+        return new AbstractScheduler(null, null) {
+            @Override
+            public CompletableFuture<Response> submit(BalanceContext ctx) {
+                return new CompletableFuture<>();
+            }
+        };
     }
 
     @Test
     void putIfAbsentThenTerminateDecrementsOnce() {
-        InflightStore store = new InflightStore(Mockito.mock(BatchSchedulerReporter.class));
+        InflightStore store = newStore();
         try {
             InflightItem item = newItem(1L);
             assertNull(store.putIfAbsent("1", item));
@@ -58,8 +80,63 @@ class InflightStoreActiveCountTest {
     }
 
     @Test
+    void perSchedulerBucketsAreIsolated() {
+        InflightStore store = newStore();
+        try {
+            AbstractScheduler batch = newScheduler();
+            AbstractScheduler direct = newScheduler();
+
+            InflightItem batchItem = newItem(10L, batch);
+            InflightItem directItem = newItem(11L, direct);
+            InflightItem unowned = newItem(12L);
+            assertNull(store.putIfAbsent("10", batchItem));
+            assertNull(store.putIfAbsent("11", directItem));
+            assertNull(store.putIfAbsent("12", unowned));
+
+            // global counter sees all three; buckets only see their own items
+            assertEquals(3, store.activeCount());
+            assertEquals(1, store.activeCount(batch));
+            assertEquals(1, store.activeCount(direct));
+
+            // terminating the DIRECT item must not touch the BATCH bucket
+            assertTrue(directItem.cancel());
+            assertEquals(2, store.activeCount());
+            assertEquals(1, store.activeCount(batch));
+            assertEquals(0, store.activeCount(direct));
+
+            // second terminal attempt loses the CAS: bucket not double-decremented
+            assertTrue(batchItem.cancel());
+            batchItem.timeout();
+            assertEquals(0, store.activeCount(batch));
+
+            assertTrue(unowned.cancel());
+            assertEquals(0, store.activeCount());
+        } finally {
+            store.shutdown();
+        }
+    }
+
+    @Test
+    void perSchedulerBucketCompensatedWhenTerminalBeforeWiring() {
+        InflightStore store = newStore();
+        try {
+            AbstractScheduler batch = newScheduler();
+            InflightItem item = newItem(20L, batch);
+            assertTrue(item.cancel());
+
+            // terminal before registration: compensation path must roll the
+            // bucket back together with the global counter
+            assertNull(store.putIfAbsent("20", item));
+            assertEquals(0, store.activeCount());
+            assertEquals(0, store.activeCount(batch));
+        } finally {
+            store.shutdown();
+        }
+    }
+
+    @Test
     void terminalBeforeCallbackWiringIsCompensated() {
-        InflightStore store = new InflightStore(Mockito.mock(BatchSchedulerReporter.class));
+        InflightStore store = newStore();
         try {
             // Terminate before registration: transitionTo sees a null callback,
             // so putIfAbsent's compensation path must claim and run the decrement.
@@ -75,7 +152,7 @@ class InflightStoreActiveCountTest {
 
     @Test
     void concurrentPutIfAbsentAndTerminateNeverLeaksActiveCount() throws Exception {
-        InflightStore store = new InflightStore(Mockito.mock(BatchSchedulerReporter.class));
+        InflightStore store = newStore();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             int rounds = 5_000;

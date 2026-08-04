@@ -174,7 +174,8 @@ public class FixedWindowBatcherAlgorithm {
         // 1. Engine backpressure: park if the prefill worker already has too
         //    many batches inflight, to prevent overloading the engine.
         int maxInflightBatches = ctx.cfg().getFlexlbBatchFixedMaxInflightBatches();
-        if (maxInflightBatches > 0 && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
+        int inflightBatches = ctx.prefillEp().prefillInflightCount() + ctx.prefillEp().prefillEngineTaskCount();
+        if (maxInflightBatches > 0 && inflightBatches >= maxInflightBatches) {
             TimeUnit.MILLISECONDS.sleep(1);
             return;
         }

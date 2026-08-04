@@ -316,7 +316,7 @@ public class FlexlbConfig {
      * Only a safety net — calibrate() cleans up normally.  This catches stale
      * entries left by engine crashes, lost status reports, or bugs.
      * 5 min is generous for network/engine-report jitter but short enough
-     * that stale inflight won't distort realWaitTimeMs for long.
+     * that stale inflight won't distort prefillEstimatedWaitTimeMs for long.
      */
     private long flexlbInflightTtlMs = 300_000L;
 
@@ -446,7 +446,7 @@ public class FlexlbConfig {
 
     /**
      * Maximum total in-flight requests across all batchers. Acts as a global
-     * admission control gate at the FlexlbBatchScheduler entry.
+     * admission control gate at the BatchScheduler entry.
      */
     private int flexlbBatchMaxInflight = 100000;
 
@@ -571,7 +571,7 @@ public class FlexlbConfig {
     /**
      * Returns {@code true} when the effective schedule mode is BATCH.
      * Convenience method for strategy classes that need to decide whether
-     * to reserve prefill inflight locally or defer to FlexlbBatchScheduler.
+     * to reserve prefill inflight locally or defer to BatchScheduler.
      */
     public boolean isBatchPath() {
         return getDefaultScheduleModeEnum() == ScheduleModeEnum.BATCH;

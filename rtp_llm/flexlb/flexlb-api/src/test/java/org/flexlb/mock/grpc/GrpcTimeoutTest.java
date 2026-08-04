@@ -33,9 +33,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>gRPC client sets {@code withDeadlineAfter(deadlineMs)} on the blocking stub</li>
  *   <li>When the deadline fires, the blocking call throws {@code StatusRuntimeException}
  *       with status DEADLINE_EXCEEDED</li>
- *   <li>{@link org.flexlb.balance.scheduler.DefaultBatchDispatcher} catches this in its
- *       {@code catch (Throwable)} block and calls {@code onTimeout()}</li>
- *   <li>The scheduler records a TIMED_OUT tombstone and returns BATCH_SLO_EXPIRED</li>
+ *   <li>{@link org.flexlb.balance.endpoint.PrefillEndpoint} catches this in its
+ *       {@code catch (Throwable)} block and settles each item via {@code failTimeout()}</li>
+ *   <li>The item records a TIMED_OUT terminal state and returns BATCH_SLO_EXPIRED</li>
  * </ul>
  *
  * <p>Note: The mock's {@code enqueueBatch} records the request <em>before</em> sleeping,

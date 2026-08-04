@@ -13,16 +13,15 @@ import org.mockito.ArgumentCaptor;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -37,7 +36,7 @@ class FixedWindowBatcherAlgorithmTest {
         BatchItem second = enqueuedItem(2L, 2L);
         PriorityBlockingQueue<BatchItem> queue = queueWith(first, second);
         BatcherContext ctx = context(
-                "test", null, new FlexlbConfig(), null, queue,
+                "test", null, new FlexlbConfig(), queue,
                 mock(BatchSchedulerReporter.class));
 
         assertEquals(2, ctx.size());
@@ -49,7 +48,7 @@ class FixedWindowBatcherAlgorithmTest {
 
         queue.add(first);
         BatcherContext drainCtx = context(
-                "test", null, new FlexlbConfig(), null, queue,
+                "test", null, new FlexlbConfig(), queue,
                 mock(BatchSchedulerReporter.class));
         drainCtx.drainTo(new ArrayList<>());
         assertEquals(0, drainCtx.size());
@@ -65,9 +64,8 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         when(predictor.predictBatchMs(anyList())).thenReturn(500.0);
 
-        Callbacks handler = new Callbacks();
         BatcherContext context = context(
-                "test", endpoint, config, handler,
+                "test", endpoint, config,
                 queueWith(enqueuedItem(1, System.currentTimeMillis()),
                         enqueuedItem(2, System.currentTimeMillis())),
                 mock(BatchSchedulerReporter.class));
@@ -76,7 +74,7 @@ class FixedWindowBatcherAlgorithmTest {
 
         ArgumentCaptor<List<BatchItem>> items = ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(handler.onBatchReady).accept(items.capture(), meta.capture());
+        verify(endpoint).submitBatch(items.capture(), meta.capture());
         assertEquals(2, items.getValue().size());
         assertEquals("predict_threshold", meta.getValue().reason());
     }
@@ -87,16 +85,15 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
-        Callbacks handler = new Callbacks();
         BatcherContext context = context(
-                "test", endpoint, config, handler,
+                "test", endpoint, config,
                 queueWith(enqueuedItem(1, System.currentTimeMillis() - 170)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(handler.onBatchReady).accept(anyList(), meta.capture());
+        verify(endpoint).submitBatch(anyList(), meta.capture());
         assertEquals("fixed_window_timeout", meta.getValue().reason());
     }
 
@@ -106,21 +103,20 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
-        Callbacks handler = new Callbacks();
         BatchItem[] items = new BatchItem[32];
         long now = System.currentTimeMillis() - 1_000;
         for (int index = 0; index < items.length; index++) {
             items[index] = enqueuedItem(index + 1, now);
         }
         BatcherContext context = context(
-                "test", endpoint, config, handler, queueWith(items),
+                "test", endpoint, config, queueWith(items),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(handler.onBatchReady).accept(dispatched.capture(), meta.capture());
+        verify(endpoint).submitBatch(dispatched.capture(), meta.capture());
         assertEquals(32, dispatched.getValue().size());
         assertEquals("batch_full", meta.getValue().reason());
     }
@@ -139,10 +135,9 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
-        Callbacks handler = new Callbacks();
         long now = System.currentTimeMillis() - 1_000;
         BatcherContext context = context(
-                "test", endpoint, config, handler,
+                "test", endpoint, config,
                 queueWith(enqueuedItem(1, now, 60),
                         enqueuedItem(2, now + 1, 50),
                         enqueuedItem(3, now + 2, 30)),
@@ -151,7 +146,7 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler.onBatchReady).accept(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        verify(endpoint).submitBatch(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(60L, dispatched.getValue().stream().mapToLong(BatchItem::seqLen).sum());
         assertEquals(2, context.size());
@@ -182,15 +177,14 @@ class FixedWindowBatcherAlgorithmTest {
             items[index] = enqueuedItem(index + 1L, now + index, 9_192L);
         }
 
-        Callbacks handler = new Callbacks();
         BatcherContext context = context(
-                "test", endpoint, config, handler, queueWith(items),
+                "test", endpoint, config, queueWith(items),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler.onBatchReady).accept(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        verify(endpoint).submitBatch(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(12, context.size());
     }
@@ -210,9 +204,8 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         long now = System.currentTimeMillis() - 1_000;
-        Callbacks handler = new Callbacks();
         BatcherContext context = context(
-                "test", endpoint, config, handler,
+                "test", endpoint, config,
                 queueWith(enqueuedItem(1, now, 60),
                         enqueuedItem(2, now + 1, 20),
                         enqueuedItem(3, now + 2, 5)),
@@ -221,7 +214,7 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler.onBatchReady).accept(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        verify(endpoint).submitBatch(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(2, context.size());
         assertEquals(2L, context.peek().requestId());
@@ -251,9 +244,8 @@ class FixedWindowBatcherAlgorithmTest {
         for (int index = 0; index < requestCount; index++) {
             items[index] = enqueuedItem(index + 1L, now + index, seqLen);
         }
-        Callbacks handler = new Callbacks();
         BatcherContext context = context(
-                "test", endpoint, config, handler, queueWith(items),
+                "test", endpoint, config, queueWith(items),
                 mock(BatchSchedulerReporter.class));
 
         FixedWindowBatcherAlgorithm algorithm = new FixedWindowBatcherAlgorithm();
@@ -261,7 +253,7 @@ class FixedWindowBatcherAlgorithmTest {
         algorithm.processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler.onBatchReady, times(2)).accept(
+        verify(endpoint, times(2)).submitBatch(
                 dispatched.capture(), org.mockito.ArgumentMatchers.any());
         List<List<BatchItem>> batches = dispatched.getAllValues();
 
@@ -288,17 +280,16 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
-        Callbacks handler = new Callbacks();
         long now = System.currentTimeMillis();
         BatcherContext context = context(
-                "test", endpoint, config, handler,
+                "test", endpoint, config,
                 queueWith(enqueuedItem(1, now, 60), enqueuedItem(2, now + 1, 40)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler.onBatchReady).accept(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        verify(endpoint).submitBatch(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(1, context.size());
     }
@@ -315,15 +306,16 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getStatus()).thenReturn(status);
 
         BatchItem item = enqueuedItem(1, 1, 100);
-        Callbacks handler = new Callbacks();
         BatcherContext context = context(
-                "test", endpoint, config, handler, queueWith(item),
+                "test", endpoint, config, queueWith(item),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
-        verify(handler.onOfferFailure).accept(eq(item), any(IllegalArgumentException.class));
-        verify(handler.onBatchReady, never()).accept(anyList(), any(DispatchMeta.class));
+        // Oversized item settles itself via failOffer: future completes with error
+        assertTrue(item.future().isDone());
+        assertFalse(item.future().join().isSuccess());
+        verify(endpoint, never()).submitBatch(anyList(), any(DispatchMeta.class));
         assertEquals(0, context.size());
     }
 
@@ -340,7 +332,8 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs) {
-        BatchItem item = new BatchItem(null, null, null, null, null, null, null, enqueuedAtMs);
+        BatchItem item = new BatchItem(null, new CompletableFuture<>(),
+                null, null, null, null, null, enqueuedAtMs);
         item.setSortKey(enqueuedAtMs);  // FixedWindow: sortKey = enqueuedAtMs
         return item;
     }
@@ -352,7 +345,8 @@ class FixedWindowBatcherAlgorithmTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(request);
         BatchItem item = new BatchItem(
-                balanceContext, null, null, null, null, null, null, enqueuedAtMs);
+                balanceContext, new CompletableFuture<>(),
+                null, null, null, null, null, enqueuedAtMs);
         item.setSortKey(enqueuedAtMs);
         return item;
     }
@@ -366,25 +360,10 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     private static BatcherContext context(String key, PrefillEndpoint endpoint,
-                                          FlexlbConfig config, Callbacks callbacks,
+                                          FlexlbConfig config,
                                           PriorityBlockingQueue<BatchItem> queue,
                                           BatchSchedulerReporter reporter) {
-        Callbacks cb = callbacks != null ? callbacks : new Callbacks();
         return new BatcherContext(key, endpoint, config,
-                cb.onExpired, cb.onBatchReady, cb.onOfferFailure,
                 queue, new AtomicInteger(queue.size()), reporter);
-    }
-
-    /**
-     * Mockito mocks for the three batcher callbacks. Verify interactions via
-     * {@code verify(handler.onBatchReady).accept(...)} etc.
-     */
-    private static final class Callbacks {
-        @SuppressWarnings("unchecked")
-        final Consumer<BatchItem> onExpired = mock(Consumer.class);
-        @SuppressWarnings("unchecked")
-        final BiConsumer<List<BatchItem>, DispatchMeta> onBatchReady = mock(BiConsumer.class);
-        @SuppressWarnings("unchecked")
-        final BiConsumer<BatchItem, Throwable> onOfferFailure = mock(BiConsumer.class);
     }
 }

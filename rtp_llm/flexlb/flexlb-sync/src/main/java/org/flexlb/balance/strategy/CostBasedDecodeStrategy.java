@@ -125,8 +125,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long sumCacheUsed = 0;
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
-            loads[i] = ep.getTotalLoad();
-            kvUseds[i] = ep.realKvUsed();
+            loads[i] = ep.decodeTotalLoad();
+            kvUseds[i] = ep.decodeRealKvUsed();
             sumLoad += loads[i];
             sumCacheUsed += kvUseds[i];
         }
@@ -137,8 +137,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         Map<String, Integer> rejections = new java.util.HashMap<>();
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
-            long availableKv = ep.realKvAvailable();
-            long totalKv = ep.realKvTotal();
+            long availableKv = ep.decodeRealKvAvailable();
+            long totalKv = ep.decodeKvTotal();
             if (totalKv > 0 && availableKv < seqLen) {
                 rejections.merge("KV_CAPACITY", 1, Integer::sum);
                 continue;
@@ -165,12 +165,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         }
 
         int n = candidateEndpoints.size();
-        // 缓存 realKvUsed() 避免重复调用
+        // 缓存 decodeRealKvUsed() 避免重复调用
         long[] cacheUsed = new long[n];
         int minCacheUsedIdx = 0;
         int maxCacheUsedIdx = 0;
         for (int i = 0; i < n; i++) {
-            cacheUsed[i] = candidateEndpoints.get(i).realKvUsed();
+            cacheUsed[i] = candidateEndpoints.get(i).decodeRealKvUsed();
             if (cacheUsed[i] < cacheUsed[minCacheUsedIdx]) {
                 minCacheUsedIdx = i;
             }
@@ -233,9 +233,9 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             // Cap expectedKvTokens to the endpoint's total KV capacity. When
             // maxNewTokens is very large (e.g. 8192), the raw sum seqLen +
             // maxNewTokens may exceed the physical KV limit, causing
-            // inflightKvReserved() to be artificially inflated and scoring
-            // to become overly conservative.
-            long totalKv = optimalEndpoint.realKvTotal();
+            // decodeInflightExpectedKvReserved() to be artificially inflated
+            // and scoring to become overly conservative.
+            long totalKv = optimalEndpoint.decodeKvTotal();
             if (totalKv > 0 && expectedKvTokens > totalKv) {
                 expectedKvTokens = totalKv;
             }

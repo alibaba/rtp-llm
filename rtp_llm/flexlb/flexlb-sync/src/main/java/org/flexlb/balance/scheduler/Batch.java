@@ -35,9 +35,6 @@ public final class Batch implements InflightEntry {
     /** The prefill endpoint this batch is dispatched to. */
     volatile PrefillEndpoint prefillEp;
 
-    /** The scheduler that manages this batch. */
-    volatile AbstractScheduler scheduler;
-
     /** CAS flag — {@code true} once the batch reaches a terminal state. */
     final AtomicBoolean terminated = new AtomicBoolean(false);
 
@@ -65,14 +62,6 @@ public final class Batch implements InflightEntry {
 
     public void setPrefillEp(PrefillEndpoint ep) {
         this.prefillEp = ep;
-    }
-
-    public AbstractScheduler scheduler() {
-        return scheduler;
-    }
-
-    public void setScheduler(AbstractScheduler scheduler) {
-        this.scheduler = scheduler;
     }
 
     public boolean isTerminated() {
@@ -169,15 +158,12 @@ public final class Batch implements InflightEntry {
     // ---- private helpers ----
 
     /**
-     * Batch-level cleanup: release EP resources and notify scheduler.
+     * Batch-level cleanup: release EP resources.
      * Called exactly once (inside CAS-guarded terminate/complete/failAll).
      */
     private void cleanupBatchLevel() {
         if (prefillEp != null) {
             prefillEp.releaseBatch(batchId);
-        }
-        if (scheduler != null) {
-            scheduler.removeBatchInflight(String.valueOf(batchId));
         }
     }
 }

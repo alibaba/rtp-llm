@@ -1,10 +1,12 @@
 package org.flexlb.balance.strategy;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.endpoint.BatchDispatchExecutor;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -13,13 +15,13 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 
 import java.util.HashMap;
@@ -47,8 +49,9 @@ class RandomStrategyTest {
     void setUp() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
-        endpointRegistry = new EndpointRegistry(configService, () -> Mockito.mock(FlexlbBatchScheduler.class),
-                Mockito.mock(BatchSchedulerReporter.class));
+        endpointRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
+                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                Mockito.mock(BatchSchedulerReporter.class), null);
         resourceMeasure = Mockito.mock(ResourceMeasure.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);

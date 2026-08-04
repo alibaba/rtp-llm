@@ -38,9 +38,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       {@code StatusRuntimeException}. If {@code isConnectionBrokenError} matches,
  *       it retries once with a new channel — which also fails.</li>
  *   <li>Regardless of retry, the exception propagates to
- *       {@link org.flexlb.balance.scheduler.DefaultBatchDispatcher}, which calls
- *       {@code failItems()} → {@code callbacks.onFailure()} →
- *       {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler#onFailure}</li>
+ *       {@link org.flexlb.balance.endpoint.PrefillEndpoint}, which calls
+ *       {@code failItems()} → {@code BatchItem.failDispatch()}</li>
  * </ul>
  *
  * <p>Note: {@code MockWorker.stop()} already supports graceful gRPC server shutdown
@@ -68,7 +67,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         Response ackResponse = future1.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "First request should succeed while worker is online");
         assertTrue(ackResponse.isEnqueuedByMaster(), "Should be enqueued by master");
-        int existingBatches = getPrefillEndpoint().getInflightBatchCount();
+        int existingBatches = getPrefillEndpoint().prefillInflightCount() + getPrefillEndpoint().prefillEngineTaskCount();
 
         // 2. Stop the mock prefill worker's gRPC server (simulates worker crash)
         mockPrefillWorker.stop();
@@ -93,7 +92,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
                 "Error message should not be empty");
 
         // 8. Verify: the failed request does not add leaked prefill inflight state.
-        assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
+        assertEquals(existingBatches, getPrefillEndpoint().prefillInflightCount() + getPrefillEndpoint().prefillEngineTaskCount());
 
         // 9. Verify: decode worker never received any enqueue request (PD-separated)
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),

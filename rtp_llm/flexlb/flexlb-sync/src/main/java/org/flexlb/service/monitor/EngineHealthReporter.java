@@ -4,6 +4,9 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.SimpleWorkerEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
@@ -44,6 +47,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_VISITOR_SUCC
 import static org.flexlb.constant.MetricConstant.CACHE_TOTAL_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_TOKENS;
+import static org.flexlb.constant.MetricConstant.ENGINE_ACTIVE_TASK_COUNT;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_RT;
@@ -52,15 +56,17 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_IN
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.ENGINE_FINISHED_TASK_LIST_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT;
+import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WAITING_COUNT;
+import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_RUNNING_COUNT;
 import static org.flexlb.constant.MetricConstant.ENGINE_PREFILL_WORKER_NUMBER;
-import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_AVAILABLE_CONCURRENCY;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_SUCCESS_QPS;
-import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_LOAD_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
@@ -122,13 +128,16 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
-        this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_PREFILL_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_PREFILL_WAITING_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_PREFILL_RUNNING_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_ACTIVE_TASK_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ZK_MASTER_NODE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ZK_MASTER_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
-        this.monitor.register(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_INFO_LOAD_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_RT, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, FlexMetricType.QPS);
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
@@ -143,11 +152,12 @@ public class EngineHealthReporter {
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
-    public void reportLatencyMetric(String modelName, String role, double result, double result2) {
+    public void reportLatencyMetric(String modelName, String role, double stepLatencyVariance, double loadVariance) {
         FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
-        monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, result);
-        monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, metricTags, result2);
-        logger.debug("Latency metric - model: {}, role: {}, stepLatency: {}, queryLen: {}", modelName, role, result, result2);
+        monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, stepLatencyVariance);
+        monitor.report(ENGINE_WORKER_INFO_LOAD_VAR, metricTags, loadVariance);
+        logger.debug("Latency metric - model: {}, role: {}, stepLatencyVar: {}, loadVar: {}",
+                modelName, role, stepLatencyVariance, loadVariance);
     }
 
     @Scheduled(fixedRate = 2000)
@@ -233,7 +243,18 @@ public class EngineHealthReporter {
         if (lastUpdateTime > 0) {
             monitor.report(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - lastUpdateTime);
         }
-        monitor.report(ENGINE_RUNNING_QUEUE_TIME, metricTags, ep != null ? ep.getLoadMetric() : 0);
+        // Role-specific EP load: prefill reports wait time, decode and other
+        // roles report active task count — separate metrics, no unit mixing.
+        if (ep instanceof PrefillEndpoint prefill) {
+            monitor.report(ENGINE_PREFILL_WAIT_TIME_MS, metricTags, prefill.prefillEstimatedWaitTimeMs());
+            // Layer-2 phase views: engine-accepted tasks split by WAITING/RUNNING
+            monitor.report(ENGINE_PREFILL_WAITING_COUNT, metricTags, prefill.prefillEngineWaitingCount());
+            monitor.report(ENGINE_PREFILL_RUNNING_COUNT, metricTags, prefill.prefillEngineRunningCount());
+        } else if (ep instanceof DecodeEndpoint decode) {
+            monitor.report(ENGINE_ACTIVE_TASK_COUNT, metricTags, decode.decodeTotalLoad());
+        } else if (ep instanceof SimpleWorkerEndpoint simple) {
+            monitor.report(ENGINE_ACTIVE_TASK_COUNT, metricTags, simple.runningTaskCount());
+        }
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);

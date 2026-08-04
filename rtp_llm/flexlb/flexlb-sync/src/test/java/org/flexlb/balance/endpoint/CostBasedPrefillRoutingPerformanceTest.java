@@ -3,7 +3,7 @@ package org.flexlb.balance.endpoint;
 import ch.qos.logback.classic.Level;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
@@ -15,6 +15,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -123,9 +124,9 @@ class CostBasedPrefillRoutingPerformanceTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
         BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class, withSettings().stubOnly());
-        FlexlbBatchScheduler scheduler = Mockito.mock(
-                FlexlbBatchScheduler.class, withSettings().stubOnly());
-        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
+        endpointRegistry = new EndpointRegistry(configService, Mockito.mock(EngineGrpcClient.class),
+                Mockito.mock(BatchDispatchExecutor.class), Mockito.mock(InflightStore.class),
+                reporter, null);
 
         for (int index = 0; index < ENGINE_COUNT; index++) {
             int port = 61_000 + index;
