@@ -2,14 +2,43 @@ import unittest
 from unittest import TestCase
 from unittest.mock import patch
 
-from rtp_llm.config.engine_config import EngineConfig
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
+from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
+
+
+class ServerConfigPortLayoutTest(TestCase):
+    def test_dash_sc_rejects_legacy_stride_eight(self):
+        config = ServerConfig()
+        config.worker_info_port_num = 8
+
+        with self.assertRaisesRegex(ValueError, "must be at least 9"):
+            config.validate_port_layout(dash_sc_enabled=True)
+
+    def test_dash_sc_accepts_stride_nine_without_cross_rank_overlap(self):
+        config = ServerConfig()
+        config.worker_info_port_num = 9
+        config.validate_port_layout(dash_sc_enabled=True)
+
+        config.rank_id = 0
+        rank_zero_dash_sc_port = config.dash_sc_grpc_server_port
+        config.rank_id = 1
+        rank_one_server_port = config.server_port
+
+        self.assertEqual(rank_zero_dash_sc_port, config.start_port + 8)
+        self.assertEqual(rank_one_server_port, config.start_port + 9)
+        self.assertNotEqual(rank_zero_dash_sc_port, rank_one_server_port)
+
+    def test_vit_without_dash_sc_allows_legacy_stride(self):
+        config = ServerConfig()
+        config.worker_info_port_num = 8
+
+        config.validate_port_layout(dash_sc_enabled=False)
 
 
 class GenerateConfigTest(TestCase):
@@ -68,6 +97,42 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(engine_config.pd_sep_config.role_type, RoleType.PREFILL)
         self.assertEqual(engine_config.parallelism_config.role_type, RoleType.PREFILL)
 
+    def test_engine_config_minimal_dataclass_construction_from_py_env_configs(self):
+        py_env_configs = PyEnvConfigs()
+
+        engine_config = EngineConfig(
+            parallelism_config=py_env_configs.parallelism_config,
+            runtime_config=py_env_configs.runtime_config,
+            nccl_comm_config=NcclCommConfig(
+                nccl_ip="",
+                tp_nccl_port=0,
+                dp_tp_nccl_port=0,
+                ffn_tp_nccl_port=0,
+            ),
+            server_config=py_env_configs.server_config,
+            pd_sep_config=py_env_configs.pd_separation_config,
+            concurrency_config=py_env_configs.concurrency_config,
+            fmha_config=py_env_configs.fmha_config,
+            kv_cache_config=py_env_configs.kv_cache_config,
+            profiling_debug_logging_config=(
+                py_env_configs.profiling_debug_logging_config
+            ),
+            hw_kernel_config=py_env_configs.py_hw_kernel_config,
+            device_resource_config=py_env_configs.device_resource_config,
+            moe_config=py_env_configs.moe_config,
+            model_specific_config=py_env_configs.model_specific_config,
+            sp_config=py_env_configs.sp_config,
+            cache_store_config=py_env_configs.cache_store_config,
+            misc_config=py_env_configs.misc_config.misc_config,
+            arpc_config=py_env_configs.arpc_config,
+            grpc_config=py_env_configs.grpc_config,
+            dash_sc_grpc_config=py_env_configs.dash_sc_grpc_config,
+            grammar_config=py_env_configs.grammar_config,
+            load_config=py_env_configs.load_config,
+        )
+
+        self.assertIs(engine_config.grammar_config, py_env_configs.grammar_config)
+
     def test_set_parallelism_config_propagates_prefill_cp_cache_fields(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.prefill_cp_config.kv_cache_sharded = True
@@ -83,6 +148,44 @@ class GenerateConfigTest(TestCase):
         )
         self.assertEqual(
             py_env_configs.parallelism_config.prefill_cp_config.prefill_cp_size, 4
+        )
+
+    @patch.dict(
+        "os.environ",
+        {
+            "START_PORT": "20000",
+            "REMOTE_SERVER_PORT": "30000",
+            "WORKER_INFO_PORT_NUM": "13",
+        },
+        clear=True,
+    )
+    def test_custom_stride_reaches_local_remote_and_pd_port_consumers(self):
+        py_env_configs = setup_args()
+        server_config = py_env_configs.server_config
+        distribute_config = py_env_configs.distribute_config
+        server_config.rank_id = 2
+        distribute_config.rank_id = 2
+        py_env_configs.pd_separation_config.role_type = RoleType.DECODE
+
+        setup_pd_sep_config(
+            py_env_configs.pd_separation_config,
+            py_env_configs.cache_store_config,
+            server_config,
+            distribute_config,
+        )
+
+        self.assertEqual(server_config.server_port, 20026)
+        self.assertEqual(distribute_config.remote_rpc_server_port, 30027)
+        self.assertEqual(py_env_configs.pd_separation_config.worker_port_offset, 13)
+        self.assertEqual(
+            py_env_configs.pd_separation_config.remote_rpc_server_port, 30027
+        )
+        self.assertEqual(
+            py_env_configs.pd_separation_config.cache_store_connect_port, 30028
+        )
+        self.assertEqual(
+            py_env_configs.pd_separation_config.cache_store_rdma_connect_port,
+            30030,
         )
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)

@@ -30,6 +30,39 @@ from rtp_llm.config.generate_config import (
 )
 
 
+class TestStructuredOutputPassthrough(unittest.TestCase):
+
+    def test_structured_output_controls_are_config_passthrough(self):
+        cases = {
+            "json_format": True,
+            "response_format": {"type": "json_object"},
+            "json_schema": {"type": "object"},
+            "regex": "a+",
+            "ebnf": "root ::= 'a'",
+            "structural_tag": {"format": {}},
+        }
+        for name, value in cases.items():
+            with self.subTest(name=name):
+                config = GenerateConfig(**{name: value})
+                config.validate()
+
+    def test_default_structured_output_controls_remain_valid(self):
+        GenerateConfig().validate()
+
+    def test_plain_text_response_format_remains_valid(self):
+        for value in ({"type": "text"}, '{"type":"text"}', "text"):
+            with self.subTest(value=value):
+                GenerateConfig(response_format=value).validate()
+
+    def test_plain_text_response_format_allows_beam_and_multi_return(self):
+        for value in ({"type": "text"}, '{"type":"text"}', "text", "not-json"):
+            with self.subTest(value=value):
+                GenerateConfig(response_format=value, num_beams=2).validate()
+                GenerateConfig(
+                    response_format=value, num_return_sequences=2
+                ).validate()
+
+
 class TestClampDivergeStartCombo(unittest.TestCase):
 
     def setUp(self):
