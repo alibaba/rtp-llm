@@ -91,14 +91,17 @@ struct AuxInfo {
     int32_t                      local_reuse_len          = 0;
     int32_t                      remote_reuse_len         = 0;
     int32_t                      memory_reuse_len         = 0;
+    int32_t                      disk_reuse_len           = 0;
     int32_t                      prefill_total_reuse_len  = 0;
     int32_t                      prefill_local_reuse_len  = 0;
     int32_t                      prefill_remote_reuse_len = 0;
     int32_t                      prefill_memory_reuse_len = 0;
+    int32_t                      prefill_disk_reuse_len   = 0;
     int32_t                      decode_total_reuse_len   = 0;
     int32_t                      decode_local_reuse_len   = 0;
     int32_t                      decode_remote_reuse_len  = 0;
     int32_t                      decode_memory_reuse_len  = 0;
+    int32_t                      decode_disk_reuse_len    = 0;
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;

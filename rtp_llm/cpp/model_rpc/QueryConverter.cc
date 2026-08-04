@@ -371,14 +371,17 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_local_reuse_len(response.aux_info.local_reuse_len);
             aux_info->set_remote_reuse_len(response.aux_info.remote_reuse_len);
             aux_info->set_memory_reuse_len(response.aux_info.memory_reuse_len);
+            aux_info->set_disk_reuse_len(response.aux_info.disk_reuse_len);
             aux_info->set_prefill_total_reuse_len(response.aux_info.prefill_total_reuse_len);
             aux_info->set_prefill_local_reuse_len(response.aux_info.prefill_local_reuse_len);
             aux_info->set_prefill_remote_reuse_len(response.aux_info.prefill_remote_reuse_len);
             aux_info->set_prefill_memory_reuse_len(response.aux_info.prefill_memory_reuse_len);
+            aux_info->set_prefill_disk_reuse_len(response.aux_info.prefill_disk_reuse_len);
             aux_info->set_decode_total_reuse_len(response.aux_info.decode_total_reuse_len);
             aux_info->set_decode_local_reuse_len(response.aux_info.decode_local_reuse_len);
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
+            aux_info->set_decode_disk_reuse_len(response.aux_info.decode_disk_reuse_len);
             aux_info->set_aux_string(aux_string);
             auto* mm_map = aux_info->mutable_multimodal_lengths();
             for (const auto& [key, value] : response.aux_info.multimodal_lengths) {

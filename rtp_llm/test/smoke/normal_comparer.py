@@ -53,14 +53,17 @@ class AuxInfo(BaseModel):
     local_reuse_len: Optional[int] = None
     remote_reuse_len: Optional[int] = None
     memory_reuse_len: Optional[int] = None
+    disk_reuse_len: Optional[int] = None
     prefill_total_reuse_len: Optional[int] = None
     prefill_local_reuse_len: Optional[int] = None
     prefill_remote_reuse_len: Optional[int] = None
     prefill_memory_reuse_len: Optional[int] = None
+    prefill_disk_reuse_len: Optional[int] = None
     decode_total_reuse_len: Optional[int] = None
     decode_local_reuse_len: Optional[int] = None
     decode_remote_reuse_len: Optional[int] = None
     decode_memory_reuse_len: Optional[int] = None
+    decode_disk_reuse_len: Optional[int] = None
 
     output_len: Optional[int] = None
     step_output_len: Optional[int] = None
@@ -352,14 +355,17 @@ class NormalComparer(BaseComparer):
             "local_reuse_len",
             "remote_reuse_len",
             "memory_reuse_len",
+            "disk_reuse_len",
             "prefill_total_reuse_len",
             "prefill_local_reuse_len",
             "prefill_remote_reuse_len",
             "prefill_memory_reuse_len",
+            "prefill_disk_reuse_len",
             "decode_total_reuse_len",
             "decode_local_reuse_len",
             "decode_remote_reuse_len",
             "decode_memory_reuse_len",
+            "decode_disk_reuse_len",
         ]:
             expect_val = getattr(expect_aux, field)
             actual_val = getattr(actual_aux, field)
