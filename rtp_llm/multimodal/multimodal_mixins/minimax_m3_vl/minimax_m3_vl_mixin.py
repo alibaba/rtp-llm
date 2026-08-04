@@ -24,14 +24,18 @@ import json
 import logging
 import math
 import os
+import threading
+from collections import OrderedDict
 from typing import Any, List, Optional
 
 import torch
+import torch.nn as nn
 import torchvision
 from PIL import Image
 from transformers import AutoConfig, AutoTokenizer
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
@@ -59,10 +63,213 @@ from .image_processor import (
 from .minimax_m3_vl_vit import (  # noqa: F401
     MiniMaxM3VLVisionTower,
     VisionConfig,
+    _select_attention_backend,
     get_fused_qkv_checkpoint_names,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _MiniMaxM3VLPreprocessBuffers(nn.Module):
+    """FP32 normalization constants that follow the active ViT device."""
+
+    def __init__(self, image_mean, image_std):
+        super().__init__()
+        self.register_buffer(
+            "image_mean",
+            torch.tensor(image_mean, dtype=torch.float32).view(1, 1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "image_std",
+            torch.tensor(image_std, dtype=torch.float32).view(1, 1, 3, 1, 1),
+            persistent=False,
+        )
+
+
+class _MiniMaxM3VLVisionGraphEntry:
+    def __init__(self, graph, static_input, static_output, attention_context):
+        self.graph = graph
+        self.static_input = static_input
+        self.static_output = static_output
+        self.attention_context = attention_context
+        self.ready_event = torch.cuda.Event()
+        self.has_pending_output = False
+
+
+class _MiniMaxM3VLVisionGraphCache:
+    """Bounded exact-shape CUDA Graph cache for the M3VL vision tower.
+
+    Packed attention isolation depends on the complete grid signature, so graph
+    entries are never reused across different grids. A signature is captured on
+    its second occurrence; one-off or unsupported workloads stay eager.
+    """
+
+    _GRAPH_BACKENDS = frozenset(("fa4", "flash_attn", "flashinfer"))
+
+    def __init__(
+        self,
+        visual: nn.Module,
+        max_entries: int = 4,
+        capture_after: int = 2,
+        max_graph_patches: int = 4096,
+    ):
+        self._visual = visual
+        self._max_entries = max_entries
+        self._capture_after = capture_after
+        self._max_graph_patches = max_graph_patches
+        self._enabled = True
+        self._entries = OrderedDict()
+        self._seen = {}
+        self._disabled = set()
+        self._lock = threading.Lock()
+        self._stats = {
+            "hit": 0,
+            "miss": 0,
+            "capture": 0,
+            "fallback": 0,
+        }
+
+    @staticmethod
+    def _signature(pixel_values: torch.Tensor, grid_thw: torch.Tensor):
+        grid = tuple(tuple(int(value) for value in row) for row in grid_thw.tolist())
+        return (
+            pixel_values.device.type,
+            pixel_values.device.index,
+            pixel_values.dtype,
+            tuple(pixel_values.shape),
+            grid,
+        )
+
+    def stats(self):
+        with self._lock:
+            return dict(self._stats)
+
+    def set_enabled(self, enabled: bool):
+        with self._lock:
+            self._enabled = enabled
+
+    def _fallback(self, pixel_values, grid_thw):
+        self._stats["fallback"] += 1
+        kmonitor.report(AccMetrics.VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC, 1)
+        return self._visual(pixel_values, grid_thw)
+
+    def _capture(self, pixel_values, grid_thw):
+        static_input = pixel_values.detach().clone()
+        vision_model = getattr(
+            getattr(self._visual, "vision_tower", None),
+            "vision_model",
+            self._visual,
+        )
+        attention_context = vision_model.prepare_cuda_graph_attention_context(
+            grid_thw,
+            pixel_values.device,
+            pixel_values.dtype,
+        )
+        current_stream = torch.cuda.current_stream(pixel_values.device)
+        capture_stream = torch.cuda.Stream(device=pixel_values.device)
+        capture_stream.wait_stream(current_stream)
+        with torch.cuda.stream(capture_stream), torch.inference_mode():
+            self._visual(
+                static_input,
+                grid_thw,
+                attention_context=attention_context,
+            )
+        current_stream.wait_stream(capture_stream)
+        torch.cuda.synchronize(pixel_values.device)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph), torch.inference_mode():
+            static_output = self._visual(
+                static_input,
+                grid_thw,
+                attention_context=attention_context,
+            )
+        return _MiniMaxM3VLVisionGraphEntry(
+            graph,
+            static_input,
+            static_output,
+            attention_context,
+        )
+
+    @staticmethod
+    def _replay(entry, pixel_values):
+        stream = torch.cuda.current_stream(pixel_values.device)
+        if entry.has_pending_output:
+            stream.wait_event(entry.ready_event)
+        entry.static_input.copy_(pixel_values)
+        entry.graph.replay()
+        output = entry.static_output.clone()
+        entry.ready_event.record(stream)
+        entry.has_pending_output = True
+        return output
+
+    def run(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
+        if not self._enabled:
+            return self._visual(pixel_values, grid_thw)
+        # Packed batches have data-dependent segment counts and graph I/O copies
+        # outweighed launch savings in profiling. Keep them eager until Stage 6
+        # has a padding scheme that preserves segment-level attention isolation.
+        if grid_thw.ndim != 2 or grid_thw.shape[0] != 1:
+            return self._visual(pixel_values, grid_thw)
+        if (
+            not pixel_values.is_cuda
+            or pixel_values.shape[0] > self._max_graph_patches
+            or torch.cuda.is_current_stream_capturing()
+            or _select_attention_backend(pixel_values) not in self._GRAPH_BACKENDS
+        ):
+            with self._lock:
+                return self._fallback(pixel_values, grid_thw)
+
+        signature = self._signature(pixel_values, grid_thw)
+        with self._lock:
+            entry = self._entries.get(signature)
+            if entry is not None:
+                self._entries.move_to_end(signature)
+                self._stats["hit"] += 1
+                kmonitor.report(AccMetrics.VIT_CUDA_GRAPH_HIT_QPS_METRIC, 1)
+                kmonitor.report(GaugeMetrics.VIT_CUDA_GRAPH_PADDING_RATIO_METRIC, 0)
+                return self._replay(entry, pixel_values)
+
+            self._stats["miss"] += 1
+            kmonitor.report(AccMetrics.VIT_CUDA_GRAPH_MISS_QPS_METRIC, 1)
+            if signature in self._disabled:
+                return self._visual(pixel_values, grid_thw)
+
+            seen = self._seen.get(signature, 0) + 1
+            self._seen[signature] = seen
+            if seen < self._capture_after:
+                return self._visual(pixel_values, grid_thw)
+
+            try:
+                entry = self._capture(pixel_values, grid_thw)
+            except (RuntimeError, AssertionError, ValueError) as error:
+                self._disabled.add(signature)
+                self._stats["fallback"] += 1
+                kmonitor.report(AccMetrics.VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC, 1)
+                logger.warning(
+                    "M3VL vision CUDA Graph capture failed; using eager: %s",
+                    error,
+                )
+                return self._visual(pixel_values, grid_thw)
+
+            self._entries[signature] = entry
+            self._seen.pop(signature, None)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+            # Capture records the work but some graph-safe kernels do not leave
+            # their captured output buffer in a consumable state. Replay once so
+            # the request that triggered capture observes the same result as hits.
+            self._stats["capture"] += 1
+            kmonitor.report(AccMetrics.VIT_CUDA_GRAPH_CAPTURE_QPS_METRIC, 1)
+            kmonitor.report(GaugeMetrics.VIT_CUDA_GRAPH_PADDING_RATIO_METRIC, 0)
+            logger.info(
+                "captured M3VL vision CUDA Graph shape=%s grids=%s cache_size=%d",
+                tuple(pixel_values.shape),
+                signature[-1],
+                len(self._entries),
+            )
+            return self._replay(entry, pixel_values)
 
 
 class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
@@ -90,6 +297,11 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         self.video_token_index = getattr(self.hf_config, "video_token_index", 200026)
 
         self.visual = MiniMaxM3VLVisionTower(self.hf_config).to(torch.bfloat16)
+        self._preprocess_buffers = _MiniMaxM3VLPreprocessBuffers(
+            self.mm_processor.image_mean,
+            self.mm_processor.image_std,
+        )
+        self._vision_graph_cache = _MiniMaxM3VLVisionGraphCache(self.visual)
 
         # --- LLM word embedding (CPU, ~2.3 GB) ---
         self.word_embedding_weight = self._load_word_embedding(ckpt_path)
@@ -126,6 +338,23 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             self._start_emb = self._start_emb.to(device=device, dtype=dtype)
             self._end_emb = self._end_emb.to(device=device, dtype=dtype)
             self._bracket_embs_on_device = True
+
+    def _ensure_preprocess_buffers_on_device(self):
+        if self._preprocess_buffers.image_mean.device != self._device:
+            self._preprocess_buffers.to(device=self._device)
+        return (
+            self._preprocess_buffers.image_mean,
+            self._preprocess_buffers.image_std,
+        )
+
+    def vision_graph_stats(self):
+        return self._vision_graph_cache.stats()
+
+    def set_vision_cuda_graph_enabled(self, enabled: bool):
+        self._vision_graph_cache.set_enabled(enabled)
+
+    def _run_visual(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
+        return self._vision_graph_cache.run(pixel_values, grid_thw)
 
     @property
     def _data_type(self) -> torch.dtype:
@@ -466,7 +695,12 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
 
         return torch.cat(chunks, dim=0), ts_offset
 
-    def _gpu_fold(self, frames_nchw: torch.Tensor, target_hw) -> tuple:
+    def _gpu_fold(
+        self,
+        frames_nchw: torch.Tensor,
+        target_hw,
+        pixel_values_out: Optional[torch.Tensor] = None,
+    ) -> tuple:
         """GPU resize + rescale + normalize + temporal-pad + patch-fold.
 
         Takes raw decoded frames ``[N, C, H, W]`` (N=1 for images) on any device
@@ -482,6 +716,8 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         temporal_patch_size = self.temporal_patch_size
         target_h, target_w = target_hw
 
+        # Transfer compact uint8 input first, then cast on GPU. Combining the
+        # device and dtype conversion makes pageable H2D copies much slower.
         frames = frames_nchw.to(device=device).float()
         frames = torchvision.transforms.functional.resize(
             frames,
@@ -490,16 +726,20 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         )
 
         video = frames.unsqueeze(0)  # (1, T, C, H, W)
-        video = video * p.rescale_factor
-        mean = torch.tensor(p.image_mean, device=device).view(1, 1, 3, 1, 1)
-        std = torch.tensor(p.image_std, device=device).view(1, 1, 3, 1, 1)
-        video = (video - mean) / std
+        mean, std = self._ensure_preprocess_buffers_on_device()
+        video.mul_(p.rescale_factor).sub_(mean).div_(std)
 
         T = video.shape[1]
         pad_n = (temporal_patch_size - T % temporal_patch_size) % temporal_patch_size
         if pad_n:
-            tail = video[:, -1:].repeat(1, pad_n, 1, 1, 1)
-            video = torch.cat([video, tail], dim=1)
+            padded = torch.empty(
+                (video.shape[0], T + pad_n, *video.shape[2:]),
+                device=video.device,
+                dtype=video.dtype,
+            )
+            padded[:, :T].copy_(video)
+            padded[:, T:].copy_(video[:, -1:].expand(-1, pad_n, -1, -1, -1))
+            video = padded
 
         B, T_pad, channel, H, W = video.shape
         grid_t = T_pad // temporal_patch_size
@@ -518,12 +758,35 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             patch_size,
         )
         patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
-        flatten = patches.reshape(
-            B,
+        pixel_values_shape = (
             grid_t * grid_h * grid_w,
             channel * temporal_patch_size * patch_size * patch_size,
         )
-        pixel_values = flatten.squeeze(0).to(dtype)
+        if pixel_values_out is None:
+            pixel_values = torch.empty(
+                pixel_values_shape,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            if (
+                pixel_values_out.shape != pixel_values_shape
+                or pixel_values_out.device != device
+                or pixel_values_out.dtype != dtype
+                or not pixel_values_out.is_contiguous()
+            ):
+                raise ValueError(
+                    "invalid M3VL packed pixel output: "
+                    f"expected shape={pixel_values_shape} device={device} "
+                    f"dtype={dtype}, got shape={tuple(pixel_values_out.shape)} "
+                    f"device={pixel_values_out.device} dtype={pixel_values_out.dtype}"
+                )
+            pixel_values = pixel_values_out
+
+        # Copy the strided folded view directly into the final BF16 layout. This
+        # avoids a per-item FP32 flatten allocation followed by another cast and
+        # lets batched_embedding provide slices of one packed destination.
+        pixel_values.view(*patches.shape).copy_(patches)
         # Shape metadata stays on CPU. The vision tower creates cu_seqlens on
         # the target device once, avoiding a grid_thw D2H sync in every batch.
         grid_thw = torch.tensor([[grid_t, grid_h, grid_w]], dtype=torch.long)
@@ -551,7 +814,7 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         is_video = timestamp_token_ids is not None
         frames_nchw = self._raw_to_nchw(raw, is_video)
         pixel_values, grid_thw = self._gpu_fold(frames_nchw, target_hw)
-        vit_feats = self.visual(pixel_values, grid_thw).to(dtype)
+        vit_feats = self._run_visual(pixel_values, grid_thw).to(dtype)
 
         if not is_video:
             result = self._assemble_image(vit_feats)
@@ -573,7 +836,6 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         self._ensure_bracket_embs_on_device()
 
         # --- 1. GPU transform (resize/normalize/fold) per item, then batch ViT ---
-        all_pv: List[torch.Tensor] = []
         all_thw: List[torch.Tensor] = []
         grids: List[torch.Tensor] = []
         split_sizes: List[int] = []
@@ -582,17 +844,38 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
         # output has pv.shape[0] // merge_size**2 rows per item. Split the batched
         # ViT output by the POST-merge count, not the pre-merge patch count.
         merge_length = self.merge_size**2
-        for raw, target_hw, ts_info in data_list:
+        patch_counts = [
+            self.estimate_work(data, mm_type).input_patches
+            for data, mm_type in zip(data_list, mm_types)
+        ]
+        patch_dim = (
+            3
+            * self.temporal_patch_size
+            * self.mm_processor.patch_size
+            * self.mm_processor.patch_size
+        )
+        batched_pv = torch.empty(
+            (sum(patch_counts), patch_dim),
+            device=device,
+            dtype=dtype,
+        )
+
+        patch_offset = 0
+        for (raw, target_hw, ts_info), patch_count in zip(data_list, patch_counts):
             frames_nchw = self._raw_to_nchw(raw, ts_info is not None)
-            pv, thw = self._gpu_fold(frames_nchw, target_hw)
-            all_pv.append(pv)
+            next_patch_offset = patch_offset + patch_count
+            pv, thw = self._gpu_fold(
+                frames_nchw,
+                target_hw,
+                pixel_values_out=batched_pv[patch_offset:next_patch_offset],
+            )
             all_thw.append(thw)
             grids.append(thw)
             split_sizes.append(pv.shape[0] // merge_length)
+            patch_offset = next_patch_offset
 
-        batched_pv = torch.cat(all_pv, dim=0)
         batched_thw = torch.cat(all_thw, dim=0)
-        all_vit_feats = self.visual(batched_pv, batched_thw).to(dtype)
+        all_vit_feats = self._run_visual(batched_pv, batched_thw).to(dtype)
         per_item_feats = torch.split(all_vit_feats, split_sizes, dim=0)
 
         # --- 2. Batch word-embedding lookup for all timestamps ---
