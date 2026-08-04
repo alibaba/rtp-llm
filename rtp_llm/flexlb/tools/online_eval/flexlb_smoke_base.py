@@ -268,7 +268,15 @@ class FlexLBSmokeBase:
     # -- Cancel (dual-path) -----------------------------------------------
 
     async def _cancel(self, request_id: int, response=None) -> None:
-        """Cancel via Master (always) + Worker (direct/queue path only)."""
+        """Cancel via Master (always) + Worker (always, best-effort).
+
+        The master Cancel removes the request from the scheduler inflight
+        store.  The worker Cancel directly notifies the engine so it stops
+        decoding and terminates the response stream.  In batch mode the
+        master does not yet propagate cancel to the engine, so calling
+        worker Cancel directly is required for the stream to terminate
+        before the request completes naturally.
+        """
         stub = self.schedule_pb2_grpc.FlexlbServiceStub(
             await self._channel(self._master_target())
         )
@@ -284,7 +292,7 @@ class FlexLBSmokeBase:
             cancel_request,
             timeout=10.0,
         )
-        if response is not None and not response.enqueued_by_master:
+        if response is not None:
             await self._worker_cancel(request_id, response)
 
     async def _worker_cancel(self, request_id: int, response) -> None:

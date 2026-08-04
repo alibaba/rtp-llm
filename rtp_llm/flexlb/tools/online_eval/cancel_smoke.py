@@ -186,7 +186,11 @@ class CancelSmokeTest(FlexLBSmokeBase):
         cancel_rid = rids[1]  # B
         try:
             # Schedule all three concurrently
-            responses = await asyncio.gather(*[self._schedule_auto(r) for r in rids])
+            # Use output_len=100 to give the mock engine enough decode time
+            # (~2s) for the cancel to arrive before the request completes.
+            responses = await asyncio.gather(
+                *[self._schedule_auto(r, output_len=100) for r in rids]
+            )
             for i, resp in enumerate(responses):
                 if resp.code != 200 or not resp.success:
                     return ScenarioResult(

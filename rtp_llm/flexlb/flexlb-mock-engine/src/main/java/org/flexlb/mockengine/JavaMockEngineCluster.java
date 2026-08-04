@@ -493,6 +493,16 @@ public final class JavaMockEngineCluster {
             observer.onCompleted();
         }
 
+        @Override
+        public void cancel(EngineRpcService.CancelRequestPB request,
+                           StreamObserver<EngineRpcService.EmptyPB> observer) {
+            long requestId = request.getRequestId();
+            runningTasks.remove(requestId);
+            statusVersion.incrementAndGet();
+            observer.onNext(EngineRpcService.EmptyPB.newBuilder().build());
+            observer.onCompleted();
+        }
+
         private record VersionedTask(long version, EngineRpcService.TaskInfoPB task) {
         }
     }

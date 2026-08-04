@@ -77,7 +77,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             response = await self._schedule_auto(rid, **kwargs)
             if response.code != 200 or not response.success:
                 return "", f"schedule failed: {response.error_message}"
-            addr = self._role_addr(response, self.pb2.ROLE_TYPE_PREFILL)
+            addr = self._role_addr(response, "PREFILL")
             input_pb = (
                 self._build_generate_input(rid)
                 if not response.enqueued_by_master
