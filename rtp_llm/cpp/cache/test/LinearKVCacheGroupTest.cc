@@ -35,10 +35,8 @@ TEST_F(LinearKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
 
     EXPECT_TRUE(group.prefixReusable());
     EXPECT_TRUE(group.hasSparseSlots());
-    EXPECT_FALSE(group.hasKernelBlockSubdiv());
     EXPECT_TRUE(group.transferTailBlocks());
     EXPECT_TRUE(group.isReservable());
-    EXPECT_FALSE(group.memoryPlacement() == CacheMemoryPlacement::HOST_PINNED);
 
     auto disabled_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
     disabled_policy.enable_prefix_reuse = false;

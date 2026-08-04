@@ -1,3 +1,4 @@
+import pickle
 from unittest import TestCase, main
 
 from rtp_llm.config.model_config import ModelConfig
@@ -9,7 +10,12 @@ from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
-from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
+from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
+    HybridAttentionType,
+    KVCacheSpecDesc,
+    KVCacheSpecType,
+)
 
 
 class HybridKVCacheSpecTest(TestCase):
@@ -357,6 +363,22 @@ class HybridKVCacheSpecTest(TestCase):
         KimiLinear._post_build_model_config(config)
 
         self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "sentinel")
+
+    def test_cache_capacity_policy_pickle_drops_legacy_budget_field(self):
+        policy = CacheCapacityPolicyDesc()
+        policy.reservable = False
+        policy.explicit_block_num = 17
+
+        restored = pickle.loads(pickle.dumps(policy))
+        self.assertEqual(restored.reservable, policy.reservable)
+        self.assertEqual(restored.explicit_block_num, policy.explicit_block_num)
+        self.assertFalse(hasattr(restored, "charge_to_paged_budget"))
+
+        legacy = CacheCapacityPolicyDesc.__new__(CacheCapacityPolicyDesc)
+        legacy.__setstate__((True, 23, False))
+        self.assertTrue(legacy.reservable)
+        self.assertEqual(legacy.explicit_block_num, 23)
+        self.assertFalse(hasattr(legacy, "charge_to_paged_budget"))
 
 
 if __name__ == "__main__":

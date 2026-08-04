@@ -146,8 +146,7 @@ static void setExplicitBlocksForGroup(CacheConfig& config, size_t group_id, uint
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         policies.push_back(config.policyForGroup(gid));
     }
-    policies[group_id].explicit_block_num     = block_num;
-    policies[group_id].charge_to_paged_budget = block_num > 0;
+    policies[group_id].explicit_block_num = block_num;
     config.setGroupPolicies(policies);
 }
 
