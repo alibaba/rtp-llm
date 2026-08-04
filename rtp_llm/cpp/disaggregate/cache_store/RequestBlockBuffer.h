@@ -7,7 +7,6 @@
 #include <memory>
 #include <vector>
 #include <functional>
-#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -54,7 +53,6 @@ public:
     // change with true callback, dtor with false callback
     typedef std::function<void(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&)> WatchFunc;
     bool setWatchFunc(WatchFunc&& watch_func);
-    bool setWatchFunc(WatchFunc&& watch_func, std::shared_ptr<const std::unordered_set<std::string>> filter_keys);
     void notifyRequestDone();
 
     std::string debugInfo() const;
@@ -63,11 +61,6 @@ private:
     void triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&);
 
 private:
-    struct Watcher {
-        WatchFunc                                              func;
-        std::shared_ptr<const std::unordered_set<std::string>> filter_keys;
-    };
-
     std::string requestid_;
     std::string request_key_;
 
@@ -78,7 +71,7 @@ private:
     size_t                                                        blocks_size_ = 0;
 
     mutable std::shared_mutex watch_func_mutex_;
-    std::vector<Watcher>      watch_funcs_;
+    std::vector<WatchFunc>    watch_funcs_;
 };
 
 }  // namespace rtp_llm

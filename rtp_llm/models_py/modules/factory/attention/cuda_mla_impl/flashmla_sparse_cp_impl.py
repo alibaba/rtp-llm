@@ -24,11 +24,9 @@ except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.distributed.pynccl_cp import (
-    all_gather,
-    enabled as cp_opt_enabled,
-    warmup as warmup_pynccl,
-)
+from rtp_llm.models_py.distributed.pynccl_cp import all_gather
+from rtp_llm.models_py.distributed.pynccl_cp import enabled as cp_opt_enabled
+from rtp_llm.models_py.distributed.pynccl_cp import warmup as warmup_pynccl
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_kv_allgather_restore_indices,
     cp_actual_owned_kv_lens,
@@ -53,52 +51,6 @@ from .flashmla_sparse_impl import (
     _GatherWorkspace,
     _topk_2d,
 )
-
-_PD_DEBUG_PLAN_LOGGED: set[str] = set()
-
-
-def _pd_debug_enabled() -> bool:
-    return os.environ.get("RTP_LLM_PD_DEBUG", "0") == "1"
-
-
-def _rank_tag() -> str:
-    return (
-        f"rank={os.environ.get('RANK', os.environ.get('WORLD_RANK', '?'))} "
-        f"local_rank={os.environ.get('LOCAL_RANK', '?')}"
-    )
-
-
-def _cuda_graph_capturing() -> bool:
-    try:
-        return bool(
-            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
-        )
-    except Exception:
-        return False
-
-
-def _tensor_summary(t: Optional[torch.Tensor]) -> str:
-    if t is None:
-        return "None"
-    try:
-        if t.is_cuda and _cuda_graph_capturing():
-            return (
-                f"shape={tuple(t.shape)} device={t.device} dtype={t.dtype} " "capture=1"
-            )
-        if t.numel() == 0:
-            return f"shape={tuple(t.shape)} numel=0"
-        tc = t.detach()
-        if tc.is_cuda:
-            tc = tc.cpu()
-        if tc.numel() <= 16:
-            return f"shape={tuple(t.shape)} values={tc.tolist()}"
-        return (
-            f"shape={tuple(t.shape)} numel={tc.numel()} "
-            f"min={tc.min().item()} max={tc.max().item()} "
-            f"head={tc[:4].tolist()} tail={tc[-4:].tolist()}"
-        )
-    except Exception as exc:
-        return f"shape={tuple(t.shape)} summary_error={exc}"
 
 
 def _total_local_ids_are_identity(
@@ -770,32 +722,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
-        if _pd_debug_enabled():
-            log_key = f"{os.getpid()}:{self.prefill_cp_rank}"
-            if log_key not in _PD_DEBUG_PLAN_LOGGED:
-                _PD_DEBUG_PLAN_LOGGED.add(log_key)
-                logging.info(
-                    "[PD_DEBUG][CP_MLA_PLAN] %s cp_rank=%s cp_size=%s "
-                    "chunk_lengths=%s actual_lengths=%s prefix_lengths=%s "
-                    "local_tokens=%s kv_restore=%s total_global=%s total_local=%s "
-                    "cu_kv=%s total_kv_len=%s local_ids_identity=%s "
-                    "gather_enabled=%s",
-                    _rank_tag(),
-                    self.prefill_cp_rank,
-                    self.prefill_cp_size,
-                    chunk_lengths_list,
-                    _tensor_summary(self.cp_info.prefill_actual_input_lengths_cpu),
-                    _tensor_summary(self.attn_inputs.prefix_lengths),
-                    local_tokens,
-                    _tensor_summary(self.kv_restore_unpad_indices),
-                    _tensor_summary(self.total_global_ids),
-                    _tensor_summary(self.total_local_ids),
-                    _tensor_summary(self.cu_kv_seqlens_global),
-                    self.total_kv_len,
-                    self.total_local_ids_is_identity,
-                    self._gather is not None,
-                )
-
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
         """Allocate the BF16 workspace from prefill_ragged_kv_len_indptr_d.
 
@@ -868,9 +794,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
         )
         gathered_ckv = gathered_ckv.reshape(-1, compressed_kv.size(-1))
-        gathered_k_pe = all_gather(
-            k_pe.contiguous(), group=Group.TP, role="mla_kpe"
-        )
+        gathered_k_pe = all_gather(k_pe.contiguous(), group=Group.TP, role="mla_kpe")
         gathered_k_pe = gathered_k_pe.reshape(-1, k_pe.size(-1))
 
         restored_ckv = gathered_ckv[self.kv_restore_unpad_indices]
@@ -991,9 +915,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         gathered = all_gather(
             local_fused.contiguous(), group=Group.TP, role="mla_history"
-        ).reshape(
-            -1, local_fused.size(-1)
-        )
+        ).reshape(-1, local_fused.size(-1))
         ws.fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
 
     def _attend_with_kvcache(

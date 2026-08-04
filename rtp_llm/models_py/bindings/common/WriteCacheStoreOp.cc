@@ -106,14 +106,9 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.use_opaque_kv_cache_store,
                                 captured_kv_cache.layer_id,
                                 captured_kv_cache.region_name,
-                                // REBASE CONFLICT CONTEXT(6511f0467): new base
-                                // passes CP sharding context here; source branch
-                                // added async writer ownership after the event.
-                                // Keep both constructor fields in OpData order.
                                 captured_cache_store.cp_rank,
                                 captured_cache_store.cp_size,
-                                std::move(event),
-                                captured_cache_store.cache_store_async_writer};
+                                std::move(event)};
 
         KvCacheInfo kv_cache_info;
         kv_cache_info.kv_cache_buffer = captured_kv_cache.kv_cache_base;

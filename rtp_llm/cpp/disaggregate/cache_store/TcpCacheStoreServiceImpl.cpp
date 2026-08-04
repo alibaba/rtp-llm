@@ -5,8 +5,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImplContext.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheTransferServiceImplContext.h"
 
-#include <unordered_set>
-
 namespace rtp_llm {
 
 TcpCacheStoreServiceImpl::TcpCacheStoreServiceImpl(
@@ -69,14 +67,7 @@ void TcpCacheStoreServiceImpl::loadTcpBlocks(const ::CacheLoadRequest*          
         context->loadBlockOnTcp(ok, blocks);
     };
 
-    auto filter_keys = std::make_shared<std::unordered_set<std::string>>();
-    filter_keys->reserve(static_cast<size_t>(request->blocks_size()));
-    for (int i = 0; i < request->blocks_size(); ++i) {
-        filter_keys->insert(request->blocks(i).key());
-    }
-
-    if (!request_block_buffer_store_->setRequestBlockBufferWatchFunc(
-            request->requestid(), std::move(watch_func), std::move(filter_keys))) {
+    if (!request_block_buffer_store_->setRequestBlockBufferWatchFunc(request->requestid(), std::move(watch_func))) {
         RTP_LLM_LOG_WARNING(
             "cache store service set request block buffer watch func failed, request id %s, request from %s",
             request->requestid().c_str(),

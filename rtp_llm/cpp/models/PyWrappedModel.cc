@@ -16,7 +16,6 @@
 #include <cstring>
 #include <iostream>
 #include <numeric>
-#include <sstream>
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <c10/core/DeviceGuard.h>
@@ -58,32 +57,6 @@ static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayo
 
 namespace {
 
-const bool kPdDebugEnabled = []() {
-    const char* env = std::getenv("RTP_LLM_PD_DEBUG");
-    return env != nullptr && std::string(env) == "1";
-}();
-
-const bool kMtpDecodeDebugEnabled = []() {
-    const char* env = std::getenv("RTP_LLM_DEBUG_MTP_DECODE_DATA");
-    return env != nullptr && std::string(env) != "0";
-}();
-
-bool pdDebugEnabled() {
-    return kPdDebugEnabled;
-}
-
-bool mtpDecodeDebugEnabled() {
-    static const bool logged = []() {
-        if (kMtpDecodeDebugEnabled) {
-            RTP_LLM_LOG_WARNING(
-                "[debug-mtp-decode-data] enabled; tensor summaries may perform D2H copies and serialize debugging runs");
-        }
-        return true;
-    }();
-    (void)logged;
-    return kMtpDecodeDebugEnabled;
-}
-
 torch::TensorOptions runtimeCudaOptions(c10::ScalarType dtype) {
     return torch::TensorOptions().dtype(dtype).device(getTorchCudaDevice());
 }
@@ -106,54 +79,6 @@ void checkRuntimeCudaDevice(const torch::Tensor& tensor, const char* name) {
                             name,
                             tensor.get_device(),
                             expected_device);
-}
-
-std::string tensorSummary(const torch::Tensor& tensor, int64_t limit = 4) {
-    if (!tensor.defined()) {
-        return "None";
-    }
-    std::ostringstream oss;
-    oss << "shape=[";
-    for (int64_t i = 0; i < tensor.dim(); ++i) {
-        if (i > 0) {
-            oss << ",";
-        }
-        oss << tensor.size(i);
-    }
-    oss << "] device=" << tensor.device() << " dtype=" << tensor.dtype() << " numel=" << tensor.numel();
-    if (tensor.numel() == 0) {
-        return oss.str();
-    }
-    auto flat       = tensor.reshape({-1});
-    auto head_count = std::min<int64_t>(limit, flat.numel());
-    auto tail_count = std::min<int64_t>(limit, flat.numel());
-    auto head       = flat.slice(0, 0, head_count);
-    auto tail       = flat.slice(0, flat.numel() - tail_count, flat.numel());
-    if (head.device().is_cuda()) {
-        head = head.cpu();
-        tail = tail.cpu();
-    }
-    oss << " head=" << head << " tail=" << tail;
-    return oss.str();
-}
-
-std::string logitsTopKSummary(const torch::Tensor& logits, int64_t k = 8) {
-    if (!logits.defined() || logits.numel() == 0 || logits.dim() != 2 || logits.size(0) == 0) {
-        return "None";
-    }
-    try {
-        auto               row      = logits[0];
-        auto               topk     = row.topk(std::min<int64_t>(k, row.size(0)));
-        auto               values   = std::get<0>(topk);
-        auto               indices  = std::get<1>(topk);
-        auto               values_h = values.device().is_cuda() ? values.cpu() : values;
-        auto               ids_h    = indices.device().is_cuda() ? indices.cpu() : indices;
-        std::ostringstream oss;
-        oss << "ids=" << ids_h << " values=" << values_h;
-        return oss.str();
-    } catch (const std::exception& e) {
-        return std::string("topk_error=") + e.what();
-    }
 }
 
 }  // namespace
@@ -423,36 +348,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         }
     }
 
-    if (pdDebugEnabled()) {
-        static std::atomic<int> debug_log_budget{512};
-        if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-            RTP_LLM_LOG_INFO("[PD_DEBUG][PY_ATTENTION_INPUTS] is_prefill=%d is_target_verify=%d "
-                             "context_bs=%zu decode_bs=%zu batch_size=%d total_tokens=%d "
-                             "combo_tokens=%s input_lengths_src=%s sequence_lengths_src=%s prefix_lengths_src=%s "
-                             "attn_input_lengths=%s attn_sequence_lengths=%s attn_prefix_lengths=%s "
-                             "seq_plus_1=%s decode_cu=%s cu_seqlens=%s cu_kv=%s kv_kernel_blocks=%s kv_blocks=%s",
-                             static_cast<int>(py_attn_inputs.is_prefill),
-                             static_cast<int>(py_attn_inputs.is_target_verify),
-                             context_batch_size,
-                             decode_batch_size,
-                             batch_size,
-                             py_attn_inputs.total_tokens,
-                             tensorSummary(inputs.combo_tokens).c_str(),
-                             tensorSummary(input_lengths_src).c_str(),
-                             tensorSummary(sequence_lengths_src).c_str(),
-                             tensorSummary(prefix_lengths_src).c_str(),
-                             tensorSummary(py_attn_inputs.input_lengths).c_str(),
-                             tensorSummary(py_attn_inputs.sequence_lengths).c_str(),
-                             tensorSummary(py_attn_inputs.prefix_lengths).c_str(),
-                             tensorSummary(py_attn_inputs.sequence_lengths_plus_1_d).c_str(),
-                             tensorSummary(py_attn_inputs.decode_cu_seqlens_d).c_str(),
-                             tensorSummary(py_attn_inputs.cu_seqlens).c_str(),
-                             tensorSummary(py_attn_inputs.cu_kv_seqlens).c_str(),
-                             tensorSummary(inputs.kv_cache_kernel_block_id).c_str(),
-                             tensorSummary(inputs.kv_cache_block_id).c_str());
-        }
-    }
-
     return py_attn_inputs;
 }
 
@@ -500,28 +395,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3, "kv_cache_kernel_block_id shape should be 3");
     // New CUDA layout: [group, batch, kernel_blocks].
     // Per-group device views are zero-copy slices; host_by_group was removed.
-    const size_t group            = inputs.kv_cache_kernel_block_id.size(0);
-    const bool   debug_mtp_decode = mtpDecodeDebugEnabled();
-
-    if (debug_mtp_decode) {
-        static std::atomic<int> debug_log_budget{256};
-        if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-            RTP_LLM_LOG_INFO("[debug-mtp-decode-data][setup_kv_begin] is_prefill=%d is_target_verify=%d "
-                             "use_mla=%d group=%zu combo=%s input_lengths=%s sequence_lengths=%s "
-                             "prefix_lengths=%s lm_output_indexes=%s kv_kernel=%s kv_block=%s",
-                             static_cast<int>(py_attn_inputs.is_prefill),
-                             static_cast<int>(py_attn_inputs.is_target_verify),
-                             static_cast<int>(description_.attention_conf.use_mla),
-                             group,
-                             tensorSummary(inputs.combo_tokens).c_str(),
-                             tensorSummary(inputs.input_lengths).c_str(),
-                             tensorSummary(inputs.sequence_lengths).c_str(),
-                             tensorSummary(inputs.prefix_lengths).c_str(),
-                             tensorSummary(inputs.lm_output_indexes).c_str(),
-                             tensorSummary(inputs.kv_cache_kernel_block_id).c_str(),
-                             tensorSummary(inputs.kv_cache_block_id).c_str());
-        }
-    }
+    const size_t group = inputs.kv_cache_kernel_block_id.size(0);
 
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.clear();
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.reserve(group);
@@ -568,13 +442,6 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
         group0 = group0.contiguous().pin_memory();
         buffer_holder_.hold_host(group0);
         py_attn_inputs.kv_cache_kernel_block_id_host = group0;
-        if (debug_mtp_decode) {
-            static std::atomic<int> debug_log_budget{256};
-            if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                RTP_LLM_LOG_INFO("[debug-mtp-decode-data][setup_kv_kernel_host] group0=%s",
-                                 tensorSummary(group0, 8).c_str());
-            }
-        }
     }
 
     if (inputs.kv_cache_block_id.defined()) {
@@ -602,13 +469,6 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
                 auto physical_host = physical_group0.cpu().contiguous().pin_memory();
                 buffer_holder_.hold_host(physical_host);
                 py_attn_inputs.kv_cache_block_id_host = physical_host;
-                if (debug_mtp_decode) {
-                    static std::atomic<int> debug_log_budget{256};
-                    if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                        RTP_LLM_LOG_INFO("[debug-mtp-decode-data][setup_kv_physical_host] physical_group0=%s",
-                                         tensorSummary(physical_host, 8).c_str());
-                    }
-                }
             }
         } else {
             if (!physical_group0.is_pinned()) {
@@ -620,17 +480,6 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
             }
             const auto cuda_i32                     = runtimeCudaI32Options();
             py_attn_inputs.kv_cache_block_id_device = physical_group0.to(cuda_i32, /*non_blocking=*/true);
-        }
-    }
-    if (debug_mtp_decode) {
-        static std::atomic<int> debug_log_budget{256};
-        if (debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-            RTP_LLM_LOG_INFO("[debug-mtp-decode-data][setup_kv_end] kv_kernel_device=%s kv_kernel_host=%s "
-                             "kv_block_device=%s kv_block_host=%s",
-                             tensorSummary(py_attn_inputs.kv_cache_kernel_block_id_device).c_str(),
-                             tensorSummary(py_attn_inputs.kv_cache_kernel_block_id_host).c_str(),
-                             tensorSummary(py_attn_inputs.kv_cache_block_id_device).c_str(),
-                             tensorSummary(py_attn_inputs.kv_cache_block_id_host).c_str());
         }
     }
 }
@@ -1127,41 +976,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 return forwardPostLayersLastHidden(hidden_states, inputs);
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            if (pdDebugEnabled()) {
-                static std::atomic<int> cp_output_log_budget{16};
-                if (cp_output_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                    RTP_LLM_LOG_INFO("[PD_DEBUG][CP_HANDLE_OUTPUTS] hidden=%s num_valid_tokens=%zu "
-                                     "lm_output_indexes=%s input_lengths=%s sequence_lengths=%s "
-                                     "cp_padding=%s cp_restore=%s cp_mask=%s",
-                                     tensorSummary(hidden_states).c_str(),
-                                     num_valid_tokens,
-                                     tensorSummary(inputs.lm_output_indexes).c_str(),
-                                     tensorSummary(inputs.input_lengths).c_str(),
-                                     tensorSummary(inputs.sequence_lengths).c_str(),
-                                     tensorSummary(cp_params.prefill_cp_padding_lengths).c_str(),
-                                     tensorSummary(cp_params.prefill_qkv_restore_indice).c_str(),
-                                     tensorSummary(cp_params.prefill_qkv_padding_mask).c_str());
-                }
-            }
-            auto outputs = callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            auto   outputs          = callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
             if (mtp_hidden_states.defined() && mtp_hidden_states.numel() > 0) {
                 if (outputs.all_hidden_states.defined()
                     && outputs.all_hidden_states.size(0) == mtp_hidden_states.size(0)) {
                     outputs.all_hidden_states = mtp_hidden_states;
-                    static std::atomic<int> mtp_cp_hidden_log_budget{8};
-                    if (mtpDecodeDebugEnabled()
-                        && mtp_cp_hidden_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                        RTP_LLM_LOG_INFO("[debug-mtp-decode-data] restored CP MTP pre-norm hidden=%s "
-                                         "post_layer_hidden=%s num_valid_tokens=%zu",
-                                         tensorSummary(mtp_hidden_states, 0).c_str(),
-                                         tensorSummary(hidden_states, 0).c_str(),
-                                         num_valid_tokens);
-                    }
                 } else {
                     RTP_LLM_LOG_WARNING("[PyWrappedModel] ignored restored CP MTP hidden due to output shape "
-                                        "mismatch: mtp=%s output_all_hidden=%s",
-                                        tensorSummary(mtp_hidden_states, 0).c_str(),
-                                        tensorSummary(outputs.all_hidden_states, 0).c_str());
+                                        "mismatch: mtp_rows=%ld output_rows=%ld",
+                                        mtp_hidden_states.dim() > 0 ? mtp_hidden_states.size(0) : -1,
+                                        outputs.all_hidden_states.defined() && outputs.all_hidden_states.dim() > 0 ?
+                                            outputs.all_hidden_states.size(0) :
+                                            -1);
                 }
             }
             return outputs;
@@ -1313,19 +1139,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             last_hidden = hidden;
         }
 
-        if (pdDebugEnabled() && has_context_request) {
-            static std::atomic<int> post_layers_pre_logits_budget{16};
-            if (post_layers_pre_logits_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                RTP_LLM_LOG_INFO("[PD_DEBUG][POST_LAYERS_PRE_LOGITS] hidden=%s lm_output_indexes=%s "
-                                 "last_hidden=%s token_num=%zu need_all_logits=%d",
-                                 tensorSummary(hidden).c_str(),
-                                 tensorSummary(lm_output_indexes).c_str(),
-                                 tensorSummary(last_hidden).c_str(),
-                                 token_num,
-                                 static_cast<int>(need_all_logits));
-            }
-        }
-
         printTorchTensorData(last_hidden, "last_hidden");
 
         torch::Tensor logits;
@@ -1346,14 +1159,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
             logits = tpSyncEmbeddingOrLogits(logits);
-        }
-        if (pdDebugEnabled() && has_context_request) {
-            static std::atomic<int> post_layers_logits_budget{16};
-            if (post_layers_logits_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
-                RTP_LLM_LOG_INFO("[PD_DEBUG][POST_LAYERS_LOGITS] logits=%s topk=%s",
-                                 tensorSummary(logits).c_str(),
-                                 logitsTopKSummary(logits).c_str());
-            }
         }
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");

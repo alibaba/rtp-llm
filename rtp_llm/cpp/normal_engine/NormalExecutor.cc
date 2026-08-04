@@ -193,9 +193,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                     (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
                                                                    cache_manager->cacheConfig()) :
                                                     warmup_sentinel;
-    // REBASE CONFLICT CONTEXT(6511f0467): source branch also wanted CUDA graph
-    // buffers to use the runtime cache layout. New base already does that and
-    // adds a zero-valued warmup sentinel; keep the stricter base behavior.
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
