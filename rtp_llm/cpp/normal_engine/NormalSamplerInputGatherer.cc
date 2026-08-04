@@ -10,17 +10,6 @@
 
 namespace rtp_llm {
 
-namespace {
-
-int samplerRows(const GenerateStreamPtr& stream, bool score_batch = false) {
-    if (score_batch) {
-        return stream->scoreLen();
-    }
-    return stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
-}
-
-}  // namespace
-
 absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGroups&    stream_groups,
                                                                  const GptModelInputs&  model_inputs,
                                                                  const GptModelOutputs& model_output) const {
@@ -47,7 +36,8 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
         auto complete_seq_len   = complete_token_ids.size(1);
         auto seq_len            = stream->seqLength();
         auto current_batch_size = stream->currentBatchSize();
-        auto sampler_batch_size = samplerRows(stream);
+        auto sampler_batch_size =
+            stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
 
         for (int i = 0; i < sampler_batch_size; ++i) {
             int cur_batch = std::min(i, current_batch_size - 1);
@@ -92,7 +82,8 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
         // tile context batch logits
         size_t input_offset = total_decode_batch_size_in, logits_offset = total_decode_batch_size_in;
         for (auto& stream : stream_groups.contextStreams()) {
-            auto sampler_batch_size = samplerRows(stream);
+            auto sampler_batch_size =
+                stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
             for (int i = 0; i < sampler_batch_size; ++i) {
                 logits_tensor[input_offset].copy_(model_output.logits[logits_offset]);
                 input_offset += 1;
@@ -170,7 +161,14 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
 
     int batch_idx = 0;
     for (auto& stream : all_streams) {
-        int sampler_batch_size = samplerRows(stream, score_batch);
+        int sampler_batch_size;
+        if (score_batch) {
+            sampler_batch_size = stream->scoreLen();
+        } else if (stream->needTilingForSampling()) {
+            sampler_batch_size = stream->nextBatchSize();
+        } else {
+            sampler_batch_size = stream->currentBatchSize();
+        }
         if (sampler_inputs.cum_log_probs.defined()) {
             const auto& cum_log_probs = stream->cumLogProbs();
             memcpy(sampler_inputs.cum_log_probs.data_ptr<float>() + batch_idx,
@@ -206,7 +204,7 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
     size_t                   idx       = 0;
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, &idx](auto& stream) {
-        const size_t batch_size = samplerRows(stream);
+        const size_t batch_size = stream->currentBatchSize();
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             if (processor) {
                 state_ptr->insert(processor, idx, idx + batch_size);
