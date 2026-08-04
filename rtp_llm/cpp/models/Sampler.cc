@@ -11,21 +11,32 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+torch::Tensor narrowBatch(const torch::Tensor& tensor, int64_t offset, int64_t size) {
+    if (!tensor.defined()) {
+        return torch::Tensor();
+    }
+    if (offset == 0 && size == tensor.size(0)) {
+        return tensor;
+    }
+    return tensor.narrow(0, offset, size);
+}
+
+std::optional<torch::Tensor> optionalNarrowBatch(const torch::Tensor& tensor, int64_t offset, int64_t size) {
+    if (!tensor.defined()) {
+        return std::nullopt;
+    }
+    return narrowBatch(tensor, offset, size);
+}
+
+}  // namespace
+
 Sampler::Sampler(const SamplerInitParams& params): copy_stream_(cuda_graph::graphGetStreamFromPool(false)) {}
 
 SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
-    // Helper: narrow a tensor if defined, else return undefined tensor
-    auto mayNarrow = [](const torch::Tensor& t, int64_t offset, int64_t size) -> torch::Tensor {
-        return t.defined() ? t.narrow(0, offset, size) : torch::Tensor();
-    };
-
-    // Helper: convert optional tensor slice to std::optional<torch::Tensor>
-    auto mayOptNarrow = [](const torch::Tensor& t, int64_t offset, int64_t size) -> std::optional<torch::Tensor> {
-        return t.defined() ? std::optional<torch::Tensor>(t.narrow(0, offset, size)) : std::nullopt;
-    };
-
     preprocessLogits(inputs);
 
     uint64_t max_seq_len   = inputs.token_ids.size(1);
@@ -83,41 +94,41 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         const auto batch_size_out   = beam_batch_size * cur_num_beams_out;
         const auto to_batch_idx_out = from_batch_idx_out + batch_size_out;
 
-        auto success           = all_success.narrow(0, from_batch_idx_in, batch_size_in);
-        auto logits            = inputs.logits.narrow(0, from_batch_idx_in, batch_size_in);
-        auto token_ids_in      = inputs_token_ids_cuda.narrow(0, from_batch_idx_in, batch_size_in);
-        auto token_ids_out     = all_token_ids_out.narrow(0, from_batch_idx_out, batch_size_out);
-        auto input_lengths     = inputs.input_lengths.narrow(0, from_batch_idx_in, batch_size_in);
-        auto sequence_lengths  = inputs.sequence_lengths.narrow(0, from_batch_idx_in, batch_size_in);
-        auto cum_log_probs_in  = mayNarrow(inputs.cum_log_probs, from_batch_idx_in, batch_size_in);
-        auto cum_log_probs_out = mayNarrow(all_cum_log_probs_out, from_batch_idx_out, batch_size_out);
+        auto success           = narrowBatch(all_success, from_batch_idx_in, batch_size_in);
+        auto logits            = narrowBatch(inputs.logits, from_batch_idx_in, batch_size_in);
+        auto token_ids_in      = narrowBatch(inputs_token_ids_cuda, from_batch_idx_in, batch_size_in);
+        auto token_ids_out     = narrowBatch(all_token_ids_out, from_batch_idx_out, batch_size_out);
+        auto input_lengths     = narrowBatch(inputs.input_lengths, from_batch_idx_in, batch_size_in);
+        auto sequence_lengths  = narrowBatch(inputs.sequence_lengths, from_batch_idx_in, batch_size_in);
+        auto cum_log_probs_in  = narrowBatch(inputs.cum_log_probs, from_batch_idx_in, batch_size_in);
+        auto cum_log_probs_out = narrowBatch(all_cum_log_probs_out, from_batch_idx_out, batch_size_out);
 
         if (cur_num_beams_in == 1 && cur_num_beams_out == 1) {
             const auto decoder_batch_size = (int64_t)inputs.sequence_lengths.size(0);
             auto       sequence_lengths_in =
                 (int64_t)from_batch_idx_in < decoder_batch_size ?
-                          inputs.sequence_lengths.narrow(
-                        0,
-                        from_batch_idx_in,
-                        min((int64_t)batch_size_in, decoder_batch_size - (int64_t)from_batch_idx_in)) :
-                          torch::empty({0}, torch::kInt32);
+                    narrowBatch(inputs.sequence_lengths,
+                                from_batch_idx_in,
+                                min((int64_t)batch_size_in, decoder_batch_size - (int64_t)from_batch_idx_in)) :
+                    torch::empty({0}, torch::kInt32);
 
             // TODO(zhangjianning.zjn): would be better to eliminate the copy
             if (cum_log_probs_out.defined() && cum_log_probs_in.defined()) {
                 cum_log_probs_out.copy_(cum_log_probs_in);
             }
 
-            auto top_k                = inputs.top_k.narrow(0, from_batch_idx_in, batch_size_in);
-            auto top_p                = inputs.top_p.narrow(0, from_batch_idx_in, batch_size_in);
-            auto temperature          = inputs.temperature.narrow(0, from_batch_idx_in, batch_size_in);
-            auto repetition_penalty   = mayOptNarrow(inputs.repetition_penalty, from_batch_idx_in, batch_size_in);
-            auto presence_penalty     = mayOptNarrow(inputs.presence_penalty, from_batch_idx_in, batch_size_in);
-            auto frequency_penalty    = mayOptNarrow(inputs.frequency_penalty, from_batch_idx_in, batch_size_in);
-            auto no_repeat_ngram_size = mayOptNarrow(inputs.no_repeat_ngram_size, from_batch_idx_in, batch_size_in);
-            auto all_probs            = mayOptNarrow(inputs.all_probs, from_batch_idx_in, batch_size_in);
-            auto do_sample            = mayOptNarrow(inputs.do_sample, from_batch_idx_in, batch_size_in);
-            auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
-                                                                   inputs.generator.begin() + from_batch_idx_in + batch_size_in};
+            auto top_k              = narrowBatch(inputs.top_k, from_batch_idx_in, batch_size_in);
+            auto top_p              = narrowBatch(inputs.top_p, from_batch_idx_in, batch_size_in);
+            auto temperature        = narrowBatch(inputs.temperature, from_batch_idx_in, batch_size_in);
+            auto repetition_penalty = optionalNarrowBatch(inputs.repetition_penalty, from_batch_idx_in, batch_size_in);
+            auto presence_penalty   = optionalNarrowBatch(inputs.presence_penalty, from_batch_idx_in, batch_size_in);
+            auto frequency_penalty  = optionalNarrowBatch(inputs.frequency_penalty, from_batch_idx_in, batch_size_in);
+            auto no_repeat_ngram_size =
+                optionalNarrowBatch(inputs.no_repeat_ngram_size, from_batch_idx_in, batch_size_in);
+            auto all_probs = optionalNarrowBatch(inputs.all_probs, from_batch_idx_in, batch_size_in);
+            auto do_sample = optionalNarrowBatch(inputs.do_sample, from_batch_idx_in, batch_size_in);
+            auto generator = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
+                                                        inputs.generator.begin() + from_batch_idx_in + batch_size_in};
 
             RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
             auto greedy_output = execSampleGreedy(
@@ -158,7 +169,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             const size_t vocab_size      = inputs.logits.size(1);
             const size_t max_seq_len_val = inputs.token_ids.size(1);
 
-            auto beam_indices = all_beam_indices.narrow(0, from_batch_idx_out, batch_size_out);
+            auto beam_indices = narrowBatch(all_beam_indices, from_batch_idx_out, batch_size_out);
 
             // Reshape for beam search: [batch, beams, ...]
             auto logits_reshaped =

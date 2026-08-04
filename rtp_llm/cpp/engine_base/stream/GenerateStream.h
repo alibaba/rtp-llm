@@ -586,6 +586,14 @@ public:
         uint64_t      epoch = 0;
         torch::Tensor last_sample_token_gpu;  // [1] int32
         torch::Tensor next_seq_len_gpu;       // [1] int32, seqLength after sample
+        // Fast-path representation for a decode batch. Every stream retains
+        // the same backing tensors and identifies its row with
+        // device_batch_index. This avoids constructing two Tensor views per
+        // stream on every step. The standalone [1] fields above remain
+        // supported for ingress and mixed-batch fallback states.
+        torch::Tensor batched_last_sample_tokens_gpu;  // [batch] int32
+        torch::Tensor batched_next_seq_lens_gpu;       // [batch] int32
+        int64_t       device_batch_index = -1;
         // Host seqLength before the sampled token represented by this state.
         // -1 = unset (first iter / cleared).
         int last_real_seq_len = -1;
