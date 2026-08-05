@@ -52,6 +52,13 @@ bash run_online_eval.sh
 
 The control server listens on `baseGrpcPort - 1` of the mock cluster.
 
+**Monitoring / Prometheus target contract**: since the Java rewrite the whole
+cluster is a single process and `/metrics` is served **only** on the control
+port `baseGrpcPort - 1` (aggregated by role by default, `?per_engine=true`
+for per-engine series). Configure exactly one scrape target
+(`<host>:<baseGrpcPort - 1>`). The Python-era shard aggregation port formula
+(`base + n_prefill + n_decode + 100 + shard_id`) no longer exists.
+
 **Engine addressing**: POST bodies accept either `{"engine": "prefill-0"}` (engine
 name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 
