@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
+    should_skip_tp_allreduce,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -41,6 +42,10 @@ class PureTpRouterBase(FusedMoeDataRouter):
     @classmethod
     def router_type(cls):
         return RouterType.PURE_TP
+
+    @property
+    def supports_skip_tp_allreduce(self) -> bool:
+        return True
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -118,7 +123,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         extra_finalize_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
             fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
         return fused_expert_output
 

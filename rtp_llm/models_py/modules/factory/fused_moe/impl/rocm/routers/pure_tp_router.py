@@ -5,10 +5,7 @@ import aiter
 import torch
 
 from rtp_llm.device.device_impl import is_gfx950
-from rtp_llm.models_py.distributed.collective_torch import (
-    Group,
-    all_reduce,
-)
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -17,6 +14,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
     ExpertTokensMetadata,
     FusedMoeDataRouter,
+    should_skip_tp_allreduce,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -40,6 +38,10 @@ class PureTpRouterBase(FusedMoeDataRouter):
     @classmethod
     def router_type(cls):
         return RouterType.PURE_TP
+
+    @property
+    def supports_skip_tp_allreduce(self) -> bool:
+        return True
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -125,7 +127,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         extra_finalize_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
         fused_expert_output = payload.fused_expert_output
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
             fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
         return fused_expert_output
 
@@ -181,18 +183,6 @@ class PureTpRouterFusedQuant(PureTpRouterBase):
         """Pass through BF16 without quantization; fused_moe handles quantization internally."""
         return a1, None
 
-    def finalize(
-        self,
-        payload: CombineForwardPayload,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[dict[str, Any]],
-    ) -> torch.Tensor:
-        fused_expert_output = payload.fused_expert_output
-        if self.tp_size > 1:
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
-        return fused_expert_output
 
 class PureTpRouterFp8PerBlockPassthrough(PureTpRouterBase):
     """Pure TP router for FP8 PerBlock: accepts FP8_PER_BLOCK quant but passes through BF16 without quantization (executor handles quantization internally)."""
@@ -216,6 +206,7 @@ class PureTpRouterFp8PerBlockPassthrough(PureTpRouterBase):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         return a1, None
 
+
 class PureTpRouterMXFp4Passthrough(PureTpRouterBase):
     """Pure TP router for the MXFP4 passthrough path."""
 
@@ -233,7 +224,7 @@ class PureTpRouterMXFp4Passthrough(PureTpRouterBase):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "QuarkMXFP4")
         checker.check(is_gfx950())
-        
+
     def _do_quant(
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:

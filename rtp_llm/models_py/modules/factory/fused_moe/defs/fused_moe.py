@@ -15,6 +15,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     RouterType,
 )
 
+SKIP_TP_ALLREDUCE_ARG = "skip_tp_allreduce"
+
 
 @dataclass
 class ExpertTokensMetadata:
@@ -51,6 +53,23 @@ class CombineForwardPayload:
     fused_expert_output: torch.Tensor
 
 
+def should_skip_tp_allreduce(
+    extra_finalize_args: Optional[Dict[str, Any]],
+) -> bool:
+    """Return whether a pure-TP router should leave reduction to its caller.
+
+    GenericMoeLayer uses this internal finalize argument when it combines the
+    routed and shared-expert partial outputs before issuing one TP all-reduce.
+    Keeping the flag in ``extra_finalize_args`` avoids changing the finalize
+    interface for routers that do not use TP all-reduce.
+    """
+
+    return bool(
+        extra_finalize_args is not None
+        and extra_finalize_args.get(SKIP_TP_ALLREDUCE_ARG, False)
+    )
+
+
 class FusedMoeDataRouter(ABC):
     def __init__(
         self,
@@ -69,6 +88,10 @@ class FusedMoeDataRouter(ABC):
     @classmethod
     def router_type(cls) -> RouterType:
         raise NotImplementedError
+
+    @property
+    def supports_skip_tp_allreduce(self) -> bool:
+        return False
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -186,7 +209,14 @@ class FusedMoe(torch.nn.Module):
         apply_router_weight_on_input: bool = False,
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
+        skip_tp_allreduce: bool = False,
     ) -> torch.Tensor:
+
+        if skip_tp_allreduce and not self.router.supports_skip_tp_allreduce:
+            raise ValueError(
+                "skip_tp_allreduce is only supported by routers that "
+                "advertise supports_skip_tp_allreduce"
+            )
 
         a1 = hidden_states
 
@@ -231,7 +261,15 @@ class FusedMoe(torch.nn.Module):
         else:
             extra_finalize_args.update({"a1_shape": a1.shape})
 
-        extra_finalize_args.update({"original_num_tokens": hidden_states.size(0)})
+        # Pure-TP routers normally reduce their routed output in finalize().
+        # GenericMoeLayer can set this flag to combine routed and shared-expert
+        # partial outputs first, reducing the number of small TP collectives.
+        extra_finalize_args.update(
+            {
+                "original_num_tokens": hidden_states.size(0),
+                SKIP_TP_ALLREDUCE_ARG: skip_tp_allreduce,
+            }
+        )
 
         output = self.router.finalize(
             combine_payload,

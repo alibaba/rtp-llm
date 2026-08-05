@@ -40,6 +40,8 @@ class LinearTorch(nn.Module):
 class FakeFusedMoe(nn.Module):
     topk_ids_dtype = torch.int32
 
+    router = SimpleNamespace(supports_skip_tp_allreduce=True)
+
     def forward(self, hidden_states, **kwargs):
         return torch.zeros_like(hidden_states)
 
@@ -205,6 +207,7 @@ class LinearTest(TestCase):
             dp_rank=0,
             dp_size=1,
             get_ffn_tp_size=lambda: 1,
+            get_attn_tp_size=lambda: 1,
         )
         moe_config = SimpleNamespace(fake_balance_expert=False)
         hw_kernel_config = HWKernelConfig()
