@@ -112,9 +112,10 @@ class ConfigServiceTest {
     void should_use_default_strategy_configs_without_environment() {
         ConfigService configService = new ConfigService(Map.of());
 
-        StrategyConfigs.CandidatePoolConfig candidatePool = configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getCandidatePool();
+        StrategyConfigs.ShortestTtftStrategyConfig shortestTtft = configService.getStrategyConfigs()
+                .getShortestTtft();
+        StrategyConfigs.CandidatePoolConfig candidatePool = shortestTtft.getCandidatePool();
+        assertEquals(1.0, shortestTtft.getQueueTimeWeight());
         assertEquals(StrategyConfigs.CandidatePoolMode.RATIO, candidatePool.getMode());
         assertEquals(0.3, candidatePool.getRatio());
         assertEquals(1, candidatePool.getMinSize());
@@ -128,6 +129,7 @@ class ConfigServiceTest {
                 "STRATEGY_CONFIGS", """
                         {
                           "shortestTtft": {
+                            "queueTimeWeight": 0.3,
                             "candidatePool": {
                               "mode": "FIXED",
                               "size": 1
@@ -136,9 +138,10 @@ class ConfigServiceTest {
                         }
                         """));
 
-        StrategyConfigs.CandidatePoolConfig candidatePool = configService.getStrategyConfigs()
-                .getShortestTtft()
-                .getCandidatePool();
+        StrategyConfigs.ShortestTtftStrategyConfig shortestTtft = configService.getStrategyConfigs()
+                .getShortestTtft();
+        StrategyConfigs.CandidatePoolConfig candidatePool = shortestTtft.getCandidatePool();
+        assertEquals(0.3, shortestTtft.getQueueTimeWeight());
         assertEquals(StrategyConfigs.CandidatePoolMode.FIXED, candidatePool.getMode());
         assertEquals(1, candidatePool.getSize());
         assertEquals(0.3, candidatePool.getRatio());
@@ -164,6 +167,22 @@ class ConfigServiceTest {
                 .getCandidatePool();
         assertEquals(StrategyConfigs.CandidatePoolMode.FIXED, candidatePool.getMode());
         assertEquals(2, candidatePool.getSize());
+    }
+
+    @Test
+    void should_normalize_invalid_shortest_ttft_queue_time_weight() {
+        ConfigService configService = new ConfigService(Map.of(
+                "STRATEGY_CONFIGS", """
+                        {
+                          "shortestTtft": {
+                            "queueTimeWeight": 1.5
+                          }
+                        }
+                        """));
+
+        assertEquals(1.0, configService.getStrategyConfigs()
+                .getShortestTtft()
+                .getQueueTimeWeight());
     }
 
     @Test
