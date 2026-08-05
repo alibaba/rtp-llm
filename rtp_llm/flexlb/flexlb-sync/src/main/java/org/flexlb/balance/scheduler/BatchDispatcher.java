@@ -40,4 +40,15 @@ public interface BatchDispatcher {
                   long predMs,
                   String reason,
                   DispatchCallback callback);
+
+    /**
+     * Best-effort cancel RPC to the item's prefill and decode endpoints.
+     * Fire-and-forget: failures are logged but never propagated — the request
+     * is already terminated locally by the scheduler. The engine Cancel RPC is
+     * idempotent and returns OK even if the stream is not found.
+     *
+     * @param item      the batch item whose endpoints should be notified
+     * @param requestId the request to cancel on the engine side
+     */
+    void cancel(BatchItem item, long requestId);
 }

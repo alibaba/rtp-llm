@@ -14,6 +14,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.CancelReasonPB;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -184,6 +185,56 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     "Submit failed: " + t.getMessage());
         }
         return future;
+    }
+
+    // ==================== Cancellation ====================
+
+    /**
+     * Cancel an inflight request end-to-end.
+     *
+     * <ol>
+     *   <li>local terminal handling (Chain A) — lifecycle to FAILED terminal state,
+     *       resource rollback, removal from the pending prefill batch and caller
+     *       future completion with WORKER_EXECUTION_FAILED (non-retryable)</li>
+     *   <li>best-effort engine cancel RPC (Chain B) — notify prefill/decode engine
+     *       to stop the stream; engine reports CANCELLED via finished_task_list</li>
+     * </ol>
+     *
+     * <p>Terminal reconciliation: the engine's cancelled stream moves to
+     * finished_streams_ via {@code dequeue()}, reported through GetWorkerStatus
+     * finished_task_list. Master's {@link #onWorkerStatusUpdate} consumes it —
+     * the entry is already removed by this method, so it is a no-op. The terminal
+     * state is published exactly once through {@link #finishEntry}.
+     *
+     * @param requestId the request to cancel
+     * @param reason    cancel reason (e.g. PRIORITY_PREEMPTED, CLIENT_CANCELLED)
+     */
+    public void cancelRequest(long requestId, CancelReasonPB reason) {
+        InflightEntry entry = inflight.get(requestId);
+        if (entry == null) {
+            Logger.warn("FlexlbBatchScheduler.cancelRequest: requestId={} not inflight (reason={})",
+                    requestId, reason);
+            return;
+        }
+        BatchItem item;
+        synchronized (entry) {
+            if (entry.lifecycle.isTerminal()) {
+                Logger.debug("FlexlbBatchScheduler.cancelRequest: requestId={} already terminal", requestId);
+                return;
+            }
+            item = entry.item;
+            RequestLifecycleSnapshot terminal = entry.lifecycle.fail("request cancelled: " + reason);
+            rollbackOnce(entry);
+            removeFromPrefillBatch(entry);
+            completeError(item.future(), StrategyErrorType.WORKER_EXECUTION_FAILED,
+                    "request cancelled: " + reason);
+            finishEntry(entry, terminal);
+        }
+        // Best-effort engine cancel (Chain B) — fire-and-forget, outside the entry lock
+        dispatcher.cancel(item, requestId);
+        Logger.warn("FlexlbBatchScheduler.cancelRequest: requestId={} cancelled reason={}",
+                requestId, reason);
+        reporter.reportPriorityCancel("scheduler");
     }
 
     // ==================== Completion from worker status ====================

@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.scheduler.CancelHandler;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
@@ -10,13 +11,14 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.CancelReasonPB;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
 
 @Component
-public class RouteService {
+public class RouteService implements CancelHandler {
 
     private final ConfigService configService;
     private final Router router;
@@ -97,6 +99,17 @@ public class RouteService {
     private boolean hasValidGenerateInput(BalanceContext ctx) {
         byte[] bytes = ctx.getGenerateInputPbBytes();
         return bytes != null && bytes.length > 0;
+    }
+
+    /**
+     * {@link CancelHandler} entry — cancel an inflight request through the
+     * scheduler cancel chain (local terminal handling + engine cancel RPC).
+     */
+    @Override
+    public void cancel(long requestId, CancelReasonPB reason) {
+        if (flexlbBatchScheduler != null) {
+            flexlbBatchScheduler.cancelRequest(requestId, reason);
+        }
     }
 
     public RequestLifecycleSnapshot getRequestState(long requestId,

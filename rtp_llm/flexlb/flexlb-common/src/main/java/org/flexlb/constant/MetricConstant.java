@@ -495,4 +495,9 @@ public class MetricConstant {
      * Dispatch executor completed task count (counter — monotonically increasing)
      */
     public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS = "dispatch.executor.completed.tasks";
+
+    /**
+     * Priority cancel RPC count (QPS), tagged by source ("router" / "scheduler")
+     */
+    public static final String PRIORITY_CANCEL_COUNT = "app.flexlb.priority.cancel.count";
 }

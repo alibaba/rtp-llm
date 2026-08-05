@@ -6,6 +6,7 @@ import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
@@ -42,6 +43,7 @@ import java.util.concurrent.TimeUnit;
 public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private static final String METRIC_PREFIX = "flexlb.";
+    private static final long CANCEL_RPC_TIMEOUT_MS = 3000L;
 
     private final EngineGrpcClient grpcClient;
     private final ConfigService configService;
@@ -120,6 +122,30 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                 callback.onFailure(item, e);
             }
         }
+    }
+
+
+    @Override
+    public void cancel(BatchItem item, long requestId) {
+        PrefillEndpoint prefillEp = item.prefillEp();
+        if (prefillEp != null) {
+            cancelEndpoint(prefillEp.getIp(), prefillEp.getGrpcPort(), prefillEp.ipPort(), "prefill", requestId);
+        }
+        DecodeEndpoint decodeEp = item.decodeEp();
+        if (decodeEp != null) {
+            cancelEndpoint(decodeEp.getIp(), decodeEp.getGrpcPort(), decodeEp.ipPort(), "decode", requestId);
+        }
+    }
+
+    private void cancelEndpoint(String ip, int grpcPort, String ipPort, String role, long requestId) {
+        grpcClient.cancelAsync(ip, grpcPort, requestId, CANCEL_RPC_TIMEOUT_MS)
+                .whenComplete((resp, ex) -> {
+                    if (ex != null) {
+                        Logger.warn("Engine cancel ({}) failed: requestId={} ep={}", role, requestId, ipPort, ex);
+                    } else {
+                        Logger.debug("Engine cancel ({}) sent: requestId={} ep={}", role, requestId, ipPort);
+                    }
+                });
     }
 
     @PreDestroy

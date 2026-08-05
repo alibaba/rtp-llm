@@ -17,6 +17,7 @@ import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ACK_TO_RESPONSE_TIME_MS;
+import static org.flexlb.constant.MetricConstant.PRIORITY_CANCEL_COUNT;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
@@ -98,6 +99,9 @@ public class BatchSchedulerReporter {
 
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+
+        // Priority cancel — cancel RPC invocations, tagged by source (QPS)
+        monitor.register(PRIORITY_CANCEL_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         log.info("BatchSchedulerReporter initialized (17 metrics)");
     }
@@ -345,5 +349,14 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(ACK_TO_RESPONSE_TIME_MS, tags, ackToResponseMs);
+    }
+
+    /**
+     * Report a cancel RPC invocation.
+     * @param source the cancel source: "router" or "scheduler" (FlexlbBatchScheduler)
+     */
+    public void reportPriorityCancel(String source) {
+        FlexMetricTags tags = FlexMetricTags.of("source", source);
+        monitor.report(PRIORITY_CANCEL_COUNT, tags, 1.0);
     }
 }

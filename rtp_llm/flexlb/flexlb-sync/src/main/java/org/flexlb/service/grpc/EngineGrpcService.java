@@ -54,4 +54,14 @@ public class EngineGrpcService {
         }
         return engineGrpcClient.getCacheStatusAsync(ip, grpcPort, request, requestTimeoutMs);
     }
+
+    /**
+     * Cancel an inflight request on the engine (async, best-effort).
+     * <p>Master -> engine cancel RPC. Used by FlexlbBatchScheduler.cancelRequest
+     * for priority preemption and client-initiated cancel.
+     */
+    public CompletableFuture<EngineRpcService.EmptyPB> cancelAsync(
+            String ip, int grpcPort, long requestId, long requestTimeoutMs) {
+        return engineGrpcClient.cancelAsync(ip, grpcPort, requestId, requestTimeoutMs);
+    }
 }
