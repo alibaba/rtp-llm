@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -29,6 +30,17 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _DEFAULT_MAX_THINKING_TOKENS = 131072
 _DEFAULT_MAX_NEW_TOKENS = 131072
+_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV = (
+    "DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS"
+)
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _pack_eos_for_empty_generated_ids() -> bool:
+    return (
+        os.environ.get(_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV, "").strip().lower()
+        in _TRUE_ENV_VALUES
+    )
 
 FINISH_REASON_LENGTH = 1
 FINISH_REASON_STOP_ENGINE_PARAM = 8
@@ -1127,17 +1139,11 @@ def _append_generated_ids_output(
     infer: predict_v2_pb2.ModelInferResponse,
     generated_ids: list[int],
 ) -> None:
-    """``generated_ids``: INT32 little-endian, shape ``[1, len]``.
-
-    When empty, a 4-byte filler (single INT32 ``0``) is appended because
-    ``raw_input_contents`` indices must stay aligned with ``outputs``. The consumer
-    side (access_log ``_scan_response_outputs``) checks declared ``shape`` so the
-    filler byte does not leak into token accumulators.
-    """
+    """``generated_ids``: INT32 little-endian, shape ``[1, len]``."""
     raw = (
         struct.pack("<%di" % len(generated_ids), *generated_ids)
         if generated_ids
-        else struct.pack("<i", 0)
+        else b""
     )
     out = infer.outputs.add()
     out.name = "generated_ids"
@@ -1153,8 +1159,8 @@ def prepend_to_generated_ids_tensor(
     """Prepend ``token_ids`` to the already-appended ``generated_ids`` tensor on ``infer``.
 
     Returns ``False`` and leaves ``infer`` untouched when ``token_ids`` is empty, when
-    ``generated_ids`` is absent, when its declared shape is a zero-length / filler
-    payload, or when the frame already contains logprob tensors. Prompt echo tokens
+    ``generated_ids`` is absent, when its declared shape is zero-length, or when
+    the frame already contains logprob tensors. Prompt echo tokens
     have no sampled probability; callers must emit them in a separate no-logprob
     frame instead of making the existing tensors misaligned.
     """
@@ -1997,6 +2003,15 @@ def build_stream_response_from_generate_outputs(
     finished = stream_finished if stream_finished is not None else out_py.finished
     backend_generated_ids = _token_ids_list_from_generate_output(out_py)
     generated_ids = token_ids if token_ids is not None else backend_generated_ids
+    injected_terminal_eos = False
+    if not generated_ids and finished and _pack_eos_for_empty_generated_ids():
+        if eos_token_id is None:
+            raise RuntimeError("eos_token_id is required for terminal response")
+        generated_ids = [int(eos_token_id)]
+        injected_terminal_eos = True
+    if injected_terminal_eos and include_logprobs:
+        include_logprobs = False
+        include_forced_token_logprobs = True
     if (
         include_logprobs
         and token_ids is not None

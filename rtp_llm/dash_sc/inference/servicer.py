@@ -803,31 +803,6 @@ async def iter_real_model_stream_infer(
                 # model_rpc_client copies the final submitted role_addrs here.
                 access_agg.record_role_addrs(aux_info.role_addrs, phase="phase1")
             if not generated_ids and not out_py.finished:
-                response = build_stream_response_from_generate_outputs(
-                    dash_sc_request_id=request.id,
-                    model_name=request.model_name,
-                    go=go,
-                    request_log_tag=tag,
-                    request_input_ids=input_ids_list,
-                    return_input_ids=other.return_input_ids,
-                    is_streaming=is_streaming,
-                    generate_config=generate_config,
-                    debug=other.debug,
-                    eos_token_id=eos_id,
-                    max_token_id=max_id,
-                    _request_shape=request_shape,
-                    logprob_phase="empty",
-                    logprob_pre_content_token_count=0,
-                )
-                stats = (
-                    0,
-                    False,
-                    _FINISH_REASON_NOT_FINISHED,
-                    prompt_token_num,
-                    prompt_cached_token_num,
-                    (),
-                )
-                yield (response, stats) if yield_access_stats else response
                 continue
             ids_for_accounting = generated_ids
             if should_echo and not echoed and generated_ids:
