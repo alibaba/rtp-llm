@@ -1400,9 +1400,17 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 parts =
                                     sliceFixedDestinationForPeer(std::move(parts), mtp_cache_cfg, region_name, gid, i);
 
-                                // See slice_opaque_kv_by_head on the main path.
+                                // See slice_opaque_kv_by_head on the main path. The draft keeps its own
+                                // cache config, so the partition has to come from the draft predicate too:
+                                // pairing the target's count with a kv_halves flag taken from the draft makes
+                                // the requested slice length disagree with the stored block, and prefill
+                                // answers EC_FAILED_INVALID_REQ.
                                 const bool mtp_slice_opaque_kv_by_head = mtp_use_opaque_kv_store && !mtp_use_mla
                                                                          && !mtp_use_hybrid && decode_attn_tp_size > 1;
+                                const int32_t mtp_opaque_kv_partition_count =
+                                    mtp_slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_size) : 0;
+                                const int32_t mtp_opaque_kv_partition_id =
+                                    mtp_slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_rank) : 0;
 
                                 auto addBufBlock = [&](const std::string& key,
                                                        const BlockInfo&   block,
@@ -1431,8 +1439,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                     addBufBlock("kv_" + cache_key,
                                                 parts[0],
                                                 mtp_slice_opaque_kv_by_head,
-                                                opaque_kv_partition_count,
-                                                opaque_kv_partition_id);
+                                                mtp_opaque_kv_partition_count,
+                                                mtp_opaque_kv_partition_id);
                                     if (parts.size() == 2) {
                                         addBufBlock("kv_scale_" + cache_key,
                                                     parts[1],
