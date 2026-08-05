@@ -814,19 +814,29 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
         torch::tensor({10, 101, 20, 202}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
             .reshape({2, 2});
 
-    TensorHolder host_holder;
-    processor.updatePrefillPostDSparkDraftModelInput(model_input, target_features, sampler_output, host_holder);
+    TensorHolder  host_holder;
+    torch::Tensor anchors;
+    torch::Tensor committed_ends;
+    model_input.last_hidden_states = target_features;
+    processor.updatePrefillPostDSparkCommitInput(
+        model_input, sampler_output, anchors, committed_ends, host_holder);
+
+    // The commit call keeps the target's own incremental-prefill geometry.
+    EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{7, 4}), toVec<int32_t>(model_input.prefix_lengths));
+    EXPECT_EQ(5, model_input.last_hidden_states.size(0));
+    EXPECT_EQ(12, model_input.last_hidden_states.size(1));
+    EXPECT_EQ((std::vector<int32_t>{101, 202}), toVec<int32_t>(anchors));
+    EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(committed_ends));
+
+    processor.buildDSparkProposeInput(model_input, anchors, committed_ends, host_holder);
 
     EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, 202, mask_id, mask_id}),
               toVec<int32_t>(model_input.combo_tokens));
-    EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.dspark_ctx_lengths));
-    EXPECT_EQ((std::vector<int32_t>{7, 4}), toVec<int32_t>(model_input.cache_store_prefix_lengths));
-    EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.cache_store_input_lengths));
+    EXPECT_FALSE(model_input.last_hidden_states.defined());
     EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, gamma}), toVec<int32_t>(model_input.lm_output_indexes));
-    EXPECT_EQ(5, model_input.last_hidden_states.size(0));
-    EXPECT_EQ(12, model_input.last_hidden_states.size(1));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillCacheStoreUsesCommittedPromptLength) {
@@ -862,10 +872,18 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillCacheStoreUsesCommittedProm
         {static_cast<int64_t>(prompt_lengths.size()), 2},
         torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
-    TensorHolder host_holder;
-    processor.updatePrefillPostDSparkDraftModelInput(model_input, target_features, sampler_output, host_holder);
+    TensorHolder  host_holder;
+    torch::Tensor anchors;
+    torch::Tensor committed_ends;
+    model_input.last_hidden_states = target_features;
+    processor.updatePrefillPostDSparkCommitInput(
+        model_input, sampler_output, anchors, committed_ends, host_holder);
 
-    const auto store_lengths = toVec<int32_t>(model_input.cache_store_input_lengths);
+    // CacheStore keys derive from the commit call's standard fields, which
+    // describe exactly the committed prompt: the speculative gamma rows live
+    // only in the separate propose call, so they can never shift the store's
+    // block plan across a cache-block boundary.
+    const auto store_lengths = toVec<int32_t>(model_input.input_lengths);
     EXPECT_EQ(prompt_lengths, store_lengths);
     for (size_t i = 0; i < prompt_lengths.size(); ++i) {
         const auto prompt_blocks = (prompt_lengths[i] + tokens_per_blk - 1) / tokens_per_blk;

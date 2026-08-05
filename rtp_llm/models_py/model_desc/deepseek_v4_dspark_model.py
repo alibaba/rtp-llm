@@ -27,6 +27,7 @@ batch size.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
@@ -354,34 +355,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # DSpark attention / block forward
     # ------------------------------------------------------------------
 
-    def _forward_dspark_attention(
-        self,
-        layer_idx: int,
-        x: torch.Tensor,
-        query_positions: torch.Tensor,
-        main_x: torch.Tensor,
-        context_req_ids: torch.Tensor,
-        context_positions: torch.Tensor,
-        prefix_lengths: torch.Tensor,
-        active_requests: torch.Tensor,
-        block_table: Optional[torch.Tensor],
-        tokens_per_block: int,
-        graph_metadata: Any,
-    ) -> torch.Tensor:
-        batch_size, gamma, _ = x.shape
-        if batch_size == 0:
-            return torch.empty_like(x)
-        if block_table is None:
-            raise RuntimeError("DSpark attention requires an SWA block table")
-
-        layer = self.v4.layers[layer_idx]
-        attn = layer.attn
+    @contextmanager
+    def _swa_cache_bound(self, layer_idx: int, block_table: torch.Tensor):
+        """Temporarily point one draft layer's attention at this model's
+        paged SWA cache and yield ``(attn, entries_per_block, pool)``."""
+        attn = self.v4.layers[layer_idx].attn
         if int(attn.compress_ratio) != 0:
             raise RuntimeError(
                 f"DSpark layer {layer_idx} is not SWA-only: "
                 f"compress_ratio={attn.compress_ratio}"
             )
-
         previous_cache = attn._kv_cache
         previous_tables = attn._block_tables_by_type
         attn._kv_cache = self.kv_cache
@@ -394,44 +377,122 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 raise RuntimeError(
                     f"DSpark layer {layer_idx} has no FP8 SWA paged pool"
                 )
+            yield attn, entries_per_block, pool
+        finally:
+            attn._kv_cache = previous_cache
+            attn._block_tables_by_type = previous_tables
 
-            # Insert newly committed target features through this layer's own
-            # wkv/kv_norm/RoPE pipeline. Hole rows and superseded SWA ring
-            # generations carry a -1 slot and are ignored by the FP8 writer.
+    def _commit_layer_features(
+        self,
+        layer_idx: int,
+        main_x: torch.Tensor,
+        context_req_ids: torch.Tensor,
+        context_positions: torch.Tensor,
+        committed_ends: torch.Tensor,
+        block_table: torch.Tensor,
+        tokens_per_block: int,
+        batch_size: int,
+    ) -> None:
+        """Insert committed target features through one layer's own
+        wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
+        generations carry a -1 slot and are ignored by the FP8 writer."""
+        with self._swa_cache_bound(layer_idx, block_table) as (
+            attn,
+            entries_per_block,
+            pool,
+        ):
             context_rows = int(main_x.shape[0])
-            if context_rows > 0:
-                safe_context_pos = context_positions.to(torch.long).clamp_min(0)
-                context_freqs = attn.freqs_cis.index_select(
-                    0, safe_context_pos
-                ).contiguous()
-                context_kv = fused_rmsnorm_rope(
-                    attn._lin(attn.wkv, main_x).contiguous(),
-                    attn.kv_norm,
-                    context_freqs,
-                    int(attn.rope_head_dim),
-                    eps=float(attn.eps),
-                )
-                context_slots = compute_swa_slot_mapping_from_positions(
-                    block_table=block_table[:batch_size]
-                    .to(device=x.device, dtype=torch.int32)
-                    .contiguous(),
-                    req_id_per_token=context_req_ids,
-                    positions=context_positions,
-                    seq_lens=prefix_lengths,
-                    num_tokens=context_rows,
-                    pool_entries_per_block=entries_per_block,
-                    tokens_per_block_for_block_table=tokens_per_block,
-                    ring_entries=entries_per_block,
-                )
-                decode_write_swa_fp8(
-                    kv=context_kv,
-                    slot_mapping=context_slots,
-                    swa_pool_3d=pool,
-                    bsz=context_rows,
-                    q_len=1,
-                    head_dim=int(attn.head_dim),
-                )
+            safe_context_pos = context_positions.to(torch.long).clamp_min(0)
+            context_freqs = attn.freqs_cis.index_select(
+                0, safe_context_pos
+            ).contiguous()
+            context_kv = fused_rmsnorm_rope(
+                attn._lin(attn.wkv, main_x).contiguous(),
+                attn.kv_norm,
+                context_freqs,
+                int(attn.rope_head_dim),
+                eps=float(attn.eps),
+            )
+            context_slots = compute_swa_slot_mapping_from_positions(
+                block_table=block_table[:batch_size]
+                .to(device=main_x.device, dtype=torch.int32)
+                .contiguous(),
+                req_id_per_token=context_req_ids,
+                positions=context_positions,
+                seq_lens=committed_ends,
+                num_tokens=context_rows,
+                pool_entries_per_block=entries_per_block,
+                tokens_per_block_for_block_table=tokens_per_block,
+                ring_entries=entries_per_block,
+            )
+            decode_write_swa_fp8(
+                kv=context_kv,
+                slot_mapping=context_slots,
+                swa_pool_3d=pool,
+                bsz=context_rows,
+                q_len=1,
+                head_dim=int(attn.head_dim),
+            )
 
+    def commit_feature_rows(
+        self,
+        main_x: torch.Tensor,
+        context_req_ids: torch.Tensor,
+        context_positions: torch.Tensor,
+        committed_ends: torch.Tensor,
+        inputs: PyModelInputs,
+    ) -> None:
+        batch_size = int(committed_ends.numel())
+        if batch_size == 0 or int(main_x.shape[0]) == 0:
+            return
+        attention_inputs = inputs.attention_inputs
+        block_table = self._swa_block_table(attention_inputs, batch_size)
+        tokens_per_block = int(
+            require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
+        )
+        write_cache_store_impl = create_write_cache_store_impl(
+            attention_inputs, self.kv_cache
+        )
+        for layer_idx in range(len(self.v4.layers)):
+            self._commit_layer_features(
+                layer_idx,
+                main_x,
+                context_req_ids,
+                context_positions,
+                committed_ends,
+                block_table,
+                tokens_per_block,
+                batch_size,
+            )
+            # PD-separated prefill publishes each committed draft-layer cache
+            # from the commit call: the published range is exactly the
+            # committed rows, so speculative query rows never enter the
+            # store's block plan.
+            if write_cache_store_impl is not None:
+                write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
+
+    def _forward_dspark_attention(
+        self,
+        layer_idx: int,
+        x: torch.Tensor,
+        query_positions: torch.Tensor,
+        prefix_lengths: torch.Tensor,
+        active_requests: torch.Tensor,
+        block_table: Optional[torch.Tensor],
+        tokens_per_block: int,
+        graph_metadata: Any,
+    ) -> torch.Tensor:
+        batch_size, gamma, _ = x.shape
+        if batch_size == 0:
+            return torch.empty_like(x)
+        if block_table is None:
+            raise RuntimeError("DSpark attention requires an SWA block table")
+
+        with self._swa_cache_bound(layer_idx, block_table) as (
+            attn,
+            entries_per_block,
+            pool,
+        ):
             # Project and insert all query KVs before attention so each query
             # can read every other query position, including future noise.
             qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
@@ -481,23 +542,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 topk_length=topk_length,
             )
             return decode_output_proj(attn, output, qkv.freqs_cis, batch_size, gamma)
-        finally:
-            attn._kv_cache = previous_cache
-            attn._block_tables_by_type = previous_tables
 
     def _forward_layers(
         self,
         query_ids: torch.Tensor,
         query_positions: torch.Tensor,
-        main_x: torch.Tensor,
-        context_req_ids: torch.Tensor,
-        context_positions: torch.Tensor,
         prefix_lengths: torch.Tensor,
         active_requests: torch.Tensor,
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
-        write_cache_store_impl: Any = None,
     ) -> torch.Tensor:
         batch_size, gamma = query_ids.shape
         hidden = self.v4.embed(query_ids)
@@ -513,9 +567,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 layer_idx,
                 x_pre,
                 query_positions,
-                main_x,
-                context_req_ids,
-                context_positions,
                 prefix_lengths,
                 active_requests,
                 block_table,
@@ -532,15 +583,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             ffn_output = layer.ffn(x_pre, query_ids)
             hidden = layer.ffn_hc.post(ffn_output, residual, post, comb)
 
-            # The custom non-causal attention path bypasses the ordinary V4
-            # prefill loop, so it must explicitly publish each completed
-            # draft-layer cache in PD-separated prefill. The forward computes
-            # the fixed query rows locally, while the C++ CacheStore overrides
-            # expose only committed prefix/suffix KV. Decode rebuilds the
-            # speculative rows after loading that committed state.
-            if write_cache_store_impl is not None:
-                write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
-
         return hidden
 
     # ------------------------------------------------------------------
@@ -551,9 +593,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self,
         query_ids: torch.Tensor,
         query_positions: torch.Tensor,
-        main_x: torch.Tensor,
-        context_req_ids: torch.Tensor,
-        context_positions: torch.Tensor,
         prefix_lengths: torch.Tensor,
         active_requests: torch.Tensor,
         inputs: PyModelInputs,
@@ -569,9 +608,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         tokens_per_block = int(
             require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
         )
-        write_cache_store_impl = create_write_cache_store_impl(
-            attention_inputs, self.kv_cache
-        )
 
         # Eager forwards get a fresh owner each round, while CUDA graph capture
         # receives the persistent object created by ``prepare_fmha_impl``.
@@ -583,15 +619,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         return self._forward_layers(
             query_ids,
             query_positions,
-            main_x,
-            context_req_ids,
-            context_positions,
             prefix_lengths,
             active_requests,
             block_table,
             tokens_per_block,
             graph_metadata,
-            write_cache_store_impl,
         )
 
     def compute_draft_logits(
@@ -616,6 +648,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
         device = self.v4.embed.weight.device
         gamma = self._gen_num_per_cycle
+        # The presence of feature rows is what marks a commit call; propose
+        # calls carry only the query block.
+        is_commit = (
+            inputs.input_hiddens is not None
+            and isinstance(inputs.input_hiddens, torch.Tensor)
+            and inputs.input_hiddens.numel() > 0
+        )
 
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.
@@ -627,12 +666,22 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 "returning warmup placeholders for batch=%d",
                 batch_size,
             )
+            if is_commit:
+                return PyModelOutputs(
+                    torch.zeros(
+                        (0, int(self._v4_args.dim)),
+                        dtype=torch.bfloat16,
+                        device=device,
+                    )
+                )
             return self.dspark_empty_outputs(batch_size, device)
 
         if not bool(self.fp8_kv_cache):
             raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
 
-        return self.run_draft_step(inputs, fmha_impl, device)
+        if is_commit:
+            return self.run_commit_step(inputs, device)
+        return self.run_propose_step(inputs, fmha_impl, device)
 
 
 __all__ = ["DeepSeekV4DSparkModel"]

@@ -312,18 +312,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
 
-        const bool is_dspark_draft = params.sp_config.type == SP_TYPE_DSPARK && params.model_id != 0;
-        graph_params.is_dspark_draft = is_dspark_draft;
-        if (is_dspark_draft) {
-            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_instance, "_dspark_aux_feature_dim"),
-                                    "DSpARK draft model must expose _dspark_aux_feature_dim for CUDA graph capture");
-            graph_params.input_hidden_size = py_instance.attr("_dspark_aux_feature_dim").cast<size_t>();
-            // The target verifies [anchor + gamma] and writes one auxiliary
-            // row for each of those positions into the shared MTP hidden
-            // buffer; the proposer query itself has gamma rows. Accepted
-            // rows are selected by device-side lengths.
-            graph_params.input_hidden_rows_per_bs = params.sp_config.gen_num_per_cycle + 1;
-        }
+        // The graphed DSpARK call is the fixed-width propose block, which
+        // carries no feature input — commit calls (feature rows in
+        // input_hiddens) stay eager, so no aux-specific graph geometry is
+        // needed.
+        graph_params.is_dspark_draft = params.sp_config.type == SP_TYPE_DSPARK && params.model_id != 0;
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;

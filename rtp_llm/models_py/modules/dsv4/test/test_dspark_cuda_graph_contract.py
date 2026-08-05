@@ -121,11 +121,8 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertTrue(metadata.support_cuda_graph())
         metadata.prepare_cuda_graph(None)
 
-    def test_context_write_uses_request_ids_positions_and_committed_ends(self) -> None:
-        """The DSpARK call site must not reconstruct positions from a QSL."""
-
-        class StopAfterContextWrite(Exception):
-            pass
+    def test_commit_write_uses_request_ids_positions_and_committed_ends(self) -> None:
+        """The DSpARK commit call must not reconstruct positions from a QSL."""
 
         class FakeAttention:
             compress_ratio = 0
@@ -178,23 +175,18 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
             patch.object(
                 dspark_model_module,
                 "decode_write_swa_fp8",
-                side_effect=StopAfterContextWrite,
             ) as cache_writer,
         ):
-            with self.assertRaises(StopAfterContextWrite):
-                model._forward_dspark_attention(
-                    layer_idx=0,
-                    x=torch.zeros((1, 1, 4), dtype=torch.bfloat16),
-                    query_positions=torch.tensor([[12]], dtype=torch.long),
-                    main_x=torch.zeros((4, 4), dtype=torch.bfloat16),
-                    context_req_ids=context_req_ids,
-                    context_positions=context_positions,
-                    prefix_lengths=prefix_lengths,
-                    active_requests=torch.tensor([True]),
-                    block_table=torch.tensor([[1]], dtype=torch.int32),
-                    tokens_per_block=256,
-                    graph_metadata=SimpleNamespace(sched_meta_cache={}),
-                )
+            model._commit_layer_features(
+                layer_idx=0,
+                main_x=torch.zeros((4, 4), dtype=torch.bfloat16),
+                context_req_ids=context_req_ids,
+                context_positions=context_positions,
+                committed_ends=prefix_lengths,
+                block_table=torch.tensor([[1]], dtype=torch.int32),
+                tokens_per_block=256,
+                batch_size=1,
+            )
 
         kwargs = slot_mapper.call_args.kwargs
         self.assertTrue(torch.equal(kwargs["req_id_per_token"], context_req_ids))

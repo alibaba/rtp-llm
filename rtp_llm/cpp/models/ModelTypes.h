@@ -89,7 +89,6 @@ enum GptModelInputIndex : size_t {
     // last_hidden_states can have a different row count from combo_tokens for
     // DSpARK prefill seeding, so transmit its leading dimension explicitly.
     mtpHiddenStatesRows,
-    dsparkCtxLengths,
     cacheStoreInputLengths,
     cacheStorePrefixLengths,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
@@ -108,9 +107,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitSequenceLengths  = 1u << 2,
     kDeviceBitPrefixLengths    = 1u << 3,
     kDeviceBitLmOutputIndexes  = 1u << 4,
-    kDeviceBitDsparkCtxLengths = 1u << 5,
-    kDeviceBitCacheStoreInputLengths  = 1u << 6,
-    kDeviceBitCacheStorePrefixLengths = 1u << 7,
+    kDeviceBitCacheStoreInputLengths  = 1u << 5,
+    kDeviceBitCacheStorePrefixLengths = 1u << 6,
 };
 
 struct CacheStoreTensorSyncMetadata {

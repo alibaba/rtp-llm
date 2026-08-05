@@ -199,6 +199,22 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
+void MtpExecutor::buildDSparkProposeOrPlaceholder(GptModelInputs&      model_input,
+                                                  const torch::Tensor& anchors,
+                                                  const torch::Tensor& committed_ends) {
+    if (anchors.defined()) {
+        batch_stream_processor_->buildDSparkProposeInput(model_input, anchors, committed_ends, buffer_holder_);
+        return;
+    }
+    const auto    cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const int64_t batch    = model_input.input_lengths.numel();
+    model_input.combo_tokens       = torch::empty({batch * static_cast<int64_t>(propose_step_)}, cuda_i32);
+    model_input.last_hidden_states = torch::Tensor();
+    model_input.prefix_lengths     = torch::empty({batch}, cuda_i32);
+    model_input.input_lengths      = torch::empty({batch}, cuda_i32);
+    model_input.lm_output_indexes  = torch::empty({batch}, cuda_i32);
+}
+
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                                        ModelBase&      source,
                                                        bool            request_actual_rows) {
@@ -269,7 +285,6 @@ void MtpExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const cha
     to_cuda(model_input.prefix_lengths, "prefix_lengths");
     to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
-    to_cuda(model_input.dspark_ctx_lengths, "dspark_ctx_lengths");
     to_cuda(model_input.cache_store_input_lengths, "cache_store_input_lengths");
     to_cuda(model_input.cache_store_prefix_lengths, "cache_store_prefix_lengths");
     checkModelInputsOnCuda(model_input, tag);
@@ -296,7 +311,6 @@ void MtpExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, cons
     check(model_input.prefix_lengths, "prefix_lengths");
     check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     check(model_input.lm_output_indexes, "lm_output_indexes");
-    check(model_input.dspark_ctx_lengths, "dspark_ctx_lengths");
     check(model_input.cache_store_input_lengths, "cache_store_input_lengths");
     check(model_input.cache_store_prefix_lengths, "cache_store_prefix_lengths");
     RTP_LLM_LOG_DEBUG("[mtp-device-input] %s metadata tensors are CUDA", tag);
@@ -835,6 +849,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     // target model sample
+    // DSpARK: filled by the commit-input update, consumed by the propose call.
+    torch::Tensor dspark_seed_anchors;
+    torch::Tensor dspark_seed_committed_ends;
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (model_input.is_fake_stream) {
@@ -842,9 +859,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 sampler_output.token_ids = torch::zeros(
                     {static_cast<int64_t>(stream_groups.totalSamplerBatchSizeOut()), 1},
                     torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-                auto target_features = model_->getMtpTargetHiddenStates(model_input.combo_tokens.numel());
-                batch_stream_processor_->updatePrefillPostDSparkDraftModelInput(
-                    model_input, target_features, sampler_output, buffer_holder_);
+                maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+                batch_stream_processor_->updatePrefillPostDSparkCommitInput(
+                    model_input, sampler_output, dspark_seed_anchors, dspark_seed_committed_ends, buffer_holder_);
             } else {
                 model_input.last_hidden_states = model_output.all_hidden_states;
             }
@@ -863,16 +880,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.input_lengths = saved_input_lengths;
             }
             if (is_dspark_) {
-                // Target prefill wrote its aux features into the shared MTP
-                // hidden buffer ([T, capture_layers * hidden] rows). Under CP
-                // the buffer is rank-local while the dspark context mapping
-                // still assumes global rows — supported with the follow-up
-                // sharded feature injection.
+                // DSpARK CP is sharded-only by design (matching production
+                // topologies; vLLM's DSpark likewise rejects context
+                // parallelism outright): the draft evaluates the full block
+                // on every rank, and only slice-owned rank-local commits are
+                // supported — the sharded feature injection provides them.
                 RTP_LLM_CHECK_WITH_INFO(
                     !cp_enabled, "DSpARK prefill under context parallelism requires sharded feature injection");
-                auto target_features = model_->getMtpTargetHiddenStates(model_input.combo_tokens.numel());
-                batch_stream_processor_->updatePrefillPostDSparkDraftModelInput(
-                    model_input, target_features, sampler_output, buffer_holder_);
+                maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+                batch_stream_processor_->updatePrefillPostDSparkCommitInput(
+                    model_input, sampler_output, dspark_seed_anchors, dspark_seed_committed_ends, buffer_holder_);
             } else {
                 batch_stream_processor_->updatePrefillPostDraftModelInput(
                     model_input, model_output, sampler_output, buffer_holder_);
@@ -901,6 +918,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         // Source = main (just ran prefill; its pre-hc buffer is current).
         if (!is_dspark_) {
             maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
+        }
+        if (is_dspark_) {
+            // Commit: prompt-suffix feature rows into the draft feature KV
+            // (the call keeps the target's own incremental-prefill geometry;
+            // output intentionally unused), then the fixed-width propose
+            // block against the committed KV.
+            (void)draft_model_->forward(model_input);
+            buildDSparkProposeOrPlaceholder(model_input, dspark_seed_anchors, dspark_seed_committed_ends);
+            tpSyncModelInputs(model_input, parallelism_config_);
         }
         draft_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1161,6 +1187,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor              hidden_states_d_t;
     torch::Tensor              draft_token_ids_t;
     torch::Tensor              spec_token_ids_t;
+    // DSpARK: filled by the commit-input update, consumed by the propose call.
+    torch::Tensor              dspark_anchors;
+    torch::Tensor              dspark_committed_ends;
     std::vector<torch::Tensor> draft_probs_list;
     torch::Event               accept_len_ready_event = cuda_graph::makeGraphEvent();
     int64_t                    model_forward_us       = 0;
@@ -1411,8 +1440,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // geometry.
             auto target_features =
                 model_->getMtpTargetHiddenStates(static_cast<int64_t>(batch_size) * (propose_step_ + 1));
-            batch_stream_processor_->updateDecodePostDSparkDraftModelInput(
-                model_input, target_features, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+            batch_stream_processor_->updateDecodePostDSparkCommitInput(model_input,
+                                                                       target_features,
+                                                                       speculative_sampler_output,
+                                                                       batch_size,
+                                                                       dspark_anchors,
+                                                                       dspark_committed_ends,
+                                                                       hidden_states_d_t,
+                                                                       buffer_holder_);
         } else {
             batch_stream_processor_->updateDecodePostDraftModelInput(
                 model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
@@ -1428,12 +1463,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 model_->getMtpTargetHiddenStates(static_cast<int64_t>(batch_size) * (propose_step_ + 1));
             RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
                                     "dspark target TP rank did not bind the MTP hidden buffer");
+            // Commit-call placeholders; the propose call builds its own below.
             model_input.combo_tokens =
-                torch::empty({static_cast<int64_t>(batch_size * propose_step_)}, cuda_i32);
+                torch::empty({static_cast<int64_t>(batch_size) * (propose_step_ + 1)}, cuda_i32);
             model_input.last_hidden_states = torch::empty_like(target_features);
             model_input.input_lengths      = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input.prefix_lengths     = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
-            model_input.dspark_ctx_lengths = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input.sequence_lengths   = torch::empty({0}, cuda_i32);
         } else {
             model_input.last_hidden_states = model_output.all_hidden_states;
@@ -1457,7 +1492,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     {
-        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (is_dspark_) {
+            // Commit: dense verify rows into the draft feature KV
+            // (incremental-prefill shape; output intentionally unused), then
+            // the fixed-width propose block against the committed KV.
+            (void)runDraftPrefillForward(model_input);
+            buildDSparkProposeOrPlaceholder(model_input, dspark_anchors, dspark_committed_ends);
+            broadcastPostRejectionInputs(model_input);
+        }
         draft_prefill_model_output = runDraftPrefillForward(model_input);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1814,7 +1857,6 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         if (is_dspark_) {
             execBroadcast({{model_input.input_lengths}, 0});
             execBroadcast({{model_input.prefix_lengths}, 0});
-            execBroadcast({{model_input.dspark_ctx_lengths}, 0});
         }
     }
     model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;

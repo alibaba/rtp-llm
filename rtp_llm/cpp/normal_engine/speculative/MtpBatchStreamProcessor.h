@@ -67,15 +67,21 @@ public:
                                           const SamplerOutput&   sampler_output,
                                           TensorHolder&          host_holder);
 
-    // DSpARK proposes a fixed-width block in one draft forward.  gamma is
-    // propose_step_: draft input is [anchor, noise x (gamma - 1)], while the
-    // target verifies [anchor, proposal x gamma].
-    // ``target_features`` is the target's shared MTP hidden buffer view
-    // ([rows, capture_layers * hidden], see getMtpTargetHiddenStates).
-    void updatePrefillPostDSparkDraftModelInput(GptModelInputs&      model_input,
-                                                const torch::Tensor& target_features,
-                                                const SamplerOutput& sampler_output,
-                                                TensorHolder&        host_holder);
+    // DSpARK runs two standard-slot draft calls per round: a commit call
+    // (incremental-prefill shape, feature rows already loaded into
+    // last_hidden_states from the shared MTP hidden buffer) and a
+    // fixed-width propose call ([anchor, noise x (gamma - 1)] against the
+    // committed feature KV).
+    void updatePrefillPostDSparkCommitInput(GptModelInputs&      model_input,
+                                            const SamplerOutput& sampler_output,
+                                            torch::Tensor&       anchors_out,
+                                            torch::Tensor&       committed_ends_out,
+                                            TensorHolder&        host_holder);
+
+    void buildDSparkProposeInput(GptModelInputs&      model_input,
+                                 const torch::Tensor& anchors,
+                                 const torch::Tensor& committed_ends,
+                                 TensorHolder&        host_holder);
 
     void prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
                                        GptModelInputs&     model_input,
@@ -86,12 +92,14 @@ public:
                                         torch::Tensor&      draft_token_probs_d_t,
                                         TensorHolder&       host_holder);
 
-    void updateDecodePostDSparkDraftModelInput(GptModelInputs&                              model_input,
-                                               const torch::Tensor&                         target_features,
-                                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                               size_t                                       batch_size,
-                                               torch::Tensor&                               hidden_states_d_t,
-                                               TensorHolder&                                host_holder);
+    void updateDecodePostDSparkCommitInput(GptModelInputs&                              model_input,
+                                           const torch::Tensor&                         target_features,
+                                           const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                           size_t                                       batch_size,
+                                           torch::Tensor&                               anchors_out,
+                                           torch::Tensor&                               committed_ends_out,
+                                           torch::Tensor&                               hidden_states_d_t,
+                                           TensorHolder&                                host_holder);
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,

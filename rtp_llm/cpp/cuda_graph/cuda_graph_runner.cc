@@ -257,25 +257,6 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                            inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
     }
 
-    if (is_dspark_draft_) {
-        RTP_LLM_CHECK_WITH_INFO(py_model_inputs_.dspark_ctx_lengths.defined(),
-                                "DSpARK graph inputs must own persistent context metadata");
-        // A smaller live batch may reuse a larger captured graph. Clear the
-        // padded metadata first so those rows cannot inject stale target
-        // features into blocks that have since been reassigned. Feature rows
-        // are front-packed by request, so zero lengths for padded slots keep
-        // the derived (prefix-sum) row windows monotonic and empty.
-        py_model_inputs_.dspark_ctx_lengths.zero_();
-        if (inputs.dspark_ctx_lengths.defined() && inputs.dspark_ctx_lengths.numel() > 0) {
-            RTP_LLM_CHECK_WITH_INFO(inputs.dspark_ctx_lengths.numel() <= py_model_inputs_.dspark_ctx_lengths.numel(),
-                                    "dspark_ctx_lengths numel mismatch: %zu > %zu",
-                                    inputs.dspark_ctx_lengths.numel(),
-                                    py_model_inputs_.dspark_ctx_lengths.numel());
-            optimizedCopyAsync(inputs.dspark_ctx_lengths,
-                               py_model_inputs_.dspark_ctx_lengths,
-                               inputs.dspark_ctx_lengths.numel() * sizeof(int32_t));
-        }
-    }
 }
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
@@ -699,14 +680,9 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     }
 
     if (is_dspark_draft_) {
-        const int64_t live_batch = inputs.attention_inputs.input_lengths.size(0);
-        const int64_t max_live_aux_numel =
-            live_batch * input_hidden_rows_per_bs_ * static_cast<int64_t>(input_hidden_size_);
-        if (!enable_cuda_graph_ || !inputs.dspark_ctx_lengths.defined() || inputs.dspark_ctx_lengths.numel() == 0
-            || !inputs.input_hiddens.defined() || inputs.input_hiddens.numel() > max_live_aux_numel) {
-            // Prompt seeding can carry an arbitrarily long target-feature
-            // suffix. Keep that ragged case eager; the decode tail is bounded
-            // by (gamma+1) aux rows per live request.
+        // Commit calls carry feature rows (ragged, eager); the fixed-width
+        // propose call carries none and is the graphed shape.
+        if (!enable_cuda_graph_ || inputs.input_hiddens.defined()) {
             return false;
         }
         return tryGetRealGraphDecodeBatchSize(inputs, state);
@@ -917,15 +893,14 @@ void CudaGraphRunner::initCapture() {
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
-        // Input hidden geometry is independent from query-token geometry for
-        // DSpARK: gamma query rows consume gamma+1 target aux rows of width
-        // n_aux*hidden. Generic/MTP graphs retain the historical T x hc*hidden
-        // defaults populated in the constructor.
-        inputs.input_hiddens = torch::zeros(
-            {static_cast<int64_t>(max_bs_) * input_hidden_rows_per_bs_, static_cast<int64_t>(input_hidden_size_)},
-            options_cuda_float_);
-        if (is_dspark_draft_) {
-            inputs.dspark_ctx_lengths = torch::zeros({static_cast<int64_t>(max_bs_)}, options_cuda_int32_);
+        // The DSpARK draft graph captures the propose call, which carries no
+        // feature input — a defined input_hiddens would route the captured
+        // forward into the eager commit arm. Generic/MTP graphs retain the
+        // historical T x hc*hidden defaults populated in the constructor.
+        if (!is_dspark_draft_) {
+            inputs.input_hiddens = torch::zeros(
+                {static_cast<int64_t>(max_bs_) * input_hidden_rows_per_bs_, static_cast<int64_t>(input_hidden_size_)},
+                options_cuda_float_);
         }
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
@@ -1103,14 +1078,9 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const int token_slice_len =
         draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
-    const int input_hidden_slice_rows =
-        is_dspark_draft_ ? batch_size * input_hidden_rows_per_bs_ : token_slice_len;
-    inputs.input_hiddens =
-        capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, input_hidden_slice_rows);
-    if (is_dspark_draft_) {
-        inputs.dspark_ctx_lengths =
-            capture_mem_hold_.py_model_inputs_.dspark_ctx_lengths.slice(0, 0, batch_size);
-    }
+    inputs.input_hiddens = is_dspark_draft_ ?
+                               torch::Tensor() :
+                               capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =

@@ -146,6 +146,13 @@ protected:
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
     // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
     // carrier. The source returns the full buffer; consumers slice as needed.
+    // Fill the DSpARK propose-call input after the commit forward. Ranks
+    // without the anchors (non-root, fake streams) build placeholder shapes
+    // for the subsequent broadcast/sync to fill.
+    void buildDSparkProposeOrPlaceholder(GptModelInputs&      model_input,
+                                         const torch::Tensor& anchors,
+                                         const torch::Tensor& committed_ends);
+
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                               ModelBase&      source,
                                               bool            request_actual_rows = false);

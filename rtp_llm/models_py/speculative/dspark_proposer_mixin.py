@@ -13,18 +13,20 @@ family implements only the hooks that genuinely differ per model: feature
 projection, KV injection + non-causal query-block attention, and the logits
 head.
 
-Engine input contract (all token rows are request-major):
+Engine input contract — two standard-slot calls per round (all token rows
+are request-major):
 
-* ``input_ids``: ``[B * width]`` query block.  Column zero is the anchor;
-  the remaining columns are forced to the configured noise token here.
-* ``input_hiddens``: target auxiliary features, flattenable to
+* **Commit** (incremental-prefill shape): ``input_ids`` = the committed
+  tokens, ``attention_inputs.input_lengths`` = newly committed rows per
+  request, ``attention_inputs.prefix_lengths`` = where they start,
+  ``input_hiddens`` = the matching target feature rows, flattenable to
   ``[rows, aux_feature_dim]`` (a zero-copy view of the shared MTP hidden
-  buffer, whose DSpARK row width equals the aux payload).
-* ``dspark_ctx_lengths``: number of newly committed feature rows for each
-  request. Rows arrive front-packed by request, so each request's window
-  starts at the exclusive prefix sum of the lengths.
-* ``attention_inputs.prefix_lengths``: committed sequence length *after*
-  those context rows and immediately before the query block.
+  buffer). The presence of ``input_hiddens`` is what marks a commit call.
+* **Propose** (fixed-width block): ``input_ids`` = ``[B * width]`` query
+  block (column zero is the anchor; the remaining columns are forced to
+  the configured noise token here), ``attention_inputs.prefix_lengths`` =
+  committed sequence length immediately before the query block. No
+  feature input — the block reads the committed feature KV.
 
 The greedy sampling tail reproduces the reference proposer numerics exactly:
 ``softmax(base + bias)`` then ``argmax`` per step, the sampled token feeding
@@ -174,20 +176,30 @@ class DSparkProposerMixin:
         draft-input features ``[rows, hidden_dim]`` (bf16)."""
         raise NotImplementedError
 
+    def commit_feature_rows(
+        self,
+        main_x: torch.Tensor,
+        context_req_ids: torch.Tensor,
+        context_positions: torch.Tensor,
+        prefix_lengths: torch.Tensor,
+        inputs: PyModelInputs,
+    ) -> None:
+        """Write projected feature rows ``main_x`` into every draft layer's
+        KV cache (per-layer KV projection of the same rows — features are not
+        propagated through the layers)."""
+        raise NotImplementedError
+
     def forward_query_block(
         self,
         query_ids: torch.Tensor,
         query_positions: torch.Tensor,
-        main_x: torch.Tensor,
-        context_req_ids: torch.Tensor,
-        context_positions: torch.Tensor,
         prefix_lengths: torch.Tensor,
         active_requests: torch.Tensor,
         inputs: PyModelInputs,
         fmha_impl: Any,
     ) -> torch.Tensor:
-        """Commit ``main_x`` rows into the draft KV cache and evaluate the
-        non-causal query block.  Returns backbone hidden states; called for
+        """Evaluate the non-causal query block against the previously
+        committed feature KV.  Returns backbone hidden states; called for
         empty batches too so collective layers stay balanced."""
         raise NotImplementedError
 
@@ -229,17 +241,84 @@ class DSparkProposerMixin:
         )
         return outputs
 
-    def run_draft_step(
+    def run_commit_step(
+        self,
+        inputs: PyModelInputs,
+        device: torch.device,
+    ) -> PyModelOutputs:
+        """Commit target feature rows into the draft KV cache.
+
+        A standard incremental-prefill call: ``input_lengths`` is the number
+        of newly committed rows per request (prompt suffix at seeding, the
+        dense gamma+1 verify rows at the decode tail — rejected rows are
+        overwritten in place next round, the same self-healing MTP relies
+        on), ``prefix_lengths`` is where they start, and ``input_hiddens``
+        carries the feature rows packed in the same request-major order.
+        Produces no logits."""
+        attention_inputs = inputs.attention_inputs
+        input_lengths = optional_tensor(
+            getattr(attention_inputs, "input_lengths", None)
+        )
+        batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
+        hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
+
+        def _empty_outputs() -> PyModelOutputs:
+            return PyModelOutputs(
+                torch.zeros(
+                    (0, self._dspark_hidden_dim),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+            )
+
+        if batch_size == 0 or hidden is None or hidden.numel() == 0:
+            return _empty_outputs()
+
+        aux_dim = self._dspark_aux_feature_dim
+        if hidden.numel() % aux_dim != 0:
+            raise RuntimeError(
+                "DSpark target feature tensor cannot be reshaped to the "
+                f"configured width {aux_dim}: shape={tuple(hidden.shape)}"
+            )
+        features = hidden.reshape(-1, aux_dim).to(device=device)
+        row_count = int(features.shape[0])
+
+        prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
+        if prefix is None or int(prefix.numel()) < batch_size:
+            raise RuntimeError(
+                "DSpark commit requires prefix_lengths with one value per request"
+            )
+        prefix_lengths = prefix[:batch_size].to(device=device, dtype=torch.long)
+        lengths = input_lengths[:batch_size].to(device=device, dtype=torch.long)
+        starts = lengths.cumsum(0) - lengths
+
+        # Row windows are the plain prefix sum of the standard input_lengths;
+        # positions continue each request's committed prefix. All rows are
+        # payload — the commit call's geometry is exactly its row layout.
+        req, positions = map_context_rows(
+            starts, lengths, prefix_lengths + lengths, row_count
+        )
+
+        main_x = self.combine_hidden_states(features)
+        self.commit_feature_rows(
+            main_x,
+            req,
+            positions,
+            (prefix_lengths + lengths).to(torch.int32),
+            inputs,
+        )
+        return _empty_outputs()
+
+    def run_propose_step(
         self,
         inputs: PyModelInputs,
         fmha_impl: Any,
         device: torch.device,
     ) -> PyModelOutputs:
-        """Execute one DSpark draft round on an initialized model.
+        """Evaluate one fixed-width proposal block on an initialized model.
 
-        The subclass owns readiness checks (weights loaded, KV cache
-        present); this method owns the input contract and the
-        model-independent round shape."""
+        The query block reads the committed feature KV written by
+        :meth:`run_commit_step`; the call carries no feature input."""
         width = self._dspark_width
 
         attention_inputs = inputs.attention_inputs
@@ -278,22 +357,13 @@ class DSparkProposerMixin:
             width, device=device, dtype=torch.long
         ).view(1, width)
 
-        main_x, context_req_ids, context_positions = self._parse_committed_context(
-            inputs, prefix_lengths.to(torch.long), batch_size, device
-        )
-        ctx_lengths = optional_tensor(getattr(inputs, "dspark_ctx_lengths", None))
-        active_requests = (
-            ctx_lengths[:batch_size].to(device=device) > 0
-            if ctx_lengths is not None
-            else torch.zeros(batch_size, dtype=torch.bool, device=device)
-        )
+        # Live requests always carry a non-empty committed prefix (at least
+        # the anchor's context); zero-prefix slots are CUDA-graph padding.
+        active_requests = prefix_lengths > 0
 
         hidden = self.forward_query_block(
             query_ids,
             query_positions,
-            main_x,
-            context_req_ids,
-            context_positions,
             prefix_lengths,
             active_requests,
             inputs,
@@ -313,68 +383,6 @@ class DSparkProposerMixin:
         outputs.draft_tokens = draft_tokens
         outputs.draft_probs = draft_probs
         return outputs
-
-    def _parse_committed_context(
-        self,
-        inputs: PyModelInputs,
-        prefix_lengths: torch.Tensor,
-        batch_size: int,
-        device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return ``main_x, req_ids, positions`` for received target rows.
-
-        Rows are front-packed by request; ``searchsorted`` over the derived
-        prefix-sum starts maps all source rows to requests without a
-        device-to-host length read. Padding rows past the packed span retain
-        a ``-1`` request/position and are skipped by the cache writer.
-        """
-        aux_dim = self._dspark_aux_feature_dim
-        hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
-        lengths = optional_tensor(getattr(inputs, "dspark_ctx_lengths", None))
-
-        def _empty() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            return (
-                torch.empty(
-                    (0, self._dspark_hidden_dim),
-                    dtype=torch.bfloat16,
-                    device=device,
-                ),
-                torch.empty(0, dtype=torch.int32, device=device),
-                torch.empty(0, dtype=torch.int32, device=device),
-            )
-
-        if batch_size == 0:
-            return _empty()
-        if hidden is None:
-            raise RuntimeError("DSpark requires target features in input_hiddens")
-        if lengths is None or int(lengths.numel()) < batch_size:
-            raise RuntimeError(
-                "DSpark requires dspark_ctx_lengths with one value per request"
-            )
-
-        lengths = lengths[:batch_size].to(device=device, dtype=torch.long)
-        # Feature rows are front-packed by request in both arms (prefill
-        # seeding is packed by construction; the decode tail front-packs the
-        # accepted verify rows in C++), so the row windows are always the
-        # exclusive prefix sum of the lengths. Rows past the packed span are
-        # padding and fail the interval check in map_context_rows.
-        starts = lengths.cumsum(0) - lengths
-
-        if hidden.numel() % aux_dim != 0:
-            raise RuntimeError(
-                "DSpark target feature tensor cannot be reshaped to the "
-                f"configured width {aux_dim}: shape={tuple(hidden.shape)}"
-            )
-        features = hidden.reshape(-1, aux_dim).to(device=device)
-        row_count = int(features.shape[0])
-        if row_count == 0:
-            return _empty()
-
-        main_x = self.combine_hidden_states(features)
-        req, positions = map_context_rows(
-            starts, lengths, prefix_lengths, row_count
-        )
-        return main_x, req, positions
 
     def _sample_sequential_markov(
         self,

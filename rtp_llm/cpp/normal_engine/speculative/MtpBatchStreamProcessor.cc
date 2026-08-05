@@ -746,34 +746,40 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) 
     return dspark_lm_indexes_cache_.narrow(0, 0, batch_size);
 }
 
-void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInputs&      model_input,
-                                                                     const torch::Tensor& target_features,
-                                                                     const SamplerOutput& sampler_output,
-                                                                     TensorHolder&        host_holder) {
-    const int64_t batch_size = sampler_output.token_ids.size(0);
+void MtpBatchStreamProcessor::updatePrefillPostDSparkCommitInput(GptModelInputs&      model_input,
+                                                                 const SamplerOutput& sampler_output,
+                                                                 torch::Tensor&       anchors_out,
+                                                                 torch::Tensor&       committed_ends_out,
+                                                                 TensorHolder&        host_holder) {
+    // The commit call keeps the target's own incremental-prefill geometry:
+    // combo = prompt suffix tokens, input_lengths = suffix rows,
+    // prefix_lengths = reused prefix, feature rows already loaded into
+    // last_hidden_states by the shared MTP buffer override (or the CP
+    // bridge). CacheStore keys derive from these standard fields, which
+    // describe exactly the committed prompt — no override channel needed.
+    RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark draft width must be positive");
+    RTP_LLM_CHECK_WITH_INFO(model_input.last_hidden_states.defined(),
+                            "dspark prefill: target MTP hidden buffer did not provide aux features");
+    anchors_out         = toCudaInt32(lastColumnAsFlat(sampler_output.token_ids), host_holder);
+    auto suffix_lengths = toCudaInt32(model_input.input_lengths, host_holder);
+    auto reuse_lengths  = toCudaInt32(model_input.prefix_lengths, host_holder);
+    committed_ends_out  = reuse_lengths + suffix_lengths;
+}
+
+void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model_input,
+                                                      const torch::Tensor& anchors,
+                                                      const torch::Tensor& committed_ends,
+                                                      TensorHolder&        host_holder) {
+    const int64_t batch_size = anchors.numel();
     RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark draft width must be positive");
     RTP_LLM_CHECK_WITH_INFO(dspark_mask_token_id_ >= 0,
                             "dspark requires a non-negative noise token id, got %d",
                             dspark_mask_token_id_);
-    RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
-                            "dspark prefill: target MTP hidden buffer did not provide aux features");
-
-    auto anchors        = toCudaInt32(lastColumnAsFlat(sampler_output.token_ids), host_holder);
-    auto suffix_lengths = toCudaInt32(model_input.input_lengths, host_holder).clone();
-    auto reuse_lengths  = toCudaInt32(model_input.prefix_lengths, host_holder);
-
-    model_input.combo_tokens       = dsparkComboTokens(batch_size, anchors);
-    model_input.last_hidden_states = target_features;
-    model_input.dspark_ctx_lengths = suffix_lengths;
-    // CacheStore keys are derived from the committed prompt received by both
-    // PD peers. The gamma rows written by this draft seeding forward are
-    // speculative state outside that prompt's hash namespace. Counting them
-    // here shifts the SWA tail window onto a padded key whenever the rows cross
-    // a cache-block boundary, so prefill and decode derive different block
-    // plans for the draft layers.
-    model_input.cache_store_prefix_lengths = reuse_lengths;
-    model_input.cache_store_input_lengths  = suffix_lengths;
-    model_input.prefix_lengths     = reuse_lengths + suffix_lengths;
+    // Fixed-width proposal block: no feature input (the block reads the
+    // committed feature KV written by the commit call).
+    model_input.combo_tokens       = dsparkComboTokens(batch_size, toCudaInt32(anchors, host_holder));
+    model_input.last_hidden_states = torch::Tensor();
+    model_input.prefix_lengths     = toCudaInt32(committed_ends, host_holder).contiguous();
     model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
@@ -861,11 +867,13 @@ void MtpBatchStreamProcessor::updateDSparkDraftSamplerOutput(const StreamGroups&
     draft_sampler_output.all_probs = draft_token_probs_d_t;
 }
 
-void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
+void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(
     GptModelInputs&                              model_input,
     const torch::Tensor&                         target_features,
     const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
     size_t                                       batch_size,
+    torch::Tensor&                               anchors_out,
+    torch::Tensor&                               committed_ends_out,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
     const int64_t verify_width = propose_step_ + 1;
@@ -879,39 +887,28 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     auto accept_tokens = toCudaInt32(speculative_sampler_output.accept_tokens, host_holder)
                              .reshape({static_cast<int64_t>(batch_size), verify_width});
     auto anchor_indexes = (accept_len.to(torch::kInt64) - 1).reshape({static_cast<int64_t>(batch_size), 1});
-    auto anchors = accept_tokens.gather(1, anchor_indexes).reshape({static_cast<int64_t>(batch_size)});
+    anchors_out = accept_tokens.gather(1, anchor_indexes).reshape({static_cast<int64_t>(batch_size)});
 
     RTP_LLM_CHECK_WITH_INFO(target_features.size(0) == static_cast<int64_t>(batch_size) * verify_width,
                             "dspark decode tail: aux rows %ld != batch*verify_width %ld",
                             target_features.size(0),
                             static_cast<int64_t>(batch_size) * verify_width);
-    model_input.combo_tokens = dsparkComboTokens(batch_size, anchors);
 
-    // Front-pack the accepted rows of the dense [B*(gamma+1)] verify buffer so
-    // the draft-side row windows are the plain prefix sum of the lengths —
-    // the same packed layout as prefill seeding. All device-side arithmetic
-    // with data-independent shapes (no host sync): slot j gathers the
-    // (j+1)-th accepted row; slots past the packed span deterministically
-    // repeat the final source row and are skipped by the draft's window
-    // mapping.
-    {
-        const auto rows_total = static_cast<int64_t>(batch_size) * verify_width;
-        const auto long_cuda  = torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA);
-        auto       accepted =
-            (torch::arange(verify_width, long_cuda).unsqueeze(0) < accept_len.to(torch::kLong).unsqueeze(1))
-                .reshape({rows_total});
-        auto src = torch::searchsorted(accepted.cumsum(0), torch::arange(1, rows_total + 1, long_cuda))
-                       .clamp_max(rows_total - 1);
-        model_input.last_hidden_states = target_features.index_select(0, src);
-    }
-    hidden_states_d_t = model_input.last_hidden_states;
+    // Dense commit, exactly like the MTP decode tail: all gamma+1 verify rows
+    // are committed at the old prefix, and the rows past each accepted length
+    // are overwritten in place by the next round. The commit call therefore
+    // carries no acceptance information at all.
+    model_input.combo_tokens =
+        toCudaInt32(speculative_sampler_output.accept_tokens, host_holder).reshape({-1}).contiguous();
+    model_input.last_hidden_states = target_features;
+    hidden_states_d_t              = model_input.last_hidden_states;
 
-    auto old_prefix                = toCudaInt32(model_input.prefix_lengths, host_holder).clone();
-    model_input.dspark_ctx_lengths = accept_len;
-    model_input.prefix_lengths     = old_prefix + accept_len;
-    model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
-    model_input.sequence_lengths   = emptyInt32OnCuda({0});
-    model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
+    // prefix/input_lengths/sequence_lengths/lm_output_indexes stay exactly as
+    // the verify step built them (setVerifyPairInputs): the dense commit call
+    // IS the verify geometry.
+    auto old_prefix            = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
+    committed_ends_out         = old_prefix + accept_len;
+    model_input.prefix_lengths = old_prefix;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(

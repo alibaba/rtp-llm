@@ -171,6 +171,14 @@ class ProposerContractTest(unittest.TestCase):
             proposer.combine_hidden_states(torch.zeros(1, 8))
         with self.assertRaises(NotImplementedError):
             proposer.compute_draft_logits(torch.zeros(1, 3, 4, 8))
+        with self.assertRaises(NotImplementedError):
+            proposer.commit_feature_rows(
+                torch.zeros(1, 8),
+                torch.zeros(1, dtype=torch.int32),
+                torch.zeros(1, dtype=torch.int32),
+                torch.zeros(1, dtype=torch.int32),
+                None,
+            )
         # Full-vocabulary default: identity mapping.
         ids = torch.tensor([3, 5])
         self.assertTrue(torch.equal(proposer.map_draft_to_target(ids), ids))
@@ -183,8 +191,8 @@ class ProposerContractTest(unittest.TestCase):
             DSparkMarkovHead(w, w, vocab_size=12, rank=4)
 
 
-class _ParseProposer(DSparkProposerMixin):
-    """Captures the feature rows handed to the projection hook."""
+class _CommitProposer(DSparkProposerMixin):
+    """Captures the rows handed to the projection and commit hooks."""
 
     def __init__(self, *, aux_dim: int):
         self.init_dspark_proposer(
@@ -195,37 +203,46 @@ class _ParseProposer(DSparkProposerMixin):
             vocab_size=7,
         )
         self.seen_features = None
+        self.committed = None
 
     def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
         self.seen_features = features
         return features
 
+    def commit_feature_rows(self, main_x, req, positions, committed_ends, inputs):
+        self.committed = (main_x, req, positions, committed_ends)
 
-class ParseCommittedContextTest(unittest.TestCase):
-    def test_feature_rows_reach_projection_zero_copy(self) -> None:
+
+class CommitStepTest(unittest.TestCase):
+    def test_commit_derives_windows_from_standard_prefill_geometry(self) -> None:
         # input_hiddens is a view of the shared MTP hidden buffer whose
-        # DSpARK row width equals the aux payload — parsing must not copy.
+        # DSpARK row width equals the aux payload — the commit step must not
+        # copy it, and its row windows come straight from
+        # input_lengths/prefix_lengths.
         aux_dim, rows = 6, 4
-        proposer = _ParseProposer(aux_dim=aux_dim)
+        proposer = _CommitProposer(aux_dim=aux_dim)
         hidden = torch.arange(
             rows * aux_dim, dtype=torch.float32
         ).reshape(rows, aux_dim)
         inputs = SimpleNamespace(
             input_hiddens=hidden,
-            dspark_ctx_lengths=torch.tensor([3, 1], dtype=torch.int32),
+            attention_inputs=SimpleNamespace(
+                input_lengths=torch.tensor([3, 1], dtype=torch.int32),
+                prefix_lengths=torch.tensor([10, 20], dtype=torch.int32),
+            ),
         )
-        prefix = torch.tensor([3, 1], dtype=torch.int32)
 
-        main_x, req, pos = proposer._parse_committed_context(
-            inputs, prefix, 2, torch.device("cpu")
-        )
+        proposer.run_commit_step(inputs, torch.device("cpu"))
 
         torch.testing.assert_close(proposer.seen_features, hidden)
         self.assertEqual(
             proposer.seen_features.data_ptr(), hidden.data_ptr()
         )
+        main_x, req, positions, committed_ends = proposer.committed
         self.assertEqual(main_x.shape, (rows, aux_dim))
         self.assertEqual(req.tolist(), [0, 0, 0, 1])
+        self.assertEqual(positions.tolist(), [10, 11, 12, 20])
+        self.assertEqual(committed_ends.tolist(), [13, 21])
 
 
 if __name__ == "__main__":

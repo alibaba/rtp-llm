@@ -1060,14 +1060,24 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
 
+    // Commit call: dense verify rows at the old prefix (accept-independent).
+    GptModelInputs commit_input;
+    commit_input.combo_tokens       = torch::tensor({1, 0, 0, 0}, torch::kInt32);
+    commit_input.input_lengths      = torch::tensor({gamma + 1}, torch::kInt32);
+    commit_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
+    commit_input.lm_output_indexes  = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    commit_input.last_hidden_states = target_aux_features;
+
+    // Propose call: fixed-width block at the accepted committed end, no
+    // feature input.
     GptModelInputs draft_input;
     draft_input.combo_tokens      = torch::tensor({1, 0, 0}, torch::kInt32);
     draft_input.input_lengths     = torch::tensor({gamma}, torch::kInt32);
     draft_input.prefix_lengths    = torch::tensor({3}, torch::kInt32);
     draft_input.lm_output_indexes = torch::tensor({0}, torch::kInt32);
-    // accept_len=1 front-packs row 0; padding slots repeat the final row.
-    draft_input.last_hidden_states =
-        target_aux_features.index_select(0, torch::tensor({0, 3, 3, 3}, torch::kLong).to(torch::kCUDA));
+
+    GptModelOutputs commit_output;
+    commit_output.hidden_states = torch::zeros({0, 2}, torch::kFloat32).to(torch::kCUDA);
 
     GptModelOutputs draft_output;
     draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);
@@ -1085,8 +1095,8 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
                                                0.7f})
                                     .reshape({1, gamma, vocab_size})
                                     .to(torch::kCUDA);
-    components.fake_draft_model->setInputs({draft_input});
-    components.fake_draft_model->setOutputs({draft_output});
+    components.fake_draft_model->setInputs({commit_input, draft_input});
+    components.fake_draft_model->setOutputs({commit_output, draft_output});
 
     setupFakeModels(components.executor.get(),
                     std::move(components.fake_target_model),
