@@ -48,3 +48,38 @@ def sm120_suites():
             ),
         ],
     )
+
+    # SM120 dense FP8; FP8_PER_BLOCK is routed through the shared DeepGEMM path.
+    native.test_suite(
+        name = "smoke_sm120_dense",
+        tests = [
+            smoke_test(
+                name = "dense_fp8pb_dynamic_sm120",
+                task_info = "data/model/qwen3/q_r_fp8pb_sm120.json",
+                envs = ["LOAD_PYTHON_MODEL=1"],
+                smoke_args = "--quantization FP8_PER_BLOCK --act_type BF16 --warm_up 0",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
+            smoke_test(
+                name = "dense_fp8pt_dynamic_sm120",
+                task_info = "data/model/qwen3/q_r_fp8pt_sm120.json",
+                envs = ["LOAD_PYTHON_MODEL=1"],
+                smoke_args = "--quantization FP8_DYNAMIC_PER_TENSOR --act_type BF16 --warm_up 0",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
+        ],
+    )
+
+    # SM120 MoE FP8 (RTX 5000 Pro), auto strategy selects the DeepGEMM executor
+    native.test_suite(
+        name = "smoke_sm120_moe",
+        tests = [
+            smoke_test(
+                name = "moe_fp8pb_tp2_sm120",
+                task_info = "data/model/qwen3_moe/q_r_30b_fp8pb_sm120.json",
+                envs = ["LOAD_PYTHON_MODEL=1"],
+                smoke_args = "--moe_strategy auto --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64 --enable_cuda_graph 1 --decode_capture_config '1,2'",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
+        ],
+    )
