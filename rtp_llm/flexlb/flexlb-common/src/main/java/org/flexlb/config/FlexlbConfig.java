@@ -271,6 +271,34 @@ public class FlexlbConfig {
      */
     private int statusCheckExecutorMaxSize = 64;
 
+    // ========== Engine Sync Configuration ==========
+
+    /**
+     * Interval in milliseconds between engine status sync cycles.
+     * Environment variable: SYNC_STATUS_INTERVAL.
+     */
+    private long syncStatusInterval = 20;
+
+    /**
+     * Timeout in milliseconds for gRPC sync-request calls to engines.
+     * Must be longer than {@link #syncStatusInterval} to avoid premature timeouts.
+     * Environment variable: SYNC_REQUEST_TIMEOUT_MS.
+     */
+    private long syncRequestTimeoutMs = 5000;
+
+    /**
+     * Worker status expiration threshold in microseconds.
+     * Workers whose last status update is older than this are considered expired and removed.
+     * Environment variable: WORKER_TIMEOUT_US.
+     */
+    private long workerTimeoutUs = 3_000_000L;
+
+    /**
+     * Whether to enable verbose cache-status debug logging in gRPC sync runners.
+     * Environment variable: WHALE_CACHE_DEBUG_MODE.
+     */
+    private boolean whaleCacheDebugMode = false;
+
     /**
      * Service Discovery Executor max pool size.
      * Environment variable: SERVICE_DISCOVERY_MAX_SIZE

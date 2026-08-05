@@ -52,7 +52,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       long requestTimeoutMs,
                                       LongAdder syncCount,
                                       Long syncEngineStatusInterval,
-                                      Executor callbackExecutor) {
+                                      Executor callbackExecutor,
+                                      boolean whaleCacheDebugMode) {
 
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
@@ -65,9 +66,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.cacheAwareService = cacheAwareService;
-        this.debug = Optional.ofNullable(System.getenv("WHALE_CACHE_DEBUG_MODE"))
-                .map(Boolean::parseBoolean)
-                .orElse(false);
+        this.debug = whaleCacheDebugMode;
         this.requestTimeoutMs = requestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;

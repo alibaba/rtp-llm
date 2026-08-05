@@ -2,6 +2,7 @@ package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -24,9 +25,8 @@ public class ExpirationCleaner {
     private final EndpointRegistry endpointRegistry;
 
     @Autowired
-    public ExpirationCleaner(EndpointRegistry endpointRegistry) {
-        this(endpointRegistry,
-                Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")));
+    public ExpirationCleaner(EndpointRegistry endpointRegistry, ConfigService configService) {
+        this(endpointRegistry, configService.loadBalanceConfig().getWorkerTimeoutUs());
     }
 
     ExpirationCleaner(EndpointRegistry endpointRegistry, long workerTimeoutUs) {

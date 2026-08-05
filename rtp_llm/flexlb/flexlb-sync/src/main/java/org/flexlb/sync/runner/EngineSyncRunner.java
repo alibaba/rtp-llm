@@ -57,6 +57,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final EndpointRegistry endpointRegistry;
 
+    private final boolean whaleCacheDebugMode;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -69,7 +71,8 @@ public class EngineSyncRunner implements Runnable {
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
                             InflightStore globalInflightStore,
-                            EndpointRegistry endpointRegistry) {
+                            EndpointRegistry endpointRegistry,
+                            boolean whaleCacheDebugMode) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -84,6 +87,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
+        this.whaleCacheDebugMode = whaleCacheDebugMode;
     }
 
     @Override
@@ -163,7 +167,8 @@ public class EngineSyncRunner implements Runnable {
                         GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                                 workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
-                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval, statusCheckExecutor);
+                                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval, statusCheckExecutor,
+                                whaleCacheDebugMode);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getCacheCheckInProgress().set(false);

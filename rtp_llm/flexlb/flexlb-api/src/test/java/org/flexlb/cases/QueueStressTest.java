@@ -65,8 +65,8 @@ public class QueueStressTest {
      * 1. Set maxQueueSize = 10
      * 2. Set Worker resources unavailable, forcing all requests into queue
      * 3. Send 20 requests concurrently (exceeding queue capacity)
-     * 4. Phase 1: ~10 requests rejected immediately with QUEUE_FULL (8502)
-     * 5. Phase 2: ~10 queued requests timeout after generate_timeout with QUEUE_TIMEOUT (8503)
+     * 4. Phase 1: ~10 requests rejected immediately with QUEUE_FULL (4502)
+     * 5. Phase 2: ~10 queued requests timeout after generate_timeout with QUEUE_TIMEOUT (4503)
      */
     @SneakyThrows
     public void testQueueFullRejection() {
@@ -203,7 +203,8 @@ public class QueueStressTest {
                                .returnResult()
                                .getResponseBody();
 
-                       if (responseBody != null && responseBody.contains("8502")) {
+                       if (responseBody != null && responseBody.contains(
+                               String.valueOf(QUEUE_FULL.getErrorCode()))) {
                            rejectedCount.incrementAndGet();
                        }
                        log.info("Thread {} received response: {}", threadId, responseBody);

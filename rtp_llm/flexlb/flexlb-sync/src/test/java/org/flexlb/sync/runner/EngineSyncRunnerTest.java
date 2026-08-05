@@ -89,7 +89,8 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 null,
-                null
+                null,
+                false
         );
     }
 
@@ -118,7 +119,8 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 null,
-                null
+                null,
+                false
         );
 
         // Execute
@@ -137,7 +139,7 @@ class EngineSyncRunnerTest {
                 modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, null, null);
+                syncEngineStatusInterval, null, null, false);
 
         runner.run();
 
@@ -169,7 +171,7 @@ class EngineSyncRunnerTest {
                 modelName, statuses, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, null, registry);
+                syncEngineStatusInterval, null, registry, false);
         runner.run();
 
         assertFalse(status.isAlive());
@@ -193,7 +195,8 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 null,
-                null
+                null,
+                false
         );
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(new WorkerHost("127.0.0.1", 61000)));

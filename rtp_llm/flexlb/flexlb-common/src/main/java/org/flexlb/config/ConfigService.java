@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -71,6 +72,7 @@ public class ConfigService {
         // ignores parse errors, so it is not called here. getDefaultScheduleModeEnum()
         // throws IllegalArgumentException for invalid schedule mode values.
         config.getDefaultScheduleModeEnum();
+        validateCostFormula(config.getCostFormula());
 
         dumpEffectiveConfig(config);
         this.flexlbConfig = config;
@@ -255,17 +257,78 @@ public class ConfigService {
 
     /**
      * Log the effective configuration after all overrides have been applied.
-     * Only dumps critical scheduling config — no sensitive information.
+     * Uses reflection to dump every declared field of {@link FlexlbConfig},
+     * ensuring new fields are automatically included without manual updates.
      */
     private void dumpEffectiveConfig(FlexlbConfig config) {
         log.info("===== FlexLB Effective Configuration =====");
-        log.info("scheduleMode={}", config.getDefaultScheduleMode());
-        log.info("batchMaxCapacity={}, batchMaxInflight={}",
-            config.getFlexlbBatchMaxCapacity(), config.getFlexlbBatchMaxInflight());
-        log.info("fixedMaxInflightBatches={}",
-            config.getFlexlbBatchFixedMaxInflightBatches());
-        log.info("prefillPredictorType={}", config.getPrefillPredictorType());
+        Field[] fields = FlexlbConfig.class.getDeclaredFields();
+        for (Field field : fields) {
+            // Skip static, transient, and synthetic fields
+            int mods = field.getModifiers();
+            if (Modifier.isStatic(mods) || Modifier.isTransient(mods) || field.isSynthetic()) {
+                continue;
+            }
+            try {
+                field.setAccessible(true);
+                Object value = field.get(config);
+                String valueStr;
+                if (value != null && !isSupportedType(field.getType()) && !field.getType().isEnum()) {
+                    // Complex objects (e.g. TrafficPolicyConfig) — serialize to JSON
+                    valueStr = JsonUtils.toStringOrEmpty(value);
+                } else {
+                    valueStr = String.valueOf(value);
+                }
+                log.info("{}={}", field.getName(), valueStr);
+            } catch (Exception e) {
+                log.warn("Failed to dump config field: {}", field.getName(), e);
+            }
+        }
         log.info("==========================================");
+    }
+
+    /**
+     * Validate the cost formula string at startup (fail-fast).
+     * Performs basic syntax checks: non-blank, balanced parentheses, and
+     * only allowed characters. Full parsing validation is done by
+     * {@code FormulaPredictor} at construction time.
+     *
+     * @param formula the cost formula to validate
+     * @throws ConfigValidationException if the formula fails basic syntax checks
+     */
+    private void validateCostFormula(String formula) {
+        if (formula == null || formula.isBlank()) {
+            throw new ConfigValidationException("costFormula",
+                "costFormula is null or blank");
+        }
+        // Check for balanced parentheses
+        int parenDepth = 0;
+        for (int i = 0; i < formula.length(); i++) {
+            char c = formula.charAt(i);
+            if (c == '(') {
+                parenDepth++;
+            } else if (c == ')') {
+                parenDepth--;
+                if (parenDepth < 0) {
+                    throw new ConfigValidationException("costFormula",
+                        "Unbalanced ')' at position " + i + " in: " + formula);
+                }
+            }
+        }
+        if (parenDepth != 0) {
+            throw new ConfigValidationException("costFormula",
+                "Unbalanced parentheses (missing " + parenDepth + " ')' ) in: " + formula);
+        }
+        // Check for invalid characters — allow alphanumeric, operators, parens, dots, commas, whitespace
+        for (int i = 0; i < formula.length(); i++) {
+            char c = formula.charAt(i);
+            if (!Character.isLetterOrDigit(c) && c != '_' && c != '.'
+                    && c != '+' && c != '-' && c != '*' && c != '/' && c != '^'
+                    && c != '(' && c != ')' && c != ',' && !Character.isWhitespace(c)) {
+                throw new ConfigValidationException("costFormula",
+                    "Invalid character '" + c + "' at position " + i + " in: " + formula);
+            }
+        }
     }
 
     private void warnDeprecatedEnvVars() {

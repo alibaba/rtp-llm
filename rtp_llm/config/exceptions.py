@@ -41,7 +41,9 @@ class ExceptionType(IntEnum):
     EXECUTION_EXCEPTION = 606
     EXCEEDS_KV_CACHE_MAX_LEN = 607, ExceptionCategory.TOO_LONG
 
-    # Error codes starting from 8000 can be retried
+    # Error code ranges encode retry semantics:
+    #   4000-4999 — non-retryable (invalid request, queue full, persistent errors)
+    #   8000-8999 — retryable (transient failures, resource unavailable, timeouts)
     CANCELLED = 8100, ExceptionCategory.CANCELLED
     OUT_OF_VOCAB_RANGE = 8101, ExceptionCategory.INVALID_OUTPUT
     OUTPUT_QUEUE_FULL = 8102, ExceptionCategory.CAPACITY
@@ -97,19 +99,22 @@ class ExceptionType(IntEnum):
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 8324, ExceptionCategory.TIMEOUT
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 8325
 
-    # master error
+    # master error — retryable (84xx)
     MASTER_NO_AVAILABLE_WORKER = 8400, ExceptionCategory.CAPACITY
     MASTER_NO_PREFILL_WORKER = 8402, ExceptionCategory.CAPACITY
     MASTER_NO_DECODE_WORKER = 8403, ExceptionCategory.CAPACITY
     MASTER_NO_PDFUSION_WORKER = 8404, ExceptionCategory.CAPACITY
     MASTER_NO_VIT_WORKER = 8405, ExceptionCategory.CAPACITY
-    MASTER_INVALID_REQUEST = 8406, ExceptionCategory.BAD_REQUEST
+    MASTER_NO_FRONTEND_WORKER = 8407, ExceptionCategory.CAPACITY
+    # master error — non-retryable (44xx = mirror of 84xx)
+    MASTER_INVALID_REQUEST = 4406, ExceptionCategory.BAD_REQUEST
 
-    # route error
+    # route error — retryable (85xx)
     ROUTE_ERROR = 8500, ExceptionCategory.CAPACITY
-    ROUTER_QUEUE_FULL = 8502, ExceptionCategory.CAPACITY
-    ROUTER_QUEUE_TIMEOUT = 8503, ExceptionCategory.TIMEOUT
     ROUTER_REQUEST_CANCELLED = 8504, ExceptionCategory.CANCELLED
+    # route error — non-retryable (45xx = mirror of 85xx)
+    ROUTER_QUEUE_FULL = 4502, ExceptionCategory.CAPACITY
+    ROUTER_QUEUE_TIMEOUT = 4503, ExceptionCategory.TIMEOUT
 
     # multimodal error
     MM_LONG_PROMPT_ERROR = 901, ExceptionCategory.TOO_LONG
@@ -130,6 +135,11 @@ class ExceptionType(IntEnum):
     @property
     def category(self) -> ExceptionCategory:
         return self._category
+
+    @property
+    def is_retryable(self) -> bool:
+        """True if this error code is in the retryable range (8000-8999)."""
+        return 8000 <= int(self) <= 8999
 
 
 class FtRuntimeException(Exception):

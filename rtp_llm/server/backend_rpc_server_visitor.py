@@ -156,9 +156,17 @@ class BackendRPCServerVisitor:
         exception_type = getattr(e, "exception_type", None)
         if exception_type is not None:
             try:
-                return int(exception_type) >= 8000
+                code = int(exception_type)
+                # 4000-4999: non-retryable (invalid request, queue full, etc.)
+                if 4000 <= code <= 4999:
+                    return False
+                # 8000-8999: retryable (transient failures, resource unavailable)
+                if 8000 <= code <= 8999:
+                    return True
             except (TypeError, ValueError):
                 pass
+        # Fall back to text-based detection for gRPC transport errors
+        # that don't carry an ExceptionType (e.g. RuntimeError from model_rpc_client).
         text = str(e)
         return (
             "StatusCode.UNAVAILABLE" in text
