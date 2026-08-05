@@ -38,6 +38,7 @@ cc_library(
     ],
     hdrs = [
         "KVCMPublisher.h",
+        "KVCacheEventPublisherAssembly.h",
         "KVCacheEventPublisherConfig.h",
         "KVCacheEventPublisherFactory.h",
         "KVCacheEventReporter.h",

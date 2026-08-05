@@ -505,10 +505,10 @@ SharedBlockCache::LogicalCacheSnapshot SharedBlockCache::logicalCacheSnapshot() 
     return snapshot;
 }
 
-void SharedBlockCache::setEventPublisher(KVCacheEventPublisherPtr publisher, int required_group_count) {
+void SharedBlockCache::setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids) {
     std::lock_guard<std::mutex> lock(mu_);
-    event_publisher_      = std::move(publisher);
-    required_group_count_ = std::max(required_group_count, 1);
+    event_publisher_    = std::move(publisher);
+    required_group_ids_ = required_group_ids;
     published_keys_.clear();
     if (!event_publisher_) {
         return;
@@ -773,13 +773,21 @@ bool SharedBlockCache::removeItemLocked(CacheKeyType cache_key, UnifiedCacheItem
 }
 
 bool SharedBlockCache::isLogicallyCompleteLocked(const UnifiedCacheItem& item) const {
-    size_t visible_group_count = 0;
-    for (size_t group_id = 0; group_id < item.group_block_ids.size(); ++group_id) {
-        if (!isNullBlockIdx(item.group_block_ids[group_id]) && groupMatchable(item, group_id)) {
-            ++visible_group_count;
+    // Only groups that participate in prefix reuse are required; groups such as
+    // SWA windows never insert full block chains and must not block publication.
+    if (required_group_ids_.empty()) {
+        return false;
+    }
+    for (const int group_id : required_group_ids_) {
+        if (group_id < 0 || static_cast<size_t>(group_id) >= item.group_block_ids.size()) {
+            return false;
+        }
+        const auto gid = static_cast<size_t>(group_id);
+        if (isNullBlockIdx(item.group_block_ids[gid]) || !groupMatchable(item, gid)) {
+            return false;
         }
     }
-    return visible_group_count >= static_cast<size_t>(required_group_count_);
+    return true;
 }
 
 void SharedBlockCache::updatePublishedStateLocked(CacheKeyType cache_key) {

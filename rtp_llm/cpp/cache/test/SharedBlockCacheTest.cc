@@ -72,7 +72,7 @@ TEST(SharedBlockCacheTest, PublisherTracksCompleteLogicalKeysOnly) {
     SharedBlockCache cache;
     auto             publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/2);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0, 1});
 
     cache.put(1,
               std::vector<BlockIdxType>{101, 201},
@@ -109,13 +109,49 @@ TEST(SharedBlockCacheTest, PublisherTracksCompleteLogicalKeysOnly) {
     EXPECT_TRUE(cache.logicalCacheSnapshot().cache_keys.empty());
 }
 
+TEST(SharedBlockCacheTest, PublisherIgnoresGroupsThatDoNotParticipateInReuse) {
+    SharedBlockCache cache;
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    // Two groups exist but only group 0 participates in prefix reuse; group 1
+    // mirrors an SWA group whose slots stay NULL_BLOCK_IDX forever.
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0});
+
+    cache.put(1,
+              std::vector<BlockIdxType>{101, NULL_BLOCK_IDX},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep());
+    ASSERT_EQ(1u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_ADD, publisher->events[0].type);
+    EXPECT_EQ(1, publisher->events[0].block_key);
+    EXPECT_EQ(cache.logicalCacheSnapshot().cache_keys, (std::vector<CacheKeyType>{1}));
+
+    ASSERT_TRUE(cache.remove(1).has_value());
+    ASSERT_EQ(2u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events[1].type);
+    EXPECT_EQ(1, publisher->events[1].block_key);
+    EXPECT_TRUE(cache.logicalCacheSnapshot().cache_keys.empty());
+}
+
+TEST(SharedBlockCacheTest, PublisherWithEmptyRequiredGroupsNeverPublishes) {
+    SharedBlockCache cache;
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{});
+
+    putOne(cache, 1, 101, rootDep());
+    EXPECT_TRUE(publisher->events.empty());
+    EXPECT_TRUE(cache.logicalCacheSnapshot().cache_keys.empty());
+}
+
 TEST(SharedBlockCacheTest, PublisherIsSeededFromExistingCompleteKeysWithoutDuplicateAdds) {
     SharedBlockCache cache;
     putOne(cache, 1, 101, rootDep());
 
     auto publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0});
 
     EXPECT_TRUE(publisher->events.empty());
     ASSERT_TRUE(cache.remove(1).has_value());
@@ -128,7 +164,7 @@ TEST(SharedBlockCacheTest, PublisherReportsWholeChainEvictionDeletes) {
     SharedBlockCache cache;
     auto             publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0});
 
     putOne(cache, 1, 101, rootDep(0));
     putOne(cache, 2, 102, childDep(1, 1));
@@ -149,7 +185,7 @@ TEST(SharedBlockCacheTest, PublisherReportsDeleteWhenIndependentGroupEvictionMak
     SharedBlockCache cache;
     auto             publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/2);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0, 3});
     cache.setIndependentGroupEviction(/*enabled=*/true, {3});
 
     cache.put(1,
@@ -181,7 +217,7 @@ TEST(SharedBlockCacheTest, PublisherDoesNotDeleteKeyThatWasNeverComplete) {
     SharedBlockCache cache;
     auto             publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/2);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0, 1});
 
     putOne(cache, 1, 101, rootDep());
     EXPECT_TRUE(publisher->events.empty());
@@ -196,7 +232,7 @@ TEST(SharedBlockCacheTest, CapacityReplacementPublishesDeleteBeforeReplacementAd
     SharedBlockCache cache(/*max_capacity=*/1);
     auto             publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0});
 
     putOne(cache, 1, 101, rootDep());
     putOne(cache, 2, 102, rootDep());
@@ -221,7 +257,7 @@ TEST(SharedBlockCacheTest, CapacityReplacementSkipsResidentTailForNonResidentEnt
     SharedBlockCache cache(/*max_capacity=*/2);
     auto             publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0});
 
     putOne(cache, 1, 101, rootDep(), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/true);
     putOne(cache, 2, 102, rootDep());
@@ -241,7 +277,7 @@ TEST(SharedBlockCacheTest, CapacityReplacementRejectsInsertWhenAllEntriesAreResi
     SharedBlockCache cache(/*max_capacity=*/1);
     auto             publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0});
 
     putOne(cache, 1, 101, rootDep(), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/true);
     putOne(cache, 2, 102, rootDep());
@@ -438,7 +474,7 @@ TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasU
     cache.setPrefixTreeEnabled(false);
     auto publisher = std::make_shared<RecordingPublisher>();
     ASSERT_TRUE(publisher->start());
-    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+    cache.setEventPublisher(publisher, /*required_group_ids=*/{0});
 
     putOne(cache, 8, 108, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace);
     putOne(cache, 8, NULL_BLOCK_IDX, childDep(7, 7), SharedBlockCache::kGpuLogicalNamespace);

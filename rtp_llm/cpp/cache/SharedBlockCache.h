@@ -116,7 +116,9 @@ public:
     LogicalCacheSnapshot logicalCacheSnapshot() const;
 
     // Installed during engine initialization and cleared before publisher shutdown.
-    void setEventPublisher(KVCacheEventPublisherPtr publisher, int required_group_count);
+    // `required_group_ids` lists the groups that participate in prefix reuse; a key
+    // is publishable only when every listed group holds a matchable block.
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
 
     void setPrefixTreeEnabled(bool enabled);
     bool prefixTreeEnabled() const;
@@ -188,7 +190,7 @@ private:
     int64_t                          version_{-1};
     int64_t                          cache_event_version_{-1};
     KVCacheEventPublisherPtr         event_publisher_;
-    int                              required_group_count_{1};
+    std::vector<int>                 required_group_ids_;
     std::unordered_set<CacheKeyType> published_keys_;
     bool                             prefix_tree_enabled_{true};
     bool                             independent_group_eviction_enabled_{false};

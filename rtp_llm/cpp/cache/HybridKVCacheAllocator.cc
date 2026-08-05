@@ -73,6 +73,18 @@ std::vector<int> HybridKVCacheAllocator::independentEvictionGroupIds() const {
     return group_ids;
 }
 
+std::vector<int> HybridKVCacheAllocator::reuseParticipatingGroupIds() const {
+    // Mirror skipReuseCacheGroup(): only groups whose prefix reuse is enabled
+    // ever insert block chains into SharedBlockCache.
+    std::vector<int> group_ids;
+    for (size_t gid = 0; gid < kv_cache_groups_.size(); ++gid) {
+        if (kv_cache_groups_[gid]->prefixReuseEnabled()) {
+            group_ids.push_back(static_cast<int>(gid));
+        }
+    }
+    return group_ids;
+}
+
 bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
     return mapper && mapper->isSharded() && gid >= 0 && static_cast<size_t>(gid) < kv_cache_groups_.size()
            && mapper->compactLastRankGroup(config_, static_cast<size_t>(gid));

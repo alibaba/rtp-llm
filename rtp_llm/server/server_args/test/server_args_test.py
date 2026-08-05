@@ -401,23 +401,36 @@ class ServerArgsSetTest(TestCase):
             any("KV_CACHE_EVENT_QUEUE_CAPACITY" in message for message in logs.output)
         )
 
-    def test_invalid_boolean_env_value_warns_and_uses_default_in_mixed_mode(self):
+    def test_invalid_boolean_env_value_fails_fast_in_mixed_mode(self):
+        # str2bool raises ArgumentTypeError, which must fail fast so the mixed
+        # CLI+env path matches the pure-env path instead of silently falling
+        # back to the default value.
         os.environ["ENABLE_REMOTE_CACHE"] = "ture"
         sys.argv = ["prog", "--model_type", "qwen"]
 
         import rtp_llm.server.server_args.server_args
 
         importlib.reload(rtp_llm.server.server_args.server_args)
-        with self.assertLogs(level="WARNING") as logs:
-            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+        with self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(SystemExit):
+                rtp_llm.server.server_args.server_args.setup_args()
 
-        self.assertFalse(py_env_configs.kv_cache_config.enable_remote_cache)
         self.assertTrue(
-            any(
-                "ENABLE_REMOTE_CACHE" in message and "default value False" in message
-                for message in logs.output
-            )
+            any("ENABLE_REMOTE_CACHE" in message for message in logs.output)
         )
+
+    def test_invalid_boolean_env_value_fails_fast_in_pure_env_mode(self):
+        # The pure environment-variable path converts env values through
+        # argparse itself; both paths must reject the same invalid input.
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["ENABLE_REMOTE_CACHE"] = "ture"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
 
     def test_gpu_batch_vit_args_parse(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs

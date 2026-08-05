@@ -124,9 +124,10 @@ leader switching inside RTP-LLM.
 Publisher type values are case-sensitive for both CLI arguments and environment variables; invalid values are rejected
 during argument parsing. In mixed CLI + environment mode, this validation now applies to every server argument with
 `choices`, including the existing PDFusion scheduler mode, cache-store RDMA mode, KV-cache dtype, and MoE backend
-selectors. Clear any stale invalid environment value before upgrading. Environment values that cannot be converted to
-their declared numeric or boolean type retain the legacy fallback-to-default behavior and now emit a warning naming
-the ignored variable.
+selectors. Clear any stale invalid environment value before upgrading. Environment values rejected by an explicit
+converter such as `str2bool` (e.g. a misspelled boolean) abort startup with an argparse error, matching the pure
+environment-variable mode. Only plain numeric conversion failures (`ValueError`/`TypeError`) retain the legacy
+fallback-to-default behavior and emit a warning naming the ignored variable.
 
 `KVCacheConfig` pickle state supports the legacy 43- and 54-element layouts plus the current 68-element layout. The
 current layout cannot be deserialized by an older binary, so processes that exchange pickled configuration during

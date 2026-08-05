@@ -379,13 +379,30 @@ class EnvArgumentParser(argparse.ArgumentParser):
                             if action.type is not None:
                                 try:
                                     converted_value = action.type(env_value)
-                                except (
-                                    ValueError,
-                                    TypeError,
-                                    argparse.ArgumentTypeError,
-                                ):
-                                    # Preserve the legacy fallback-to-default behavior,
-                                    # but make the ignored configuration discoverable.
+                                except argparse.ArgumentTypeError:
+                                    # Values explicitly rejected by the converter
+                                    # (e.g. str2bool) fail fast so the mixed
+                                    # CLI+env path matches the pure-env path,
+                                    # where argparse raises the same error.
+                                    option = (
+                                        action.option_strings[0]
+                                        if action.option_strings
+                                        else action.dest
+                                    )
+                                    logging.error(
+                                        "Invalid value for environment variable %s (argument %s)",
+                                        env_name,
+                                        option,
+                                    )
+                                    self.error(
+                                        f"argument {option}: invalid value "
+                                        f"{env_value!r} from environment "
+                                        f"variable {env_name}"
+                                    )
+                                except (ValueError, TypeError):
+                                    # Preserve the legacy fallback-to-default behavior
+                                    # for plain conversion failures, but make the
+                                    # ignored configuration discoverable.
                                     logging.warning(
                                         "Ignoring environment variable %s because it "
                                         "cannot be converted for argument %s; using "

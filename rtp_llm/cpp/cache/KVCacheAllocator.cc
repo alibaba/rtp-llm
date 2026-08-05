@@ -447,6 +447,16 @@ std::vector<int> KVCacheAllocator::independentEvictionGroupIds() const {
     return {};
 }
 
+std::vector<int> KVCacheAllocator::reuseParticipatingGroupIds() const {
+    std::vector<int> group_ids;
+    for (size_t gid = 0; gid < static_cast<size_t>(config_.groupNums()); ++gid) {
+        if (config_.policyForGroup(gid).enable_prefix_reuse) {
+            group_ids.push_back(static_cast<int>(gid));
+        }
+    }
+    return group_ids;
+}
+
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
     if (block_pool_) {
         block_pool_->regUserMr(model_id, std::move(cache_store));

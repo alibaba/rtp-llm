@@ -27,3 +27,16 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "kv_cache_event_publisher_assembly_test",
+    srcs = [
+        "KVCacheEventPublisherAssemblyTest.cc",
+    ],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
