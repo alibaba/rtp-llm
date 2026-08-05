@@ -179,6 +179,13 @@ protected:
     int          deviceCacheMetricTokensPerBlock() const;
     void         submitBlockReleases(BlockReleaseBatch& releases);
 
+    static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
+        if (seq_len <= 1 || reuse_unit_tokens <= 0) {
+            return 0;
+        }
+        return static_cast<size_t>(seq_len - 1) / static_cast<size_t>(reuse_unit_tokens);
+    }
+
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
     DeviceBlockPoolPtr                 block_pool_;

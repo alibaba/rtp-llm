@@ -77,7 +77,11 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
         common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(config_, 0, common_seq_len);
     }
-    const auto& cache_keys = kv_resource->cacheKeys(0);
+    const auto& cache_keys        = kv_resource->cacheKeys(0);
+    const int   seq_len           = malloc_info.complete_token_ids->seqLength();
+    const int   reuse_unit_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+                                        static_cast<int>(cp_slot_mapper_->logicalSeqSizePerBlock(config_, 0)) :
+                                        full_kv_cache_group_->seqSizePerBlock();
 
     int64_t                           match_cost_time_us = 0;
     size_t                            reuse_blocks       = 0;
@@ -110,15 +114,15 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     };
 
     if (malloc_info.enable_cache_lookup && full_kv_cache_group_->prefixReuseEnabled()) {
-        CacheKeysType local_keys = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+        CacheKeysType match_keys = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
                                        cp_slot_mapper_->localCacheKeys(config_, 0, cache_keys) :
                                        cache_keys;
-        CacheKeysType match_keys(local_keys.begin(), local_keys.empty() ? local_keys.end() : local_keys.end() - 1);
-        const int64_t match_begin_time_us = currentTimeUs();
-        BlockTreeMatchResult match_result = block_tree_cache_->match(match_keys);
-        match_cost_time_us                = currentTimeUs() - match_begin_time_us;
-        const bool has_async_context      = match_result.async_context != nullptr;
-        load_context                      = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
+        match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
+        const int64_t        match_begin_time_us = currentTimeUs();
+        BlockTreeMatchResult match_result        = block_tree_cache_->match(match_keys);
+        match_cost_time_us                       = currentTimeUs() - match_begin_time_us;
+        const bool has_async_context             = match_result.async_context != nullptr;
+        load_context = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
         match_result.async_context.reset();
         matched_resources = std::move(match_result.matched_device_resources);
         if (has_async_context && load_context == nullptr) {
@@ -206,8 +210,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             return rollback();
         }
     }
-    if (!full_kv_cache_group_->malloc(
-            block_ids_0, common_seq_len, false, 0, nullptr, materialize_positions)) {
+    if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len, false, 0, nullptr, materialize_positions)) {
         return rollback();
     }
 
@@ -232,15 +235,11 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
         full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id, 0), block_ids_0.blocks());
     }
-    const int    reuse_len = static_cast<int>(reuse_blocks
-                                           * (cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
-                                                     cp_slot_mapper_->logicalSeqSizePerBlock(config_, 0) :
-                                                     static_cast<size_t>(full_kv_cache_group_->seqSizePerBlock())));
+    const int    reuse_len = static_cast<int>(reuse_blocks) * reuse_unit_tokens;
     MallocResult result{true, reuse_len, match_cost_time_us, load_context};
     if (load_context != nullptr && reuse_blocks > 0) {
-        const int reuse_unit_tokens = reuse_len / static_cast<int>(reuse_blocks);
-        result.memory_reuse_len     = static_cast<int>(load_context->matchedBlocks(Tier::HOST)) * reuse_unit_tokens;
-        result.disk_reuse_len       = static_cast<int>(load_context->matchedBlocks(Tier::DISK)) * reuse_unit_tokens;
+        result.memory_reuse_len = static_cast<int>(load_context->matchedBlocks(Tier::HOST)) * reuse_unit_tokens;
+        result.disk_reuse_len   = static_cast<int>(load_context->matchedBlocks(Tier::DISK)) * reuse_unit_tokens;
     }
     return result;
 }

@@ -700,6 +700,19 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     EXPECT_EQ(hit->blocks(0, 0)[1], seed_blocks[1]);
 
     allocator_->free(FreeInfo{hit, hit_tokens});
+
+    // 12 tokens => base keys {100,101,102} => canonical {101}; 8 <= 12 - 1, so the
+    // complete first logical block stays reusable.
+    auto unaligned = createBatchKVCacheResource(/*batch_size=*/1, config);
+    unaligned->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto       unaligned_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    MallocInfo unaligned_info{unaligned, unaligned_tokens};
+    auto       unaligned_result = allocator_->malloc(unaligned_info);
+    ASSERT_TRUE(unaligned_result.success);
+    EXPECT_EQ(unaligned_result.reuse_len, 8);
+    EXPECT_EQ(unaligned->blocks(0, 0)[0], seed_blocks[0]);
+
+    allocator_->free(FreeInfo{unaligned, unaligned_tokens});
     block_pool->decRef(seed_blocks, BlockRefType::REQUEST);
 }
 

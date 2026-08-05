@@ -171,7 +171,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     const int             seq_size_per_block = static_cast<int>(cache_config_.seq_size_per_block);
     auto                  load_resource      = makeResource(cache_config_);
     auto                  load_token_ids =
-        makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
+        makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
     MallocInfo load_info{load_resource, load_token_ids};
     load_info.reuse_cache         = true;
     load_info.enable_cache_lookup = true;
@@ -256,7 +256,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     manager_->free(FreeInfo{load_resource, load_token_ids});
     const size_t submits_before_second_hit = pausable_engine->submitCount();
     auto         hit_resource              = makeResource(cache_config_);
-    auto hit_token_ids = makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
+    auto         hit_token_ids =
+        makeTokenIds(/*offset=*/0, 2 * seq_size_per_block + 1, 2 * seq_size_per_block + 1, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
     hit_info.reuse_cache         = true;
     hit_info.enable_cache_lookup = true;

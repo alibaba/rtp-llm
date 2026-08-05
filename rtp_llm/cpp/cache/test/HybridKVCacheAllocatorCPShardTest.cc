@@ -140,23 +140,22 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
         << "cp_size=2 should halve allocation to ceil(4/2)=2 physical blocks per rank";
 }
 
-// 3) Reuse path: cache the last-rank canonical key and confirm a second malloc hits it,
-//    returning reuse_len in units of virtualBlockSize (= block_size * cp_size).
-TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
+// 3) Reuse path with CP canonical keys: reuse_len must stay in whole logical blocks
+//    strictly below the query length, while every complete logical prefix block below
+//    that bound is still reused. Each case seeds the full canonical chain the request
+//    could match, so a lookup that keeps too many keys is visible here.
+void expectCpCanonicalReuse(int                  seq_len,
+                            const CacheKeysType& request_keys,
+                            const CacheKeysType& cached_canonical_keys,
+                            int                  expected_reuse_len,
+                            int                  expected_local_blocks) {
     auto config    = makeCPHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(seedCompleteBlockTreePath(allocator, cached_canonical_keys).success);
 
-    const int full_group_id = 1;
-    // Full keys for 4 blocks: {100,101,102,103}.
-    // localCacheKeys(cp_rank=cp_size-1=1, cp_size=2) selects indices {1,3} => {101, 103}.
-    // initMallocForCommonLen drops the last for matching => match_keys = {101}.
-    // Joint match requires a physically complete declarative coordinate for key 101.
-    const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{101});
-    ASSERT_TRUE(seeded.success);
-
-    auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
-    auto tokens    = makeTokens(1, 16, 4);
+    auto batch_res = makeBatchRes(1, config, request_keys);
+    auto tokens    = makeTokens(1, seq_len, 4);
 
     MallocInfo info{batch_res, tokens};
     info.enable_cache_lookup = true;
@@ -165,10 +164,18 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     auto result = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
-    // Expect 1 reuse virtual-block * virtualBlockSize(=8 tokens).
-    EXPECT_EQ(result.reuse_len, 8);
-    // Per-rank physical blocks for full group still = ceil(4/2) = 2.
-    EXPECT_EQ(batch_res->blocksNum(0, full_group_id), 2);
+    EXPECT_EQ(result.reuse_len, expected_reuse_len) << "seq_len=" << seq_len;
+    EXPECT_EQ(batch_res->cacheResource(0).reuseBlockNum(), static_cast<size_t>(expected_reuse_len / 8))
+        << "seq_len=" << seq_len;
+    EXPECT_EQ(batch_res->blocksNum(0, /*full_group_id=*/1), expected_local_blocks) << "seq_len=" << seq_len;
+}
+
+TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseOnCanonicalKeysStaysBelowQueryLength) {
+    // block_size=4, cp_size=2 => one canonical key covers 8 tokens.
+    expectCpCanonicalReuse(/*seq_len=*/16, {100, 101, 102, 103}, {101, 103}, /*reuse_len=*/8, /*local_blocks=*/2);
+    expectCpCanonicalReuse(/*seq_len=*/12, {100, 101, 102}, {101}, /*reuse_len=*/8, /*local_blocks=*/2);
+    expectCpCanonicalReuse(/*seq_len=*/8, {100, 101}, {101}, /*reuse_len=*/0, /*local_blocks=*/1);
+    expectCpCanonicalReuse(/*seq_len=*/17, {100, 101, 102, 103, 104}, {101, 103}, /*reuse_len=*/16, /*local_blocks=*/3);
 }
 
 // 4) When reuse is disabled, cp_slot_mapper still translates seq_len for malloc and skips the match.

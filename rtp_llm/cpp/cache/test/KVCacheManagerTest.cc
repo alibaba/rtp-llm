@@ -1218,6 +1218,58 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoUsesAuthoritativeBlockTreeSnapshot) {
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*kv_cache_manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
 }
 
+TEST_F(KVCacheManagerTest, StorePublishesFullBlocksOnlyAndLookupLeavesOneToken) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/8, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reuse_cache = true;
+
+    auto manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+
+    auto seed_resource = makeDSV4BatchResource(cache_config);
+    auto seed_tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/10, /*max_seq_len=*/10, /*seq_size_per_block=*/4);
+    MallocInfo seed_malloc{seed_resource, seed_tokens};
+    seed_malloc.reuse_cache         = true;
+    seed_malloc.enable_cache_lookup = false;
+    ASSERT_TRUE(manager->malloc(seed_malloc).success);
+    ASSERT_EQ(seed_resource->blocksNum(0, 0), 3);
+
+    const CacheKeysType seed_keys = seed_resource->cacheKeys(0);
+    ASSERT_EQ(seed_keys.size(), 3u);
+
+    manager->insertIntoCache(InsertInfo{seed_resource, seed_tokens, /*is_resident=*/false});
+    manager->free(FreeInfo{seed_resource, seed_tokens});
+
+    EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot(/*limit=*/100).keys,
+              (CacheKeysType{seed_keys[0], seed_keys[1]}));
+    auto partial_match = manager->blockTreeCache()->match(seed_keys);
+    EXPECT_EQ(partial_match.matched_device_blocks, 2u);
+    manager->blockTreeCache()->releaseMatchedResources(partial_match.matched_device_resources);
+
+    auto       aligned_resource = makeDSV4BatchResource(cache_config);
+    auto       aligned_tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/8, /*max_seq_len=*/10, 4);
+    MallocInfo aligned_malloc{aligned_resource, aligned_tokens};
+    aligned_malloc.reuse_cache         = true;
+    aligned_malloc.enable_cache_lookup = true;
+    auto aligned_result                = manager->malloc(aligned_malloc);
+    ASSERT_TRUE(aligned_result.success);
+    EXPECT_EQ(aligned_result.reuse_len, 4);
+    manager->free(FreeInfo{aligned_resource, aligned_tokens});
+
+    auto       longer_resource = makeDSV4BatchResource(cache_config);
+    auto       longer_tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/9, /*max_seq_len=*/10, 4);
+    MallocInfo longer_malloc{longer_resource, longer_tokens};
+    longer_malloc.reuse_cache         = true;
+    longer_malloc.enable_cache_lookup = true;
+    auto longer_result                = manager->malloc(longer_malloc);
+    ASSERT_TRUE(longer_result.success);
+    EXPECT_EQ(longer_result.reuse_len, 8);
+    manager->free(FreeInfo{longer_resource, longer_tokens});
+
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/100, Tier::DEVICE);
+}
+
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
 

@@ -1290,7 +1290,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     allocator->blockTreeCacheOwner()->releaseMatchedResources(seed_match.matched_device_resources);
 
     auto hit_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
-    auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
 
     MallocInfo hit_malloc{hit_res, hit_tokens};
     hit_malloc.enable_cache_lookup = true;
