@@ -19,9 +19,62 @@ JAVA_LOAD_CLIENT_MAIN_CLASS="org.flexlb.mockengine.JavaLoadClient"
 JAVA_LOAD_CLIENT_JVM_XMS="${JAVA_LOAD_CLIENT_JVM_XMS:-4g}"
 JAVA_LOAD_CLIENT_JVM_XMX="${JAVA_LOAD_CLIENT_JVM_XMX:-4g}"
 
+# ---- JDK 21 detection (extracted from run_online_eval.sh) ----
+java_major() {
+  local java_bin="${1:-java}"
+  "${java_bin}" -version 2>&1 | awk -F'[\".]' '/version/ {print ($2 == "1" ? $3 : $2); exit}'
+}
+
+detect_java21_home() {
+  if [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/java" ]]; then
+    if [[ "$(java_major "${JAVA_HOME}/bin/java")" -ge 21 ]]; then
+      echo "${JAVA_HOME}"
+      return 0
+    fi
+  fi
+  if [[ -n "${JAVA21_HOME:-}" && -x "${JAVA21_HOME}/bin/java" ]]; then
+    echo "${JAVA21_HOME}"
+    return 0
+  fi
+  if [[ -x "${HOME}/java21/bin/java" \
+        && "$(java_major "${HOME}/java21/bin/java")" -ge 21 ]]; then
+    echo "${HOME}/java21"
+    return 0
+  fi
+  local java_bin
+  while IFS= read -r java_bin; do
+    if [[ -x "${java_bin}" && "$(java_major "${java_bin}")" -ge 21 ]]; then
+      dirname "$(dirname "${java_bin}")"
+      return 0
+    fi
+  done < <(
+    {
+      alternatives --display java 2>/dev/null || true
+      update-alternatives --display java 2>/dev/null || true
+    } | awk '/bin\/java/ {print $1}' | sort -u
+  )
+  return 1
+}
+
+# Ensure a JDK >= 21 is active for subsequent java invocations (mock engine
+# jar, load client). Fails hard instead of letting a default JDK 17 blow up
+# at runtime.
+require_java21() {
+  local home
+  home="$(detect_java21_home || true)"
+  if [[ -z "${home}" ]]; then
+    echo "ERROR: Java 21+ is required to run the FlexLB mock engine / load client." >&2
+    echo "Set JAVA21_HOME or JAVA_HOME to a JDK 21 installation." >&2
+    exit 1
+  fi
+  export JAVA_HOME="${home}"
+  export PATH="${JAVA_HOME}/bin:${PATH}"
+}
+
 # Build flexlb-mock-engine (which bundles JavaMockEngineCluster,
 # MockControlServer and JavaLoadClient) when the fat jar is missing.
 ensure_java_mock_engine_jar() {
+  require_java21
   if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
     echo "Java mock engine jar not found, building: ${JAVA_MOCK_ENGINE_JAR}" >&2
     (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests) >&2
@@ -87,6 +140,7 @@ JAVA_LOAD_CLIENT_ENV_VARS=(
 #     ... \
 #     >"${RUN_DIR}/load_client.log" 2>&1 &
 run_java_load_client() {
+  require_java21
   ensure_java_mock_engine_jar || return 1
   local var kv
   for var in "${JAVA_LOAD_CLIENT_ENV_VARS[@]}"; do
