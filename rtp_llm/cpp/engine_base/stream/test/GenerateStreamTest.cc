@@ -110,6 +110,9 @@ void waitForConsumer(std::future<T>& future, const std::shared_ptr<NormalGenerat
 
 class RecordingLogitsProcessor final: public BaseLogitsProcessor {
 public:
+    explicit RecordingLogitsProcessor(std::optional<int64_t> reported_output_len = std::nullopt):
+        reported_output_len_(reported_output_len) {}
+
     std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {
         return std::nullopt;
     }
@@ -122,8 +125,15 @@ public:
         return std::nullopt;
     }
 
+    std::optional<int64_t> committedOutputLen() const override {
+        return reported_output_len_;
+    }
+
     int                  commit_calls = 0;
     std::vector<int32_t> committed_tokens;
+
+private:
+    std::optional<int64_t> reported_output_len_;
 };
 
 TEST_F(GenerateStreamTest, testConstruct) {
@@ -530,7 +540,7 @@ TEST_F(GenerateStreamTest, CommitsFinalTokenBeforePublishingFinishedOutput) {
     auto builder   = GenerateStreamBuilder();
     auto stream    = builder.createContextStream({1, 2, 3}, /*max_new_tokens=*/1);
     auto processor = std::make_shared<RecordingLogitsProcessor>();
-    stream->installLogitsProcessor(processor);
+    stream->logits_processor_list_.push_back(processor);
     stream->setIsContextStream(false);
     stream->generate_status_->status = StreamState::RUNNING;
 
@@ -553,6 +563,61 @@ TEST_F(GenerateStreamTest, CommitsFinalTokenBeforePublishingFinishedOutput) {
     EXPECT_EQ(stream->outputTokenLen(), 1);
     EXPECT_EQ(processor->commit_calls, 1);
     EXPECT_EQ(processor->committed_tokens, std::vector<int32_t>({42}));
+}
+
+TEST_F(GenerateStreamTest, IgnoresUpdateAfterStreamIsFinished) {
+    auto builder   = GenerateStreamBuilder();
+    auto stream    = builder.createContextStream({1, 2, 3});
+    auto processor = std::make_shared<RecordingLogitsProcessor>();
+    stream->logits_processor_list_.push_back(processor);
+    stream->generate_status_->status = StreamState::FINISHED;
+    const auto output_len_before     = stream->outputTokenLen();
+
+    auto             new_tokens = torch::tensor({{42}}, torch::kInt32);
+    StreamUpdateInfo update_info{new_tokens,
+                                 1,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor()};
+
+    stream->update(update_info);
+
+    EXPECT_EQ(stream->outputTokenLen(), output_len_before);
+    EXPECT_EQ(processor->commit_calls, 0);
+    EXPECT_FALSE(stream->hasOutput());
+}
+
+TEST_F(GenerateStreamTest, RejectsProcessorLengthMismatchBeforePublishingOutput) {
+    auto builder   = GenerateStreamBuilder();
+    auto stream    = builder.createContextStream({1, 2, 3});
+    auto processor = std::make_shared<RecordingLogitsProcessor>(/*reported_output_len=*/0);
+    stream->logits_processor_list_.push_back(processor);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    auto             new_tokens = torch::tensor({{42}}, torch::kInt32);
+    StreamUpdateInfo update_info{new_tokens,
+                                 1,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor()};
+
+    stream->update(update_info);
+
+    EXPECT_EQ(processor->commit_calls, 1);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::UNKNOWN_ERROR);
+    EXPECT_FALSE(stream->hasOutput());
 }
 
 }  // namespace rtp_llm

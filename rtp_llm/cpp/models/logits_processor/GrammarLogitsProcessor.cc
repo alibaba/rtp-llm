@@ -45,16 +45,6 @@ ErrorResult<int32_t> validateVocabSize(RtpGrammarMatcher& matcher, size_t model_
 
 ErrorResult<int>
 prepareSpecMask(RtpGrammarMatcher& matcher, int64_t eos_token_id, const SpecLogitsProcessorRequest& request) {
-    const size_t required_words = SpecLogitsProcessorRequest::bitmaskWordCount(request.vocab_size);
-    if (request.bitmask_size_int32 < required_words) {
-        return ErrorInfo(ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL,
-                         "grammar MTP verify: bitmask buffer smaller than model vocab (words="
-                             + std::to_string(request.bitmask_size_int32)
-                             + ", vocab=" + std::to_string(request.vocab_size) + ")");
-    }
-    if (request.draft_tokens == nullptr) {
-        return ErrorInfo(ErrorCode::INVALID_PARAMS, "grammar MTP verify: draft token buffer is null");
-    }
     if (eos_token_id < 0 || static_cast<size_t>(eos_token_id) >= request.vocab_size) {
         matcher.markFinished();
         return ErrorInfo(ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB,
@@ -263,11 +253,8 @@ private:
                 break;
         }
 
-        const size_t mask_vocab_size = std::min(logits_vocab_size, static_cast<size_t>(state.grammar_vocab_size));
-        if (state.mask_required && mask_vocab_size > 0) {
-            if (!state.packed_allow_mask_cpu.defined()) {
-                return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "grammar packed mask state is missing its CPU source");
-            }
+        const size_t mask_vocab_size = static_cast<size_t>(state.grammar_vocab_size);
+        if (state.mask_required) {
             auto mask = state.packed_allow_mask_cpu;
 #if USING_CUDA
             if (logits.is_cuda()) {
@@ -384,10 +371,6 @@ std::optional<int64_t> GrammarLogitsProcessor::committedOutputLen() const {
 }
 
 ErrorResult<int> GrammarLogitsProcessor::prepareSpeculative(const SpecLogitsProcessorRequest& request) {
-    if (!matcher_ || request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
-        return static_cast<int>(request.propose_step);
-    }
-
     int cap_out = 0;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);

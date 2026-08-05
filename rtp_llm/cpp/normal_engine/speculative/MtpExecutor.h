@@ -120,12 +120,9 @@ private:
                                       int64_t                                propose_step);
 
     SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams,
-                                                             const torch::Tensor&                draft_tokens);
-
-    SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerifyIfNeeded(const std::list<GenerateStreamPtr>& streams,
-                                                                     const GptModelInputs&              model_input,
-                                                                     const SamplerOutput&               draft_sampler_output,
-                                                                     const torch::Tensor&               draft_token_ids);
+                                                             const GptModelInputs&               model_input,
+                                                             const SamplerOutput&                draft_sampler_output,
+                                                             const torch::Tensor&                draft_token_ids);
 
     std::unique_ptr<ModelBase>               model_;
     std::unique_ptr<Sampler>                 sampler_;

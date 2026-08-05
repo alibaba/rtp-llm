@@ -13,8 +13,6 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
-#include <algorithm>
 #include <condition_variable>
 #include <cstdint>
 #include <iterator>
@@ -275,10 +273,6 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, std::forward<T>(error_msg));
     }
 
-    // 无锁版本的 reportError，供已持有 mutex_ 的内部路径（dispatch/process/updateStatus）使用，
-    // 构造期对象尚未发布的路径使用，避免在非递归 mutex 上自死锁。语义上等价于
-    // reportEventWithoutLock(Error, code, msg)，提供独立 API 仅为调用方意图更清晰。
-    void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
     bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
@@ -485,12 +479,7 @@ public:
     }
 
     const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
-        return logits_processors_;
-    }
-
-    void installLogitsProcessor(BaseLogitsProcessorPtr processor) {
-        RTP_LLM_CHECK_WITH_INFO(processor != nullptr, "logits processor must not be null");
-        logits_processors_.push_back(std::move(processor));
+        return logits_processor_list_;
     }
 
     at::Generator getGenerator() {
@@ -691,7 +680,7 @@ protected:
     rtp_llm::DataType dtype_;
     size_t            hidden_size_;
 
-    std::vector<BaseLogitsProcessorPtr> logits_processors_;
+    std::vector<BaseLogitsProcessorPtr> logits_processor_list_;
     at::Generator                       generator_;
 
     // just for bool test

@@ -725,7 +725,7 @@ TEST_F(MtpExecutorTest, testPrepareStreamsRejectsNormalDecodeOnlyProcessor) {
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
     GenerateStreamPtr    stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->installLogitsProcessor(std::make_shared<FakeNormalDecodeOnlyProcessor>());
+    stream->logits_processor_list_.push_back(std::make_shared<FakeNormalDecodeOnlyProcessor>());
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;

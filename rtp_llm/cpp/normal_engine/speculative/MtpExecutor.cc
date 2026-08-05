@@ -723,7 +723,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
     }
 
-    spec_logits_result = runSpecLogitsVerifyIfNeeded(streams, model_input, draft_sampler_output, draft_token_ids_t);
+    spec_logits_result = runSpecLogitsVerify(streams, model_input, draft_sampler_output, draft_token_ids_t);
 
     // eplb
     if (expert_balancer_) {
@@ -1035,7 +1035,24 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 }
 
 SpecLogitsVerifyRunner::LaunchResult MtpExecutor::runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams,
-                                                                      const torch::Tensor& draft_tokens) {
+                                                                      const GptModelInputs&               model_input,
+                                                                      const SamplerOutput& draft_sampler_output,
+                                                                      const torch::Tensor& draft_token_ids) {
+    if (!isTpRank0() || warm_up_ || model_input.is_fake_stream) {
+        return {};
+    }
+
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify)");
+    torch::Tensor draft_tokens = draft_token_ids;
+    if (propose_step_ == 1) {
+        if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.numel() > 0) {
+            draft_tokens = draft_sampler_output.token_ids;
+        } else {
+            draft_tokens = model_input.combo_tokens.reshape(
+                {static_cast<int64_t>(streams.size()), static_cast<int64_t>(propose_step_ + 1)});
+        }
+    }
+
     SpecLogitsVerifyRunner::LaunchTask task;
     task.total_streams = streams.size();
     task.propose_step  = static_cast<int>(propose_step_);
@@ -1052,27 +1069,6 @@ SpecLogitsVerifyRunner::LaunchResult MtpExecutor::runSpecLogitsVerify(const std:
         ++stream_idx;
     }
     return spec_logits_verify_runner_.run(task);
-}
-
-SpecLogitsVerifyRunner::LaunchResult
-MtpExecutor::runSpecLogitsVerifyIfNeeded(const std::list<GenerateStreamPtr>& streams,
-                                         const GptModelInputs&               model_input,
-                                         const SamplerOutput&                draft_sampler_output,
-                                         const torch::Tensor&                draft_token_ids) {
-    if (!isTpRank0() || warm_up_ || model_input.is_fake_stream) {
-        return {};
-    }
-
-    RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify)");
-    if (propose_step_ != 1) {
-        return runSpecLogitsVerify(streams, draft_token_ids);
-    }
-    if (draft_sampler_output.token_ids.defined() && draft_sampler_output.token_ids.numel() > 0) {
-        return runSpecLogitsVerify(streams, draft_sampler_output.token_ids);
-    }
-    auto draft_tokens = model_input.combo_tokens.reshape(
-        {static_cast<int64_t>(streams.size()), static_cast<int64_t>(propose_step_ + 1)});
-    return runSpecLogitsVerify(streams, draft_tokens);
 }
 
 }  // namespace rtp_llm

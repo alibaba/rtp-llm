@@ -89,7 +89,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
         generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
     if (processors_result.ok()) {
-        logits_processors_ = std::move(processors_result.value());
+        logits_processor_list_ = std::move(processors_result.value());
     } else {
         const auto& err = processors_result.status();
         reportEventWithoutLock(StreamEvents::Error, err.code(), err.ToString());
@@ -530,12 +530,8 @@ void GenerateStream::reportTimeoutWithoutLock(int64_t running_time_ms, int64_t t
                                + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
 }
 
-void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
-    reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
-}
-
 bool GenerateStream::reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info) {
-    if (!error_info.has_value()) {
+    if (!error_info.has_value() || !error_info->hasError()) {
         return false;
     }
     const auto& error = error_info.value();
@@ -930,7 +926,7 @@ std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch:
     if (num_new_tokens <= 0) {
         return std::nullopt;
     }
-    for (const auto& logit_processor_ptr : logits_processors_) {
+    for (const auto& logit_processor_ptr : logits_processor_list_) {
         auto error = logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
         if (error.has_value()) {
             return error;
@@ -949,7 +945,7 @@ void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src
     std::vector<int> src_batch_indices_vec(data, data + src_batch_indices.numel());
     RTP_LLM_CHECK(src_batch_indices_vec.size() == currentBatchSize());
 
-    for (const auto& logit_processor_ptr : logits_processors_) {
+    for (const auto& logit_processor_ptr : logits_processor_list_) {
         logit_processor_ptr->updateMultiSeqStatus(src_batch_indices_vec);
     }
 }
@@ -960,7 +956,7 @@ std::optional<ErrorInfo> GenerateStream::validateLogitsProcessorState() {
     }
 
     const auto  stream_output_len = static_cast<int64_t>(outputTokenLen());
-    const auto& processors        = logits_processors_;
+    const auto& processors        = logits_processor_list_;
     for (size_t i = 0; i < processors.size(); ++i) {
         const auto& processor            = processors[i];
         const auto  processor_output_len = processor->committedOutputLen();

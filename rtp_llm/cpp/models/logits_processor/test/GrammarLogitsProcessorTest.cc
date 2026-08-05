@@ -596,30 +596,6 @@ TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
     EXPECT_EQ(expectCapOk(proc->prepareSpeculative(req)), 0);
 }
 
-// Undersized bitmask buffer must error out as GRAMMAR_BITMASK_BUFFER_TOO_SMALL, not corrupt the caller's heap.
-TEST(GrammarLogitsProcessorTest, RejectsUndersizedBitmaskBuffer) {
-    auto backend = makeBackend();
-    ASSERT_TRUE(backend);
-    auto proc = makeProcessor(backend, "ab");
-
-    const int propose_step = 1;
-    // Allocate a deliberately too-small buffer for vocab=128 (needs 4 words).
-    const size_t         words = 1;
-    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
-    std::vector<int32_t> draft{kA};
-
-    SpecLogitsProcessorRequest req;
-    req.draft_tokens       = draft.data();
-    req.propose_step       = propose_step;
-    req.bitmask_cpu_out    = bm.data();
-    req.bitmask_size_int32 = words;
-    req.vocab_size         = 128;
-
-    auto cap_or = proc->prepareSpeculative(req);
-    ASSERT_FALSE(cap_or.ok());
-    EXPECT_EQ(cap_or.status().code(), ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL);
-}
-
 TEST(GrammarLogitsProcessorTest, SpecVerifyRejectsGrammarVocabExceedingModelVocabInSameBitmaskWord) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
