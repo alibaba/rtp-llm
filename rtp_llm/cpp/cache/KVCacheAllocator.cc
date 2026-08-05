@@ -349,8 +349,8 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
             }
         }
     }
-    batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
-    batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
+    batch_resource->cacheResource(0).setCacheKeysAndBlockDependencies(std::move(evicted_keys),
+                                                                      std::move(evicted_dependencies));
     batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
     return batch_resource;
 }

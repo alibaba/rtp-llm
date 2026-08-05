@@ -29,9 +29,6 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
     }
 
     batch_kv_cache_resource->setLastBlockAligned(seq_len % seq_size_per_block == 0);
-    for (int i = 0; i < batch_size; ++i) {
-        batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
-    }
 }
 
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
@@ -63,9 +60,6 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
 
     // After incremental update we guarantee all existing keys are for full blocks.
     batch_kv_cache_resource->setLastBlockAligned(true);
-    for (int i = 0; i < batch_size; ++i) {
-        batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
-    }
 }
 
 void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {

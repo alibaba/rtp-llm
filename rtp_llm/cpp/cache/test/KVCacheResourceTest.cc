@@ -201,18 +201,15 @@ TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
         BlockDependency{false, 0, 7},
         BlockDependency{true, 100, 8},
     };
-    resource.setCacheKeys(CacheKeysType{100, 200});
-    resource.setBlockDependencies(custom);
-    resource.ensureLinearBlockDependencies();
+    resource.setCacheKeysAndBlockDependencies(CacheKeysType{100, 200}, custom);
     ASSERT_EQ(resource.blockDependencies().size(), 2u);
     EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
+    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 7u);
     EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
     EXPECT_EQ(resource.blockDependencies()[1].parent_key, 100);
-    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 1u);
+    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 8u);
 
-    resource.cacheKeys().push_back(300);
-    resource.ensureLinearBlockDependencies();
+    resource.appendCacheKey(300);
     ASSERT_EQ(resource.blockDependencies().size(), 3u);
     EXPECT_EQ(resource.blockDependencies()[2].parent_key, 200);
     EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);

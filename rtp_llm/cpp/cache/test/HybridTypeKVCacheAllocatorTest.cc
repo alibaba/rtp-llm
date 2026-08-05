@@ -1240,7 +1240,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrDecrKVCacheRefReferencesOnlyMatchedVa
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{100, 101, 102};
+    resource.setCacheKeys(CacheKeysType{100, 101, 102});
     resource.mutableBlockIds(/*gid=*/0).assign(
         BlockIndicesType{blocks[0], 0, blocks[1]});  // linear group (contains a 0)
     resource.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{blocks[2], blocks[3], 0});  // full group (contains a 0)

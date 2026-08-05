@@ -409,8 +409,8 @@ private:
     makeCacheResource(const CacheKeysType&                          cache_keys,
                       const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                       size_t                                        reuse_len = 0) const {
-        auto res               = std::make_shared<KVCacheResource>();
-        res->cacheKeys()       = cache_keys;
+        auto res = std::make_shared<KVCacheResource>();
+        res->setCacheKeys(cache_keys);
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         res->initGroups(cache_config_.topologyPtr());
         const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
@@ -437,8 +437,8 @@ private:
                                                              const std::vector<BlockIdxType>& group0_blocks,
                                                              const std::vector<BlockIdxType>& group1_blocks,
                                                              size_t                           reuse_len = 0) const {
-        auto res         = std::make_shared<KVCacheResource>();
-        res->cacheKeys() = cache_keys;
+        auto res = std::make_shared<KVCacheResource>();
+        res->setCacheKeys(cache_keys);
         (void)group1_blocks;
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         RTP_LLM_CHECK_WITH_INFO(layer_num == 4, "test helper expects 4 layers, got %zu", layer_num);
@@ -836,8 +836,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
 
     // uninitialized legacy layer view
     // NOTE: asyncRead always skips the last cache_key (cache_keys.size() - 1), so keep size >= 2 here.
-    auto res_empty_lbs         = std::make_shared<KVCacheResource>();
-    res_empty_lbs->cacheKeys() = {1, 2};
+    auto res_empty_lbs = std::make_shared<KVCacheResource>();
+    res_empty_lbs->setCacheKeys({1, 2});
     auto ctx_empty_lbs =
         connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
     EXPECT_EQ(ctx_empty_lbs, nullptr);
@@ -1164,8 +1164,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
     EXPECT_EQ(ctx1, nullptr);
 
     // uninitialized legacy layer view
-    auto res_empty_lbs         = std::make_shared<KVCacheResource>();
-    res_empty_lbs->cacheKeys() = {1};
+    auto res_empty_lbs = std::make_shared<KVCacheResource>();
+    res_empty_lbs->setCacheKeys({1});
     res_empty_lbs->setLastBlockAligned(true);
     auto ctx_empty_lbs = connector_->asyncWrite(res_empty_lbs, meta);
     EXPECT_EQ(ctx_empty_lbs, nullptr);
