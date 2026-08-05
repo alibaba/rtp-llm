@@ -953,6 +953,7 @@ class TestCudaFp4StrategySelection(unittest.TestCase):
         fp4_moe_op: str,
         *,
         moe_strategy: str = "auto",
+        enable_cuda_graph: bool = False,
     ) -> MoEConfigAdapter:
         if topology == "no_dp":
             moe_config = create_moe_config(use_all_gather=True)
@@ -984,6 +985,7 @@ class TestCudaFp4StrategySelection(unittest.TestCase):
             model_config=create_model_config_with_fp4_quant(),
             parallelism_config=parallelism_config,
             moe_config=moe_config,
+            enable_cuda_graph=enable_cuda_graph,
         )
 
     def _candidates(self, config: MoEConfigAdapter) -> dict:
@@ -1020,6 +1022,14 @@ class TestCudaFp4StrategySelection(unittest.TestCase):
     def test_sm12x_no_dp_explicit_b12x_selects_b12x(self) -> None:
         with self._arch(sm12x=True):
             config = self._make_config("no_dp", "b12x")
+            self.assertEqual(
+                self._candidates(config), {**self.NONE_SELECTED, "b12x": True}
+            )
+
+    def test_sm12x_no_dp_b12x_accepts_cuda_graph(self) -> None:
+        with self._arch(sm12x=True):
+            config = self._make_config("no_dp", "b12x", enable_cuda_graph=True)
+            self.assertGreater(config.ll_num_max_token, 0)
             self.assertEqual(
                 self._candidates(config), {**self.NONE_SELECTED, "b12x": True}
             )
