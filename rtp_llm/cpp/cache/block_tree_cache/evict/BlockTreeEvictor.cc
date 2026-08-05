@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -348,25 +350,6 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictimInGroupSet(Group
     }
 }
 
-std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(Tier tier) {
-    for (auto& group_set : tree_->groupSets()) {
-        auto eviction_desc = chooseVictimInGroupSet(*group_set, tier);
-        if (!eviction_desc.has_value()) {
-            continue;
-        }
-
-        RTP_LLM_LOG_DEBUG("selected candidate, "
-                          "group_set[%zu] type=%s tier=%s target=%s node_key=%ld",
-                          eviction_desc->group_set_id,
-                          cacheGroupTypeName(group_set->groupType()),
-                          tierName(eviction_desc->source_tier),
-                          tierName(eviction_desc->target_tier),
-                          eviction_desc->node ? eviction_desc->node->cache_key : 0);
-        return eviction_desc;
-    }
-    return std::nullopt;
-}
-
 std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_set_id, Tier tier) {
     if (group_set_id >= tree_->groupSets().size()) {
         return std::nullopt;
@@ -378,48 +361,88 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
     return chooseVictimInGroupSet(*group_set, tier);
 }
 
-std::vector<TransferDescriptor>
-BlockTreeEvictor::chooseWatermarkVictims(GroupSet& group_set, Tier tier, double watermark_ratio) {
-    std::vector<TransferDescriptor> victims;
-    if (watermark_ratio <= 0.0) {
-        return victims;
-    }
-
-    size_t excess = computeGroupSetExcess(group_set, tier, watermark_ratio);
-    if (excess == 0) {
-        return victims;
-    }
-
-    RTP_LLM_LOG_INFO("tier=%s group_set[%zu] "
-                     "excess=%zu (ratio=%.2f), evicting",
-                     tierName(tier),
-                     group_set.groupSetId(),
-                     excess,
-                     watermark_ratio);
-
-    victims.reserve(excess);
-    for (size_t i = 0; i < excess; ++i) {
-        auto eviction_desc = chooseVictimInGroupSet(group_set, tier);
-        if (eviction_desc.has_value()) {
-            victims.push_back(*eviction_desc);
-        } else {
-            break;
-        }
-    }
-    return victims;
+size_t BlockTreeEvictor::watermarkExcess(const GroupSet& group_set, Tier tier, double watermark_ratio) const {
+    return watermark_ratio <= 0.0 ? 0 : computeGroupSetExcess(group_set, tier, watermark_ratio);
 }
 
 // ---- Migration pipeline (begin -> copy -> finish) ----
+BlockTreeEvictor::FullPruneClosure
+BlockTreeEvictor::collectFullPruneClosure(const TransferDescriptor& eviction_desc) const {
+    FullPruneClosure closure;
+    // Reuse the output vector as the worklist. Reversing a parent-before-child
+    // traversal gives the bottom-up order required by topology cleanup.
+    closure.nodes_bottom_up.push_back(eviction_desc.node);
+    for (size_t i = 0; i < closure.nodes_bottom_up.size(); ++i) {
+        TreeNode* node = closure.nodes_bottom_up[i];
+        for (const auto& [_, child] : node->children) {
+            closure.nodes_bottom_up.push_back(child);
+        }
+
+        if (node == eviction_desc.node) {
+            continue;
+        }
+        // Once a FULL prefix is removed, every descendant resource is unreachable
+        // through matching. Prune every idle resource and detach in-flight transfers.
+        // Request references are held top-down, so an evictable FULL prefix cannot
+        // have a request-referenced descendant.
+        for (const GroupSetPtr& group_set : tree_->groupSets()) {
+            const size_t            group_set_id = group_set->groupSetId();
+            const GroupSetResource& resource     = node->group_set_resources[group_set_id];
+            if (resource.transfer_state != GroupSetTransferState::IDLE) {
+                closure.detached_resources.emplace_back(node, group_set_id);
+                continue;
+            }
+            if (resource.is_empty()) {
+                continue;
+            }
+
+            const Tier source_tier = resource.getTopTier();
+            closure.dependent_descs.push_back(makeDesc(node, group_set_id, source_tier, Tier::NONE));
+        }
+    }
+    std::reverse(closure.nodes_bottom_up.begin(), closure.nodes_bottom_up.end());
+    return closure;
+}
+
 std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(TransferDescriptor eviction_desc) {
     EvictionPlan plan;
     if (eviction_desc.node == nullptr) {
         return std::nullopt;
     }
 
+    std::vector<size_t> preexisting_root_transfer_ids;
+    if (eviction_desc.target_tier == Tier::NONE) {
+        for (const GroupSetPtr& group_set : tree_->groupSets()) {
+            const size_t group_set_id = group_set->groupSetId();
+            if (eviction_desc.node->group_set_resources[group_set_id].transfer_state
+                != GroupSetTransferState::IDLE) {
+                preexisting_root_transfer_ids.push_back(group_set_id);
+            }
+        }
+    }
+
     if (!prepareDesc(eviction_desc)) {
         return std::nullopt;
     }
     plan.primary_desc = eviction_desc;
+
+    auto attach_full_prune = [this, &plan](const TransferDescriptor& full_prune_desc) {
+        if (full_prune_desc.target_tier != Tier::NONE
+            || tree_->groupSets()[full_prune_desc.group_set_id]->groupType() != CacheGroupType::FULL
+            || plan.hasFullPruneClosure()) {
+            return;
+        }
+        FullPruneClosure closure = collectFullPruneClosure(full_prune_desc);
+        plan.dependent_prune_descs = std::move(closure.dependent_descs);
+        for (const TransferDescriptor& dependent_desc : plan.dependent_prune_descs) {
+            reserveSource(dependent_desc);
+        }
+        for (const auto& [node, group_set_id] : closure.detached_resources) {
+            node->group_set_resources[group_set_id].transfer_detached = true;
+        }
+        plan.full_prune_nodes_bottom_up = std::move(closure.nodes_bottom_up);
+    };
+    attach_full_prune(plan.primary_desc);
 
     for (size_t cascade_group_set_id : selectCascadeGroupSets(
              eviction_desc.node, eviction_desc.group_set_id, eviction_desc.source_tier, enable_reverse_eviction_)) {
@@ -438,7 +461,14 @@ std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(Transf
             }
             continue;
         }
+        attach_full_prune(cascade_desc);
         plan.cascade_descs.push_back(std::move(cascade_desc));
+    }
+
+    if (plan.hasFullPruneClosure()) {
+        for (size_t group_set_id : preexisting_root_transfer_ids) {
+            plan.primary_desc.node->group_set_resources[group_set_id].transfer_detached = true;
+        }
     }
 
     return plan;
@@ -452,6 +482,11 @@ void BlockTreeEvictor::complete(const EvictionPlan& plan, const CopyResultSet& r
     if (!results.primary_success) {
         rollbackPreparedPlan(plan);
         return;
+    }
+
+    for (const TransferDescriptor& dependent_desc : plan.dependent_prune_descs) {
+        const GroupSetPtr& group_set = tree_->groupSets()[dependent_desc.group_set_id];
+        applyDescCompletion(group_set, dependent_desc);
     }
 
     auto primary_group_set_id = plan.primary_desc.group_set_id;
@@ -491,7 +526,11 @@ void BlockTreeEvictor::complete(const EvictionPlan& plan, const CopyResultSet& r
         applyDescCompletion(group_set, cascade_desc);
     }
 
-    finalizeEviction(plan.primary_desc.node);
+    if (plan.hasFullPruneClosure()) {
+        finalizeFullPrune(plan);
+    } else {
+        finalizeEviction(plan.primary_desc.node);
+    }
 }
 
 // Move source blocks out of the resource, install target blocks (if demoting), clear
@@ -499,6 +538,11 @@ void BlockTreeEvictor::complete(const EvictionPlan& plan, const CopyResultSet& r
 // held only by cache.
 bool BlockTreeEvictor::applyDescCompletion(const GroupSetPtr& group_set, const TransferDescriptor& eviction_desc) {
     auto& resource = eviction_desc.node->group_set_resources[eviction_desc.group_set_id];
+    if (resource.transfer_detached) {
+        releaseTargetBlocks(eviction_desc);
+        discardDetachedTransfer(eviction_desc);
+        return true;
+    }
     if (resource.transfer_state != GroupSetTransferState::DEMOTING) {
         RTP_LLM_LOG_WARNING("state mismatch, group_set=%zu node_key=%ld", eviction_desc.group_set_id, eviction_desc.node->cache_key);
         releaseTargetBlocks(eviction_desc);
@@ -544,11 +588,24 @@ bool BlockTreeEvictor::applyDescCompletion(const GroupSetPtr& group_set, const T
 }
 
 void BlockTreeEvictor::rollbackPreparedPlan(const EvictionPlan& plan) {
+    bool detached =
+        plan.primary_desc.node->group_set_resources[plan.primary_desc.group_set_id].transfer_detached;
+    for (const TransferDescriptor& cascade_desc : plan.cascade_descs) {
+        detached = detached
+                   || cascade_desc.node->group_set_resources[cascade_desc.group_set_id].transfer_detached;
+    }
+
     releaseTargetBlocks(plan.primary_desc);
     restoreSource(plan.primary_desc);
     for (const auto& cascade_desc : plan.cascade_descs) {
         releaseTargetBlocks(cascade_desc);
         restoreSource(cascade_desc);
+    }
+    for (const TransferDescriptor& dependent_desc : plan.dependent_prune_descs) {
+        restoreSource(dependent_desc);
+    }
+    if (detached) {
+        finalizeEviction(plan.primary_desc.node);
     }
 }
 
@@ -674,6 +731,10 @@ bool BlockTreeEvictor::restoreSource(const TransferDescriptor& eviction_desc) {
         return false;
     }
     GroupSetResource& resource = eviction_desc.node->group_set_resources[group_set_id];
+    if (resource.transfer_detached) {
+        discardDetachedTransfer(eviction_desc);
+        return true;
+    }
     if (resource.transfer_state != GroupSetTransferState::DEMOTING) {
         RTP_LLM_LOG_WARNING(
             "state mismatch, group_set=%zu node_key=%ld", eviction_desc.group_set_id, eviction_desc.node->cache_key);
@@ -687,6 +748,22 @@ bool BlockTreeEvictor::restoreSource(const TransferDescriptor& eviction_desc) {
                             eviction_desc.node->cache_key);
     refreshCandidate(*tree_->groupSets()[group_set_id], eviction_desc.node, eviction_desc.source_tier);
     return true;
+}
+
+void BlockTreeEvictor::discardDetachedTransfer(const TransferDescriptor& transfer_desc) {
+    GroupSetResource& resource = transfer_desc.node->group_set_resources[transfer_desc.group_set_id];
+    const GroupSetPtr& group_set = tree_->groupSets()[transfer_desc.group_set_id];
+    const MultiNodeResource source_holder{
+        transfer_desc.group_set_id,
+        transfer_desc.source_tier,
+        {{transfer_desc.node, transfer_desc.source_blocks}}};
+    if (transfer_desc.source_tier == Tier::DEVICE) {
+        group_set->unmapDeviceBlocksFromTreeNode(source_holder);
+    }
+    group_set->unreferenceBlocks(source_holder, BlockRefType::BLOCK_CACHE);
+    resource.evictFromTier(transfer_desc.source_tier);
+    resource.transfer_state    = GroupSetTransferState::IDLE;
+    resource.transfer_detached = false;
 }
 
 void BlockTreeEvictor::releaseTargetBlocks(const TransferDescriptor& eviction_desc) {
@@ -706,17 +783,40 @@ void BlockTreeEvictor::releaseTargetBlocks(const TransferDescriptor& eviction_de
 void BlockTreeEvictor::finalizeEviction(TreeNode* node) {
     if (tree_->isRemovable(node)) {
         RTP_LLM_LOG_DEBUG("deleting empty node key=%ld", node->cache_key);
-        for (const auto& group_set : tree_->groupSets()) {
-            for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
-                heapFor(group_set->groupSetId(), tier)->erase(node);
-            }
-        }
+        eraseNodeFromAllHeaps(node);
         TreeNode* surviving_ancestor = tree_->removeNodeAndEmptyAncestors(node);
         if (surviving_ancestor != tree_->root()) {
             onTopologyChanged(surviving_ancestor);
         }
     } else if (node->parent && node->parent != tree_->root()) {
         onTopologyChanged(node->parent);
+    }
+}
+
+void BlockTreeEvictor::eraseNodeFromAllHeaps(TreeNode* node) {
+    for (const GroupSetPtr& group_set : tree_->groupSets()) {
+        for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+            heapFor(group_set->groupSetId(), tier)->erase(node);
+        }
+    }
+}
+
+void BlockTreeEvictor::finalizeFullPrune(const EvictionPlan& plan) {
+    TreeNode* const boundary_node = plan.primary_desc.node->parent;
+    std::unordered_set<TreeNode*> detached_nodes;
+
+    for (TreeNode* node : plan.full_prune_nodes_bottom_up) {
+        if (tree_->isRemovable(node)) {
+            eraseNodeFromAllHeaps(node);
+            tree_->detachNode(node);
+            detached_nodes.insert(node);
+        }
+    }
+
+    tree_->eraseDetachedNodes(detached_nodes);
+    TreeNode* survivor = tree_->removeNodeAndEmptyAncestors(boundary_node);
+    if (survivor != tree_->root()) {
+        onTopologyChanged(survivor);
     }
 }
 

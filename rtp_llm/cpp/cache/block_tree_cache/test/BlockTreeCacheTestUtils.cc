@@ -305,7 +305,10 @@ DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
     config->use_cuda_malloc_backing = false;
 
     auto pool = std::make_shared<DeviceBlockPool>(config);
-    RTP_LLM_CHECK(pool->init());
+    // Structural tree/eviction tests only exercise block-id ownership and do not
+    // access payload memory. Mark the logical pool ready without allocating a
+    // CUDA tensor so these tests remain runnable on CPU-only test hosts.
+    pool->markInitialized();
     auto structural_blocks = pool->malloc(physical_block_count - 1);
     RTP_LLM_CHECK(structural_blocks.has_value());
     return pool;
@@ -466,14 +469,20 @@ int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t n
 
     int total_evicted = 0;
     for (size_t attempt = 0; attempt < num_blocks; ++attempt) {
-        auto eviction_desc = cache.evictor_.chooseVictim(tier);
+        std::optional<TransferDescriptor> eviction_desc;
+        for (const GroupSetPtr& group_set : cache.tree_->groupSets()) {
+            eviction_desc = cache.evictor_.chooseVictim(group_set->groupSetId(), tier);
+            if (eviction_desc.has_value()) {
+                break;
+            }
+        }
         if (!eviction_desc.has_value()) {
             break;
         }
+        eviction_desc->target_tier = Tier::NONE;
 
         // Tests use this entry to trigger eviction state transitions without
         // exposing a direct-reclaim operation on the production cache API.
-        eviction_desc->target_tier = Tier::NONE;
         if (cache.evictor_.submitLocked(*eviction_desc)) {
             ++total_evicted;
         }

@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -47,10 +48,17 @@ public:
     struct EvictionPlan {
         TransferDescriptor              primary_desc;
         std::vector<TransferDescriptor> cascade_descs;
+        // FULL prune closure only. Every dependent descriptor targets NONE,
+        // and nodes stay valid because such plans are committed synchronously.
+        std::vector<TransferDescriptor> dependent_prune_descs;
+        std::vector<TreeNode*>          full_prune_nodes_bottom_up;
 
         bool needsCopy() const;
         bool empty() const {
             return primary_desc.node == nullptr;
+        }
+        bool hasFullPruneClosure() const {
+            return !full_prune_nodes_bottom_up.empty();
         }
     };
 
@@ -93,13 +101,14 @@ public:
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, prepare, finish, and rollback mutate tree/group-set/pool/heap state
     // and must run under BlockTreeCache's mutex. Task execution is lock-free.
-    std::optional<TransferDescriptor> chooseVictim(Tier tier);
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier);
-    std::vector<TransferDescriptor>   chooseWatermarkVictims(GroupSet& group_set, Tier tier, double watermark_ratio);
+    size_t watermarkExcess(const GroupSet& group_set, Tier tier, double watermark_ratio) const;
     std::optional<EvictionPlan>       buildPlan(TransferDescriptor eviction_desc);
     bool submitLocked(TransferDescriptor& eviction_desc, std::vector<EvictionReleaseCredit>* release_credits = nullptr);
     void complete(const EvictionPlan& plan, const CopyResultSet& results);
     void rollbackPreparedPlan(const EvictionPlan& plan);
+    // Discard a detached operation's source without publishing its target.
+    void discardDetachedTransfer(const TransferDescriptor& transfer_desc);
     void writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
                             CacheKeyType                           cache_key,
                             size_t                                 group_set_id);
@@ -113,6 +122,12 @@ public:
     void onTierEntered(TreeNode* node, size_t group_set_id, Tier tier);
 
 private:
+    struct FullPruneClosure {
+        std::vector<TransferDescriptor>           dependent_descs;
+        std::vector<std::pair<TreeNode*, size_t>> detached_resources;
+        std::vector<TreeNode*>                    nodes_bottom_up;
+    };
+
     struct GroupSetTierHeaps {
         std::unique_ptr<EvictionHeap> device;
         std::unique_ptr<EvictionHeap> host;
@@ -127,7 +142,7 @@ private:
     bool isEvictable(const GroupSet& group_set, const TreeNode* node, Tier tier) const;
 
     std::optional<TransferDescriptor> chooseVictimInGroupSet(GroupSet& group_set, Tier tier);
-    static Tier                 defaultTargetTier(Tier source);
+    static Tier                       defaultTargetTier(Tier source);
 
     TransferDescriptor  makeDesc(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const;
     std::vector<size_t> selectCascadeGroupSets(const TreeNode* node,
@@ -135,11 +150,14 @@ private:
                                                Tier            tier,
                                                bool            enable_reverse_eviction) const;
     bool                prepareDesc(TransferDescriptor& eviction_desc);
+    FullPruneClosure    collectFullPruneClosure(const TransferDescriptor& eviction_desc) const;
     void                reserveSource(const TransferDescriptor& eviction_desc);
     bool                restoreSource(const TransferDescriptor& eviction_desc);
     void                releaseTargetBlocks(const TransferDescriptor& eviction_desc);
     bool                applyDescCompletion(const GroupSetPtr& group_set, const TransferDescriptor& eviction_desc);
     void                finalizeEviction(TreeNode* node);
+    void                finalizeFullPrune(const EvictionPlan& plan);
+    void                eraseNodeFromAllHeaps(TreeNode* node);
     size_t              computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const;
 
     BlockTree*                          tree_;

@@ -143,7 +143,17 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         }
     }
 
-    TreeNode* current = root_.get();
+    return insertNodeImpl(cache_keys, resources, /*enable_hard_stop=*/true);
+}
+
+BlockTreeInsertResult BlockTree::insertNodeImpl(
+    const CacheKeysType&                              cache_keys,
+    const std::vector<std::vector<GroupSetResource>>& resources,
+    bool                                               enable_hard_stop) {
+    BlockTreeInsertResult result;
+
+    TreeNode* current                = root_.get();
+    size_t    inserted_prefix_length = 0;
 
     // All published tiers take BLOCK_CACHE refs; only Device blocks enter the reverse index.
     auto publishTier = [this](TreeNode* node, size_t group_set_id, const GroupSetResource& resource, Tier tier) {
@@ -158,8 +168,32 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         CacheKeyType key = cache_keys[i];
         auto         it  = current->children.find(key);
         if (it != current->children.end()) {
-            current                                = it->second;
-            const auto&         incoming_resources = resources[i];
+            TreeNode* child = it->second;
+            if (enable_hard_stop) {
+                bool full_path_ready = true;
+                for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+                    if (group_sets_[group_set_id]->groupType() != CacheGroupType::FULL) {
+                        continue;
+                    }
+                    const GroupSetResource& incoming = resources[i][group_set_id];
+                    if (!incoming.hasTier(Tier::DEVICE)) {
+                        continue;
+                    }
+                    const GroupSetResource& existing = child->group_set_resources[group_set_id];
+                    const bool can_reuse = existing.isValidSteadyState() && existing.hasCompleteDeviceValue();
+                    const bool can_adopt = existing.is_removable();
+                    if (!can_reuse && !can_adopt) {
+                        full_path_ready = false;
+                        break;
+                    }
+                }
+                if (!full_path_ready) {
+                    break;
+                }
+            }
+
+            current = child;
+            const auto& incoming_resources = resources[i];
             std::vector<size_t> adopted_group_set_ids;
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
                 GroupSetResource&       existing      = current->group_set_resources[group_set_id];
@@ -195,10 +229,11 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
             }
             result.inserted_nodes.push_back(current);
         }
+        inserted_prefix_length = i + 1;
     }
 
     RTP_LLM_LOG_DEBUG("keys=%zu created=%zu adopted=%zu tree_nodes=%zu",
-                      cache_keys.size(),
+                      inserted_prefix_length,
                       result.inserted_nodes.size(),
                       result.adopted_nodes.size(),
                       node_pool_.size());
@@ -212,23 +247,38 @@ bool BlockTree::isRemovable(TreeNode* node) const {
                           [](const GroupSetResource& resource) { return resource.is_removable(); });
 }
 
-TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
-    TreeNode* current       = node;
-    int       removed_count = 0;
-    while (isRemovable(current)) {
-        TreeNode* parent = current->parent;
-        RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", current->cache_key, node_pool_.size());
-        parent->children.erase(current->cache_key);
-        current->parent = nullptr;
-        auto it = std::find_if(node_pool_.begin(), node_pool_.end(), [current](const std::unique_ptr<TreeNode>& ptr) {
-            return ptr.get() == current;
-        });
-        node_pool_.erase(it);
-        current = parent;
-        removed_count++;
+TreeNode* BlockTree::detachNode(TreeNode* node) {
+    TreeNode* parent = node->parent;
+    RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
+
+    parent->children.erase(node->cache_key);
+    node->parent = nullptr;
+    return parent;
+}
+
+void BlockTree::eraseDetachedNodes(const std::unordered_set<TreeNode*>& detached_nodes) {
+    if (detached_nodes.empty()) {
+        return;
     }
-    if (removed_count > 0) {
-        RTP_LLM_LOG_DEBUG("removed %d nodes", removed_count);
+    node_pool_.erase(std::remove_if(node_pool_.begin(),
+                                    node_pool_.end(),
+                                    [&detached_nodes](const std::unique_ptr<TreeNode>& node) {
+                                        return detached_nodes.count(node.get()) != 0;
+                                    }),
+                     node_pool_.end());
+}
+
+TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
+    TreeNode*                     current = node;
+    std::unordered_set<TreeNode*> detached_nodes;
+    while (isRemovable(current)) {
+        TreeNode* detached = current;
+        current            = detachNode(current);
+        detached_nodes.insert(detached);
+    }
+    if (!detached_nodes.empty()) {
+        eraseDetachedNodes(detached_nodes);
+        RTP_LLM_LOG_DEBUG("removed %zu nodes", detached_nodes.size());
     }
     return current;
 }

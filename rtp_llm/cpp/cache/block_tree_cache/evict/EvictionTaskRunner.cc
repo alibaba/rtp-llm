@@ -143,6 +143,9 @@ EvictionTaskRunner::collectReleaseCredits(const BlockTreeEvictor::EvictionPlan& 
     for (const TransferDescriptor& cascade_desc : plan.cascade_descs) {
         collect(cascade_desc);
     }
+    for (const TransferDescriptor& dependent_desc : plan.dependent_prune_descs) {
+        collect(dependent_desc);
+    }
     return release_credits;
 }
 

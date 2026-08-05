@@ -185,6 +185,9 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const BlockTreeEvicto
     const int64_t finish_time_us = currentTimeUs();
     if (results.primary_success) {
         reportEvictionTransfer(plan.primary_desc, group_sets, finish_time_us);
+        for (const TransferDescriptor& dependent_desc : plan.dependent_prune_descs) {
+            reportEvictionTransfer(dependent_desc, group_sets, finish_time_us);
+        }
     }
     for (size_t desc_index = 0; desc_index < plan.cascade_descs.size(); ++desc_index) {
         if (desc_index < results.cascade_success.size() && results.cascade_success[desc_index]) {

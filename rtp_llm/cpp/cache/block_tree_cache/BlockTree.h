@@ -12,6 +12,8 @@
 
 namespace rtp_llm {
 
+class BlockTreeEvictor;
+
 struct ReusableGroupLocation {
     size_t group_set_id{0};
     size_t member_group_id{0};
@@ -56,6 +58,14 @@ public:
     }
 
 private:
+    friend class BlockTreeEvictor;
+
+    BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
+                                         const std::vector<std::vector<GroupSetResource>>& resources,
+                                         bool enable_hard_stop);
+
+    TreeNode* detachNode(TreeNode* node);
+    void      eraseDetachedNodes(const std::unordered_set<TreeNode*>& detached_nodes);
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
     void      releaseNode(TreeNode* node);
 

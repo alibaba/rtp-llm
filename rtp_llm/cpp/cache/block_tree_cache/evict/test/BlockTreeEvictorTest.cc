@@ -538,7 +538,7 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     evictor_->onTopologyChanged(parent);
 
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 2u);
-    auto victim = evictor_->chooseVictim(Tier::DEVICE);
+    auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
     EXPECT_EQ(victim->node, insertedNode(rival));
     EXPECT_EQ(parent->group_set_resources[0].candidate_meta.last_access_seq, parent_meta.last_access_seq);
@@ -568,7 +568,7 @@ TEST_F(BlockTreeEvictorTest, ExistingGroupFillAdmitsChildAndRemovesFullParentCan
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
     GroupSetResource empty_resource;
-    empty_resource.device_blocks = {NULL_BLOCK_IDX};
+    empty_resource.device_blocks      = {NULL_BLOCK_IDX};
     BlockTreeInsertResult empty_child =
         tree_->insertNode({100, 200}, {{makeResource(Tier::DEVICE, parent_block)}, {empty_resource}});
     evictor_->onInsertCommitted(empty_child);
@@ -606,7 +606,7 @@ TEST_F(BlockTreeEvictorTest, LastReferenceReleaseReadmitsLazyDroppedCandidate) {
     group_->referenceBlocks(match_set, BlockRefType::REQUEST);
     ASSERT_EQ(host_pool->refCount(block), 3u);
 
-    EXPECT_FALSE(evictor_->chooseVictim(Tier::HOST).has_value());
+    EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::HOST).has_value());
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
 
     group_->unreferenceBlocks(match_set, BlockRefType::REQUEST);
@@ -619,7 +619,7 @@ TEST_F(BlockTreeEvictorTest, LastReferenceReleaseReadmitsLazyDroppedCandidate) {
     EXPECT_EQ(host_pool->refCount(block), 1u);
     ASSERT_EQ(evictor_->candidateStats().host_candidates, 1u);
 
-    auto victim = evictor_->chooseVictim(Tier::HOST);
+    auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::HOST);
     ASSERT_TRUE(victim.has_value());
     EXPECT_EQ(victim->node, insertedNode(result));
 
@@ -903,7 +903,7 @@ TEST_F(BlockTreeEvictorTest, LoadSuccessAdmitsOnlyStableDeviceResource) {
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
-    auto victim = evictor_->chooseVictim(Tier::DEVICE);
+    auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
     EXPECT_EQ(victim->node, insertedNode(result));
 
@@ -926,7 +926,7 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     auto& resource = insertedNode(result)->group_set_resources[0];
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
-    auto victim = evictor_->chooseVictim(Tier::DEVICE);
+    auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
     auto plan = evictor_->buildPlan(*victim);
     ASSERT_TRUE(plan.has_value());
@@ -946,7 +946,7 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     EXPECT_EQ(host_pool->freeBlocksNum(), 1u);
     EXPECT_EQ(host_pool->totalRefCount(BlockRefType::EVICTION), 0u);
 
-    victim = evictor_->chooseVictim(Tier::DEVICE);
+    victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
     plan = evictor_->buildPlan(*victim);
     ASSERT_TRUE(plan.has_value());
@@ -1422,7 +1422,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
     evictor.onMatched({insertedNode(first)});
 
     EXPECT_EQ(insertedNode(first)->group_set_resources[0].candidate_meta.admission_seq, first_admission);
-    auto first_victim = evictor.chooseVictim(Tier::DEVICE);
+    auto first_victim = evictor.chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(first_victim.has_value());
     EXPECT_EQ(first_victim->node, insertedNode(first));
 
@@ -1431,7 +1431,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
     // survive that rollback unchanged.
     EXPECT_FALSE(evictor.buildPlan(*first_victim).has_value());
     EXPECT_EQ(insertedNode(first)->group_set_resources[0].candidate_meta.admission_seq, first_admission);
-    auto retried_victim = evictor.chooseVictim(Tier::DEVICE);
+    auto retried_victim = evictor.chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(retried_victim.has_value());
     EXPECT_EQ(retried_victim->node, insertedNode(first));
 
@@ -1460,7 +1460,7 @@ TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
 
     GroupSetResource empty_resource;
     empty_resource.device_blocks = {NULL_BLOCK_IDX};
-    auto existing                = tree.insertNode({100}, {{empty_resource}});
+    auto existing = tree.insertNode({100}, {{empty_resource}});
     evictor.onInsertCommitted(existing);
 
     MultiNodeBlocks device_set = allocateDeviceBlocksForTest(*group, 2, BlockRefType::BLOCK_CACHE);
@@ -1517,7 +1517,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
 
     EXPECT_EQ(insertedNode(first)->group_set_resources[0].candidate_meta.hit_count, 1u);
     EXPECT_EQ(insertedNode(second)->group_set_resources[0].candidate_meta.hit_count, 0u);
-    auto victim = evictor.chooseVictim(Tier::DEVICE);
+    auto victim = evictor.chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
     EXPECT_EQ(victim->node, insertedNode(second));
 

@@ -112,14 +112,15 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
     if (isNullBlockIdx(source_block)) {
         return source_block;
     }
-    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     if (source_tier == Tier::HOST) {
-        slots[0][0].host_block = source_block;
+        resources[0][0].host_block = source_block;
     } else {
-        slots[0][0].disk_slot = source_block;
+        resources[0][0].disk_slot = source_block;
     }
-    const BlockTreeInsertResult insert_result = cache.tree()->insertNode(CacheKeysType{key}, slots);
+    const BlockTreeInsertResult insert_result = cache.tree()->insertNode(CacheKeysType{key}, resources);
     EXPECT_EQ(insert_result.inserted_nodes.size(), 1u);
+    group->releaseSingleBlock(source_tier, source_block, BlockRefType::BLOCK_CACHE);
     return source_block;
 }
 
@@ -636,6 +637,30 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     block_pool->decRef(blocks, BlockRefType::REQUEST);
 }
 
+TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCacheStopsAtFirstNullBlock) {
+    const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/8, /*seq_size_per_block=*/4);
+    allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+    const auto blocks = block_pool->malloc(2).value();
+    ASSERT_EQ(blocks.size(), 2u);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
+
+    auto resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+    resource->setBatchBlocks(0, 0, BlockIndicesType{blocks[0], NULL_BLOCK_IDX, blocks[1]});
+    resource->setBatchCacheKeys(0, CacheKeysType{100, 200, 300});
+    allocator_->insertIntoCache(InsertInfo{resource, nullptr, /*is_resident=*/false});
+
+    const auto path = allocator_->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 200, 300});
+    ASSERT_EQ(path.size(), 1u);
+    EXPECT_EQ(path.front()->cache_key, 100);
+    EXPECT_EQ(path.front()->group_set_resources.front().device_blocks, (BlockIndicesType{blocks[0]}));
+
+    block_pool->decRef(blocks, BlockRefType::REQUEST);
+}
+
 TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCanonicalKeys) {
     const auto config = createSingleTypeTestConfig(/*layer_num=*/2, /*block_num=*/12, /*seq_size_per_block=*/4);
     allocator_        = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
@@ -795,13 +820,13 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
         const auto find = cache->tree()->findNode(CacheKeysType{100});
         ASSERT_FALSE(find.empty());
-        const auto& slot = find.back()->group_set_resources[0];
-        EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
+        const auto& group_set_resource = find.back()->group_set_resources[0];
+        EXPECT_EQ(group_set_resource.transfer_state, GroupSetTransferState::IDLE);
         if (source_tier == Tier::HOST) {
-            EXPECT_EQ(slot.host_block, source_block);
+            EXPECT_EQ(group_set_resource.host_block, source_block);
             EXPECT_EQ(group->hostPool()->refCount(source_block), source_ref_before);
         } else {
-            EXPECT_EQ(slot.disk_slot, source_block);
+            EXPECT_EQ(group_set_resource.disk_slot, source_block);
             EXPECT_EQ(group->diskPool()->refCount(source_block), source_ref_before);
         }
         coordinator->commit_callback_ = std::move(original_commit);
@@ -846,9 +871,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
 
     const auto find = cache->tree()->findNode(CacheKeysType{100});
     ASSERT_FALSE(find.empty());
-    const auto& slot = find.back()->group_set_resources.front();
-    ASSERT_EQ(slot.device_blocks.size(), 1u);
-    const BlockIdxType published_target = slot.device_blocks.front();
+    const auto& group_set_resource = find.back()->group_set_resources.front();
+    ASSERT_EQ(group_set_resource.device_blocks.size(), 1u);
+    const BlockIdxType published_target = group_set_resource.device_blocks.front();
     const auto&        device_pool      = cache->groupSets().front()->devicePools().front();
     ASSERT_NE(device_pool, nullptr);
     ASSERT_FALSE(resource->blocks(0, 0).empty());

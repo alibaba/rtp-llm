@@ -672,6 +672,176 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
     }
 }
 
+TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDiscardsItsTarget) {
+    auto device_pool = makeStructuralDevicePool(0);
+    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    auto disk_pool = makeDiskPool(
+        /*payload_bytes=*/1, /*usable_count=*/4, std::make_unique<MemoryDiskBlockIO>());
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
+
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache = true;
+    config.enable_disk_cache   = true;
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    ASSERT_NE(cache, nullptr);
+
+    auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{full}, /*succeed=*/true, /*pause_enabled=*/false);
+    PausableTransferReleaseGuard release_guard(pausable_copy);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_copy);
+
+    const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_source));
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {10};
+    resources[1][0].host_block    = host_source;
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, resources));
+
+    pausable_copy->enablePause();
+    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, 0, Tier::HOST));
+    ASSERT_TRUE(pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout));
+    const std::vector<TransferDescriptor> descriptors = pausable_copy->descriptors();
+    ASSERT_EQ(descriptors.size(), 1u);
+    ASSERT_EQ(descriptors[0].source_tier, Tier::HOST);
+    ASSERT_EQ(descriptors[0].target_tier, Tier::DISK);
+    const BlockIdxType disk_target = descriptors[0].singleBlockAt(Tier::DISK);
+
+    auto path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
+    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
+    EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_TRUE(host_pool->isAllocated(host_source));
+    EXPECT_TRUE(disk_pool->isAllocated(disk_target));
+
+    pausable_copy->release();
+    cache->waitForPendingTasks();
+
+    EXPECT_FALSE(host_pool->isAllocated(host_source));
+    EXPECT_FALSE(disk_pool->isAllocated(disk_target));
+    EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCommit) {
+    auto device_pool = makeStructuralDevicePool(0);
+    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache = true;
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    ASSERT_NE(cache, nullptr);
+
+    const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_source));
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {10};
+    resources[1][0].host_block    = host_source;
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, resources));
+
+    BlockTreeMatchResult              result  = cache->match({100, 200});
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    cache->releaseMatchedResources(result.matched_device_resources);
+
+    auto path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::LOAD_PENDING);
+    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_TRUE(host_pool->isAllocated(host_source));
+
+    const BlockIdList target_blocks{20};
+    device_pool->incRef(target_blocks, BlockRefType::REQUEST);
+    context->setTargetBlocks(0, target_blocks);
+    EXPECT_FALSE(context->commit());
+    EXPECT_TRUE(context->done());
+
+    EXPECT_FALSE(host_pool->isAllocated(host_source));
+    path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
+    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
+    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_FALSE(path[1]->group_set_resources[0].transfer_detached);
+
+    context.reset();
+    releaseDeviceBlocksAndNotify(*cache, device_pool, target_blocks, BlockRefType::REQUEST);
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsItsTarget) {
+    auto device_pool = makeStructuralDevicePool(0);
+    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache = true;
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    ASSERT_NE(cache, nullptr);
+
+    auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{full}, /*succeed=*/false, /*pause_enabled=*/false);
+    PausableTransferReleaseGuard release_guard(pausable_copy);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_copy);
+
+    const size_t device_free_before = device_pool->freeBlocksNum();
+    const size_t host_free_before   = host_pool->freeBlocksNum();
+    const BlockIdList prefix_blocks{10};
+    const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_source));
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = prefix_blocks;
+    resources[1][0].host_block    = host_source;
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, resources));
+
+    BlockTreeMatchResult              result  = cache->match({100, 200});
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->loadDescs().size(), 1u);
+    const BlockIdList target_blocks{20};
+    device_pool->incRef(target_blocks, BlockRefType::REQUEST);
+    context->setTargetBlocks(0, target_blocks);
+
+    pausable_copy->enablePause();
+    ASSERT_TRUE(context->commit());
+    ASSERT_TRUE(pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout));
+    cache->releaseMatchedResources(result.matched_device_resources);
+
+    auto path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
+    EXPECT_EQ(cache->evictForGroup(/*group_id=*/0, /*num_blocks=*/1), 1);
+    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
+    EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_TRUE(host_pool->isAllocated(host_source));
+
+    pausable_copy->release();
+    cache->waitForPendingTasks();
+    context->waitDone();
+
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(host_pool->isAllocated(host_source));
+    path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
+    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
+    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_FALSE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_EQ(device_pool->refCount(target_blocks.front()), 1u);
+
+    context.reset();
+    releaseDeviceBlocksAndNotify(*cache, device_pool, target_blocks, BlockRefType::REQUEST);
+    EXPECT_FALSE(device_pool->isAllocated(prefix_blocks.front()));
+    EXPECT_FALSE(device_pool->isAllocated(target_blocks.front()));
+    EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before + 2);
+    EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
+}
+
 TEST_F(BlockTreeCacheIntegrationTest, Evictor_SkipsRequestPinnedBlock) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";

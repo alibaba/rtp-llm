@@ -1204,6 +1204,32 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheStopsBeforeIncompleteGroupSet) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    auto block_pool = allocator->getDeviceBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+    const auto blocks = block_pool->malloc(5).value();
+    ASSERT_EQ(blocks.size(), 5u);
+    block_pool->incRef(blocks, BlockRefType::REQUEST);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
+    batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/0)
+        .assign({blocks[0], NULL_BLOCK_IDX, blocks[1]});
+    batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/1).assign({blocks[2], blocks[3], blocks[4]});
+
+    EXPECT_NO_THROW(allocator->insertIntoCache(InsertInfo{batch_res, nullptr, /*is_resident=*/false}));
+    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101, 102});
+    ASSERT_EQ(path.size(), 1u);
+    EXPECT_EQ(path.front()->cache_key, 100);
+    EXPECT_EQ(path.front()->group_set_resources[0].device_blocks, (BlockIndicesType{blocks[0]}));
+    EXPECT_EQ(path.front()->group_set_resources[1].device_blocks, (BlockIndicesType{blocks[2]}));
+
+    block_pool->decRef(blocks, BlockRefType::REQUEST);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
     auto config = makeTinyHybridConfig();
     ASSERT_EQ(config.groupNums(), 2);

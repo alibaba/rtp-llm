@@ -1600,8 +1600,8 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     ASSERT_NE(first_source, NULL_BLOCK_IDX);
     ASSERT_NE(second_source, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
-    resources[0][0].host_block                = first_source;
-    resources[0][1].host_block                = second_source;
+    resources[0][0].host_block = first_source;
+    resources[0][1].host_block = second_source;
     const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);
@@ -1709,7 +1709,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
-    resources[0][0].host_block                = source_block;
+    resources[0][0].host_block = source_block;
     const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);
@@ -1794,8 +1794,8 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
-    resources[0][0].device_blocks             = {resident_block};
-    resources[0][1].host_block                = host_block;
+    resources[0][0].device_blocks = {resident_block};
+    resources[0][1].host_block    = host_block;
     const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);

@@ -247,7 +247,8 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             RTP_LLM_LOG_ERROR("failed to register new load, group_set_id=%zu", desc.group_set_id);
             return false;
         }
-        if (!changeTransferState(
+        if (desc.node->group_set_resources[desc.group_set_id].transfer_detached
+            || !changeTransferState(
                 desc.node, desc.group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING)) {
             const bool erased = load_join_registry_.eraseForContext(desc.node, desc.group_set_id, context_id);
             if (!erased) {
@@ -294,6 +295,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
                                       size_t                                 prepared_desc_count,
                                       uint64_t                               context_id) {
     bool device_refs_released = false;
+    bool tree_data_mutated    = false;
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
         const TransferDescriptor& desc           = load_descs[desc_index];
         const size_t              group_set_id   = desc.group_set_id;
@@ -327,6 +329,11 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 
         MultiNodeResource source_set{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
         tree_->groupSets()[group_set_id]->unreferenceBlocks(source_set, BlockRefType::REQUEST);
+        if (desc.node->group_set_resources[group_set_id].transfer_detached) {
+            evictor_.discardDetachedTransfer(desc);
+            tree_data_mutated = true;
+            continue;
+        }
         if (desc.source_tier != Tier::DEVICE) {
             const GroupSetTransferState expected_state =
                 fully_prepared ? GroupSetTransferState::LOADING : GroupSetTransferState::LOAD_PENDING;
@@ -347,8 +354,8 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
             device_refs_released = true;
         }
     }
-    if (device_refs_released) {
-        settled_(false, true);
+    if (tree_data_mutated || device_refs_released) {
+        settled_(tree_data_mutated, device_refs_released);
     }
 }
 
@@ -389,7 +396,8 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
 
     for (const TransferDescriptor& desc : task.load_descs) {
         if (settlement_success && desc.source_tier != Tier::DEVICE
-            && desc.node->group_set_resources[desc.group_set_id].transfer_state != GroupSetTransferState::LOADING) {
+            && (desc.node->group_set_resources[desc.group_set_id].transfer_state != GroupSetTransferState::LOADING
+                || desc.node->group_set_resources[desc.group_set_id].transfer_detached)) {
             RTP_LLM_LOG_WARNING("completion state mismatch, group_set=%zu", desc.group_set_id);
             settlement_success = false;
         }
@@ -410,6 +418,12 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task& task, bool copy_suc
             continue;
         }
         GroupSetResource& resource = desc.node->group_set_resources[group_set_id];
+        if (resource.transfer_detached) {
+            evictor_.discardDetachedTransfer(desc);
+            tree_data_mutated = true;
+            state_settled     = true;
+            continue;
+        }
         if (settlement_success) {
             if (enable_device_cache_) {
                 MultiNodeResource target_holder{

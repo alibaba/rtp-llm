@@ -427,9 +427,24 @@ void BlockTreeCache::checkWatermark() {
             continue;
 
         for (auto& group_set : tree_->groupSets()) {
-            auto victims = evictor_.chooseWatermarkVictims(*group_set, tier, wm.ratio);
-            for (auto& eviction_desc : victims) {
-                evictor_.submitLocked(eviction_desc);
+            size_t excess = evictor_.watermarkExcess(*group_set, tier, wm.ratio);
+            if (excess == 0) {
+                continue;
+            }
+            RTP_LLM_LOG_INFO("tier=%s group_set[%zu] excess=%zu (ratio=%.2f), evicting",
+                             tierName(tier),
+                             group_set->groupSetId(),
+                             excess,
+                             wm.ratio);
+
+            while (excess > 0) {
+                auto eviction_desc = evictor_.chooseVictim(group_set->groupSetId(), tier);
+                if (!eviction_desc.has_value() || !evictor_.submitLocked(*eviction_desc)) {
+                    break;
+                }
+                // Async demotion is counted as one accepted victim; synchronous
+                // FULL prune may reduce the actual excess by an entire closure.
+                excess = std::min(excess - 1, evictor_.watermarkExcess(*group_set, tier, wm.ratio));
             }
         }
     }
