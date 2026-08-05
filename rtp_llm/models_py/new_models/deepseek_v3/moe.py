@@ -2,10 +2,7 @@
 MoE layers for DeepSeek V3.2, new-loader style.
 
 Key design:
-  - DeepSeekV32Experts extends BaseMoEExperts for the routed experts.
-    HF ckpt provides per-expert weights (gate_proj, up_proj, down_proj) which
-    BaseMoEExperts handles with its own EP/TP streaming load_weights override
-    (taking precedence over RtpModule's default via normal Python MRO).
+  - BaseMoEExperts owns the routed experts and their EP/TP loading contract.
   - DeepSeekV32MoEBlock wraps gate + SelectTopk(/GroupTopK) + experts + shared_expert.
     Mirrors GenericMoeLayer.forward but with new-loader submodules.
   - Shared expert reuses the common TP/FP8-safe DeepSeek MLP.
@@ -19,7 +16,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import FakeBalanceExpert, GroupTopK, SelectTopk
@@ -72,15 +68,17 @@ def _validate_routing_args(
     topk_group: int,
     grouped: bool,
 ) -> None:
+    if not 0 < top_k <= num_experts:
+        raise ValueError(f"top_k={top_k} must be in [1, {num_experts}]")
+    if not grouped:
+        return
     if n_group <= 0 or num_experts % n_group:
         raise ValueError(
             f"num_experts={num_experts} must be divisible by n_group={n_group}"
         )
     if not 0 < topk_group <= n_group:
         raise ValueError(f"topk_group={topk_group} must be in [1, n_group={n_group}]")
-    selected_capacity = (
-        topk_group * (num_experts // n_group) if grouped else num_experts
-    )
+    selected_capacity = topk_group * (num_experts // n_group)
     if not 0 < top_k <= selected_capacity:
         raise ValueError(
             f"top_k={top_k} exceeds selected-group capacity {selected_capacity}"
@@ -118,8 +116,6 @@ def _select_deepseek_topk(
         topk_group=topk_group,
         grouped=group_limited,
     )
-    group_size = num_experts // n_group
-
     if scoring_func == 0:
         scores = torch.softmax(router_logits_fp32, dim=-1)
     elif scoring_func == 1:
@@ -129,6 +125,7 @@ def _select_deepseek_topk(
 
     candidate_scores = scores
     if group_limited:
+        group_size = num_experts // n_group
         group_scores = scores.view(-1, n_group, group_size).amax(dim=-1)
         candidate_scores = _mask_scores_by_group(
             scores,
@@ -212,20 +209,6 @@ def _select_deepseek_noaux_topk(
     return topk_weights * routed_scaling_factor, topk_ids
 
 
-class DeepSeekV32Experts(BaseMoEExperts):
-    """Routed experts for DeepSeek V3.2.
-
-    Inherits everything from BaseMoEExperts:
-      - EP/TP expert loading via _dispatch_weight / _dispatch_scale
-      - FP8/FP4 scale fusion in process_weights_after_loading
-      - _build_weights_dict → FusedMoeFactory
-
-    Quantization is driven by LoadConfig. Already-quantized FP8-per-block
-    checkpoints resolve through BaseMoEExperts' shared ``fp8_block`` mapping;
-    plain BF16/FP16 checkpoints use the unquantized path.
-    """
-
-
 class DeepSeekV32MoeGate(RtpModule):
     """Router gate that owns both `weight` and `e_score_correction_bias`.
 
@@ -297,9 +280,12 @@ class DeepSeekV32MoEBlock(RtpModule):
         correction_bias: bool = False,
     ):
         super().__init__()
-        fake_balance_expert = (
-            False if moe_config is None else moe_config.fake_balance_expert
-        )
+        if moe_config is None:
+            fake_balance_expert = False
+        elif isinstance(moe_config, dict):
+            fake_balance_expert = moe_config.get("fake_balance_expert", False)
+        else:
+            fake_balance_expert = getattr(moe_config, "fake_balance_expert", False)
         if not isinstance(fake_balance_expert, bool):
             raise TypeError("moe_config.fake_balance_expert must be a bool")
         if scoring_func not in (0, 1):
@@ -319,10 +305,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             topk_group=topk_group,
             grouped=grouped,
         )
-        self.tp_size = tp_size
-        self.ep_size = ep_size
         self.top_k = top_k
-        self.has_shared_expert = has_shared_expert
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
         self.n_group = n_group
@@ -330,11 +313,25 @@ class DeepSeekV32MoEBlock(RtpModule):
         self.has_moe_norm = has_moe_norm
         self.correction_bias = correction_bias
         self.group_limited = topk_method == "group_limited_greedy"
+
+        def config_value(name: str, default: Any) -> Any:
+            if isinstance(model_config, dict):
+                return model_config.get(name, default)
+            return getattr(model_config, name, default)
+
         routing_config = {
-            "hidden_size": (model_config.hidden_size, hidden_size),
-            "expert_num": (model_config.expert_num, num_experts),
-            "moe_k": (model_config.moe_k, top_k),
-            "has_moe_norm": (model_config.has_moe_norm, has_moe_norm),
+            "hidden_size": (config_value("hidden_size", hidden_size), hidden_size),
+            "expert_num": (config_value("expert_num", num_experts), num_experts),
+            "moe_k": (config_value("moe_k", top_k), top_k),
+            "has_moe_norm": (
+                config_value("has_moe_norm", has_moe_norm),
+                has_moe_norm,
+            ),
+            "moe_n_group": (config_value("moe_n_group", n_group), n_group),
+            "moe_topk_group": (
+                config_value("moe_topk_group", topk_group),
+                topk_group,
+            ),
         }
         mismatches = [
             f"{name}=ModelConfig({actual!r})/constructor({expected!r})"
@@ -352,6 +349,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             and scoring_func == 0
             and not self.group_limited
             and routed_scaling_factor == 1.0
+            and not (top_k == 1 and has_moe_norm)
         )
         # SelectTopk and FusedMoe both consume ModelConfig. The equality check
         # above keeps their sizing/normalization contract identical to the
@@ -384,18 +382,19 @@ class DeepSeekV32MoEBlock(RtpModule):
             and not self._use_fast_select_topk
             and not self._use_fast_group_topk
         ):
-            logger.info(
-                "DeepSeek layer %d uses reference PyTorch MoE routing "
-                "(method=%s scoring_func=%d groups=%d/%d scaling=%s "
-                "renormalize=%s)",
-                layer_idx,
-                topk_method,
-                scoring_func,
-                topk_group,
-                n_group,
-                routed_scaling_factor,
-                has_moe_norm,
-            )
+            if layer_idx == 0:
+                logger.info(
+                    "DeepSeek layer %d uses reference PyTorch MoE routing "
+                    "(method=%s scoring_func=%d groups=%d/%d scaling=%s "
+                    "renormalize=%s)",
+                    layer_idx,
+                    topk_method,
+                    scoring_func,
+                    topk_group,
+                    n_group,
+                    routed_scaling_factor,
+                    has_moe_norm,
+                )
         if fake_balance_expert:
             if parallelism_config is None:
                 raise ValueError(
@@ -414,7 +413,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             self.fake_balance_expert = None
 
         # Routed experts
-        self.experts = DeepSeekV32Experts(
+        self.experts = BaseMoEExperts(
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -442,7 +441,7 @@ class DeepSeekV32MoEBlock(RtpModule):
                 tp_rank=tp_rank,
                 quant_config=quant_config,
                 params_dtype=params_dtype,
-                reduce_output=False,
+                reduce_output=True,
             )
         else:
             self.shared_experts = None
@@ -472,12 +471,17 @@ class DeepSeekV32MoEBlock(RtpModule):
         )
 
         if self.correction_bias:
-            if self._use_fast_group_topk and router_logits_fp32.is_cuda:
-                if self.group_topk is None:
+            if self._use_fast_group_topk:
+                if not router_logits_fp32.is_cuda:
                     raise RuntimeError(
-                        "DeepSeek grouped top-k router is not initialized"
+                        "DeepSeek CUDA grouped top-k router received a CPU tensor"
                     )
-                self.group_topk(
+                group_topk = self.group_topk
+                if group_topk is None:
+                    raise RuntimeError(
+                        "DeepSeek CUDA grouped top-k router is not initialized"
+                    )
+                group_topk(
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     scores=router_logits_fp32,
@@ -501,10 +505,15 @@ class DeepSeekV32MoEBlock(RtpModule):
                 topk_weights.copy_(selected_weights)
                 topk_ids.copy_(selected_ids)
         else:
-            if self._use_fast_select_topk and router_logits_fp32.is_cuda:
-                if self.select_topk is None:
-                    raise RuntimeError("DeepSeek fast top-k router is not initialized")
-                self.select_topk(router_logits_fp32, topk_ids, topk_weights)
+            if self._use_fast_select_topk:
+                if not router_logits_fp32.is_cuda:
+                    raise RuntimeError(
+                        "DeepSeek CUDA top-k router received a CPU tensor"
+                    )
+                select_topk = self.select_topk
+                if select_topk is None:
+                    raise RuntimeError("DeepSeek CUDA top-k router is not initialized")
+                select_topk(router_logits_fp32, topk_ids, topk_weights)
             else:
                 selected_weights, selected_ids = _select_deepseek_topk(
                     router_logits_fp32,
@@ -526,8 +535,6 @@ class DeepSeekV32MoEBlock(RtpModule):
 
         if self.shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
-            if self.tp_size > 1:
-                shared_output = all_reduce(shared_output, group=Group.TP)
             experts_output = experts_output + shared_output
 
         return experts_output

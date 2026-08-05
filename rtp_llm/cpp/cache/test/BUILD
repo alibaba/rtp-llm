@@ -58,6 +58,17 @@ cc_library(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "block_pool_config_helper_test",
+    srcs = ["BlockPoolConfigHelperTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool_config",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_binary(
     name = "cache_config_creator_py_test",
     linkshared = 1,

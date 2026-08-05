@@ -26,14 +26,14 @@ import torch.nn as nn
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
-    _build_mla_runtime_layout,
-    _build_rope_cache,
-    _extract_config_values,
-    _nonnegative_int,
-    _positive_int,
-    _read_config_json,
+    MlaRuntimeLayoutMixin,
+    build_rope_cache,
+    checkpoint_path,
+    extract_config_values,
+    nonnegative_int,
+    positive_int,
+    read_config_json,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.model import DeepSeekV32DecoderLayer
 from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
@@ -89,7 +89,7 @@ def _draft_checkpoint_layer(config_json: Dict[str, Any]) -> int:
         isinstance(name, str) for name in architectures
     ):
         raise TypeError("config.json architectures must be a list of strings")
-    nextn_layers = _nonnegative_int(
+    nextn_layers = nonnegative_int(
         config_json.get("num_nextn_predict_layers", 0),
         "num_nextn_predict_layers",
     )
@@ -107,7 +107,7 @@ def _draft_checkpoint_layer(config_json: Dict[str, Any]) -> int:
             "appended MTP "
             f"layer, got num_nextn_predict_layers={nextn_layers}"
         )
-    return _positive_int(config_json.get("num_hidden_layers"), "num_hidden_layers")
+    return positive_int(config_json.get("num_hidden_layers"), "num_hidden_layers")
 
 
 # ------------------------------------------------------------------ #
@@ -115,7 +115,7 @@ def _draft_checkpoint_layer(config_json: Dict[str, Any]) -> int:
 # ------------------------------------------------------------------ #
 
 
-class DeepSeekV32MTPForCausalLM(GptModelBase):
+class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
     """DeepSeek V3 MTP draft head for new-loader.
 
     Single-layer MoE decoder + MTPBlock projection.
@@ -162,17 +162,14 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
         )
         self._mla_kernel_layout = None
 
-        # Resolve ckpt_path
-        ckpt_path = ""
-        if hasattr(model_config, "ckpt_path") and model_config.ckpt_path:
-            ckpt_path = model_config.ckpt_path
+        ckpt_path = checkpoint_path(model_config)
 
-        config_json = _read_config_json(ckpt_path)
+        config_json = read_config_json(ckpt_path)
         if not config_json:
             raise FileNotFoundError(
                 "DeepSeek MTP newloader requires checkpoint config.json"
             )
-        cfg = _extract_config_values(model_config, load_config, config_json)
+        cfg = extract_config_values(model_config, load_config, config_json)
         self._checkpoint_layer = _draft_checkpoint_layer(config_json)
         self._checkpoint_prefix = f"model.layers.{self._checkpoint_layer}."
 
@@ -197,7 +194,7 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
 
         # --- RoPE cache ---
         device = torch.device(getattr(load_config, "device", "cuda"))
-        cos_sin_cache = _build_rope_cache(
+        cos_sin_cache = build_rope_cache(
             config_json if config_json else cfg,
             cfg["max_seq_len"],
             device,
@@ -285,41 +282,6 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
             tp_size=cfg["lm_head_tp_size"],
             tp_rank=cfg["lm_head_tp_rank"],
             params_dtype=cfg["lm_head_params_dtype"],
-        )
-
-    def runtime_weight_view(self) -> Dict[str, torch.Tensor]:
-        return {
-            "embedding": self.embed_tokens.weight,
-            "final_layernorm.gamma": self.norm.weight,
-            "lm_head": self.lm_head.weight,
-        }
-
-    def initialize(self, init_resource):
-        """Build the MLA kernel layout after all post-load hooks have run."""
-        ok = super().initialize(init_resource)
-        self._ensure_mla_kernel_layout()
-        return ok
-
-    def _ensure_mla_kernel_layout(self) -> None:
-        """Reconstruct only the W.* tensor views required by MLA kernels."""
-        if self._mla_kernel_layout is not None:
-            return
-        self._mla_kernel_layout = _build_mla_runtime_layout(
-            self.layers,
-            self.cos_sin_cache,
-        )
-
-    def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
-    ) -> Any:
-        self._ensure_mla_kernel_layout()
-        return AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self._mla_kernel_layout,
-            inputs.attention_inputs,
-            self.fmha_config,
-            is_cuda_graph,
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

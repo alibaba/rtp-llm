@@ -99,7 +99,7 @@ class IndexerOp(nn.Module):
         self.index_head_dim = index_head_dim
         self.index_topk = index_topk
         self.rope_head_dim = rope_head_dim
-        self.cos_sin_cache = cos_sin_cache
+        self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
         self.blocksize = blocksize
         self.block_size = block_size
         self.scale_fmt = scale_fmt
@@ -603,9 +603,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

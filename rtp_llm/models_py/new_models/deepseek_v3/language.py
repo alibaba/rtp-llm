@@ -59,19 +59,65 @@ class MlaKernelWeightLayout:
         return None
 
 
-def _build_mla_runtime_layout(
+def build_mla_runtime_layout(
     layers: nn.ModuleList,
     cos_sin_cache: torch.Tensor,
 ) -> MlaKernelWeightLayout:
-    """Capture MLA runtime tensors, then free superseded checkpoint storage."""
+    """Capture MLA runtime tensor views without mutating checkpoint storage."""
     attentions = [layer.self_attn for layer in layers]
-    layout = MlaKernelWeightLayout(
+    return MlaKernelWeightLayout(
         [attention._build_mla_kernel_weights() for attention in attentions],
         cos_sin_cache,
     )
-    for attention in attentions:
-        attention.release_checkpoint_only_weights()
-    return layout
+
+
+def keep_mla_checkpoint_weights() -> bool:
+    """Return whether debugging requested retention of superseded weights."""
+    value = os.environ.get("RTP_LLM_KEEP_MLA_CHECKPOINT_WEIGHTS", "0")
+    if value not in {"0", "1"}:
+        raise ValueError(
+            "RTP_LLM_KEEP_MLA_CHECKPOINT_WEIGHTS must be either '0' or '1'"
+        )
+    return value == "1"
+
+
+class MlaRuntimeLayoutMixin:
+    """Shared MLA runtime-layout lifecycle for score and MTP models."""
+
+    def runtime_weight_view(self) -> Dict[str, torch.Tensor]:
+        return {
+            "embedding": self.embed_tokens.weight,
+            "final_layernorm.gamma": self.norm.weight,
+            "lm_head": self.lm_head.weight,
+        }
+
+    def initialize(self, init_resource):
+        ok = super().initialize(init_resource)
+        self._ensure_mla_kernel_layout()
+        if not keep_mla_checkpoint_weights():
+            for layer in self.layers:
+                layer.self_attn.release_checkpoint_only_weights()
+        return ok
+
+    def _ensure_mla_kernel_layout(self) -> None:
+        if self._mla_kernel_layout is None:
+            self._mla_kernel_layout = build_mla_runtime_layout(
+                self.layers,
+                self.cos_sin_cache,
+            )
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        self._ensure_mla_kernel_layout()
+        return AttnImplFactory.get_fmha_impl(
+            self.config,
+            self.parallelism_config,
+            self._mla_kernel_layout,
+            inputs.attention_inputs,
+            self.fmha_config,
+            is_cuda_graph,
+        )
 
 
 # ------------------------------------------------------------------ #
@@ -147,13 +193,24 @@ def _resolve_yarn_parameters(config_json: dict) -> Optional[dict]:
         raise ValueError(f"DeepSeek YaRN configuration is missing keys: {missing}")
     factor = yarn["factor"]
     original_max = yarn["original_max_position_embeddings"]
-    for name, value in (
-        ("factor", factor),
-        ("mscale", yarn["mscale"]),
-        ("mscale_all_dim", yarn["mscale_all_dim"]),
+    if (
+        isinstance(factor, bool)
+        or not isinstance(factor, (int, float))
+        or not math.isfinite(float(factor))
+        or factor <= 0
     ):
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            raise ValueError(f"DeepSeek YaRN {name} must be positive, got {value!r}")
+        raise ValueError(f"DeepSeek YaRN factor must be positive, got {factor!r}")
+    for name in ("mscale", "mscale_all_dim"):
+        value = yarn[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+        ):
+            raise ValueError(
+                f"DeepSeek YaRN {name} must be non-negative, got {value!r}"
+            )
     if (
         isinstance(original_max, bool)
         or not isinstance(original_max, int)
@@ -166,7 +223,7 @@ def _resolve_yarn_parameters(config_json: dict) -> Optional[dict]:
     return yarn
 
 
-def _build_rope_cache(
+def build_rope_cache(
     config_json: dict,
     max_seq_len: int,
     device: torch.device,
@@ -237,7 +294,7 @@ def _build_rope_cache(
     )
 
 
-def _read_config_json(ckpt_path: str) -> Dict[str, Any]:
+def read_config_json(ckpt_path: str) -> Dict[str, Any]:
     """Read config.json from ckpt path, return empty dict if not found."""
     if not ckpt_path:
         return {}
@@ -251,13 +308,26 @@ def _read_config_json(ckpt_path: str) -> Dict[str, Any]:
     return payload
 
 
-def _positive_int(value: Any, name: str) -> int:
+def checkpoint_path(model_config: Any) -> str:
+    value = (
+        model_config.get("ckpt_path", "")
+        if isinstance(model_config, dict)
+        else getattr(model_config, "ckpt_path", "")
+    )
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise TypeError(f"model_config.ckpt_path must be a string, got {value!r}")
+    return value
+
+
+def positive_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
     return value
 
 
-def _nonnegative_int(value: Any, name: str) -> int:
+def nonnegative_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
     return value
@@ -283,7 +353,7 @@ def _bool_value(value: Any, name: str) -> bool:
 def _partition(load_config: Any, prefix: str) -> tuple[int, int]:
     size = getattr(load_config, f"{prefix}_size", None)
     rank = getattr(load_config, f"{prefix}_rank", None)
-    size = _positive_int(size, f"{prefix}_size")
+    size = positive_int(size, f"{prefix}_size")
     if isinstance(rank, bool) or not isinstance(rank, int) or not 0 <= rank < size:
         raise ValueError(f"invalid {prefix} partition: rank={rank!r}, size={size}")
     return size, rank
@@ -294,7 +364,7 @@ def _partition(load_config: Any, prefix: str) -> tuple[int, int]:
 # ------------------------------------------------------------------ #
 
 
-def _extract_config_values(
+def extract_config_values(
     model_config: Any,
     load_config: Any,
     config_json: Optional[Dict[str, Any]] = None,
@@ -311,8 +381,17 @@ def _extract_config_values(
             return obj.get(name, default)
         return getattr(obj, name, default)
 
-    hidden_size = _positive_int(_get(model_config, "hidden_size", 7168), "hidden_size")
-    num_layers = _positive_int(
+    eplb_config = _get(model_config, "eplb_config", None)
+    enable_eplb = _get(eplb_config, "enable_eplb", False)
+    if callable(enable_eplb):
+        enable_eplb = enable_eplb()
+    if not isinstance(enable_eplb, bool):
+        raise TypeError("eplb_config.enable_eplb must be a bool")
+    if enable_eplb:
+        raise ValueError("EPLB is not supported by the DeepSeek newloader path")
+
+    hidden_size = positive_int(_get(model_config, "hidden_size", 7168), "hidden_size")
+    num_layers = positive_int(
         _get(
             model_config,
             "num_layers",
@@ -320,8 +399,8 @@ def _extract_config_values(
         ),
         "num_layers",
     )
-    vocab_size = _positive_int(_get(model_config, "vocab_size", 102400), "vocab_size")
-    max_seq_len = _positive_int(_get(model_config, "max_seq_len", 8192), "max_seq_len")
+    vocab_size = positive_int(_get(model_config, "vocab_size", 102400), "vocab_size")
+    max_seq_len = positive_int(_get(model_config, "max_seq_len", 8192), "max_seq_len")
 
     # Attention config
     attn_config = _get(model_config, "attn_config", None)
@@ -389,18 +468,17 @@ def _extract_config_values(
     n_shared_experts = _get(model_config, "n_shared_experts", 1)
     if config_json:
         n_shared_experts = config_json.get("n_shared_experts", n_shared_experts)
-    n_shared_experts = _nonnegative_int(n_shared_experts, "n_shared_experts")
+    n_shared_experts = nonnegative_int(n_shared_experts, "n_shared_experts")
     shared_expert_intermediate_size = _get(
         model_config,
         "shared_expert_intermediate_size",
         None,
     )
-    if shared_expert_intermediate_size is None and config_json:
+    if shared_expert_intermediate_size in (None, 0) and config_json:
         shared_expert_intermediate_size = config_json.get(
-            "shared_expert_intermediate_size",
-            n_shared_experts * moe_intermediate_size,
+            "shared_expert_intermediate_size"
         )
-    if shared_expert_intermediate_size is None:
+    if shared_expert_intermediate_size in (None, 0):
         shared_expert_intermediate_size = n_shared_experts * moe_intermediate_size
 
     # NOTE: model_config.inter_size is overridden by the old-loader to
@@ -429,10 +507,10 @@ def _extract_config_values(
         first_k_dense_replace = _get(model_config, "first_k_dense_replace", 1)
     if moe_layer_freq is None:
         moe_layer_freq = _get(model_config, "moe_layer_freq", 1)
-    first_k_dense_replace = _nonnegative_int(
+    first_k_dense_replace = nonnegative_int(
         first_k_dense_replace, "first_k_dense_replace"
     )
-    moe_layer_freq = _positive_int(moe_layer_freq, "moe_layer_freq")
+    moe_layer_freq = positive_int(moe_layer_freq, "moe_layer_freq")
     moe_layer_index = [
         i
         for i in range(num_layers)
@@ -480,20 +558,8 @@ def _extract_config_values(
         has_e_score_correction, "has_e_score_correction"
     )
 
-    # Rope interleave style.
-    # The old loader sets these on model_config.attn_config.rope_config
-    # (is_neox_style / indexer_is_neox_style), NOT as direct attributes on
-    # model_config.  So _get(model_config, "rope_interleave", ...) returns the
-    # default.  Read from config_json to get the raw value — this matters for
-    # GLM-5 which may set rope_interleave=False / indexer_rope_interleave=True.
-    rope_interleave = _get(model_config, "rope_interleave", None)
-    if rope_interleave is None and config_json:
-        rope_interleave = config_json.get("rope_interleave", True)
-    if rope_interleave is None:
-        rope_interleave = True
-    rope_interleave = _bool_value(rope_interleave, "rope_interleave")
-    is_neox_style = not rope_interleave
-
+    # Only the sparse indexer consumes an interleave flag. MLA RoPE itself is
+    # applied by the backend and does not read a model-level is_neox_style.
     indexer_rope_interleave = _get(model_config, "indexer_rope_interleave", None)
     if indexer_rope_interleave is None and config_json:
         indexer_rope_interleave = config_json.get("indexer_rope_interleave", False)
@@ -528,20 +594,27 @@ def _extract_config_values(
         "config.json tie_word_embeddings",
     )
     tie_word_embeddings = model_tie_word_embeddings or checkpoint_tie_word_embeddings
+    if tie_word_embeddings and (
+        attn_tp_size != lm_head_tp_size or attn_tp_rank != lm_head_tp_rank
+    ):
+        raise ValueError(
+            "tied DeepSeek embeddings require matching attention and LM-head "
+            "TP partitions"
+        )
     moe_config = getattr(load_config, "moe_config", None)
 
     # Kernel tokens per block
     blocksize = _get(model_config, "kernel_tokens_per_block", 64)
     if attn_config is not None:
         blocksize = _get(attn_config, "kernel_tokens_per_block", blocksize)
-    blocksize = _positive_int(blocksize, "kernel_tokens_per_block")
+    blocksize = positive_int(blocksize, "kernel_tokens_per_block")
 
-    q_lora_rank = _nonnegative_int(q_lora_rank, "q_lora_rank")
-    kv_lora_rank = _positive_int(kv_lora_rank, "kv_lora_rank")
-    num_heads = _positive_int(num_heads, "num_attention_heads")
-    nope_head_dim = _positive_int(nope_head_dim, "qk_nope_head_dim")
-    rope_head_dim = _positive_int(rope_head_dim, "qk_rope_head_dim")
-    v_head_dim = _positive_int(v_head_dim, "v_head_dim")
+    q_lora_rank = nonnegative_int(q_lora_rank, "q_lora_rank")
+    kv_lora_rank = positive_int(kv_lora_rank, "kv_lora_rank")
+    num_heads = positive_int(num_heads, "num_attention_heads")
+    nope_head_dim = positive_int(nope_head_dim, "qk_nope_head_dim")
+    rope_head_dim = positive_int(rope_head_dim, "qk_rope_head_dim")
+    v_head_dim = positive_int(v_head_dim, "v_head_dim")
     if rope_head_dim % 2:
         raise ValueError("qk_rope_head_dim must be even")
     if num_heads % attn_tp_size:
@@ -550,17 +623,13 @@ def _extract_config_values(
             f"attn_tp_size={attn_tp_size}"
         )
     is_sparse = _bool_value(is_sparse, "is_sparse")
-    dense_intermediate_size = _positive_int(
-        dense_intermediate_size, "intermediate_size"
-    )
-    moe_intermediate_size = _positive_int(
-        moe_intermediate_size, "moe_intermediate_size"
-    )
-    shared_expert_intermediate_size = _nonnegative_int(
+    dense_intermediate_size = positive_int(dense_intermediate_size, "intermediate_size")
+    moe_intermediate_size = positive_int(moe_intermediate_size, "moe_intermediate_size")
+    shared_expert_intermediate_size = nonnegative_int(
         shared_expert_intermediate_size, "shared_expert_intermediate_size"
     )
-    num_experts = _nonnegative_int(num_experts, "num_experts")
-    top_k = _nonnegative_int(top_k, "num_experts_per_tok")
+    num_experts = nonnegative_int(num_experts, "num_experts")
+    top_k = nonnegative_int(top_k, "num_experts_per_tok")
     if moe_layer_index:
         if num_experts == 0:
             raise ValueError("DeepSeek MoE layers require a positive expert count")
@@ -575,17 +644,17 @@ def _extract_config_values(
     if is_sparse:
         if q_lora_rank == 0:
             raise ValueError("DeepSeek sparse indexer requires q_lora_rank > 0")
-        indexer_head_dim = _positive_int(indexer_head_dim, "index_head_dim")
-        indexer_head_num = _positive_int(indexer_head_num, "index_n_heads")
-        indexer_topk = _positive_int(indexer_topk, "index_topk")
-    scoring_func = _nonnegative_int(scoring_func, "scoring_func")
+        indexer_head_dim = positive_int(indexer_head_dim, "index_head_dim")
+        indexer_head_num = positive_int(indexer_head_num, "index_n_heads")
+        indexer_topk = positive_int(indexer_topk, "index_topk")
+    scoring_func = nonnegative_int(scoring_func, "scoring_func")
     if scoring_func not in (0, 1):
         raise ValueError(f"unsupported scoring_func={scoring_func}")
     routed_scaling_factor = _positive_float(
         routed_scaling_factor, "routed_scaling_factor"
     )
-    n_group = _positive_int(n_group, "n_group")
-    topk_group = _positive_int(topk_group, "topk_group")
+    n_group = positive_int(n_group, "n_group")
+    topk_group = positive_int(topk_group, "topk_group")
     if topk_group > n_group:
         raise ValueError(f"topk_group={topk_group} exceeds n_group={n_group}")
     if moe_layer_index and topk_method in {"group_limited_greedy", "noaux_tc"}:
@@ -629,7 +698,6 @@ def _extract_config_values(
         indexer_head_dim=indexer_head_dim,
         indexer_head_num=indexer_head_num,
         indexer_topk=indexer_topk,
-        is_neox_style=is_neox_style,
         indexer_is_neox_style=indexer_is_neox_style,
         blocksize=blocksize,
         tp_size=attn_tp_size,
@@ -657,7 +725,7 @@ def _extract_config_values(
 # ------------------------------------------------------------------ #
 
 
-class DeepSeekV32ForCausalLM(GptModelBase):
+class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
     """Config-driven DeepSeek MLA/MoE implementation for newloader.
 
     WEIGHTS_MAPPER only strips "model." prefix.  All submodule names match
@@ -698,7 +766,7 @@ class DeepSeekV32ForCausalLM(GptModelBase):
         ``language_config`` section into the top-level dict so that
         _extract_config_values can find MLA / MoE fields).
         """
-        return _read_config_json(ckpt_path)
+        return read_config_json(ckpt_path)
 
     def load_weights(self, weights):
         if isinstance(weights, dict):
@@ -749,10 +817,7 @@ class DeepSeekV32ForCausalLM(GptModelBase):
         )
         self._mla_kernel_layout: Optional[MlaKernelWeightLayout] = None
 
-        # Resolve ckpt_path from model_config.ckpt_path (C++ pybind attribute).
-        ckpt_path = ""
-        if hasattr(model_config, "ckpt_path") and model_config.ckpt_path:
-            ckpt_path = model_config.ckpt_path
+        ckpt_path = checkpoint_path(model_config)
 
         # Read config.json early — _extract_config_values needs it to
         # resolve fields that old-loader's _create_config overwrites on
@@ -766,12 +831,12 @@ class DeepSeekV32ForCausalLM(GptModelBase):
                 "MLA, RoPE, MoE, and dense-layer topology"
             )
 
-        cfg = _extract_config_values(model_config, load_config, config_json)
+        cfg = extract_config_values(model_config, load_config, config_json)
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
 
         # --- RoPE cache: read config.json directly for full rope fields ---
         device = torch.device(getattr(load_config, "device", "cuda"))
-        cos_sin_cache = _build_rope_cache(
+        cos_sin_cache = build_rope_cache(
             config_json if config_json else cfg,
             cfg["max_seq_len"],
             device,
@@ -852,54 +917,6 @@ class DeepSeekV32ForCausalLM(GptModelBase):
             tp_size=cfg["lm_head_tp_size"],
             tp_rank=cfg["lm_head_tp_rank"],
             params_dtype=cfg["lm_head_params_dtype"],
-        )
-
-    def runtime_weight_view(self) -> Dict[str, torch.Tensor]:
-        return {
-            "embedding": self.embed_tokens.weight,
-            "final_layernorm.gamma": self.norm.weight,
-            "lm_head": self.lm_head.weight,
-        }
-
-    def initialize(self, init_resource):
-        """Build the MLA kernel layout after all post-load hooks have run.
-
-        Called by C++ PyWrappedModel after weight loading +
-        process_weights_after_loading completes, before any prepare_fmha_impl /
-        forward.  By this point every self_attn module has _fused_qkv_a_w /
-        _kc_w / _vc_w populated, so the W.* kernel views are ready.
-        """
-        ok = super().initialize(init_resource)
-        self._ensure_mla_kernel_layout()
-        return ok
-
-    def _ensure_mla_kernel_layout(self) -> None:
-        """Reconstruct only the W.* tensor views required by MLA kernels.
-
-        Cannot run inside __init__ (params not loaded yet) or inside
-        process_weights_after_loading (parent hook fires before children's,
-        so layer.self_attn._fused_qkv_a_w etc. would still be None).
-        Called from initialize() once all child post-load hooks have run, and
-        also kept as a lazy fallback in forward() for direct-execution paths.
-        """
-        if self._mla_kernel_layout is not None:
-            return
-        self._mla_kernel_layout = _build_mla_runtime_layout(
-            self.layers,
-            self.cos_sin_cache,
-        )
-
-    def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
-    ) -> Any:
-        self._ensure_mla_kernel_layout()
-        return AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self._mla_kernel_layout,
-            inputs.attention_inputs,
-            self.fmha_config,
-            is_cuda_graph,
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

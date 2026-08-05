@@ -16,6 +16,20 @@ def h20_oss_suites():
                 envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="h20_deepseek_v32_newloader_cudagraph_deepep_tp2",
+                task_info="data/model/deepseek_v32_4layers/v32_fp8_q_r_h20_cuda_graph.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 1 --reserver_runtime_mem_mb 20000 --tp_size 2 --world_size 2 --dp_size 1 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 1",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_deepseek_v32_mtp_newloader",
+                task_info="data/model/deepseek_v32_4layers/v32_fp8_q_r_h20.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1 --fp8_kv_cache 1 --sp_type mtp --sp_model_type deepseek-v3-mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V3.2-Exp --sp_act_type BF16 --sp_min_token_match 2 --sp_max_token_match 2",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                gpu_type=["H20"],
+            ),
         ],
     )
 

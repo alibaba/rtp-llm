@@ -22,6 +22,7 @@ deepseek_test_deps = [
 py_test(
     name = "test_deepseek_newloader",
     srcs = ["test_deepseek_newloader.py"],
+    main = "test_deepseek_newloader.py",
     deps = deepseek_test_deps,
 )
 
@@ -33,7 +34,7 @@ py_test(
         "gpu": "H20",
         "gpu_count": "1",
     },
-    tags = ["gpu"],
+    tags = ["H20"],
     deps = deepseek_test_deps,
 )
 
@@ -45,9 +46,6 @@ py_test(
         "gpu": "MI308X-ROCM7",
         "gpu_count": "1",
     },
-    tags = [
-        "gpu",
-        "rocm",
-    ],
+    tags = ["rocm"],
     deps = deepseek_test_deps,
 )

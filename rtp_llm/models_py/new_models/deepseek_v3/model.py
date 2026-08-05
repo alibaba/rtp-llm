@@ -18,13 +18,12 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.layers.linear import ColumnParallelLinear
-from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
+from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import IndexerOp
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
-from rtp_llm.utils.model_weight import W
 
 from .attention import DeepSeekV32MlaAttention
 from .mlp import DeepSeekV32MLP
@@ -125,8 +124,6 @@ class DeepSeekV32Indexer(RtpModule):
             bias=False,
             params_dtype=torch.float32,
         )
-
-        self.cos_sin_cache = cos_sin_cache
 
         self.indexer_op = IndexerOp(
             index_n_heads=index_n_heads,
@@ -422,7 +419,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
-        fmha_impl: Any,
+        fmha_impl: MlaImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)

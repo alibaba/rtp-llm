@@ -7,14 +7,14 @@ Key design decisions:
     HF weights flow through RtpModule.load_weights directly into nn.Parameter.
   - process_weights_after_loading() fuses q_a_proj + kv_a_proj_with_mqa into
     _fused_qkv_a_w and splits kv_b_proj into the absorb/decode views.
-  - _build_mla_kernel_weights() assembles the W.* layout that MlaImplBase
-    factory expects at forward time.
+  - _build_mla_kernel_weights() exposes only the kv_b/kc/vc tensors consumed
+    by the MLA backend; Q and O projections execute through this module.
   - forward() mirrors MlaAttention.forward() exactly; the Indexer is a
     separate submodule built by the DecoderLayer when is_sparse is True.
 """
 
 import math
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -393,7 +393,6 @@ class DeepSeekV32MlaAttention(RtpModule):
 
         # --- Fused weights (built after loading) ---
         self.register_buffer("_fused_qkv_a_w", None, persistent=False)
-        self.register_buffer("_fused_qkv_a_s", None, persistent=False)
         self._fused_qkv_a_runtime: Optional[nn.Module] = None
         self.register_buffer("_kv_b_w", None, persistent=False)
         self.register_buffer("_kv_b_runtime_w", None, persistent=False)
@@ -465,7 +464,6 @@ class DeepSeekV32MlaAttention(RtpModule):
                 fused_a_scale,
             )
             self._fused_qkv_a_w = fused_a_weight
-            self._fused_qkv_a_s = fused_a_scale
         else:
             q_a_w = _linear_weight_bf16(self.q_a_proj)
             kv_a_w = _linear_weight_bf16(self.kv_a_proj_with_mqa)
@@ -491,7 +489,6 @@ class DeepSeekV32MlaAttention(RtpModule):
                     fused_a_weight, fused_a_scale
                 )
                 self._fused_qkv_a_w = fused_a_weight
-                self._fused_qkv_a_s = fused_a_scale
             else:
                 self._fused_qkv_a_w = fused_a_bf16
 
@@ -535,55 +532,13 @@ class DeepSeekV32MlaAttention(RtpModule):
             )
 
     def _build_mla_kernel_weights(self) -> Dict[str, torch.Tensor]:
-        """Assemble the W.* dict that MlaImplBase expects at forward time."""
+        """Expose only the kv_b/kc/vc tensors consumed by MLA factories."""
         if self._fused_qkv_a_w is None:
             raise RuntimeError(
                 "process_weights_after_loading() must be called before "
                 "_build_mla_kernel_weights()"
             )
         weights: Dict[str, torch.Tensor] = {}
-        if self.q_lora_rank > 0:
-            if self.q_b_proj is None or self.q_a_layernorm is None:
-                raise RuntimeError("incomplete MLA Q-LoRA runtime layout")
-            if self._fused_qkv_a_s is not None:
-                (
-                    weights[W.mla_fusedqkrope_w],
-                    weights[W.mla_fusedqkrope_s],
-                ) = _kernel_fp8_weight_and_scale(
-                    self._fused_qkv_a_w,
-                    self._fused_qkv_a_s,
-                )
-            else:
-                weights[W.mla_fusedqkrope_w] = self._fused_qkv_a_w.t()
-
-            q_b_weight = self.q_b_proj.weight.data
-            q_b_scale = _fp8_scale_parameter(self.q_b_proj)
-            if q_b_scale is not None:
-                (
-                    weights[W.mla_q_b_w],
-                    weights[W.mla_q_b_s],
-                ) = _kernel_fp8_weight_and_scale(q_b_weight, q_b_scale.data)
-            else:
-                weights[W.mla_q_b_w] = q_b_weight.t()
-            weights[W.mla_q_a_ln_gamma] = self.q_a_layernorm.weight.data
-        else:
-            weights[W.mla_fusedqkrope_no_lora_w] = self._fused_qkv_a_w.t()
-        weights[W.mla_kv_a_ln_gamma] = self.kv_a_layernorm.weight.data
-        o_weight = self.o_proj.weight.data
-        o_scale = _fp8_scale_parameter(self.o_proj)
-        if o_scale is not None:
-            (
-                weights[W.attn_o_w],
-                weights[W.attn_o_s],
-            ) = _kernel_fp8_weight_and_scale(
-                o_weight,
-                o_scale.data,
-            )
-        else:
-            # BF16 LinearFactory consumes the legacy [input, output] layout.
-            # Keep a transpose view so GEMM observes the correct stride.
-            weights[W.attn_o_w] = o_weight.t()
-
         # Prefill consumes kv_b through the attention factory. Preserve the
         # FP8 weight/scale pair so it selects the same block-quantized linear
         # as the legacy loader; kc/vc remain dequantized derived views for the

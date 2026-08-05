@@ -46,9 +46,8 @@ public:
         for (size_t i = 0; i < cache_config.mtp_sub_configs.size(); ++i) {
             const auto& mtp_sub_config = cache_config.mtp_sub_configs[i];
             RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);
-            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config->groupNums() > 0,
-                                    "MTP module %zu cache groups must not be empty",
-                                    i);
+            RTP_LLM_CHECK_WITH_INFO(
+                mtp_sub_config->groupNums() > 0, "MTP module %zu cache groups must not be empty", i);
 
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
@@ -60,16 +59,22 @@ public:
                 }
             }
             const auto& mtp_spec = mtp_sub_config->specForGroup(real_mtp_gid);
+            // Sparse attention stores the quantized indexer K cache in the
+            // scale pool. Its stride is an explicit CacheConfig override and
+            // therefore is not represented by the MLA spec's scale size.
+            const auto mtp_scale_stride_bytes =
+                mtp_sub_config->is_sparse ? mtp_sub_config->kv_scale_stride_bytes : mtp_spec->scale_block_size_bytes();
             // MTP block size may differ from the main model. Use the real
             // MTP group that owns a layer; target-aligned placeholder groups
             // must not affect the sub-model memory layout.
-            MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
-                                                                     mtp_layer_num,
-                                                                     mtp_spec->block_size_bytes(),
-                                                                     mtp_spec->scale_block_size_bytes(),
-                                                                     mtp_spec,
-                                                                     cache_config,
-                                                                     mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid));
+            MemoryLayoutConfig mtp_layout =
+                createMemoryLayoutConfig(false,
+                                         mtp_layer_num,
+                                         mtp_spec->block_size_bytes(),
+                                         mtp_scale_stride_bytes,
+                                         mtp_spec,
+                                         *mtp_sub_config,
+                                         mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid));
 
             mtp_layout.kv_cache_offset_bytes = current_offset;
             RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);
@@ -143,9 +148,9 @@ private:
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla             = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla            = cache_config.use_mla;
-        cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
+        cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
+        cfg.use_mla                    = cache_config.use_mla;
+        cfg.seq_size_per_block         = static_cast<size_t>(cache_config.seq_size_per_block);
         cfg.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
 
         cfg.kv_block_pool_size_bytes =

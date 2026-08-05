@@ -22,8 +22,8 @@ from rtp_llm.models_py.new_models.deepseek_v3.attention import (
 )
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
     DeepSeekV32ForCausalLM,
-    _build_rope_cache,
-    _extract_config_values,
+    build_rope_cache,
+    extract_config_values,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
 from rtp_llm.models_py.new_models.deepseek_v3.model import DeepSeekV32Indexer
@@ -43,7 +43,7 @@ from rtp_llm.models_py.new_models.deepseek_v3_mtp.language import (
 from rtp_llm.models_py.new_models.mtp import MTPBlock
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.registry import get_model_class
-from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops import EplbMode, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 from rtp_llm.utils.model_weight import W
 
@@ -123,6 +123,8 @@ def _router_model_config(
     expert_num=4,
     moe_k=2,
     has_moe_norm=False,
+    moe_n_group=1,
+    moe_topk_group=1,
 ):
     config = ModelConfig()
     config.attn_config.head_num = 1
@@ -134,6 +136,8 @@ def _router_model_config(
     config.expert_num = expert_num
     config.moe_k = moe_k
     config.has_moe_norm = has_moe_norm
+    config.moe_n_group = moe_n_group
+    config.moe_topk_group = moe_topk_group
     config.quant_config = None
     return config
 
@@ -171,6 +175,45 @@ def _deterministic_values(shape, offset):
     )
 
 
+def _manual_noaux_reference(
+    logits,
+    correction_bias,
+    *,
+    top_k,
+    n_group,
+    topk_group,
+    renormalize,
+    routed_scaling_factor,
+):
+    """Independent HF-style reference for forward/router integration tests."""
+    scores = logits.float().sigmoid()
+    scores_for_choice = scores + correction_bias
+    group_size = scores.shape[-1] // n_group
+    grouped_scores = scores_for_choice.view(-1, n_group, group_size)
+    group_scores = grouped_scores.topk(
+        min(2, group_size), dim=-1, sorted=False
+    ).values.sum(dim=-1)
+    selected_groups = group_scores.topk(topk_group, dim=-1, sorted=False).indices
+    group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
+    group_mask.scatter_(1, selected_groups, True)
+    expert_mask = (
+        group_mask.unsqueeze(-1)
+        .expand(-1, -1, group_size)
+        .reshape_as(scores_for_choice)
+    )
+    topk_ids = (
+        scores_for_choice.masked_fill(~expert_mask, float("-inf"))
+        .topk(top_k, dim=-1, sorted=False)
+        .indices
+    )
+    topk_weights = scores.gather(1, topk_ids)
+    if renormalize and top_k > 1:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
+            1e-20
+        )
+    return topk_weights * routed_scaling_factor, topk_ids
+
+
 def _dense_checkpoint_weights():
     values = _deterministic_values
     return {
@@ -198,6 +241,8 @@ def _mtp_loader_model_config(checkpoint_path):
     config.num_layers = 1
     config.expert_num = 2
     config.moe_k = 1
+    config.moe_n_group = 1
+    config.moe_topk_group = 1
     config.data_type = "fp32"
     config.activation_type = "SiGLU"
     return config
@@ -282,7 +327,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         max_seq_len = 32
         rope_dim = 8
         base = 10000.0
-        plain = _build_rope_cache(
+        plain = build_rope_cache(
             {"qk_rope_head_dim": rope_dim, "rope_theta": base},
             max_seq_len,
             torch.device("cpu"),
@@ -302,7 +347,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         beta_slow = 1.0
         mscale = 1.0
         mscale_all_dim = 1.0
-        yarn = _build_rope_cache(
+        yarn = build_rope_cache(
             {
                 "qk_rope_head_dim": rope_dim,
                 "rope_theta": base,
@@ -363,7 +408,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             )
         )
 
-        rope_parameters_yarn = _build_rope_cache(
+        rope_parameters_yarn = build_rope_cache(
             {
                 "qk_rope_head_dim": rope_dim,
                 "rope_parameters": {
@@ -382,10 +427,38 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         )
         self.assertTrue(torch.equal(rope_parameters_yarn, yarn))
 
+        zero_all_dim = build_rope_cache(
+            {
+                "qk_rope_head_dim": rope_dim,
+                "rope_theta": base,
+                "rope_scaling": {
+                    "factor": factor,
+                    "original_max_position_embeddings": original_max,
+                    "beta_fast": beta_fast,
+                    "beta_slow": beta_slow,
+                    "mscale": mscale,
+                    "mscale_all_dim": 0.0,
+                },
+            },
+            max_seq_len,
+            torch.device("cpu"),
+        )
+        zero_all_dim_scale = yarn_mscale(mscale)
+        torch.testing.assert_close(
+            zero_all_dim,
+            torch.cat(
+                [
+                    yarn_freqs.cos() * zero_all_dim_scale,
+                    yarn_freqs.sin() * zero_all_dim_scale,
+                ],
+                dim=-1,
+            ),
+        )
+
     def test_rope_cache_rejects_ambiguous_or_incomplete_scaling(self):
         base_config = {"qk_rope_head_dim": 8}
         with self.assertRaisesRegex(ValueError, "unsupported.*rope_type"):
-            _build_rope_cache(
+            build_rope_cache(
                 {
                     **base_config,
                     "rope_parameters": {
@@ -397,7 +470,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 torch.device("cpu"),
             )
         with self.assertRaisesRegex(ValueError, "missing keys"):
-            _build_rope_cache(
+            build_rope_cache(
                 {
                     **base_config,
                     "rope_parameters": {
@@ -409,7 +482,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 torch.device("cpu"),
             )
         with self.assertRaisesRegex(ValueError, "conflicting"):
-            _build_rope_cache(
+            build_rope_cache(
                 {
                     **base_config,
                     "rope_scaling": {
@@ -478,12 +551,12 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertIsNone(model._mla_kernel_layout)
         model._ensure_mla_kernel_layout()
         self.assertIsNotNone(model._mla_kernel_layout)
-        self.assertEqual(model.layers[0].self_attn.q_a_proj.weight.numel(), 0)
-        self.assertEqual(
+        self.assertGreater(model.layers[0].self_attn.q_a_proj.weight.numel(), 0)
+        self.assertGreater(
             model.layers[0].self_attn.kv_a_proj_with_mqa.weight.numel(),
             0,
         )
-        self.assertEqual(model.layers[0].self_attn.kv_b_proj.weight.numel(), 0)
+        self.assertGreater(model.layers[0].self_attn.kv_b_proj.weight.numel(), 0)
 
         class TorchSiluAndMul(torch.nn.Module):
             @staticmethod
@@ -618,8 +691,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         )
         self.assertIsNotNone(model.layers[0].mlp.experts.fused_moe)
         model._ensure_mla_kernel_layout()
-        self.assertEqual(model.layers[0].self_attn.q_a_proj.weight.numel(), 0)
-        self.assertEqual(
+        self.assertGreater(model.layers[0].self_attn.q_a_proj.weight.numel(), 0)
+        self.assertGreater(
             model.layers[0].self_attn.kv_a_proj_with_mqa.weight.numel(),
             0,
         )
@@ -836,13 +909,30 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             )
 
     def test_config_keeps_attention_and_ffn_topologies_distinct(self):
-        cfg = _extract_config_values(_model_config(), _load_config(), _raw_config())
+        cfg = extract_config_values(_model_config(), _load_config(), _raw_config())
         self.assertEqual((cfg["attn_tp_size"], cfg["attn_tp_rank"]), (1, 0))
         self.assertEqual((cfg["ffn_tp_size"], cfg["ffn_tp_rank"]), (2, 1))
         self.assertEqual((cfg["lm_head_tp_size"], cfg["lm_head_tp_rank"]), (2, 1))
         self.assertEqual((cfg["ep_size"], cfg["ep_rank"]), (2, 1))
         self.assertEqual(cfg["moe_layer_index"], [3])
         self.assertEqual(cfg["topk_method"], "greedy")
+
+    def test_config_rejects_eplb_before_module_construction(self):
+        config = _model_config()
+        config.eplb_config.eplb_mode = EplbMode.EPLB
+        with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
+            extract_config_values(config, _load_config(), _raw_config())
+
+    def test_tied_embeddings_require_matching_tp_partitions(self):
+        config = _model_config()
+        config.tie_word_embeddings = True
+        with self.assertRaisesRegex(ValueError, "matching attention and LM-head"):
+            extract_config_values(config, _load_config(), _raw_config())
+
+    def test_zero_explicit_shared_expert_width_uses_checkpoint_topology(self):
+        config = {"shared_expert_intermediate_size": 0}
+        cfg = extract_config_values(config, _load_config(), _raw_config())
+        self.assertEqual(cfg["shared_expert_intermediate_size"], 8)
 
     def test_new_loader_rejects_unsupported_attention_and_ffn_tp_groups(self):
         with self.assertRaisesRegex(ValueError, "independent TP subgroups"):
@@ -882,7 +972,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 "topk_method": "group_limited_greedy",
             }
         )
-        cfg = _extract_config_values(_model_config(), _load_config(), raw)
+        cfg = extract_config_values(_model_config(), _load_config(), raw)
         self.assertEqual(cfg["scoring_func"], 0)
         self.assertEqual(cfg["routed_scaling_factor"], 2.5)
         self.assertEqual(cfg["n_group"], 4)
@@ -892,7 +982,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
 
     def test_sparse_indexer_rejects_no_q_lora(self):
         with self.assertRaisesRegex(ValueError, "requires q_lora_rank"):
-            _extract_config_values(
+            extract_config_values(
                 _model_config(sparse=True, q_lora_rank=0),
                 _load_config(),
                 _raw_config(),
@@ -902,7 +992,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         config = _model_config()
         config.mla_ops_type = "MHA"
         with self.assertRaisesRegex(ValueError, "requires an MLA attention backend"):
-            _extract_config_values(config, _load_config(), _raw_config())
+            extract_config_values(config, _load_config(), _raw_config())
 
     def test_sparse_indexer_fast_and_sparse_call_sequences(self):
         class FakeIndexerOp(torch.nn.Module):
@@ -1013,6 +1103,30 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertIs(fake_op.calls[-1][1], kv_cache)
         self.assertIs(fake_op.calls[-1][2], attention_inputs)
 
+    def test_sparse_indexer_rope_cache_is_a_device_tracked_buffer(self):
+        cache = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        with torch.device("cpu"):
+            indexer = DeepSeekV32Indexer(
+                index_n_heads=1,
+                index_head_dim=2,
+                index_topk=1,
+                rope_head_dim=2,
+                hidden_size=2,
+                q_lora_rank=2,
+                layer_idx=0,
+                layernorm_eps=1e-6,
+                blocksize=64,
+                is_neox_style=False,
+                params_dtype=torch.float32,
+                cos_sin_cache=cache,
+            )
+        self.assertIs(
+            dict(indexer.indexer_op.named_buffers())["cos_sin_cache"],
+            indexer.indexer_op.cos_sin_cache,
+        )
+        indexer.indexer_op.to(dtype=torch.float64)
+        self.assertEqual(indexer.indexer_op.cos_sin_cache.dtype, torch.float64)
+
     def test_grouped_router_rejects_invalid_expert_partition(self):
         raw = _raw_config()
         raw.update(
@@ -1023,7 +1137,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             }
         )
         with self.assertRaisesRegex(ValueError, "divisible by n_group"):
-            _extract_config_values(_model_config(), _load_config(), raw)
+            extract_config_values(_model_config(), _load_config(), raw)
 
     def test_no_q_lora_has_no_empty_checkpoint_parameters(self):
         attention = DeepSeekV32MlaAttention(
@@ -1198,7 +1312,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertIs(runtime_weight, weight)
         self.assertIs(runtime_scale, scale)
 
-    def test_mla_bf16_kernel_views_match_legacy_orientation(self):
+    def test_mla_bf16_kernel_layout_contains_only_backend_consumers(self):
         attention = DeepSeekV32MlaAttention(
             hidden_size=8,
             num_heads=2,
@@ -1226,26 +1340,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         weights = attention._build_mla_kernel_weights()
 
         self.assertFalse(hasattr(attention, "_fused_qkv_b_w"))
-        self.assertEqual(
-            tuple(weights[W.mla_fusedqkrope_w].shape),
-            (8, 4 + 4 + 2),
-        )
-        self.assertEqual(
-            tuple(weights[W.mla_q_b_w].shape),
-            (4, 2 * (2 + 2)),
-        )
-        self.assertTrue(
-            torch.equal(
-                weights[W.mla_fusedqkrope_w],
-                attention._fused_qkv_a_w.t(),
-            )
-        )
-        self.assertTrue(
-            torch.equal(weights[W.mla_q_b_w], attention.q_b_proj.weight.t())
-        )
-        self.assertNotIn(W.mla_fusedqkrope_s, weights)
-        self.assertNotIn(W.mla_q_b_s, weights)
-        fused_qkv_a_ptr = weights[W.mla_fusedqkrope_w].data_ptr()
+        self.assertEqual(set(weights), {W.mla_kv_b_w, W.mla_kc, W.mla_vc})
         kv_b_ptr = weights[W.mla_kv_b_w].data_ptr()
         attention.release_checkpoint_only_weights()
         self.assertEqual(attention.q_a_proj.weight.numel(), 0)
@@ -1253,12 +1348,11 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertEqual(attention.kv_b_proj.weight.numel(), 0)
         self.assertGreater(attention.q_b_proj.weight.numel(), 0)
         self.assertGreater(attention.o_proj.weight.numel(), 0)
-        self.assertEqual(weights[W.mla_fusedqkrope_w].data_ptr(), fused_qkv_a_ptr)
         self.assertEqual(weights[W.mla_kv_b_w].data_ptr(), kv_b_ptr)
         with self.assertRaisesRegex(RuntimeError, "rebuild the model"):
             attention.load_weights({})
 
-    def test_mla_fp8_kernel_views_keep_scales_without_bf16_qb_copy(self):
+    def test_mla_fp8_kernel_layout_keeps_only_kv_b_scale(self):
         attention = DeepSeekV32MlaAttention(
             hidden_size=128,
             num_heads=2,
@@ -1276,9 +1370,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             128,
             dtype=torch.float8_e4m3fn,
         )
-        fused_scale = torch.ones(3, 1, dtype=torch.float32)
         attention._fused_qkv_a_w = fused_weight
-        attention._fused_qkv_a_s = fused_scale
         del attention.q_b_proj.weight_scale_inv
         attention.q_b_proj.register_parameter(
             "weight_scale",
@@ -1294,22 +1386,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         weights = attention._build_mla_kernel_weights()
 
         self.assertEqual(
-            tuple(weights[W.mla_fusedqkrope_w].shape),
-            (128, 320),
+            set(weights),
+            {W.mla_kv_b_w, W.mla_kv_b_s, W.mla_kc, W.mla_vc},
         )
-        self.assertEqual(
-            tuple(weights[W.mla_fusedqkrope_s].shape),
-            (1, 3),
-        )
-        self.assertEqual(
-            tuple(weights[W.mla_q_b_w].shape),
-            (128, 256),
-        )
-        self.assertEqual(
-            tuple(weights[W.mla_q_b_s].shape),
-            (1, 2),
-        )
-        self.assertEqual(weights[W.mla_q_b_w].dtype, torch.float8_e4m3fn)
         attention.release_checkpoint_only_weights()
         self.assertEqual(attention.q_a_proj.weight.numel(), 0)
         self.assertEqual(attention.kv_a_proj_with_mqa.weight.numel(), 0)
@@ -1422,7 +1501,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
     def test_noaux_router_device_selection_is_explicit(self):
         parallelism_config = _single_rank_parallelism_config()
         moe_config = types.SimpleNamespace(fake_balance_expert=False)
-        model_config = _router_model_config()
+        model_config = _router_model_config(moe_n_group=2, moe_topk_group=1)
         for device_type, expect_fast in (
             (DeviceType.Cuda, True),
             (DeviceType.ROCm, False),
@@ -1486,7 +1565,12 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 tp_rank=0,
                 ep_size=1,
                 ep_rank=0,
-                model_config=_router_model_config(moe_k=1, has_moe_norm=True),
+                model_config=_router_model_config(
+                    moe_k=1,
+                    has_moe_norm=True,
+                    moe_n_group=2,
+                    moe_topk_group=1,
+                ),
                 parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
@@ -1503,6 +1587,45 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertFalse(block._use_fast_group_topk)
         self.assertIsNone(block.group_topk)
         group_topk.assert_not_called()
+
+    def test_greedy_top1_normalization_uses_reference_path_on_cuda(self):
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.Cuda,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.SelectTopk"
+            ) as select_topk,
+            torch.device("cpu"),
+        ):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=8,
+                moe_intermediate_size=4,
+                num_experts=4,
+                top_k=1,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=_router_model_config(moe_k=1, has_moe_norm=True),
+                parallelism_config=_single_rank_parallelism_config(),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=0,
+                routed_scaling_factor=1.0,
+                n_group=1,
+                topk_group=1,
+                topk_method="greedy",
+                has_moe_norm=True,
+                correction_bias=False,
+            )
+        self.assertFalse(block._use_fast_select_topk)
+        self.assertIsNone(block.select_topk)
+        select_topk.assert_not_called()
 
     def test_non_noaux_router_avoids_cuda_select_topk_on_other_devices(self):
         parallelism_config = _single_rank_parallelism_config()
@@ -1551,6 +1674,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             "expert_num": _router_model_config(expert_num=8),
             "moe_k": _router_model_config(moe_k=1),
             "has_moe_norm": _router_model_config(has_moe_norm=True),
+            "moe_n_group": _router_model_config(moe_n_group=2),
+            "moe_topk_group": _router_model_config(moe_topk_group=2),
         }
         with (
             mock.patch(
@@ -1598,7 +1723,13 @@ class DeepSeekNewloaderTest(unittest.TestCase):
 
     def test_moe_forward_uses_reference_noaux_routing_on_cpu(self):
         parallelism_config = _single_rank_parallelism_config()
-        with torch.device("cpu"):
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.ROCm,
+            ),
+            torch.device("cpu"),
+        ):
             block = DeepSeekV32MoEBlock(
                 hidden_size=4,
                 moe_intermediate_size=2,
@@ -1612,6 +1743,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 model_config=_router_model_config(
                     hidden_size=4,
                     has_moe_norm=True,
+                    moe_n_group=2,
+                    moe_topk_group=1,
                 ),
                 parallelism_config=parallelism_config,
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
@@ -1657,7 +1790,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 torch.tensor([0.1, -0.2, 0.3, -0.4])
             )
 
-        expected_weights, expected_ids = _select_deepseek_noaux_topk(
+        expected_weights, expected_ids = _manual_noaux_reference(
             block.gate(hidden_states).float(),
             block.gate.e_score_correction_bias,
             top_k=2,
@@ -1758,6 +1891,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     hidden_size=4,
                     expert_num=8,
                     has_moe_norm=True,
+                    moe_n_group=4,
+                    moe_topk_group=2,
                 ),
                 parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
@@ -1820,7 +1955,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             )
 
         router_logits = block.gate(hidden_states).float()
-        expected_weights, expected_ids = _select_deepseek_noaux_topk(
+        expected_weights, expected_ids = _manual_noaux_reference(
             router_logits,
             block.gate.e_score_correction_bias,
             top_k=2,
@@ -1912,16 +2047,13 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 )
             )
 
-        expected_weights, expected_ids = _select_deepseek_topk(
-            block.gate(hidden_states).float(),
-            top_k=2,
-            scoring_func=0,
-            n_group=1,
-            topk_group=1,
-            group_limited=False,
-            renormalize=True,
-            routed_scaling_factor=1.0,
+        expected_weights, expected_ids = (
+            block.gate(hidden_states)
+            .float()
+            .softmax(dim=-1)
+            .topk(2, dim=-1, sorted=False)
         )
+        expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
         block(hidden_states)
 
         actual_order = capturing_experts.ids.argsort(dim=-1)
@@ -1953,6 +2085,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     hidden_size=4,
                     expert_num=8,
                     has_moe_norm=True,
+                    moe_n_group=4,
+                    moe_topk_group=2,
                 ),
                 parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
@@ -2011,7 +2145,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 torch.linspace(-0.2, 0.2, 8, device="cuda")
             )
 
-        expected_weights, expected_ids = _select_deepseek_noaux_topk(
+        expected_weights, expected_ids = _manual_noaux_reference(
             block.gate(hidden_states).float(),
             block.gate.e_score_correction_bias,
             top_k=2,
@@ -2098,7 +2232,6 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         attention.process_weights_after_loading()
         self.assertIsNotNone(attention._fused_qkv_a_runtime)
         self.assertEqual(attention._fused_qkv_a_w.dtype, torch.float8_e4m3fn)
-        self.assertIsNotNone(attention._fused_qkv_a_s)
         self.assertEqual(
             tuple(attention._fused_qkv_a_runtime.weight.shape),
             (128 + 128 + 2, 128),
@@ -2341,20 +2474,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         kernel_weights = attention._build_mla_kernel_weights()
         self.assertIsNone(attention._kv_b_w)
 
-        fused_reference = torch.cat(
-            [reference_weights["q_a"], reference_weights["kv_a"]],
-            dim=0,
-        )
-        cases = (
-            (
-                W.mla_fusedqkrope_w,
-                W.mla_fusedqkrope_s,
-                fused_reference,
-            ),
-            (W.mla_q_b_w, W.mla_q_b_s, reference_weights["q_b"]),
-            (W.mla_kv_b_w, W.mla_kv_b_s, reference_weights["kv_b"]),
-            (W.attn_o_w, W.attn_o_s, reference_weights["o"]),
-        )
+        cases = ((W.mla_kv_b_w, W.mla_kv_b_s, reference_weights["kv_b"]),)
         runtime_quant_config = types.SimpleNamespace(get_method=lambda: "FP8_PER_BLOCK")
         for weight_key, scale_key, reference in cases:
             with self.subTest(weight_key=weight_key):
@@ -2515,6 +2635,32 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 torch.zeros(2, 4, dtype=torch.float32),
                 torch.zeros(2, 4, dtype=torch.float64),
             )
+
+    def test_mtp_block_concat_order_is_numerically_explicit(self):
+        inputs_embeds = torch.tensor([[1.0, 2.0]])
+        last_hidden_states = torch.tensor([[3.0, 5.0]])
+        projection = torch.tensor(
+            [
+                [1.0, 10.0, 100.0, 1000.0],
+                [-2.0, 3.0, -5.0, 7.0],
+            ]
+        )
+        for reverse_concat, expected_concat in (
+            (False, torch.tensor([[1.0, 2.0, 3.0, 5.0]])),
+            (True, torch.tensor([[3.0, 5.0, 1.0, 2.0]])),
+        ):
+            with self.subTest(reverse_concat=reverse_concat):
+                block = MTPBlock(
+                    hidden_size=2,
+                    reverse_concat=reverse_concat,
+                    params_dtype=torch.float32,
+                )
+                block.e_norm = torch.nn.Identity()
+                block.h_norm = torch.nn.Identity()
+                block.fc.weight.data.copy_(projection)
+                actual = block(inputs_embeds, last_hidden_states)
+                expected = F.linear(expected_concat, projection)
+                torch.testing.assert_close(actual, expected)
 
 
 if __name__ == "__main__":
