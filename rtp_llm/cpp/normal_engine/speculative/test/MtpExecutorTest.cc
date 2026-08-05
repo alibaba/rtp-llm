@@ -180,10 +180,26 @@ public:
         return !prepare_input_holder.test_data.empty();
     }
 
+    // Test stand-in for the shared MTP hidden buffer view (DSpARK aux rows).
+    void setMtpTargetHiddenStates(torch::Tensor rows) {
+        mtp_target_hidden_rows_ = std::move(rows);
+    }
+
+    torch::Tensor getMtpTargetHiddenStates(int64_t num_tokens) override {
+        if (!mtp_target_hidden_rows_.defined()) {
+            return torch::Tensor();
+        }
+        if (num_tokens < 0) {
+            return mtp_target_hidden_rows_;
+        }
+        return mtp_target_hidden_rows_.slice(0, 0, num_tokens);
+    }
+
 private:
     TestDataHolder<GptModelInputs>  input_holder;
     TestDataHolder<GptModelInputs>  prepare_input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
+    torch::Tensor                   mtp_target_hidden_rows_;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -1022,10 +1038,11 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
                                           0.7f, 0.1f, 0.1f, 0.1f})
                                .reshape({gamma + 1, vocab_size})
                                .to(torch::kCUDA);
-    target_output.aux_hidden_states =
+    auto target_aux_features =
         torch::arange(0, 2 * (gamma + 1), torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
             .reshape({gamma + 1, 2});
-    target_output.all_hidden_states = target_output.aux_hidden_states;
+    target_output.all_hidden_states = target_aux_features;
+    components.fake_target_model->setMtpTargetHiddenStates(target_aux_features);
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
 
@@ -1048,7 +1065,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     draft_input.input_lengths      = torch::tensor({gamma}, torch::kInt32);
     draft_input.prefix_lengths     = torch::tensor({3}, torch::kInt32);
     draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
-    draft_input.last_hidden_states = target_output.aux_hidden_states;
+    draft_input.last_hidden_states = target_aux_features;
 
     GptModelOutputs draft_output;
     draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);

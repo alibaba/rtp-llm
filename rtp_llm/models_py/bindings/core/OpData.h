@@ -123,8 +123,6 @@ struct GptModelOutputs {
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
 
-    // Optional [token, capture_layers, hidden] target features for DSpARK.
-    torch::Tensor aux_hidden_states;
     // Optional in-model DSpARK proposal: [batch, gamma] tokens and
     // [batch, gamma, vocab] probabilities.
     torch::Tensor draft_tokens;

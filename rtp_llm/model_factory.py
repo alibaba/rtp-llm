@@ -480,7 +480,11 @@ class ModelFactory:
             raise ValueError(f"invalid dspark_markov_rank: {markov_rank}")
 
         sp_config.sp_dspark_mask_token_id = noise_token_id
+        # Both models carry the capture ids: the target uses them to capture
+        # and to size the shared MTP hidden buffer rows; the draft only needs
+        # them for the same row-width derivation (it never captures).
         model_config.capture_aux_hidden_layer_ids = target_layer_ids
+        propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
         logging.info(
             "DSpARK fixed-width wiring: gamma=%d, noise_token_id=%d, "
             "target capture layer ids=%s, markov_rank=%d",

@@ -284,6 +284,11 @@ def _args_from_model_config(
 class DeepSeekV4Model(GptModelBase):
     """Framework-facing model: owns a V4Transformer, feeds framework IO into it."""
 
+    # Whether this model captures aux hidden features for DSpARK. The draft
+    # carries the capture ids too (for the shared-buffer row-width
+    # derivation) but never captures; DeepSeekV4DSparkModel overrides this.
+    _captures_aux_hidden = True
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -322,6 +327,14 @@ class DeepSeekV4Model(GptModelBase):
                 getattr(model_config, "capture_aux_hidden_layer_ids", None) or ()
             )
         )
+        if self._capture_aux_hidden_layer_ids:
+            # DSpARK: the captured aux features ride the shared MTP hidden
+            # buffer instead of a dedicated output channel. The factory sets
+            # the capture ids on both the target and the draft config, so
+            # whichever model binds the store first derives the same row
+            # width in _bind_runtime_buffers; only the target actually
+            # captures (see _captures_aux_hidden).
+            Dsv4SharedRuntimeBufferStore.enable_mtp_hidden()
         # MoE inter dim from V4 config: explicit (not inter_size which in RTP-LLM
         # is n_shared_experts * moe_intermediate_size for DeepSeek). Use moe_config
         # if available; else read from config's hidden_size-derived fallback.
@@ -531,9 +544,18 @@ class DeepSeekV4Model(GptModelBase):
         mtp_hidden = None
         mtp_last_hidden_capacity = None
         if Dsv4SharedRuntimeBufferStore.mtp_hidden_requested():
+            # MTP rows are the pre-hc residual (hc_mult*dim); DSpARK rows are
+            # the captured aux features (len(capture_ids)*dim). Target and
+            # draft carry the same capture ids in their configs, so both
+            # derive the same width regardless of bind order.
+            hc_dim = (
+                len(self._capture_aux_hidden_layer_ids) * int(self._v4_args.dim)
+                if self._capture_aux_hidden_layer_ids
+                else int(self._v4_args.hc_mult) * int(self._v4_args.dim)
+            )
             mtp_hidden = Dsv4MtpHiddenBufferSpec(
                 token_capacity=self._resolve_mtp_hidden_token_capacity(),
-                hc_dim=int(self._v4_args.hc_mult) * int(self._v4_args.dim),
+                hc_dim=hc_dim,
             )
             if self._is_speculative:
                 mtp_last_hidden_capacity = (
@@ -644,9 +666,10 @@ class DeepSeekV4Model(GptModelBase):
                 self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
-        self.v4.set_aux_hidden_capture_layer_ids(
-            self._capture_aux_hidden_layer_ids
-        )
+        if self._captures_aux_hidden:
+            self.v4.set_aux_hidden_capture_layer_ids(
+                self._capture_aux_hidden_layer_ids
+            )
 
         # Recompute RoPE cache on real device (precompute_freqs_cis under
         # meta context yields zeros; we need real values).
@@ -1227,16 +1250,7 @@ class DeepSeekV4Model(GptModelBase):
             hidden = torch.zeros(
                 T, self._v4_args.dim, dtype=torch.bfloat16, device=device
             )
-            outputs = PyModelOutputs(hidden)
-            if self._capture_aux_hidden_layer_ids:
-                outputs.aux_hidden_states = torch.zeros(
-                    T,
-                    len(self._capture_aux_hidden_layer_ids),
-                    self._v4_args.dim,
-                    dtype=torch.bfloat16,
-                    device=device,
-                )
-            return outputs
+            return PyModelOutputs(hidden)
         attn = inputs.attention_inputs
 
         # Subclass-overridable hidden-state preparation hooks.  When a

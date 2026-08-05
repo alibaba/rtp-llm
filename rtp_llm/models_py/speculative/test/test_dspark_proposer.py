@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -180,6 +181,52 @@ class ProposerContractTest(unittest.TestCase):
             DSparkMarkovHead(w, torch.zeros(11, 5), vocab_size=11, rank=4)
         with self.assertRaises(ValueError):
             DSparkMarkovHead(w, w, vocab_size=12, rank=4)
+
+
+class _ParseProposer(DSparkProposerMixin):
+    """Captures the feature rows handed to the projection hook."""
+
+    def __init__(self, *, aux_dim: int):
+        self.init_dspark_proposer(
+            width=2,
+            noise_token_id=1,
+            aux_feature_dim=aux_dim,
+            hidden_dim=aux_dim,
+            vocab_size=7,
+        )
+        self.seen_features = None
+
+    def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
+        self.seen_features = features
+        return features
+
+
+class ParseCommittedContextTest(unittest.TestCase):
+    def test_feature_rows_reach_projection_zero_copy(self) -> None:
+        # input_hiddens is a view of the shared MTP hidden buffer whose
+        # DSpARK row width equals the aux payload — parsing must not copy.
+        aux_dim, rows = 6, 4
+        proposer = _ParseProposer(aux_dim=aux_dim)
+        hidden = torch.arange(
+            rows * aux_dim, dtype=torch.float32
+        ).reshape(rows, aux_dim)
+        inputs = SimpleNamespace(
+            input_hiddens=hidden,
+            dspark_ctx_lengths=torch.tensor([3, 1], dtype=torch.int32),
+            dspark_ctx_starts=torch.tensor([0, 3], dtype=torch.int32),
+        )
+        prefix = torch.tensor([3, 1], dtype=torch.int32)
+
+        main_x, req, pos = proposer._parse_committed_context(
+            inputs, prefix, 2, torch.device("cpu")
+        )
+
+        torch.testing.assert_close(proposer.seen_features, hidden)
+        self.assertEqual(
+            proposer.seen_features.data_ptr(), hidden.data_ptr()
+        )
+        self.assertEqual(main_x.shape, (rows, aux_dim))
+        self.assertEqual(req.tolist(), [0, 0, 0, 1])
 
 
 if __name__ == "__main__":

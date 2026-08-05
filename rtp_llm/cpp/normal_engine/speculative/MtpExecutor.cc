@@ -844,8 +844,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 sampler_output.token_ids = torch::zeros(
                     {static_cast<int64_t>(stream_groups.totalSamplerBatchSizeOut()), 1},
                     torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                auto target_features = model_->getMtpTargetHiddenStates(model_input.combo_tokens.numel());
                 batch_stream_processor_->updatePrefillPostDSparkDraftModelInput(
-                    model_input, model_output, sampler_output, buffer_holder_);
+                    model_input, target_features, sampler_output, buffer_holder_);
             } else {
                 model_input.last_hidden_states = model_output.all_hidden_states;
             }
@@ -864,8 +865,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.input_lengths = saved_input_lengths;
             }
             if (is_dspark_) {
+                // Target prefill wrote its aux features into the shared MTP
+                // hidden buffer ([T, capture_layers * hidden] rows). Under CP
+                // the buffer is rank-local while the dspark context mapping
+                // still assumes global rows — supported with the follow-up
+                // sharded feature injection.
+                RTP_LLM_CHECK_WITH_INFO(
+                    !cp_enabled, "DSpARK prefill under context parallelism requires sharded feature injection");
+                auto target_features = model_->getMtpTargetHiddenStates(model_input.combo_tokens.numel());
                 batch_stream_processor_->updatePrefillPostDSparkDraftModelInput(
-                    model_input, model_output, sampler_output, buffer_holder_);
+                    model_input, target_features, sampler_output, buffer_holder_);
             } else {
                 batch_stream_processor_->updatePrefillPostDraftModelInput(
                     model_input, model_output, sampler_output, buffer_holder_);
@@ -876,25 +885,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
-        torch::Tensor local_dspark_aux_hidden;
-        if (cp_enabled && is_dspark_) {
-            // Target CP has already all-gathered aux_hidden_states on every
-            // rank. Re-broadcasting the full [T, capture_layers * hidden]
-            // tensor here would add ~6 GiB at 256K and ~24 GiB at 1M, plus an
-            // equally large packed staging buffer. Sync only the small input
-            // metadata and restore each rank's identical local gathered view.
-            if (isTpRank0()) {
-                local_dspark_aux_hidden = model_input.last_hidden_states;
-            } else {
-                const auto& aux = model_output.aux_hidden_states;
-                RTP_LLM_CHECK_WITH_INFO(aux.defined() && aux.dim() == 3,
-                                        "DSpARK CP prefill requires gathered aux_hidden_states [T, layers, hidden]");
-                local_dspark_aux_hidden = aux.reshape({aux.size(0), -1});
-            }
-            RTP_LLM_CHECK_WITH_INFO(local_dspark_aux_hidden.defined() && local_dspark_aux_hidden.numel() > 0,
-                                    "DSpARK CP prefill gathered aux_hidden_states must be non-empty");
-            model_input.last_hidden_states = torch::Tensor();
-        }
         // Under prefill CP the post-reduce hidden just copied by
         // updatePrefillPostDraftModelInput is not the tensor consumed by
         // DSV4 MTP.  Avoid broadcasting it; after sync each rank reloads the
@@ -904,9 +894,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             model_input.last_hidden_states = torch::Tensor();
         }
         tpSyncModelInputs(model_input, parallelism_config_);
-        if (local_dspark_aux_hidden.defined()) {
-            model_input.last_hidden_states = local_dspark_aux_hidden;
-        }
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
@@ -1420,8 +1407,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
 
         if (is_dspark_) {
+            // Target verify wrote its aux features into the shared MTP hidden
+            // buffer inside the (possibly graphed) forward; replay does not
+            // advance the Python-side row count, so pass the explicit verify
+            // geometry.
+            auto target_features =
+                model_->getMtpTargetHiddenStates(static_cast<int64_t>(batch_size) * (propose_step_ + 1));
             batch_stream_processor_->updateDecodePostDSparkDraftModelInput(
-                model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+                model_input, target_features, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
         } else {
             batch_stream_processor_->updateDecodePostDraftModelInput(
                 model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
@@ -1433,11 +1426,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
         model_input.lm_output_indexes = torch::empty({(int64_t)batch_size}, cuda_i32);
         if (is_dspark_) {
-            const auto& aux = model_output.aux_hidden_states;
-            RTP_LLM_CHECK_WITH_INFO(aux.defined(), "dspark target TP rank did not export aux_hidden_states");
+            auto target_features =
+                model_->getMtpTargetHiddenStates(static_cast<int64_t>(batch_size) * (propose_step_ + 1));
+            RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
+                                    "dspark target TP rank did not bind the MTP hidden buffer");
             model_input.combo_tokens =
                 torch::empty({static_cast<int64_t>(batch_size * propose_step_)}, cuda_i32);
-            model_input.last_hidden_states = torch::empty_like(aux.reshape({aux.size(0), -1}));
+            model_input.last_hidden_states = torch::empty_like(target_features);
             model_input.input_lengths      = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input.prefix_lengths     = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input.dspark_ctx_starts  = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);

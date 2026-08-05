@@ -746,25 +746,24 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) 
     return dspark_lm_indexes_cache_.narrow(0, 0, batch_size);
 }
 
-void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInputs&        model_input,
-                                                                     const GptModelOutputs& model_output,
-                                                                     const SamplerOutput&   sampler_output,
-                                                                     TensorHolder&          host_holder) {
+void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInputs&      model_input,
+                                                                     const torch::Tensor& target_features,
+                                                                     const SamplerOutput& sampler_output,
+                                                                     TensorHolder&        host_holder) {
     const int64_t batch_size = sampler_output.token_ids.size(0);
     RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark draft width must be positive");
     RTP_LLM_CHECK_WITH_INFO(dspark_mask_token_id_ >= 0,
                             "dspark requires a non-negative noise token id, got %d",
                             dspark_mask_token_id_);
-    RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
-                            "dspark prefill: target model did not export aux_hidden_states");
+    RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
+                            "dspark prefill: target MTP hidden buffer did not provide aux features");
 
     auto anchors        = toCudaInt32(lastColumnAsFlat(sampler_output.token_ids), host_holder);
     auto suffix_lengths = toCudaInt32(model_input.input_lengths, host_holder).clone();
     auto reuse_lengths  = toCudaInt32(model_input.prefix_lengths, host_holder);
-    const auto& aux     = model_output.aux_hidden_states;
 
     model_input.combo_tokens       = dsparkComboTokens(batch_size, anchors);
-    model_input.last_hidden_states = aux.reshape({aux.size(0), -1});
+    model_input.last_hidden_states = target_features;
     model_input.dspark_ctx_lengths = suffix_lengths;
     model_input.dspark_ctx_starts  = suffix_lengths.cumsum(0, torch::kInt32) - suffix_lengths;
     // CacheStore keys are derived from the committed prompt received by both
@@ -865,14 +864,14 @@ void MtpBatchStreamProcessor::updateDSparkDraftSamplerOutput(const StreamGroups&
 
 void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     GptModelInputs&                              model_input,
-    const GptModelOutputs&                       model_output,
+    const torch::Tensor&                         target_features,
     const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
     size_t                                       batch_size,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
     const int64_t verify_width = propose_step_ + 1;
-    RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
-                            "dspark decode tail: target verify did not export aux_hidden_states");
+    RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
+                            "dspark decode tail: target MTP hidden buffer did not provide aux features");
     RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_len.defined()
                                 && speculative_sampler_output.accept_tokens.defined(),
                             "dspark decode tail: rejection output is incomplete");
@@ -883,13 +882,12 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     auto anchor_indexes = (accept_len.to(torch::kInt64) - 1).reshape({static_cast<int64_t>(batch_size), 1});
     auto anchors = accept_tokens.gather(1, anchor_indexes).reshape({static_cast<int64_t>(batch_size)});
 
-    const auto& aux = model_output.aux_hidden_states;
-    RTP_LLM_CHECK_WITH_INFO(aux.size(0) == static_cast<int64_t>(batch_size) * verify_width,
+    RTP_LLM_CHECK_WITH_INFO(target_features.size(0) == static_cast<int64_t>(batch_size) * verify_width,
                             "dspark decode tail: aux rows %ld != batch*verify_width %ld",
-                            aux.size(0),
+                            target_features.size(0),
                             static_cast<int64_t>(batch_size) * verify_width);
     model_input.combo_tokens       = dsparkComboTokens(batch_size, anchors);
-    model_input.last_hidden_states = aux.reshape({aux.size(0), -1});
+    model_input.last_hidden_states = target_features;
     hidden_states_d_t              = model_input.last_hidden_states;
 
     auto old_prefix = toCudaInt32(model_input.prefix_lengths, host_holder).clone();

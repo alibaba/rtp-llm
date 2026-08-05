@@ -18,7 +18,8 @@ Engine input contract (all token rows are request-major):
 * ``input_ids``: ``[B * width]`` query block.  Column zero is the anchor;
   the remaining columns are forced to the configured noise token here.
 * ``input_hiddens``: target auxiliary features, flattenable to
-  ``[rows, aux_feature_dim]``.
+  ``[rows, aux_feature_dim]`` (a zero-copy view of the shared MTP hidden
+  buffer, whose DSpARK row width equals the aux payload).
 * ``dspark_ctx_lengths`` / ``dspark_ctx_starts``: number and source-row
   start of newly committed feature rows for each request.
 * ``attention_inputs.prefix_lengths``: committed sequence length *after*

@@ -315,23 +315,25 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
-    begin_aux_capture = getattr(v4, "begin_aux_hidden_capture", None)
-    aux_hidden_capture = (
-        begin_aux_capture() if begin_aux_capture is not None else None
-    )
+    capture_aux = bool(getattr(v4, "capture_aux_hidden_layer_ids", ()))
     for layer_idx, layer in enumerate(v4.layers):
         h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
-        if aux_hidden_capture is not None:
-            v4.capture_aux_hidden(aux_hidden_capture, layer_idx, h)
+        if capture_aux:
+            v4.capture_aux_hidden(layer_idx, h)
         if _rt_on:
             _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
-    if begin_aux_capture is not None:
-        v4.finish_aux_hidden_capture(aux_hidden_capture)
     if v4._mtp_hidden_buffer is not None:
-        _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
-        v4._write_mtp_hidden_buffer(
-            _pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph
-        )
+        if capture_aux:
+            # DSpARK mode: the buffer already holds this forward's aux rows
+            # (written per selected layer above); only account for them.
+            v4._note_aux_hidden_rows(
+                h.size(0) * h.size(1), is_cuda_graph=attn_metadata.is_cuda_graph
+            )
+        else:
+            _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
+            v4._write_mtp_hidden_buffer(
+                _pre_hc_flat, is_cuda_graph=attn_metadata.is_cuda_graph
+            )
     h = v4._hc_head_reduce(h)
     if _rt_on:
         _rt.record("decode_hc_reduced", h)
@@ -432,19 +434,11 @@ def forward_decode(
         )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
-            outputs = PyModelOutputs(
+            return PyModelOutputs(
                 torch.zeros(
                     (0, v4_args.dim), dtype=torch.bfloat16, device=param_dev
                 )
             )
-            capture_ids = getattr(v4, "capture_aux_hidden_layer_ids", ())
-            if capture_ids:
-                outputs.aux_hidden_states = torch.zeros(
-                    (0, len(capture_ids), v4_args.dim),
-                    dtype=torch.bfloat16,
-                    device=param_dev,
-                )
-            return outputs
 
     B = meta.batch_size
     q_len = meta.q_len_per_req
@@ -498,12 +492,4 @@ def forward_decode(
             extra["start_pos"] = start_pos.detach().cpu()
         _rt.dump(step=v4._dbg_step, extra=extra)
         v4._dbg_step += 1
-    outputs = PyModelOutputs(hidden)
-    aux_hidden_states = v4.take_aux_hidden_states()
-    if aux_hidden_states is not None:
-        outputs.aux_hidden_states = aux_hidden_states.reshape(
-            B * q_len,
-            len(v4.capture_aux_hidden_layer_ids),
-            v4_args.dim,
-        )
-    return outputs
+    return PyModelOutputs(hidden)

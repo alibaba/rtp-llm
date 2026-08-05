@@ -315,12 +315,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         const bool is_dspark_draft = params.sp_config.type == SP_TYPE_DSPARK && params.model_id != 0;
         graph_params.is_dspark_draft = is_dspark_draft;
         if (is_dspark_draft) {
-            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_instance, "_dspark_aux_dim"),
-                                    "DeepSeekV4DSparkModel must expose _dspark_aux_dim for CUDA graph capture");
-            graph_params.input_hidden_size = py_instance.attr("_dspark_aux_dim").cast<size_t>();
-            // The target verifies [anchor + gamma] and exports one auxiliary
-            // row for each of those positions; the proposer query itself has
-            // gamma rows. Accepted rows are selected by device-side lengths.
+            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_instance, "_dspark_aux_feature_dim"),
+                                    "DSpARK draft model must expose _dspark_aux_feature_dim for CUDA graph capture");
+            graph_params.input_hidden_size = py_instance.attr("_dspark_aux_feature_dim").cast<size_t>();
+            // The target verifies [anchor + gamma] and writes one auxiliary
+            // row for each of those positions into the shared MTP hidden
+            // buffer; the proposer query itself has gamma rows. Accepted
+            // rows are selected by device-side lengths.
             graph_params.input_hidden_rows_per_bs = params.sp_config.gen_num_per_cycle + 1;
         }
 

@@ -806,8 +806,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     model_input.input_lengths  = torch::tensor({3, 2}, torch::kInt32);
     model_input.prefix_lengths = torch::tensor({7, 4}, torch::kInt32);
 
-    GptModelOutputs model_output;
-    model_output.aux_hidden_states =
+    auto target_features =
         torch::arange(0, 60, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({5, 12});
 
     SamplerOutput sampler_output;
@@ -816,7 +815,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
             .reshape({2, 2});
 
     TensorHolder host_holder;
-    processor.updatePrefillPostDSparkDraftModelInput(model_input, model_output, sampler_output, host_holder);
+    processor.updatePrefillPostDSparkDraftModelInput(model_input, target_features, sampler_output, host_holder);
 
     EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, 202, mask_id, mask_id}),
               toVec<int32_t>(model_input.combo_tokens));
@@ -855,8 +854,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillCacheStoreUsesCommittedProm
     model_input.input_lengths  = torch::tensor(prompt_lengths, torch::kInt32);
     model_input.prefix_lengths = torch::zeros({static_cast<int64_t>(prompt_lengths.size())}, torch::kInt32);
 
-    GptModelOutputs model_output;
-    model_output.aux_hidden_states = torch::zeros(
+    auto target_features = torch::zeros(
         {static_cast<int64_t>(prompt_lengths.size()), 1},
         torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
@@ -866,7 +864,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillCacheStoreUsesCommittedProm
         torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
     TensorHolder host_holder;
-    processor.updatePrefillPostDSparkDraftModelInput(model_input, model_output, sampler_output, host_holder);
+    processor.updatePrefillPostDSparkDraftModelInput(model_input, target_features, sampler_output, host_holder);
 
     const auto store_lengths = toVec<int32_t>(model_input.cache_store_input_lengths);
     EXPECT_EQ(prompt_lengths, store_lengths);

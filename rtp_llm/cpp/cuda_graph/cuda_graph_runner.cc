@@ -610,9 +610,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
         const auto& hold = graph_instances_[state.current_real_graph_seq_len].mem_hold_;
-        if (hold.aux_hidden_states_.defined()) {
-            outputs.aux_hidden_states = hold.aux_hidden_states_.slice(0, 0, state.current_seq_len).clone();
-        }
         if (hold.draft_tokens_.defined()) {
             outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
             outputs.draft_probs  = hold.draft_probs_.slice(0, 0, state.current_batch_size).clone();
@@ -626,9 +623,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
         const auto& hold = graph_instances_[state.current_real_graph_bs].mem_hold_;
-        if (hold.aux_hidden_states_.defined()) {
-            outputs.aux_hidden_states = hold.aux_hidden_states_.slice(0, 0, state.seq_len_sum).clone();
-        }
         if (hold.draft_tokens_.defined()) {
             outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
             outputs.draft_probs  = hold.draft_probs_.slice(0, 0, state.current_batch_size).clone();
@@ -970,7 +964,6 @@ void CudaGraphRunner::initCapture() {
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         capture_mem_hold_.setOptionalOutputs(
-            probe_outputs.aux_hidden_states.defined() ? torch::zeros_like(probe_outputs.aux_hidden_states) : torch::Tensor(),
             probe_outputs.draft_tokens.defined() ? torch::zeros_like(probe_outputs.draft_tokens) : torch::Tensor(),
             probe_outputs.draft_probs.defined() ? torch::zeros_like(probe_outputs.draft_probs) : torch::Tensor());
         initCaptureAttentionInputsPost();
@@ -1074,11 +1067,6 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             auto& hold = graph_instances_[key].mem_hold_;
-            if (hold.aux_hidden_states_.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(outputs.aux_hidden_states.defined(),
-                                        "CUDA graph optional aux output disappeared during capture");
-                hold.aux_hidden_states_.copy_(outputs.aux_hidden_states);
-            }
             if (hold.draft_tokens_.defined()) {
                 RTP_LLM_CHECK_WITH_INFO(outputs.draft_tokens.defined() && outputs.draft_probs.defined(),
                                         "DSpARK CUDA graph draft outputs disappeared during capture");
@@ -1200,9 +1188,6 @@ CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs
     auto hold = CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
                                   inputs,
                                   is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
-    auto aux_hidden_states = capture_mem_hold_.aux_hidden_states_.defined() ?
-                                 capture_mem_hold_.aux_hidden_states_.slice(0, 0, tokens_count) :
-                                 torch::Tensor();
     const int batch_size = num_tokens_per_bs_ > 0 ? tokens_count / num_tokens_per_bs_ : 0;
     auto draft_tokens = capture_mem_hold_.draft_tokens_.defined() ?
                             capture_mem_hold_.draft_tokens_.slice(0, 0, batch_size) :
@@ -1210,7 +1195,7 @@ CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs
     auto draft_probs = capture_mem_hold_.draft_probs_.defined() ?
                            capture_mem_hold_.draft_probs_.slice(0, 0, batch_size) :
                            torch::Tensor();
-    hold.setOptionalOutputs(std::move(aux_hidden_states), std::move(draft_tokens), std::move(draft_probs));
+    hold.setOptionalOutputs(std::move(draft_tokens), std::move(draft_probs));
     return hold;
 }
 

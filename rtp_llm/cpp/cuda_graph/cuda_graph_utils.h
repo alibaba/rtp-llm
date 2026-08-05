@@ -23,10 +23,9 @@ public:
         decoder_layer_hidden_states_ = hidden_states;
     };
 
-    void setOptionalOutputs(at::Tensor aux_hidden_states, at::Tensor draft_tokens, at::Tensor draft_probs) {
-        aux_hidden_states_ = std::move(aux_hidden_states);
-        draft_tokens_      = std::move(draft_tokens);
-        draft_probs_       = std::move(draft_probs);
+    void setOptionalOutputs(at::Tensor draft_tokens, at::Tensor draft_probs) {
+        draft_tokens_ = std::move(draft_tokens);
+        draft_probs_  = std::move(draft_probs);
     }
 
     CaptureMemoryHold() {}
@@ -71,7 +70,6 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
-    at::Tensor               aux_hidden_states_;
     at::Tensor               draft_tokens_;
     at::Tensor               draft_probs_;
     torch_ext::PyModelInputs py_model_inputs_;

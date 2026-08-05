@@ -358,7 +358,6 @@ struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
-    torch::Tensor          aux_hidden_states;
     torch::Tensor          draft_tokens;
     torch::Tensor          draft_probs;
 

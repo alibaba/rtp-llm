@@ -75,6 +75,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     ``[B, gamma]`` and ``[B, gamma, vocab]``.
     """
 
+    # Draft side: carries the capture ids for the shared-buffer row-width
+    # derivation but consumes the features — only the target captures.
+    _captures_aux_hidden = False
+
     def __init__(
         self,
         model_config: ModelConfig,

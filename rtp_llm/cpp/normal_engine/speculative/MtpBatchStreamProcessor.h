@@ -70,10 +70,12 @@ public:
     // DSpARK proposes a fixed-width block in one draft forward.  gamma is
     // propose_step_: draft input is [anchor, noise x (gamma - 1)], while the
     // target verifies [anchor, proposal x gamma].
-    void updatePrefillPostDSparkDraftModelInput(GptModelInputs&        model_input,
-                                                const GptModelOutputs& model_output,
-                                                const SamplerOutput&   sampler_output,
-                                                TensorHolder&          host_holder);
+    // ``target_features`` is the target's shared MTP hidden buffer view
+    // ([rows, capture_layers * hidden], see getMtpTargetHiddenStates).
+    void updatePrefillPostDSparkDraftModelInput(GptModelInputs&      model_input,
+                                                const torch::Tensor& target_features,
+                                                const SamplerOutput& sampler_output,
+                                                TensorHolder&        host_holder);
 
     void prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
                                        GptModelInputs&     model_input,
@@ -85,7 +87,7 @@ public:
                                         TensorHolder&       host_holder);
 
     void updateDecodePostDSparkDraftModelInput(GptModelInputs&                              model_input,
-                                               const GptModelOutputs&                       model_output,
+                                               const torch::Tensor&                         target_features,
                                                const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                                size_t                                       batch_size,
                                                torch::Tensor&                               hidden_states_d_t,
