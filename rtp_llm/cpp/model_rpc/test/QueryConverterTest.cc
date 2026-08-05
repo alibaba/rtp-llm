@@ -98,6 +98,7 @@ TEST_F(QueryConverterTest, testTransOutput) {
         hidden_states_data[i] = i;
     }
     res.hidden_states.emplace(hidden_states_tensor);
+    res.aux_info.all_probs = torch::tensor({{0.1f, 0.2f, 0.7f}}, torch::kFloat32);
     outputs.generate_outputs.push_back(res);
 
     GenerateOutputsPB outputs_pb;
@@ -136,6 +137,61 @@ TEST_F(QueryConverterTest, testTransOutput) {
     for (int i = 0; i < 6; ++i) {
         ASSERT_FLOAT_EQ(hidden_states_vector[i], i);
     }
+    ASSERT_TRUE(output_pb.has_all_probs());
+    const auto& all_probs_pb = output_pb.all_probs();
+    ASSERT_EQ(all_probs_pb.data_type(), TensorPB_DataType::TensorPB_DataType_FP32);
+    ASSERT_EQ(all_probs_pb.shape_size(), 3);
+    ASSERT_EQ(all_probs_pb.shape(0), 1);
+    ASSERT_EQ(all_probs_pb.shape(1), 1);
+    ASSERT_EQ(all_probs_pb.shape(2), 3);
+    std::vector<float> all_probs(all_probs_pb.fp32_data().size() / sizeof(float));
+    ASSERT_EQ(all_probs.size(), 3u);
+    std::memcpy(all_probs.data(), all_probs_pb.fp32_data().data(), all_probs_pb.fp32_data().size());
+    EXPECT_FLOAT_EQ(all_probs[0], 0.1f);
+    EXPECT_FLOAT_EQ(all_probs[1], 0.2f);
+    EXPECT_FLOAT_EQ(all_probs[2], 0.7f);
+}
+
+TEST_F(QueryConverterTest, testTransOutputAllProbsMultiOutput) {
+    // Pins the batch-dim semantics model_rpc_client.py relies on:
+    // all_all_probs[i] must be row i of the stacked [n, 1, vocab] tensor,
+    // in generate_outputs order.
+    GenerateOutputs outputs;
+    for (int i = 0; i < 2; ++i) {
+        GenerateOutput res;
+        res.output_ids         = torch::zeros({1, 1}, torch::kInt32);
+        res.aux_info.all_probs = torch::tensor({{0.25f + i, 0.5f + i, 0.75f + i}}, torch::kFloat32);
+        outputs.generate_outputs.push_back(res);
+    }
+    GenerateOutputsPB outputs_pb;
+    QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
+
+    const auto& all_probs_pb = outputs_pb.flatten_output().all_probs();
+    ASSERT_EQ(all_probs_pb.shape_size(), 3);
+    ASSERT_EQ(all_probs_pb.shape(0), 2);
+    ASSERT_EQ(all_probs_pb.shape(1), 1);
+    ASSERT_EQ(all_probs_pb.shape(2), 3);
+    std::vector<float> all_probs(all_probs_pb.fp32_data().size() / sizeof(float));
+    ASSERT_EQ(all_probs.size(), 6u);
+    std::memcpy(all_probs.data(), all_probs_pb.fp32_data().data(), all_probs_pb.fp32_data().size());
+    EXPECT_FLOAT_EQ(all_probs[0], 0.25f);  // output 0, vocab 0
+    EXPECT_FLOAT_EQ(all_probs[3], 1.25f);  // output 1, vocab 0
+}
+
+TEST_F(QueryConverterTest, testTransOutputWithoutAllProbs) {
+    // No logprobs requested -> no vocab-sized payload on the wire. The
+    // has-bit is set by the unconditional mutable_all_probs() evaluation,
+    // so absence is expressed as an empty shape, which is what
+    // model_rpc_client.py checks before parsing.
+    GenerateOutputs outputs;
+    GenerateOutput  res;
+    res.output_ids = torch::zeros({1, 1}, torch::kInt32);
+    outputs.generate_outputs.push_back(res);
+    GenerateOutputsPB outputs_pb;
+    QueryConverter::transResponse(&outputs_pb, &outputs, true, "", 10000);
+
+    EXPECT_EQ(outputs_pb.flatten_output().all_probs().shape_size(), 0);
+    EXPECT_EQ(outputs_pb.flatten_output().all_probs().fp32_data().size(), 0u);
 }
 
 TEST_F(QueryConverterTest, TransTensorPB_FP32) {
