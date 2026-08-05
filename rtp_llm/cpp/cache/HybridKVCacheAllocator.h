@@ -40,6 +40,15 @@ public:
     }
 
 protected:
+    struct PreparedKVCache {
+        int                               reuse_blocks = 0;
+        std::shared_ptr<LoadAsyncContext> load_context;
+        std::vector<RequiredPositions>    required_positions;
+        std::vector<BlockIndicesType>     referenced_blocks;
+        std::vector<size_t>               original_sizes;
+        size_t                            pending_targets = 0;
+    };
+
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
     MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) override;
     int          getNeedBlocks(const MallocInfo& malloc_info) const override;
@@ -57,14 +66,16 @@ protected:
     void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
-    int                        reuseCache(const CacheKeysType&                 cache_keys,
-                                          BatchKVCacheResource&                kv_resource,
-                                          const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                          std::shared_ptr<LoadAsyncContext>&   load_context,
-                                          std::vector<BlockIndicesType>&       referenced_blocks);
+    void prepareKVCache(const CacheKeysType&                 cache_keys,
+                        BatchKVCacheResource&                kv_resource,
+                        const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                        PreparedKVCache&                     prepared);
 
     std::vector<BlockRefTransition>
     freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
+    bool hasAvailableBlocksForReserve(const MallocInfo&       malloc_info,
+                                      size_t                  reserve_blocks,
+                                      const PreparedKVCache& prepared) const;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
     size_t       loadTargetPosition(size_t                               path_index,
                                     size_t                               group_id,
