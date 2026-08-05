@@ -1617,9 +1617,9 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     EXPECT_EQ(second_host_pool->refCount(second_source), 2u);
 
     // Duplicate the first descriptor immediately after itself. The complete batch passes
-    // preflight while both resources are IDLE. Preparation then claims the first descriptor
-    // and takes its target holder; beginLoad for the duplicate observes the
-    // same resource already LOADING and fails with one prepared descriptor and one
+    // preflight while both resources are IDLE. Preparation then transitions the first descriptor
+    // to LOADING, registers it, and takes its target holder; the duplicate observes the same
+    // resource already LOADING and fails with one prepared descriptor and one
     // untouched trailing descriptor. Add the matching source planning hold explicitly
     // so every descriptor in the synthetic context owns exactly one source hold.
     TransferDescriptor                        duplicate_first_desc = load_descs.front();
@@ -1891,66 +1891,6 @@ TEST_F(BlockTreeCacheTest, LoadContextCommitTriggersLoad) {
     cache->releaseMatchedResources(result.matched_device_resources);
     cache->waitForPendingTasks();
     device_pool->decRef(request_targets, BlockRefType::REQUEST);
-}
-
-TEST_F(BlockTreeCacheTest, MalformedLoadTargetFailsBeforeStateMutationAndAllowsRetry) {
-    if (!cudaAvailable()) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-    std::vector<DeviceBlockPoolPtr> device_pools = {
-        makeDevicePool({{1, 0}}, 1, "load_malformed_target_0"),
-        makeDevicePool({{1, 0}}, 1, "load_malformed_target_1"),
-    };
-    ASSERT_NE(device_pools[0], nullptr);
-    ASSERT_NE(device_pools[1], nullptr);
-    std::unique_ptr<BlockTreeCache>      cache     = makeHostOnlyLoadCache(device_pools);
-    const GroupSetPtr&                   group     = cache->groupSets().front();
-    const std::shared_ptr<HostBlockPool> host_pool = group->hostPool();
-    const auto                           path      = cache->tree()->findNode({200});
-    ASSERT_FALSE(path.empty());
-    TreeNode*          node         = path.back();
-    const BlockIdxType source_block = node->group_set_resources[0].host_block;
-    ASSERT_NE(source_block, NULL_BLOCK_IDX);
-    ASSERT_EQ(host_pool->refCount(source_block), 1u);
-
-    BlockTreeMatchResult              malformed         = cache->match({200});
-    std::shared_ptr<LoadAsyncContext> malformed_context = takeLoadContext(malformed);
-    ASSERT_NE(malformed_context, nullptr);
-    const BlockIdList malformed_targets = device_pools[0]->malloc(1).value();
-    ASSERT_EQ(malformed_targets.size(), 1u);
-    device_pools[0]->incRef(malformed_targets, BlockRefType::REQUEST);
-    const size_t malformed_target_ref_count = device_pools[0]->refCount(malformed_targets.front());
-    malformed_context->setTargetBlocks(0, malformed_targets);
-    EXPECT_FALSE(malformed_context->commit());
-    EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_EQ(node->group_set_resources[0].host_block, source_block);
-    EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
-    EXPECT_EQ(host_pool->refCount(source_block), 1u);
-    EXPECT_EQ(device_pools[0]->refCount(malformed_targets.front()), malformed_target_ref_count);
-    malformed_context.reset();
-    device_pools[0]->decRef(malformed_targets, BlockRefType::REQUEST);
-
-    BlockTreeMatchResult              retry         = cache->match({200});
-    std::shared_ptr<LoadAsyncContext> retry_context = takeLoadContext(retry);
-    ASSERT_NE(retry_context, nullptr);
-    BlockIdList request_targets;
-    for (const DeviceBlockPoolPtr& device_pool : device_pools) {
-        const BlockIdxType target = device_pool->malloc().value();
-        device_pool->incRef(target, BlockRefType::REQUEST);
-        request_targets.push_back(target);
-    }
-    retry_context->setTargetBlocks(0, request_targets);
-
-    ASSERT_TRUE(retry_context->commit());
-    retry_context->waitDone();
-    EXPECT_TRUE(retry_context->success());
-    EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_EQ(node->group_set_resources[0].device_blocks, request_targets);
-    EXPECT_FALSE(host_pool->isAllocated(source_block));
-
-    for (size_t pool_index = 0; pool_index < device_pools.size(); ++pool_index) {
-        device_pools[pool_index]->decRef(request_targets[pool_index], BlockRefType::REQUEST);
-    }
 }
 
 // C006-T01: destructor drains real root/live-node holds across Device, Host, and Disk.

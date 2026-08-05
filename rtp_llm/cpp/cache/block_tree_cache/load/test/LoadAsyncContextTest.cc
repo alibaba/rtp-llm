@@ -222,6 +222,14 @@ TEST_F(LoadAsyncContextTest, CommitConsumesPendingRegistration) {
     EXPECT_EQ(abort_count_, 0u);
 }
 
+TEST_F(LoadAsyncContextTest, CommitDelegatesEmptyRegisteredContext) {
+    std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({}, {}, 0);
+    ASSERT_NE(context, nullptr);
+
+    EXPECT_TRUE(context->commit());
+    EXPECT_EQ(commit_count_, 1u);
+}
+
 TEST_F(LoadAsyncContextTest, CommitFailureTerminalizesContext) {
     resetCoordinator(
         [this](const std::shared_ptr<LoadAsyncContext>& /*context*/) {

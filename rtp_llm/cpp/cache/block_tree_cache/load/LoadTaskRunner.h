@@ -17,7 +17,6 @@ class LoadTaskRunner {
 public:
     struct Task {
         std::vector<TransferDescriptor> load_descs;
-        std::vector<GroupSetPtr> desc_group_sets;
         std::vector<TransferDescriptor>    host_to_device_descriptors;
         std::vector<TransferDescriptor>    disk_to_device_descriptors;
         std::vector<bool>                  target_installed;
@@ -26,21 +25,18 @@ public:
     };
     using TaskPtr = std::shared_ptr<Task>;
 
-    TaskPtr createTask(const std::vector<TransferDescriptor>& load_descs,
-                       const std::vector<bool>&                  joined_load,
-                       const std::vector<GroupSetPtr>&           group_sets,
-                       const std::shared_ptr<LoadAsyncContext>&  context);
-    bool    prepareTransferDescriptor(Task& task, size_t desc_index);
+    explicit LoadTaskRunner(const std::vector<GroupSetPtr>& group_sets);
+
+    TaskPtr createTask(const std::shared_ptr<LoadAsyncContext>& context);
     bool    runTransfer(Task&                          task,
                         const BlockTransferDispatcher& transfer_dispatcher,
                         BlockTreeCacheMetricsReporter& metrics_reporter,
                         int                            disk_timeout_ms,
-                        int                            host_timeout_ms,
-                        bool                           prepared);
+                        int                            host_timeout_ms);
     void    releaseTaskResources(const Task& task);
 
 private:
-    void releaseUninstalledTargetHolders(const Task& task);
+    const std::vector<GroupSetPtr>& group_sets_;
 };
 
 }  // namespace rtp_llm

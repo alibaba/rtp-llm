@@ -27,8 +27,9 @@ GroupSetPtr makeTaskRunnerTestGroupSet() {
 }
 
 TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferDescriptors) {
-    LoadTaskRunner runner;
     GroupSetPtr    group = makeTaskRunnerTestGroupSet();
+    const std::vector<GroupSetPtr> group_sets{group};
+    LoadTaskRunner                 runner(group_sets);
 
     TransferDescriptor joined_desc;
     joined_desc.group_set_id                                  = 0;
@@ -36,7 +37,22 @@ TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferDescriptors) {
     const std::shared_ptr<LoadContextCoordinator> coordinator = std::make_shared<LoadContextCoordinator>(
         LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
     const std::shared_ptr<LoadAsyncContext> context = coordinator->create({joined_desc}, {true}, 1);
-    LoadTaskRunner::TaskPtr                 task    = runner.createTask({joined_desc}, {true}, {group}, context);
+    LoadTaskRunner::TaskPtr                 task    = runner.createTask(context);
+    EXPECT_EQ(task, nullptr);
+}
+
+TEST(LoadTaskRunnerTest, CreateTaskSkipsDeviceDescriptors) {
+    GroupSetPtr    group = makeTaskRunnerTestGroupSet();
+    const std::vector<GroupSetPtr> group_sets{group};
+    LoadTaskRunner                 runner(group_sets);
+
+    TransferDescriptor device_desc;
+    device_desc.group_set_id                                  = 0;
+    device_desc.source_tier                                   = Tier::DEVICE;
+    const std::shared_ptr<LoadContextCoordinator> coordinator = std::make_shared<LoadContextCoordinator>(
+        LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
+    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({device_desc}, {false}, 1);
+    LoadTaskRunner::TaskPtr                 task    = runner.createTask(context);
     EXPECT_EQ(task, nullptr);
 }
 
@@ -52,23 +68,20 @@ public:
     size_t submit_count{0};
 };
 
-TEST(LoadTaskRunnerTest, PreparationFailureSkipsTransfer) {
-    LoadTaskRunner                runner;
+TEST(LoadTaskRunnerTest, MissingSourcePoolIsRejectedByTransferEngine) {
     GroupSetPtr                   group  = makeTaskRunnerTestGroupSet();
+    const std::vector<GroupSetPtr> group_sets{group};
+    LoadTaskRunner                 runner(group_sets);
     auto                          engine = std::make_shared<CountingTransferEngine>(std::vector<GroupSetPtr>{group});
     BlockTransferDispatcher       dispatcher(engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
 
-    LoadTaskRunner::Task              task;
-    TransferDescriptor   desc;
-    desc.group_set_id = 0;
-    desc.source_tier  = Tier::HOST;
-    task.load_descs.push_back(desc);
-    task.host_to_device_descriptors.push_back(TransferDescriptor::hostToDevice(0, 1, {1}));
+    LoadTaskRunner::Task task;
+    task.load_descs.push_back(TransferDescriptor::hostToDevice(0, 1, {1}));
 
     EXPECT_FALSE(runner.runTransfer(
-        task, dispatcher, metrics_reporter, /*disk_timeout_ms=*/2000, /*host_timeout_ms=*/1000, /*prepared=*/false));
-    EXPECT_EQ(engine->submit_count, 0u);
+        task, dispatcher, metrics_reporter, /*disk_timeout_ms=*/2000, /*host_timeout_ms=*/1000));
+    EXPECT_EQ(engine->submit_count, 1u);
 }
 
 }  // namespace

@@ -56,7 +56,7 @@ private:
     bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
     BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path);
     bool commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
-    void abortLoad(LoadAsyncContext& context);
+    bool releaseDeviceLoadSourcesLocked(const LoadAsyncContext& context);
     void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
                                          const std::vector<bool>&               joined_loads,
                                          size_t                                 prepared_desc_count,

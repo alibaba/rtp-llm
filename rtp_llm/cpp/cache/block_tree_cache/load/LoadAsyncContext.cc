@@ -1,11 +1,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 
 #include <algorithm>
-#include <cassert>
 #include <unordered_map>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -84,17 +84,11 @@ const std::vector<bool>& LoadAsyncContext::joinedLoads() const {
 }
 
 bool LoadAsyncContext::commit() {
-    if (coordinator_ == nullptr || context_id_ == 0 || empty()) {
-        return false;
-    }
     return coordinator_->commit(context_id_);
 }
 
 void LoadAsyncContext::abort() {
-    if (coordinator_ == nullptr || context_id_ == 0) {
-        return;
-    }
-    const bool aborted = coordinator_->abort(context_id_, *this);
+    const bool aborted = coordinator_->abort(*this);
     if (aborted) {
         markAborted();
     }
@@ -240,20 +234,17 @@ bool LoadContextCoordinator::commit(uint64_t context_id) {
     }
 
     block_tree_cache_detail::ScopeRollback callback_guard([this]() { retireActiveCallback(); });
-    const bool                             committed = commit_callback_ && commit_callback_(context);
-    if (!committed) {
-        const bool failure_recorded = context->onTaskFail();
-        if (!failure_recorded) {
-            assert(context->done());
+    if (!commit_callback_(context)) {
+        if (!context->onTaskFail()) {
+            RTP_LLM_CHECK(context->done());
         }
-    }
-    return committed;
-}
-
-bool LoadContextCoordinator::abort(uint64_t context_id, LoadAsyncContext& context) noexcept {
-    if (context_id == 0 || context.contextId() != context_id) {
         return false;
     }
+    return true;
+}
+
+bool LoadContextCoordinator::abort(LoadAsyncContext& context) noexcept {
+    const uint64_t context_id = context.contextId();
     {
         std::lock_guard<std::mutex>       lock(mutex_);
         const PendingContextMap::iterator pending_it = pending_contexts_.find(context_id);
@@ -265,9 +256,7 @@ bool LoadContextCoordinator::abort(uint64_t context_id, LoadAsyncContext& contex
     }
 
     block_tree_cache_detail::ScopeRollback callback_guard([this]() { retireActiveCallback(); });
-    if (abort_callback_) {
-        abort_callback_(context);
-    }
+    abort_callback_(context);
     return true;
 }
 
@@ -286,8 +275,7 @@ void LoadContextCoordinator::shutdown() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (accepting_) {
             accepting_ = false;
-            for (const std::pair<const uint64_t, std::weak_ptr<LoadAsyncContext>>& pending_context :
-                 pending_contexts_) {
+            for (const auto & pending_context : pending_contexts_) {
                 std::shared_ptr<LoadAsyncContext> context = pending_context.second.lock();
                 if (context != nullptr) {
                     live_contexts.push_back(std::move(context));

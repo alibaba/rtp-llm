@@ -87,7 +87,7 @@ public:
     create(std::vector<TransferDescriptor> load_descs, std::vector<bool> joined_load, size_t matched_blocks);
     bool                              registerContext(const std::shared_ptr<LoadAsyncContext>& context);
     bool                              commit(uint64_t context_id);
-    bool                              abort(uint64_t context_id, LoadAsyncContext& context) noexcept;
+    bool                              abort(LoadAsyncContext& context) noexcept;
     void                              shutdown();
 
 private:
