@@ -26,6 +26,8 @@ __all__ = [
     "has_deep_gemm",
     "is_deep_gemm_e8m0_used",
     "configure_deep_gemm_num_sms",
+    "configure_deep_gemm_mk_alignment",
+    "get_theoretical_mk_alignment_for_contiguous_layout",
     "maybe_pack_ue8m0_scale",
 ]
 
@@ -88,7 +90,9 @@ def has_deep_gemm() -> bool:
 
 @functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
-    return torch.cuda.get_device_capability()[0] in [10, 12]
+    # Blackwell SM100 and SM120 DeepGEMM kernels consume packed UE8M0 scales.
+    # SM120 support requires the vLLM-pinned DeepGEMM build (a6b593d or newer).
+    return torch.cuda.get_device_capability()[0] in (10, 12)
 
 
 @contextmanager
@@ -109,6 +113,39 @@ def configure_deep_gemm_num_sms(num_sms: int) -> Generator[None, None, None]:
     finally:
         # restore original num sms
         deep_gemm.set_num_sms(original_num_sms)
+
+
+def get_theoretical_mk_alignment_for_contiguous_layout(
+    expected_m: int, num_groups: int
+) -> int:
+    """Return DeepGEMM's SM-specific BLOCK_M for a grouped call."""
+    import deep_gemm
+
+    try:
+        return int(
+            deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(
+                expected_m, num_groups
+            )
+        )
+    except TypeError:
+        return int(
+            deep_gemm.get_theoretical_mk_alignment_for_contiguous_layout(
+                (expected_m + num_groups - 1) // num_groups
+            )
+        )
+
+
+@contextmanager
+def configure_deep_gemm_mk_alignment(alignment: int) -> Generator[None, None, None]:
+    """Match DeepGEMM's scheduler BLOCK_M to contiguous workspace padding."""
+    import deep_gemm
+
+    original = deep_gemm.get_mk_alignment_for_contiguous_layout()
+    deep_gemm.set_mk_alignment_for_contiguous_layout(alignment)
+    try:
+        yield
+    finally:
+        deep_gemm.set_mk_alignment_for_contiguous_layout(original)
 
 
 def _missing_deep_gemm() -> NoReturn:
@@ -488,12 +525,12 @@ def maybe_pack_ue8m0_scale(
     x: torch.Tensor, scale: torch.Tensor, disable_ue8m0_cast: bool
 ) -> torch.Tensor:
     # check pack conditions:
-    # 1. sm=100
+    # 1. sm=100 or sm=120
     # 2. sf.scalar_type() == torch::kFloat
     # 3. not disable_ue8m0_cast
     # 4. num_groups > 1
     arch_major, _ = torch.cuda.get_device_capability()
-    if arch_major != 10:
+    if arch_major not in (10, 12):
         return scale
     if scale.dtype != torch.float32:
         return scale
