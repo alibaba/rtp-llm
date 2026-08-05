@@ -468,6 +468,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           captured_batch_capacity + 1,
                                           last_valid);
         }
+        if (state.current_batch_size < captured_batch_capacity) {
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.mtp_indexer_seed_rows,
+                                          state.current_batch_size,
+                                          captured_batch_capacity,
+                                          0);
+        }
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
 #else
@@ -492,6 +499,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     addD2DCopy(d2d_copies,
                inputs.attention_inputs.input_lengths,
                py_model_inputs_.attention_inputs.input_lengths,
+               state.current_batch_size * sizeof(int));
+    addD2DCopy(d2d_copies,
+               inputs.attention_inputs.mtp_indexer_seed_rows,
+               py_model_inputs_.attention_inputs.mtp_indexer_seed_rows,
                state.current_batch_size * sizeof(int));
     addD2DCopy(d2d_copies,
                inputs.attention_inputs.prefix_lengths,
@@ -881,6 +892,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
     // input_lengths [batch_size, int32] (decode only)
     inputs.attention_inputs.input_lengths = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cuda_int32_);
+    inputs.attention_inputs.mtp_indexer_seed_rows = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     // sequence_lengths [batch_size, int32] (decode only) — CUDA buffer; kernels read it on-device.
     inputs.attention_inputs.sequence_lengths =
         torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs - 1, options_cuda_int32_);
@@ -1258,6 +1270,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.input_hiddens       = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
+    inputs.attention_inputs.mtp_indexer_seed_rows =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.mtp_indexer_seed_rows.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =
         capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len_or_tokens);
 

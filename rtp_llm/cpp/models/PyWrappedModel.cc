@@ -197,6 +197,16 @@ PyWrappedModel::~PyWrappedModel() {
     }
 }
 
+void PyWrappedModel::loadMtpIndexerTopk(const torch::Tensor& topk) {
+    py::gil_scoped_acquire gil;
+    py_model_.attr("load_mtp_indexer_topk")(topk);
+}
+
+torch::Tensor PyWrappedModel::snapshotMtpIndexerTopk(int64_t batch_size) {
+    py::gil_scoped_acquire gil;
+    return py_model_.attr("snapshot_mtp_indexer_topk")(batch_size).cast<torch::Tensor>();
+}
+
 // Helper function to build PyAttentionInputs from GptModelInputs
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
@@ -262,9 +272,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     // Keep all length tensors device-resident on the model boundary. Legacy CPU
     // consumers must opt in to an explicit .cpu() with TODO(async) at the call site.
-    py_attn_inputs.prefix_lengths   = prefix_lengths;
-    py_attn_inputs.sequence_lengths = sequence_lengths;
-    py_attn_inputs.input_lengths    = input_lengths;
+    py_attn_inputs.prefix_lengths        = prefix_lengths;
+    py_attn_inputs.sequence_lengths      = sequence_lengths;
+    py_attn_inputs.input_lengths         = input_lengths;
+    py_attn_inputs.mtp_indexer_seed_rows = to_device_i32(inputs.lm_output_indexes);
 
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.dim() != 3) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(kv_kernel_block_host)");
@@ -913,7 +924,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         torch::Tensor  hidden_states;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
-        if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
+        const bool graph_can_run = enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_);
+        // Fail closed only for the fixed-role MTP sharing instances. NORMAL
+        // models intentionally retain their existing eager fallback, including
+        // draft-extend when its dedicated prefill graph is disabled.
+        const bool fixed_mtp_role = mtp_indexer_role_ != MtpIndexerRole::NORMAL;
+        const bool graph_required =
+            enable_cuda_graph_ && fixed_mtp_role
+            && (!py_model_inputs.attention_inputs.is_prefill || inputs.is_target_verify || inputs.is_draft_extend);
+        RTP_LLM_CHECK_WITH_INFO(
+            !graph_required || graph_can_run,
+            "CUDA graph is required for fixed-role MTP indexer sharing; eager fallback is disabled");
+        if (graph_can_run) {
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
             RTP_LLM_LOG_DEBUG(

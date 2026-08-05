@@ -721,6 +721,9 @@ class DeepSeekV2(BaseModel):
                 )
                 config.index_topk_pattern = config_json.get("index_topk_pattern", None)
                 config.indexer_types = config_json.get("indexer_types", None)
+                config.index_share_for_mtp_iteration = bool(
+                    config_json.get("index_share_for_mtp_iteration", False)
+                )
 
     @staticmethod
     def get_weight_cls():

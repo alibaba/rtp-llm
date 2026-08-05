@@ -520,6 +520,63 @@ TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
     checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
 }
 
+TEST_F(MtpExecutorTest, testFakeDecodeStreamGetsReusableIndexerSeedBeforeColdCheck) {
+    MtpExecutorTestConfig test_config;
+    auto                  components                = createMtpExecutorComponents(test_config);
+    components.executor->mtp_indexer_share_enabled_ = true;
+    components.executor->mtp_indexer_topk_          = 4;
+
+    auto fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+                                                              components.model_config,
+                                                              components.runtime_config,
+                                                              components.resource_context,
+                                                              test_config.vocab_size);
+    ASSERT_FALSE(fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.defined());
+    std::list<GenerateStreamPtr> streams{fake_stream};
+    std::list<GenerateStreamPtr> prefill_streams;
+    std::list<GenerateStreamPtr> decode_streams;
+    components.executor->prepareStreams(streams, prefill_streams, decode_streams);
+
+    ASSERT_TRUE(prefill_streams.empty());
+    ASSERT_EQ(decode_streams.size(), 1);
+    const auto& seed = fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu;
+    ASSERT_TRUE(seed.defined());
+    ASSERT_TRUE(seed.is_cuda());
+    ASSERT_EQ(seed.scalar_type(), torch::kInt32);
+    ASSERT_EQ(seed.sizes(), torch::IntArrayRef({1, 4}));
+    const auto seed_cpu = seed.cpu();
+    EXPECT_EQ(seed_cpu.index({0, 0}).item<int32_t>(), 0);
+    EXPECT_EQ(seed_cpu.index({0, 1}).item<int32_t>(), 1);
+    EXPECT_EQ(seed_cpu.index({0, 2}).item<int32_t>(), -1);
+    EXPECT_EQ(seed_cpu.index({0, 3}).item<int32_t>(), -1);
+
+    // NormalEngine creates a fresh fake stream on every idle DP step. Verify
+    // the seed is synthesized for each new object rather than relying on a
+    // previous fake stream's state.
+    auto next_fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+                                                                   components.model_config,
+                                                                   components.runtime_config,
+                                                                   components.resource_context,
+                                                                   test_config.vocab_size);
+    std::list<GenerateStreamPtr> next_streams{next_fake_stream};
+    prefill_streams.clear();
+    decode_streams.clear();
+    components.executor->prepareStreams(next_streams, prefill_streams, decode_streams);
+    ASSERT_TRUE(next_fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.defined());
+
+    components.executor->mtp_indexer_share_enabled_ = false;
+    auto disabled_fake_stream = MtpExecutor::createMinFakeDecodeStream(test_config.gen_num_per_cycle,
+                                                                       components.model_config,
+                                                                       components.runtime_config,
+                                                                       components.resource_context,
+                                                                       test_config.vocab_size);
+    std::list<GenerateStreamPtr> disabled_streams{disabled_fake_stream};
+    prefill_streams.clear();
+    decode_streams.clear();
+    components.executor->prepareStreams(disabled_streams, prefill_streams, decode_streams);
+    EXPECT_FALSE(disabled_fake_stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.defined());
+}
+
 TEST_F(MtpExecutorTest, testComputeMtpTargetLogprobsKeepsOnlyCompactFp32Statistics) {
     auto logits = torch::tensor({3.0f, -1.0f, 0.5f, 2.0f, 0.0f, 4.0f, 1.0f, 3.0f}, torch::kFloat16).reshape({2, 4});
     auto expected_logprobs   = torch::log_softmax(logits.to(torch::kFloat32), -1);

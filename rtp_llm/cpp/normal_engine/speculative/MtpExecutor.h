@@ -220,11 +220,18 @@ private:
     size_t                                                                                     vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
-    size_t                                           draft_vocab_size_;
+    DataType data_type_;
+    size_t   hidden_size_;
+    size_t   propose_step_;
+    size_t   draft_vocab_size_;
+    bool     mtp_indexer_share_enabled_ = false;
+    // MegaMoE symmetric buffers form a peer collective outside a single TP
+    // group. Seed/reuse graph selection must therefore be identical across
+    // the full DP+TP world, or peers can enter different cloned _mega_bufs.
+    bool                                             mtp_indexer_graph_choice_world_sync_ = false;
+    int64_t                                          mtp_indexer_topk_                    = 0;
     std::shared_ptr<ModelBase>                       draft_model_;
+    std::shared_ptr<ModelBase>                       seed_decode_draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;

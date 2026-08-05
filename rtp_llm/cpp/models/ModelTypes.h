@@ -10,6 +10,7 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <string>
+#include <cstdint>
 #include <utility>
 #include <memory>
 
@@ -30,6 +31,14 @@ struct GptModelDescription {
     double                    input_embedding_scalar = 1;
     double                    residual_scalar        = 1;
     bool                      reverse_e_h_norm       = false;
+};
+
+// Fixed role of an MTP model instance. A role is chosen before CUDA graph
+// capture and never changed on the decode hot path.
+enum class MtpIndexerRole : int32_t {
+    NORMAL = 0,
+    SEED   = 1,
+    REUSE  = 2,
 };
 
 struct GptModelInitParams {
@@ -129,6 +138,10 @@ public:
     }
     virtual bool prefillCudaGraphMode() const {
         return false;
+    }
+    virtual void          loadMtpIndexerTopk(const torch::Tensor& /*topk*/) {}
+    virtual torch::Tensor snapshotMtpIndexerTopk(int64_t /*batch_size*/) {
+        return torch::Tensor();
     }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-

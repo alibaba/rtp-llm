@@ -102,6 +102,15 @@ py_test (
 )
 
 py_test(
+    name = "mtp_indexer_share_test",
+    srcs = ["mtp_indexer_share_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+    ],
+    tags = ["open_skip"],
+)
+
+py_test(
     name = "test_dense_mlp_fp8_silu_fusion",
     srcs = ["test_dense_mlp_fp8_silu_fusion.py"],
     deps = py_test_deps,

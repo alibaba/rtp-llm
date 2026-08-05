@@ -1,3 +1,4 @@
+import os
 from typing import Any
 
 import torch
@@ -13,6 +14,33 @@ from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+_MTP_INDEXER_ROLE_NORMAL = 0
+_MTP_INDEXER_ROLE_SEED = 1
+_MTP_INDEXER_ROLE_REUSE = 2
+
+
+def _mtp_indexer_share_enabled() -> bool:
+    # Hard, process-wide opt-in. Model metadata must not silently enable an
+    # experimental execution path.
+    return os.getenv("RTP_LLM_ENABLE_MTP_INDEXER_SHARE") == "1"
+
+
+def _mtp_indexer_share_active(
+    model_config: ModelConfig,
+    parallelism_config: ParallelismConfig,
+    layer_num: int,
+    topk: int,
+) -> bool:
+    cp_config = getattr(parallelism_config, "prefill_cp_config", None)
+    context_parallel_enabled = bool(cp_config is not None and cp_config.is_enabled())
+    return bool(
+        _mtp_indexer_share_enabled()
+        and getattr(model_config, "index_share_for_mtp_iteration", False)
+        and not context_parallel_enabled
+        and layer_num == 1
+        and topk > 0
+    )
 
 
 class GenericMoeMTPModel(GptModelBase):
@@ -79,6 +107,22 @@ class GenericMoeMTPModel(GptModelBase):
             weights.global_weights[W.multi_tokens_predict_final_ln_gamma],
             eps=model_config.layernorm_eps,
         )
+        topk = int(model_config.attn_config.indexer_topk)
+        self._mtp_indexer_share_enabled = _mtp_indexer_share_active(
+            model_config, parallelism_config, self.layer_num, topk
+        )
+        self._mtp_indexer_role = _MTP_INDEXER_ROLE_NORMAL
+        buffer_device = weights.global_weights[W.multi_tokens_predict_enorm].device
+        buffer_shape = (
+            (max_generate_batch_size, topk)
+            if self._mtp_indexer_share_enabled
+            else (0, 0)
+        )
+        self._mtp_shared_topk_indices = torch.zeros(
+            buffer_shape,
+            dtype=torch.int32,
+            device=buffer_device,
+        )
 
     def clone_for_cuda_graph(self) -> "GenericMoeMTPModel":
         clone = object.__new__(type(self))
@@ -114,8 +158,107 @@ class GenericMoeMTPModel(GptModelBase):
             ]
         )
         clone.norm = self.norm
+        clone._mtp_indexer_share_enabled = self._mtp_indexer_share_enabled
+        clone._mtp_indexer_role = _MTP_INDEXER_ROLE_NORMAL
+        clone._mtp_shared_topk_indices = self._mtp_shared_topk_indices
 
         return clone
+
+    def set_mtp_indexer_role(self, role: int) -> None:
+        if role not in (
+            _MTP_INDEXER_ROLE_NORMAL,
+            _MTP_INDEXER_ROLE_SEED,
+            _MTP_INDEXER_ROLE_REUSE,
+        ):
+            raise ValueError(f"invalid MTP indexer role: {role}")
+        self._mtp_indexer_role = (
+            role if self._mtp_indexer_share_enabled else _MTP_INDEXER_ROLE_NORMAL
+        )
+
+    def load_mtp_indexer_topk(self, topk_indices: torch.Tensor) -> None:
+        if not self._mtp_indexer_share_enabled:
+            return
+        batch_size = topk_indices.size(0)
+        expected_topk = self._mtp_shared_topk_indices.size(1)
+        if (
+            topk_indices.dtype != torch.int32
+            or topk_indices.device != self._mtp_shared_topk_indices.device
+            or topk_indices.dim() != 2
+            or topk_indices.size(1) != expected_topk
+            or batch_size > self._mtp_shared_topk_indices.size(0)
+        ):
+            raise RuntimeError(
+                f"invalid request indexer seed: shape={topk_indices.shape}, "
+                f"dtype={topk_indices.dtype}"
+            )
+        self._mtp_shared_topk_indices[:batch_size].copy_(topk_indices)
+
+    def snapshot_mtp_indexer_topk(self, batch_size: int) -> torch.Tensor:
+        if not self._mtp_indexer_share_enabled:
+            return self._mtp_shared_topk_indices
+        if batch_size < 0 or batch_size > self._mtp_shared_topk_indices.size(0):
+            raise RuntimeError(f"invalid MTP indexer snapshot batch size: {batch_size}")
+        return self._mtp_shared_topk_indices[:batch_size]
+
+    def _get_mtp_reuse_topk_indices(
+        self, hidden_states: torch.Tensor, fmha_impl: Any
+    ) -> torch.Tensor:
+        batch_size = hidden_states.size(0)
+        topk = int(self.config.attn_config.indexer_topk)
+        if batch_size > self._mtp_shared_topk_indices.size(0):
+            raise RuntimeError(
+                "MTP indexer share batch exceeds fixed buffer: "
+                f"batch={batch_size}, capacity={self._mtp_shared_topk_indices.size(0)}"
+            )
+        topk_indices = self._mtp_shared_topk_indices[:batch_size, :topk]
+        positions = getattr(fmha_impl.fmha_params, "positions_d", None)
+        if (
+            not torch.is_tensor(positions)
+            or positions.numel() != batch_size
+            or positions.device != topk_indices.device
+        ):
+            raise RuntimeError("MTP indexer share requires device positions_d per row")
+
+        # Each reuse iteration appends one causal KV position. Prepend it and
+        # shift the previous selection right: while the anchor is short this
+        # only evicts a trailing -1; once top-k is full it evicts the tail. This
+        # keeps positions generated earlier in the same proposal cycle at the
+        # front instead of making them invisible to later draft tokens. Avoid
+        # inserting duplicates when the current position is already selected.
+        position_column = positions.reshape(-1, 1)
+        with_current_position = torch.cat(
+            [position_column, topk_indices[:, :-1]], dim=1
+        )
+        position_present = (topk_indices == position_column).any(dim=1, keepdim=True)
+        topk_indices.copy_(
+            torch.where(position_present, topk_indices, with_current_position)
+        )
+        return topk_indices
+
+    def _store_mtp_topk_indices(
+        self, topk_indices: torch.Tensor, seed_rows: torch.Tensor
+    ) -> None:
+        batch_size = seed_rows.numel()
+        topk = int(self.config.attn_config.indexer_topk)
+        valid = (
+            torch.is_tensor(topk_indices)
+            and topk_indices.dtype == torch.int32
+            and topk_indices.device == seed_rows.device
+            and topk_indices.dim() == 2
+            and topk_indices.size(1) == topk
+            and seed_rows.dtype == torch.int32
+            and seed_rows.dim() == 1
+            and batch_size <= self._mtp_shared_topk_indices.size(0)
+        )
+        if not valid:
+            raise RuntimeError(
+                "invalid MTP indexer share output: "
+                f"shape={getattr(topk_indices, 'shape', None)}, "
+                f"dtype={getattr(topk_indices, 'dtype', None)}, "
+                f"batch={batch_size}, topk={topk}"
+            )
+        selected = topk_indices.index_select(0, seed_rows.to(torch.int64))
+        self._mtp_shared_topk_indices[:batch_size].copy_(selected)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
@@ -131,8 +274,19 @@ class GenericMoeMTPModel(GptModelBase):
         hidden_states = self.fc(cat_hidden_states)
 
         residual = torch.zeros_like(hidden_states)
-        prev_topk_indices = None
-        enable_cmp = should_enable_glm5_cmp(
+        reuse_topk_indices = (
+            self._mtp_indexer_share_enabled
+            and self._mtp_indexer_role == _MTP_INDEXER_ROLE_REUSE
+            and not inputs.attention_inputs.is_prefill
+        )
+        prev_topk_indices = (
+            self._get_mtp_reuse_topk_indices(hidden_states, fmha_impl)
+            if reuse_topk_indices
+            else None
+        )
+        # The CMP path owns indexer execution when enabled. Reuse iterations
+        # must take the regular MLA path so the shared TopK indices are honored.
+        enable_cmp = not reuse_topk_indices and should_enable_glm5_cmp(
             self.layers,
             self.layer_num,
             hidden_states,
@@ -148,10 +302,19 @@ class GenericMoeMTPModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
                 enable_cmp=enable_cmp,
+                force_reuse_topk_indices=reuse_topk_indices,
             )
             hidden_states = output.hidden_states
             residual = output.residual
             prev_topk_indices = output.topk_indices
+
+        if (
+            self._mtp_indexer_share_enabled
+            and self._mtp_indexer_role == _MTP_INDEXER_ROLE_SEED
+        ):
+            self._store_mtp_topk_indices(
+                prev_topk_indices, inputs.attention_inputs.mtp_indexer_seed_rows
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)

@@ -111,6 +111,9 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    // Request-ordered GLM-5.2 MTP indexer seed. It stays on the draft
+    // device and is carried by GenerateStream between decode cycles.
+    torch::Tensor mtp_indexer_topk;
 
     std::vector<torch::Tensor> moe_gating;
 };

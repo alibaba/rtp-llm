@@ -1613,6 +1613,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("partial_rotary_factor", &ModelConfig::partial_rotary_factor)
         .def_readwrite("input_embedding_scalar", &ModelConfig::input_embedding_scalar)
         .def_readwrite("residual_scalar", &ModelConfig::residual_scalar)
+        .def_readwrite("index_share_for_mtp_iteration", &ModelConfig::index_share_for_mtp_iteration)
         .def_readwrite("use_norm_input_residual", &ModelConfig::use_norm_input_residual)
         .def_readwrite("use_norm_attn_out_residual", &ModelConfig::use_norm_attn_out_residual)
         .def_readwrite("input_vocab_size", &ModelConfig::input_vocab_size)

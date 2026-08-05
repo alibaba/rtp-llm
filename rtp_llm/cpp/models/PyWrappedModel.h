@@ -67,7 +67,8 @@ public:
                    py::object                py_instance,
                    bool                      is_prefill_cuda_graph_mode = false,
                    bool                      use_spec_decoding          = false,
-                   const std::vector<int>&   kv_cache_layer_to_group    = {});
+                   const std::vector<int>&   kv_cache_layer_to_group    = {},
+                   MtpIndexerRole            mtp_indexer_role           = MtpIndexerRole::NORMAL);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -86,6 +87,8 @@ public:
     bool prefillCudaGraphMode() const override {
         return is_prefill_cuda_graph_mode_;
     }
+    void          loadMtpIndexerTopk(const torch::Tensor& topk) override;
+    torch::Tensor snapshotMtpIndexerTopk(int64_t batch_size) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -134,14 +137,15 @@ private:
     torch::Tensor                            residual_scale_;
     TensorHolder                             buffer_holder_;
 
-    GraphBase* graph_runner_{nullptr};
-    py::object py_model_;
-    py::object held_attn_pyobj_;
-    bool       enable_cuda_graph_{false};
-    bool       is_prefill_cuda_graph_mode_{false};
-    bool       use_spec_decoding_{false};
-    bool       enable_device_perf_{false};
-    bool       check_nan_{false};
+    GraphBase*     graph_runner_{nullptr};
+    py::object     py_model_;
+    py::object     held_attn_pyobj_;
+    bool           enable_cuda_graph_{false};
+    bool           is_prefill_cuda_graph_mode_{false};
+    bool           use_spec_decoding_{false};
+    bool           enable_device_perf_{false};
+    bool           check_nan_{false};
+    MtpIndexerRole mtp_indexer_role_{MtpIndexerRole::NORMAL};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -163,7 +167,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
-                                      const std::vector<int>&   kv_cache_layer_to_group):
+                                      const std::vector<int>&   kv_cache_layer_to_group,
+                                      MtpIndexerRole            mtp_indexer_role):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
@@ -174,8 +179,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
-    weights_               = params.weights;
-    model_id_              = params.model_id;
+    weights_          = params.weights;
+    model_id_         = params.model_id;
+    mtp_indexer_role_ = int(device_props_.enable_layer_micro_batch) ? MtpIndexerRole::NORMAL : mtp_indexer_role;
+    if (mtp_indexer_role != MtpIndexerRole::NORMAL && int(device_props_.enable_layer_micro_batch)) {
+        RTP_LLM_LOG_WARNING("MTP indexer share is disabled when layer micro-batching is enabled");
+    }
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
     c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
@@ -380,9 +389,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         try {
             syncCudaGraphCaptureRanks(params.parallelism_config, "before_initCapture");
             py_init_result = py_initialize_method(init_resources);
+            if (mtp_indexer_role_ != MtpIndexerRole::NORMAL && py::hasattr(py_model_, "set_mtp_indexer_role")) {
+                py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
+            }
             graph_runner_->initCapture();
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
+            throw;
+        } catch (...) {
             throw;
         }
     }

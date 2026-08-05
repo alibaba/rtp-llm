@@ -34,8 +34,36 @@ _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
+_cpu_world_group: Optional[torch.distributed.ProcessGroup] = None
 _rocm_rccl = None
 _symm_mem = None
+
+
+def _get_or_create_mtp_indexer_cpu_world_group() -> torch.distributed.ProcessGroup:
+    """Lazily create the host group on the first actual world-sync decision."""
+    global _cpu_world_group
+    if _cpu_world_group is not None:
+        return _cpu_world_group
+    if os.environ.get("RTP_LLM_ENABLE_MTP_INDEXER_SHARE") != "1":
+        raise RuntimeError(
+            "MTP indexer CPU world group requested while feature is disabled"
+        )
+    if _parallelism_config is None or _parallelism_config.world_size <= 1:
+        raise RuntimeError(
+            "MTP indexer CPU world group requires a multi-rank distributed environment"
+        )
+    if not torch.distributed.is_gloo_available():
+        raise RuntimeError(
+            "RTP_LLM_ENABLE_MTP_INDEXER_SHARE=1 requires the Gloo backend "
+            "for CPU graph-selection collectives"
+        )
+    _cpu_world_group = torch.distributed.new_group(
+        ranks=list(range(_parallelism_config.world_size)),
+        backend="gloo",
+        timeout=timedelta(days=36500),
+    )
+    logging.info("Initialized MTP indexer CPU world control group")
+    return _cpu_world_group
 
 
 def _get_rocm_rccl():
@@ -426,6 +454,18 @@ def _register_process_groups_to_cpp():
         Returns:
             The reduced tensor (dest if provided, otherwise tensor).
         """
+        if tensor.is_cpu and mode == _CPP_PARALLEL_MODE_DP_AND_TP:
+            cpu_world_group = _get_or_create_mtp_indexer_cpu_world_group()
+            target = dest if dest is not None else tensor
+            if dest is not None:
+                target.copy_(tensor)
+            torch.distributed.all_reduce(
+                target,
+                op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM),
+                group=cpu_world_group,
+            )
+            return target
+
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return tensor if dest is None else tensor
@@ -569,7 +609,7 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path, _cpu_world_group
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -612,6 +652,7 @@ def destroy_distributed_environment():
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
+    _cpu_world_group = None
     _initialized = False
     gc.collect()
 
@@ -714,7 +755,9 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:

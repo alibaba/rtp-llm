@@ -685,6 +685,7 @@ class GenericMoeDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         enable_cmp: bool = False,
+        force_reuse_topk_indices: bool = False,
     ) -> DecodeLayerOutput:
         if enable_cmp:
             return self._forward_cmp(
@@ -713,6 +714,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     x_fp8=fp8_hs,
                     x_scale=scale,
                     prev_topk_indices=prev_topk_indices,
+                    force_reuse_topk_indices=force_reuse_topk_indices,
                     return_topk=True,
                 )
             else:
@@ -731,6 +733,7 @@ class GenericMoeDecoderLayer(nn.Module):
                     fmha_impl=fmha_impl,
                     kv_cache=kv_cache,
                     prev_topk_indices=prev_topk_indices,
+                    force_reuse_topk_indices=force_reuse_topk_indices,
                     return_topk=True,
                 )
             else:
