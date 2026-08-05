@@ -5,7 +5,7 @@
 namespace rtp_llm {
 
 void refreshGroupedAttentionInputs(torch_ext::PyModelInputs& inputs) {
-    for (auto& [tag, group_inputs] : inputs.attention_inputs_by_tag) {
+    for (auto& [tag, group_inputs] : inputs.group_attention_inputs) {
         (void)tag;
         auto kernel_block_id                         = group_inputs.kv_cache_kernel_block_id;
         auto kernel_block_id_device                  = group_inputs.kv_cache_kernel_block_id_device;

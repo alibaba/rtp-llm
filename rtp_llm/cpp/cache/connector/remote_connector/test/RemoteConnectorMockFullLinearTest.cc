@@ -73,10 +73,10 @@ KVCacheSpecPtr makeTestLinearSpec(const std::string& tag, uint32_t seq_size_per_
 
 void initializeResourceTopology(KVCacheResource&                                                     resource,
                                 const CacheConfig&                                                   config,
-                                std::initializer_list<std::pair<std::string_view, BlockIndicesType>> blocks_by_tag) {
+                                std::initializer_list<std::pair<std::string_view, BlockIndicesType>> group_blocks) {
     resource.initGroups(config.topologyPtr());
-    ASSERT_EQ(static_cast<size_t>(resource.groupNums()), blocks_by_tag.size());
-    for (const auto& [tag, blocks] : blocks_by_tag) {
+    ASSERT_EQ(static_cast<size_t>(resource.groupNums()), group_blocks.size());
+    for (const auto& [tag, blocks] : group_blocks) {
         resource.mutableBlockIds(tag).assign(blocks);
     }
 }

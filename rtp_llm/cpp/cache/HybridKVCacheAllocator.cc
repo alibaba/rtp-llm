@@ -575,10 +575,10 @@ void HybridKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resou
     }
 }
 
-bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                                           const std::vector<int>&         block_src_batch,
-                                           bool                            copy_last_block,
-                                           std::vector<TaggedBlockIdPair>& block_update_mapping) {
+bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                           const std::vector<int>&        block_src_batch,
+                                           bool                           copy_last_block,
+                                           std::vector<GroupBlockIdPair>& block_update_mapping) {
     block_update_mapping.clear();
     if (block_src_batch.empty()) {
         return true;

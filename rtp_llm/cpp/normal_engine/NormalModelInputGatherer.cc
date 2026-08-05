@@ -28,25 +28,25 @@ bool deviceInputEnabled() {
 }
 
 struct GatherModelInputContext {
-    int                             input_vocab_size;
-    bool                            need_cal_position_id;
-    size_t                          max_blocks_num;
-    int*                            merged_tokens;
-    int*                            input_lengths;
-    int*                            combo_position_ids;
-    std::vector<TaggedBlockIdPair>* kv_cache_update_mapping;
-    int                             batch_idx;
-    int*                            sequence_lengths;
-    bool                            has_multimodal_input;
-    bool                            has_mm_extra_input;
-    size_t                          total_decode_batch_size;
-    int*                            prefix_lengths;
-    int*                            prefix_lengths_host;
-    int*                            merged_text_mask;
-    int*                            mm_features_locs;
-    int                             token_idx;
-    int                             cum_output_seq_len;
-    int                             mm_feature_index;
+    int                            input_vocab_size;
+    bool                           need_cal_position_id;
+    size_t                         max_blocks_num;
+    int*                           merged_tokens;
+    int*                           input_lengths;
+    int*                           combo_position_ids;
+    std::vector<GroupBlockIdPair>* kv_cache_update_mapping;
+    int                            batch_idx;
+    int*                           sequence_lengths;
+    bool                           has_multimodal_input;
+    bool                           has_mm_extra_input;
+    size_t                         total_decode_batch_size;
+    int*                           prefix_lengths;
+    int*                           prefix_lengths_host;
+    int*                           merged_text_mask;
+    int*                           mm_features_locs;
+    int                            token_idx;
+    int                            cum_output_seq_len;
+    int                            mm_feature_index;
 };
 
 enum class GatherContextMode {
@@ -98,13 +98,13 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
                                    int                         stream_batch_idx,
                                    int                         model_batch_idx,
                                    bool                        warm_up) {
-    if (warm_up || model_input.block_tables_by_tag.empty()) {
+    if (warm_up || model_input.group_block_tables.empty()) {
         return;
     }
     for (const auto& [tag, block_ids] : kv_cache.groupBlocks(stream_batch_idx)) {
-        auto table_it = model_input.block_tables_by_tag.find(tag);
+        auto table_it = model_input.group_block_tables.find(tag);
         RTP_LLM_CHECK_WITH_INFO(
-            table_it != model_input.block_tables_by_tag.end(), "KV cache resource has unconfigured tag=%s", tag.c_str());
+            table_it != model_input.group_block_tables.end(), "KV cache resource has unconfigured tag=%s", tag.c_str());
         auto&       table         = table_it->second;
         const auto& kernel_blocks = block_ids->kernelBlocks();
         RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(kernel_blocks.size()) <= table.kernel_block_ids.size(1),
@@ -196,7 +196,7 @@ void gatherMultimodalFeaturesForContextBatch(const GenerateStreamPtr&    stream,
     memcpy(ctx.merged_text_mask + ctx.token_idx, text_token_mask.data(), text_token_mask.size() * sizeof(int));
 }
 
-void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<TaggedBlockIdPair>& update_mapping) {
+void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<GroupBlockIdPair>& update_mapping) {
     if (!ctx.kv_cache_update_mapping) {
         return;
     }
@@ -282,7 +282,7 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
     model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
     model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
-    for (auto& [tag, table] : model_input.block_tables_by_tag) {
+    for (auto& [tag, table] : model_input.group_block_tables) {
         (void)tag;
         table.kernel_block_ids = publishInt32ToCuda(table.kernel_block_ids, host_holder);
     }
@@ -291,13 +291,13 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
 }  // anonymous namespace
 
 NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config): config_(config) {
-    RTP_LLM_CHECK_WITH_INFO(config_.kv_cache_group_types.size() == config_.kernel_blocks_per_kv_block_by_tag.size(),
+    RTP_LLM_CHECK_WITH_INFO(config_.kv_cache_group_types.size() == config_.group_kernel_blocks_per_kv_block.size(),
                             "model input cache group maps have different sizes: types=%zu kernel_ratios=%zu",
                             config_.kv_cache_group_types.size(),
-                            config_.kernel_blocks_per_kv_block_by_tag.size());
+                            config_.group_kernel_blocks_per_kv_block.size());
     for (const auto& [tag, type] : config_.kv_cache_group_types) {
         (void)type;
-        RTP_LLM_CHECK_WITH_INFO(config_.kernel_blocks_per_kv_block_by_tag.count(tag) == 1,
+        RTP_LLM_CHECK_WITH_INFO(config_.group_kernel_blocks_per_kv_block.count(tag) == 1,
                                 "model input cache group tag=%s has no kernel block ratio",
                                 tag.c_str());
     }
@@ -351,7 +351,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         if (config_.warm_up) {
             for (auto& [tag, width] : widths) {
                 width.first  = max_blocks_num;
-                width.second = max_blocks_num * config_.kernel_blocks_per_kv_block_by_tag.at(tag);
+                width.second = max_blocks_num * config_.group_kernel_blocks_per_kv_block.at(tag);
             }
         } else {
             observe_streams(stream_groups.decodeStreams());
@@ -381,7 +381,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
                     .view({static_cast<int64_t>(total_batch_size), static_cast<int64_t>(kernel_width)});
             physical_offset += total_batch_size * width;
             kernel_offset += total_batch_size * kernel_width;
-            model_input.block_tables_by_tag.emplace(tag, std::move(table));
+            model_input.group_block_tables.emplace(tag, std::move(table));
         }
         model_input.kv_cache_update_mapping.reserve(stream_groups.totalBlockUpdateCopyNum());
         // CP-sharded group block tables can be narrower than the global cache-key
@@ -642,8 +642,8 @@ absl::Status NormalModelInputGatherer::gatherKvCacheKernelBlockIds(GptModelInput
 
     static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
     for (const auto& [tag, width] : widths) {
-        auto table_it = model_input.block_tables_by_tag.find(tag);
-        RTP_LLM_CHECK_WITH_INFO(table_it != model_input.block_tables_by_tag.end(),
+        auto table_it = model_input.group_block_tables.find(tag);
+        RTP_LLM_CHECK_WITH_INFO(table_it != model_input.group_block_tables.end(),
                                 "model input has no KV cache table for tag=%s",
                                 tag.c_str());
         table_it->second.kernel_block_ids =
@@ -656,7 +656,7 @@ absl::Status NormalModelInputGatherer::gatherKvCacheKernelBlockIds(GptModelInput
         for (int i = 0; i < current_batch_size; ++i) {
             for (const auto& [tag, block_ids] : kv_cache.groupBlocks(i)) {
                 const auto& kernel_blocks = block_ids->kernelBlocks();
-                auto&       table         = model_input.block_tables_by_tag.at(tag).kernel_block_ids;
+                auto&       table         = model_input.group_block_tables.at(tag).kernel_block_ids;
                 int32_t*    dst           = table.data_ptr<int32_t>() + static_cast<size_t>(batch_idx) * table.size(1);
                 std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
             }
@@ -672,7 +672,7 @@ absl::Status NormalModelInputGatherer::gatherKvCacheKernelBlockIds(GptModelInput
         fill_one_stream(stream, batch_idx);
     }
 
-    for (auto& [tag, table] : model_input.block_tables_by_tag) {
+    for (auto& [tag, table] : model_input.group_block_tables) {
         (void)tag;
         table.kernel_block_ids = publishInt32ToCuda(table.kernel_block_ids, host_holder);
     }

@@ -76,10 +76,10 @@ public:
         return runner_ != nullptr && runner_->canRun(inputs, state_);
     }
 
-    void clearTaggedPhysicalBlockTable(torch_ext::PyModelInputs& inputs, const std::string& tag, bool device) {
-        const auto it = inputs.attention_inputs_by_tag.find(tag);
+    void clearGroupPhysicalBlockTable(torch_ext::PyModelInputs& inputs, const std::string& tag, bool device) {
+        const auto it = inputs.group_attention_inputs.find(tag);
         RTP_LLM_CHECK_WITH_INFO(
-            it != inputs.attention_inputs_by_tag.end(), "missing tagged attention inputs for tag=%s", tag.c_str());
+            it != inputs.group_attention_inputs.end(), "missing grouped attention inputs for tag=%s", tag.c_str());
         if (device) {
             it->second.kv_cache_block_id_device = torch::Tensor();
         } else {
@@ -169,8 +169,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_capacities")  = std::map<std::string, std::pair<int, int>>{},
              py::arg("sp_steps")          = 0)
         .def("canRun", &CudaGraphTestRunner::canRun)
-        .def("clearTaggedPhysicalBlockTable",
-             &CudaGraphTestRunner::clearTaggedPhysicalBlockTable,
+        .def("clearGroupPhysicalBlockTable",
+             &CudaGraphTestRunner::clearGroupPhysicalBlockTable,
              py::arg("inputs"),
              py::arg("tag"),
              py::arg("device"))

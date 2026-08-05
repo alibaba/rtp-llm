@@ -503,7 +503,7 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     RTP_LLM_PROFILE_FUNCTION();
     auto*         generate_stream = decode_context.getStream().get();
     auto&         cache_keys      = generate_stream->cacheKeys(0);
-    BlockIdsByTag group_block_ids = generate_stream->kvCachePtr()->groupBlocks(0);
+    GroupBlockIds group_block_ids = generate_stream->kvCachePtr()->groupBlocks(0);
 
     if (resource_.workers.size() % decode_context.peer_addrs.size() != 0
         && decode_context.peer_addrs.size() % resource_.workers.size() != 0) {
@@ -1078,7 +1078,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         auto        load_layer_cache =
                             std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
 
-                        const auto  group_block = mtpBlockIdsByTagForTag(load_context.group_block_ids, tag);
+                        const auto  group_block = mtpGroupBlockIdsForTag(load_context.group_block_ids, tag);
                         const auto& block_ids   = group_block->blocks();
                         auto        block_num   = block_ids.size();
                         size_t      model_id    = module_plan.cache_model_id;
@@ -1236,11 +1236,11 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
     std::vector<std::string>  peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
-    BlockIdsByTag             group_block_ids;
+    GroupBlockIds             group_block_ids;
     ErrorInfo                 error_info = ErrorInfo::OkStatus();
     try {
         const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-        group_block_ids          = decodeBlockIdsByTag(*request, cache_config.topology());
+        group_block_ids          = decodeGroupBlockIds(*request, cache_config.topology());
     } catch (const std::exception& e) {
         error_info = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
                                std::string("invalid remote load cache topology or block ids: ") + e.what());
@@ -1278,9 +1278,9 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     return grpc::Status::OK;
 }
 
-BlockIdsByTag DecodeRpcServer::decodeBlockIdsByTag(const BroadcastLoadRequestPB& request,
+GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
                                                    const CacheTopology&          topology) {
-    BlockIdsByTag group_block_ids;
+    GroupBlockIds group_block_ids;
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
         RTP_LLM_CHECK_WITH_INFO(
             group_block_ids.count(tagged_row.tag()) == 0, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
@@ -1298,7 +1298,7 @@ BlockIdsByTag DecodeRpcServer::decodeBlockIdsByTag(const BroadcastLoadRequestPB&
     return group_block_ids;
 }
 
-std::shared_ptr<BlockIds> DecodeRpcServer::mtpBlockIdsByTagForTag(const BlockIdsByTag& main_group_block_ids,
+std::shared_ptr<BlockIds> DecodeRpcServer::mtpGroupBlockIdsForTag(const GroupBlockIds& main_group_block_ids,
                                                                   std::string_view     tag) {
     const auto tag_string = std::string(tag);
     const auto group_it   = main_group_block_ids.find(tag_string);

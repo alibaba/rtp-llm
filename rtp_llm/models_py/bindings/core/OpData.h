@@ -62,8 +62,8 @@ struct GptModelInputs {
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
-    BlockTablesByGroup             block_tables_by_tag;
-    std::vector<TaggedBlockIdPair> kv_cache_update_mapping;
+    BlockTablesByGroup            group_block_tables;
+    std::vector<GroupBlockIdPair> kv_cache_update_mapping;
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]

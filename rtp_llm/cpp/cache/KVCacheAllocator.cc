@@ -157,7 +157,7 @@ uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_lay
         config_.layer_num, static_cast<int>(model_id - 1), sub->layer_num, local_layer_id);
 }
 
-void KVCacheAllocator::blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+void KVCacheAllocator::blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping) {
     if (copy_mapping.empty()) {
         return;
     }

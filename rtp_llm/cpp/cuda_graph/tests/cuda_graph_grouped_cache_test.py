@@ -16,11 +16,11 @@ HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
 
 
-class TaggedBlockTableModel:
+class GroupedBlockTableModel:
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
     def __init__(self) -> None:
-        self.recorders: dict[str, TaggedPrepareRecorder] = {}
+        self.recorders: dict[str, GroupPrepareRecorder] = {}
         self.capture_table_pointers: set[int] = set()
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -34,7 +34,7 @@ class TaggedBlockTableModel:
                 inputs.attention_inputs[tag].kv_cache_block_id_device,
             )
         }
-        self.recorders = {tag: TaggedPrepareRecorder() for tag in GROUP_TAGS}
+        self.recorders = {tag: GroupPrepareRecorder() for tag in GROUP_TAGS}
         return self.recorders
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
@@ -50,7 +50,7 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class TaggedPrepareRecorder:
+class GroupPrepareRecorder:
     def __init__(self) -> None:
         self.host_physical: torch.Tensor | None = None
 
@@ -58,7 +58,7 @@ class TaggedPrepareRecorder:
         self.host_physical = inputs.kv_cache_block_id.clone()
 
 
-class TaggedSequenceLengthModel:
+class GroupedSequenceLengthModel:
     """Expose the cumulative lengths used by a tagged captured graph."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -305,7 +305,7 @@ def _expected_signature(
     )
 
 
-class TestCudaGraphTaggedCache(unittest.TestCase):
+class TestCudaGraphGroupedCache(unittest.TestCase):
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:
@@ -316,7 +316,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         torch.testing.assert_close(output.hidden_states, expected_output)
 
     def test_decode_tag_validation_and_replay_updates(self) -> None:
-        model = TaggedBlockTableModel()
+        model = GroupedBlockTableModel()
         runner = CudaGraphRunner()
         runner.init_decode(
             model,
@@ -394,8 +394,8 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             )
         )
 
-    def test_prefill_tagged_capture_and_replay_updates(self) -> None:
-        model = TaggedBlockTableModel()
+    def test_prefill_grouped_capture_and_replay_updates(self) -> None:
+        model = GroupedBlockTableModel()
         runner = CudaGraphRunner()
         runner.init_prefill(
             model,
@@ -440,10 +440,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             torch.tensor([[5, 0], [0, 0]], dtype=torch.int32),
         )
 
-    def test_tagged_block_table_validation_falls_back(self) -> None:
+    def test_grouped_block_table_validation_falls_back(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             HIDDEN_SIZE,
             2 * TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -453,7 +453,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
 
         missing = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-        runner.clearTaggedPhysicalBlockTable(missing, "full", False)
+        runner.clearGroupPhysicalBlockTable(missing, "full", False)
         self.assertFalse(runner.canRun(missing))
 
         wrong_type = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
@@ -481,7 +481,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             RuntimeError, "duplicate CUDA graph KV cache tag=full"
         ):
             runner.init_decode(
-                TaggedBlockTableModel(),
+                GroupedBlockTableModel(),
                 HIDDEN_SIZE,
                 TOKENS_PER_BLOCK,
                 TOKENS_PER_BLOCK,
@@ -493,7 +493,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_target_verify_validates_exact_tag_set(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedBlockTableModel(),
+            GroupedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -541,7 +541,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         prefix_len = 11
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedSequenceLengthModel(),
+            GroupedSequenceLengthModel(),
             HIDDEN_SIZE,
             64,
             TOKENS_PER_BLOCK,

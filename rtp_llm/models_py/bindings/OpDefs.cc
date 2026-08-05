@@ -208,8 +208,8 @@ void registerPyOpDefs(pybind11::module& m) {
                  if (pybind11::isinstance<PyAttentionInputs>(attention_inputs)) {
                      result.attention_inputs = attention_inputs.cast<PyAttentionInputs>();
                  } else {
-                     result.attention_inputs_by_tag = attention_inputs.cast<AttentionInputsByTag>();
-                     RTP_LLM_CHECK_WITH_INFO(!result.attention_inputs_by_tag.empty(),
+                     result.group_attention_inputs = attention_inputs.cast<GroupAttentionInputs>();
+                     RTP_LLM_CHECK_WITH_INFO(!result.group_attention_inputs.empty(),
                                              "attention_inputs tag map must not be empty");
                  }
                  return result;
@@ -229,9 +229,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_property(
             "attention_inputs",
             [](PyModelInputs& self) -> pybind11::object {
-                if (!self.attention_inputs_by_tag.empty()) {
+                if (!self.group_attention_inputs.empty()) {
                     pybind11::dict result;
-                    for (auto& [tag, inputs] : self.attention_inputs_by_tag) {
+                    for (auto& [tag, inputs] : self.group_attention_inputs) {
                         result[pybind11::str(tag)] = pybind11::cast(
                             &inputs, pybind11::return_value_policy::reference_internal, pybind11::cast(&self));
                     }
@@ -242,13 +242,13 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             [](PyModelInputs& self, pybind11::object value) {
                 if (pybind11::isinstance<PyAttentionInputs>(value)) {
-                    self.attention_inputs        = value.cast<PyAttentionInputs>();
-                    self.attention_inputs_by_tag = {};
+                    self.attention_inputs       = value.cast<PyAttentionInputs>();
+                    self.group_attention_inputs = {};
                     return;
                 }
-                auto by_group = value.cast<AttentionInputsByTag>();
+                auto by_group = value.cast<GroupAttentionInputs>();
                 RTP_LLM_CHECK_WITH_INFO(!by_group.empty(), "attention_inputs tag map must not be empty");
-                self.attention_inputs_by_tag = std::move(by_group);
+                self.group_attention_inputs = std::move(by_group);
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(

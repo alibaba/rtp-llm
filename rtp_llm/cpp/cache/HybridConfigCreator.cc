@@ -28,9 +28,9 @@ const KVCacheSpecBuildResult& singleRuntimeSpecForLayer(const LayerKVCacheSpecBu
     return layer_specs[0];
 }
 
-std::vector<GroupBase> buildTaggedGroups(const LayerKVCacheSpecBuildResults& runtime_specs,
-                                         const ModelConfig&                  model_config,
-                                         const ParallelismConfig&            parallelism_config) {
+std::vector<GroupBase> buildGroups(const LayerKVCacheSpecBuildResults& runtime_specs,
+                                   const ModelConfig&                  model_config,
+                                   const ParallelismConfig&            parallelism_config) {
     const int64_t layer_num = model_config.num_layers;
     RTP_LLM_CHECK_WITH_INFO(layer_num > 0, "invalid model_config.num_layers=%ld", layer_num);
     RTP_LLM_CHECK_WITH_INFO(runtime_specs.size() == static_cast<size_t>(layer_num),
@@ -196,7 +196,7 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     config.dtype              = dtype;
     config.linear_step        = 1;
 
-    auto cache_groups = buildTaggedGroups(runtime_specs, model_config, parallelism_config);
+    auto cache_groups = buildGroups(runtime_specs, model_config, parallelism_config);
     auto full_spec    = representativeSpec(cache_groups, CacheGroupType::FULL);
     auto linear_spec  = representativeSpec(cache_groups, CacheGroupType::LINEAR);
 

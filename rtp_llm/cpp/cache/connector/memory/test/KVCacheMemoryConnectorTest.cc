@@ -275,7 +275,7 @@ private:
 
     void addTaggedGpuBlocks(MemoryOperationRequestPB::CopyItem& item,
                             const std::vector<BlockIdxType>&    blocks_by_layer) const {
-        const auto& slots = connector_->layerTagSlots();
+        const auto& slots = connector_->layerGroupSlots();
         for (const auto& slot : slots) {
             ASSERT_GE(slot.layer_id, 0);
             ASSERT_LT(static_cast<size_t>(slot.layer_id), blocks_by_layer.size());
@@ -564,9 +564,9 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     EXPECT_THROW(conn->init(), std::runtime_error);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, LayerTagSlotsAreCachedDerivedBindings) {
-    const auto& first  = connector_->layerTagSlots();
-    const auto& second = connector_->layerTagSlots();
+TEST_F(KVCacheMemoryConnectorTest, LayerGroupSlotsAreCachedDerivedBindings) {
+    const auto& first  = connector_->layerGroupSlots();
+    const auto& second = connector_->layerGroupSlots();
 
     EXPECT_EQ(&first, &second);
     ASSERT_FALSE(first.empty());
@@ -1649,7 +1649,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCop
     auto*                    item = req.add_copy_items();
     addTaggedGpuBlocks(*item,
                        std::vector<BlockIdxType>(static_cast<size_t>(cache_config_.layer_all_num), gpu_block_idx));
-    const auto& slots = connector_->layerTagSlots();
+    const auto& slots = connector_->layerGroupSlots();
     ASSERT_FALSE(slots.empty());
     auto* invalid_block = item->add_tagged_gpu_blocks();
     invalid_block->set_layer_id(cache_config_.layer_num);

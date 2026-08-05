@@ -32,7 +32,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
         for (const auto& group : cache_config.topology().groups()) {
             RTP_LLM_CHECK(
                 model_input_gatherer_config_.kv_cache_group_types.emplace(group.tag, group.policy.group_type).second);
-            RTP_LLM_CHECK(model_input_gatherer_config_.kernel_blocks_per_kv_block_by_tag
+            RTP_LLM_CHECK(model_input_gatherer_config_.group_kernel_blocks_per_kv_block
                               .emplace(group.tag, cache_config.kernelBlocksPerKvBlockForGroup(group.tag))
                               .second);
         }

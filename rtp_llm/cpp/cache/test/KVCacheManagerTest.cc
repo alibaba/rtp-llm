@@ -432,7 +432,7 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     assertBlockBytesEq(cache_manager, /*layer_id=*/1, block_src, expected_block);
 
     // Copy src -> dst and validate
-    cache_manager->blockBatchCopy({TaggedBlockIdPair{"default", block_src, block_dst}});
+    cache_manager->blockBatchCopy({GroupBlockIdPair{"default", block_src, block_dst}});
     assertBlockBytesEq(cache_manager, /*layer_id=*/0, block_dst, expected_block);
     assertBlockBytesEq(cache_manager, /*layer_id=*/1, block_dst, expected_block);
 
@@ -490,7 +490,7 @@ TEST_F(KVCacheManagerTest, BlockCopyAlsoCopiesScaleWhenQuantized) {
     runtimeSyncAndCheck();
 
     // Copy should include both K/V scales.
-    cache_manager->blockBatchCopy({TaggedBlockIdPair{"default", block_src, block_dst}});
+    cache_manager->blockBatchCopy({GroupBlockIdPair{"default", block_src, block_dst}});
     runtimeSyncAndCheck();
 
     for (int layer_id = 0; layer_id < 2; ++layer_id) {
@@ -521,7 +521,7 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
         ASSERT_TRUE(cache_manager->writeKVBlockForTest(block_id, "default", k_t, v_t));
     }
 
-    std::vector<TaggedBlockIdPair> mapping;
+    std::vector<GroupBlockIdPair> mapping;
     mapping.reserve(dst_blocks_num);
     for (int j = 0; j < dst_blocks_num; ++j) {
         const int dst_block = 1 + src_blocks_num + j;
@@ -717,7 +717,7 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
         assertDsv4RegionPatternEq(manager, dst_block, region_case.layer_id, region_case.tag, bytes, 0);
     }
 
-    std::vector<TaggedBlockIdPair> copy_mapping;
+    std::vector<GroupBlockIdPair> copy_mapping;
     copy_mapping.reserve(manager_config.topology().groups().size());
     for (const auto& group : manager_config.topology().groups()) {
         copy_mapping.push_back({group.tag, src_block, dst_block});
