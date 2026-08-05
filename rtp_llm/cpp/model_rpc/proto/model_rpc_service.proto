@@ -537,7 +537,15 @@ message MemoryOperationRequestPB {
 }
 
 message MemoryOperationResponsePB {
-    bool success = 1;
+    // gRPC status reports the RPC/transport outcome; this code reports the transfer
+    // business outcome of a handler that ran to completion. CODE_UNSPECIFIED is the
+    // protobuf default and means the handler never filled in a result.
+    enum Code {
+        CODE_UNSPECIFIED = 0;
+        OK = 1;
+        FAILED = 2;
+    }
+    Code code = 1;
 }
 
 message TPWorkerInfoPB {

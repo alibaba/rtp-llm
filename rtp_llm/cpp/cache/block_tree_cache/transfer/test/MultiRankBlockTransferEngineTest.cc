@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 #include <grpcpp/grpcpp.h>
 
+#include <chrono>
+#include <csignal>
 #include <mutex>
+#include <sys/resource.h>
+#include <thread>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
@@ -12,6 +16,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
@@ -25,9 +30,10 @@ struct MultiRankBlockTransferRpcState {
 
 struct MultiRankBlockTransferRpcConfig {
     bool                                            has_mem_response;
-    bool                                            mem_response_success;
+    MemoryOperationResponsePB::Code                 mem_response_code;
     grpc::Status                                    rpc_status;
     std::shared_ptr<MultiRankBlockTransferRpcState> state{nullptr};
+    int                                             sleep_millis{0};
 };
 
 class MultiRankBlockTransferRpcService final: public RpcService::Service {
@@ -36,12 +42,15 @@ public:
 
     grpc::Status
     ExecuteFunction(grpc::ServerContext*, const FunctionRequestPB* request, FunctionResponsePB* response) override {
+        if (config_.sleep_millis > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(config_.sleep_millis));
+        }
         if (config_.state != nullptr && request->has_mem_request()) {
             std::lock_guard<std::mutex> lock(config_.state->mutex);
             config_.state->requests.push_back(request->mem_request());
         }
         if (config_.has_mem_response) {
-            response->mutable_mem_response()->set_success(config_.mem_response_success);
+            response->mutable_mem_response()->set_code(config_.mem_response_code);
         }
         return config_.rpc_status;
     }
@@ -106,10 +115,10 @@ makeBroadcastManager(const std::vector<MultiRankBlockTransferRpcConfig>&        
 }
 
 static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager) {
-    DeviceBlockPoolPtr device_pool = makeDevicePool({{256, 0}}, 8, "multi_rank_engine_device");
-    std::shared_ptr<FullGroupSet> full = std::make_shared<FullGroupSet>(
-        std::vector<DeviceBlockPoolPtr>{device_pool}, makeHostPool(256, 8), nullptr);
-    auto               topology    = block_transfer_engine_test::makeTestTopology(
+    DeviceBlockPoolPtr            device_pool = makeDevicePool({{256, 0}}, 8, "multi_rank_engine_device");
+    std::shared_ptr<FullGroupSet> full =
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, makeHostPool(256, 8), nullptr);
+    auto topology = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
     full->initialize(0, topology, {0});
     std::vector<GroupSetPtr> groups = {full};
@@ -119,10 +128,9 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
                                      broadcast_manager);
 }
 
-static std::shared_ptr<FullGroupSet>
-makeBroadcastGroup(const std::string&              pool_name,
-                   std::shared_ptr<HostBlockPool>    host_pool = nullptr,
-                   BlockTreeDiskBlockPoolPtr         disk_pool = nullptr) {
+static std::shared_ptr<FullGroupSet> makeBroadcastGroup(const std::string&             pool_name,
+                                                        std::shared_ptr<HostBlockPool> host_pool = nullptr,
+                                                        BlockTreeDiskBlockPoolPtr      disk_pool = nullptr) {
     auto device_pool = makeDevicePool({{256, 0}}, 8, pool_name);
     RTP_LLM_CHECK(device_pool != nullptr);
     return std::make_shared<FullGroupSet>(
@@ -131,7 +139,7 @@ makeBroadcastGroup(const std::string&              pool_name,
 
 static BlockIdxType prepareDeviceTarget(const std::shared_ptr<FullGroupSet>& group) {
     const DeviceBlockPoolPtr& device_pool = group->devicePools().front();
-    auto               topology    = block_transfer_engine_test::makeTestTopology(
+    auto                      topology    = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
     group->initialize(0, topology, {0});
     const auto block = device_pool->malloc();
@@ -202,8 +210,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastManagerStoredCorrectly) {
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK},
-        {true, true, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
@@ -214,24 +222,55 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers)
         cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnWorkerRpcError) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWithoutDispatchOnInvalidBatch) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK},
-        {true, true, grpc::Status(grpc::StatusCode::INTERNAL, "worker failed")},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
 
+    EXPECT_FALSE(cache->transfer_dispatcher_->multi_rank_engine_->execute({}, /*timeout_ms=*/500));
     EXPECT_FALSE(
-        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500));
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/0));
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnWorkerRpcError) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::INTERNAL, "worker failed")},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+
+    EXPECT_THROW(
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
+        rtp_llm::RTPException);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnRpcDeadline) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, /*sleep_millis=*/500},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+
+    EXPECT_THROW(
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/50),
+        rtp_llm::RTPException);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnWorkerBusinessError) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK},
-        {true, false, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
@@ -242,10 +281,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnWorkerBusinessE
         cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnMissingMemoryResponse) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsWhenAllWorkersReportBusinessError) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK},
-        {false, false, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
@@ -254,6 +293,126 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnMissingMemoryRe
 
     EXPECT_FALSE(
         cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500));
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferWaitsForEveryRankBeforeReportingBusinessError) {
+    std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state, /*sleep_millis=*/300},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/5000));
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_GE(elapsed_ms, 250) << "controller must not report failure before the slow rank finishes";
+    std::lock_guard<std::mutex> lock(state->mutex);
+    EXPECT_EQ(state->requests.size(), 2u);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnMissingMemoryResponse) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {false, MemoryOperationResponsePB::CODE_UNSPECIFIED, grpc::Status::OK},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+
+    EXPECT_THROW(
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
+        rtp_llm::RTPException);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnUnfilledResponseCode) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::CODE_UNSPECIFIED, grpc::Status::OK},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+
+    EXPECT_THROW(
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
+        rtp_llm::RTPException);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsOnUnknownResponseCode) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, static_cast<MemoryOperationResponsePB::Code>(42), grpc::Status::OK},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+
+    EXPECT_THROW(
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
+        rtp_llm::RTPException);
+}
+
+class MultiRankBlockTransferGrpcStatusTest: public ::testing::TestWithParam<grpc::StatusCode> {};
+
+TEST_P(MultiRankBlockTransferGrpcStatusTest, BroadcastTransferAbortsOnAnyNonOkStatus) {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status(GetParam(), "worker failed")},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+
+    EXPECT_THROW(
+        cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500),
+        rtp_llm::RTPException);
+}
+
+INSTANTIATE_TEST_SUITE_P(NonOkWorkerStatuses,
+                         MultiRankBlockTransferGrpcStatusTest,
+                         ::testing::Values(grpc::StatusCode::CANCELLED,
+                                           grpc::StatusCode::INTERNAL,
+                                           grpc::StatusCode::UNAVAILABLE,
+                                           grpc::StatusCode::RESOURCE_EXHAUSTED));
+
+static void disableCoreDump() {
+    rlimit no_core;
+    no_core.rlim_cur = 0;
+    no_core.rlim_max = 0;
+    setrlimit(RLIMIT_CORE, &no_core);
+}
+
+static void broadcastWithNonOkWorkerStatus() {
+    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "worker gone")},
+    };
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
+    ASSERT_NE(broadcast_manager, nullptr);
+    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
+
+    disableCoreDump();
+    StaticConfig::user_ft_core_dump_on_exception = true;
+    (void)cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500);
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsWithSigabrtWhenCoreDumpEnabled) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    // RTP_LLM_FAIL logs through the project logger, not the child's stderr, so only the
+    // exit signal is assertable here.
+    EXPECT_EXIT(broadcastWithNonOkWorkerStatus(), ::testing::KilledBySignal(SIGABRT), "");
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource) {
@@ -262,17 +421,16 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     }
     std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK, state},
-        {true, true, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
 
-    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(256, 4);
-    std::shared_ptr<FullGroupSet> group =
-        makeBroadcastGroup("broadcast_host_load_success", host_pool);
-    const BlockIdxType device_block = prepareDeviceTarget(group);
+    std::shared_ptr<HostBlockPool> host_pool    = makeHostPool(256, 4);
+    std::shared_ptr<FullGroupSet>  group        = makeBroadcastGroup("broadcast_host_load_success", host_pool);
+    const BlockIdxType             device_block = prepareDeviceTarget(group);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -306,8 +464,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
-    releaseDeviceBlocksAndNotify(
-        *cache, group->devicePools().front(), {device_block}, BlockRefType::REQUEST);
+    releaseDeviceBlocksAndNotify(*cache, group->devicePools().front(), {device_block}, BlockRefType::REQUEST);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -326,17 +483,16 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     }
     std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK, state},
-        {true, false, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK, state},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
 
-    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(256, 4);
-    std::shared_ptr<FullGroupSet> group =
-        makeBroadcastGroup("broadcast_host_load_failure", host_pool);
-    const BlockIdxType device_block = prepareDeviceTarget(group);
+    std::shared_ptr<HostBlockPool> host_pool    = makeHostPool(256, 4);
+    std::shared_ptr<FullGroupSet>  group        = makeBroadcastGroup("broadcast_host_load_failure", host_pool);
+    const BlockIdxType             device_block = prepareDeviceTarget(group);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -386,17 +542,16 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
 TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInstallTargetOrClearSource) {
     std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK, state},
-        {true, true, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
 
-    std::shared_ptr<HostBlockPool> host_pool = makeHostPool(256, 4);
-    std::shared_ptr<FullGroupSet> group =
-        makeBroadcastGroup("load_completion_state_mismatch", host_pool);
-    const BlockIdxType device_block = prepareDeviceTarget(group);
+    std::shared_ptr<HostBlockPool> host_pool    = makeHostPool(256, 4);
+    std::shared_ptr<FullGroupSet>  group        = makeBroadcastGroup("load_completion_state_mismatch", host_pool);
+    const BlockIdxType             device_block = prepareDeviceTarget(group);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -414,8 +569,8 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInsta
     auto find_result = cache->tree()->findNode({100});
     ASSERT_FALSE(find_result.empty());
 
-    group->referenceBlocks(
-        MultiNodeResource{0, Tier::HOST, {{find_result.back(), {host_block}}}}, BlockRefType::REQUEST);
+    group->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{find_result.back(), {host_block}}}},
+                           BlockRefType::REQUEST);
     ASSERT_TRUE(cache->loader_.changeTransferState(
         find_result.back(), 0, GroupSetTransferState::IDLE, GroupSetTransferState::LOAD_PENDING));
     cache->evictor_.refreshCandidate(find_result.back(), 0);
@@ -435,8 +590,7 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInsta
     ASSERT_NE(context, nullptr);
     LoadTaskRunner::TaskPtr task = cache->loader_.load_task_runner_.createTask({desc}, {false}, {group}, context);
     ASSERT_NE(task, nullptr);
-    ASSERT_TRUE(
-        cache->loader_.load_join_registry_.start(find_result.back(), 0, desc.target_blocks, task->context));
+    ASSERT_TRUE(cache->loader_.load_join_registry_.start(find_result.back(), 0, desc.target_blocks, task->context));
     find_result.back()->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
     cache->loader_.runLoadTask(task);
 
@@ -458,8 +612,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     }
     std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK, state},
-        {true, true, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
@@ -467,9 +621,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 4);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 4, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullGroupSet> group =
-        makeBroadcastGroup("broadcast_disk_load", host_pool, disk_pool);
-    const BlockIdxType device_block = prepareDeviceTarget(group);
+    std::shared_ptr<FullGroupSet>           group     = makeBroadcastGroup("broadcast_disk_load", host_pool, disk_pool);
+    const BlockIdxType                      device_block = prepareDeviceTarget(group);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
@@ -505,8 +658,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     EXPECT_EQ(disk_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
-    releaseDeviceBlocksAndNotify(
-        *cache, group->devicePools().front(), {device_block}, BlockRefType::REQUEST);
+    releaseDeviceBlocksAndNotify(*cache, group->devicePools().front(), {device_block}, BlockRefType::REQUEST);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -524,8 +676,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
     std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK, state},
-        {true, true, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
@@ -533,8 +685,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullGroupSet> full =
-        makeBroadcastGroup("broadcast_eviction_success", host_pool, disk_pool);
+    std::shared_ptr<FullGroupSet> full = makeBroadcastGroup("broadcast_eviction_success", host_pool, disk_pool);
     initializeBroadcastGroups({full});
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -589,15 +740,15 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     }
     auto                                               state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK, state},
-        {true, true, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
 
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    auto full = makeBroadcastGroup("broadcast_device_to_disk", nullptr, disk_pool);
+    auto full      = makeBroadcastGroup("broadcast_device_to_disk", nullptr, disk_pool);
     initializeBroadcastGroups({full});
     MultiNodeBlocks device = allocateDeviceBlocksForTest(*full, 1, BlockRefType::REQUEST);
     ASSERT_EQ(device.size(), 1u);
@@ -616,8 +767,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device.front();
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    releaseDeviceBlocksAndNotify(
-        *cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocksAndNotify(*cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
 
     cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -646,15 +796,15 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     }
     auto                                               state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK, state},
-        {true, false, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK, state},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto broadcast_manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(broadcast_manager, nullptr);
 
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    auto full = makeBroadcastGroup("broadcast_device_to_disk_failure", nullptr, disk_pool);
+    auto full      = makeBroadcastGroup("broadcast_device_to_disk_failure", nullptr, disk_pool);
     initializeBroadcastGroups({full});
     MultiNodeBlocks device = allocateDeviceBlocksForTest(*full, 1, BlockRefType::REQUEST);
     ASSERT_EQ(device.size(), 1u);
@@ -673,8 +823,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device.front();
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    releaseDeviceBlocksAndNotify(
-        *cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
+    releaseDeviceBlocksAndNotify(*cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
 
     cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -698,8 +847,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, true, grpc::Status::OK},
-        {true, false, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
@@ -707,8 +856,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullGroupSet> full =
-        makeBroadcastGroup("broadcast_eviction_failure", host_pool, disk_pool);
+    std::shared_ptr<FullGroupSet> full = makeBroadcastGroup("broadcast_eviction_failure", host_pool, disk_pool);
     initializeBroadcastGroups({full});
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -748,12 +896,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPrimaryAndCascades) {
-    std::shared_ptr<HostBlockPool>          host_pool     = makeHostPool(256, 8);
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool     = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullGroupSet> primary_group =
-        makeBroadcastGroup("broadcast_primary", host_pool, disk_pool);
-    std::shared_ptr<FullGroupSet> cascade_group =
-        makeBroadcastGroup("broadcast_cascade", host_pool, disk_pool);
+    std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
+    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
+    std::shared_ptr<FullGroupSet> primary_group       = makeBroadcastGroup("broadcast_primary", host_pool, disk_pool);
+    std::shared_ptr<FullGroupSet> cascade_group       = makeBroadcastGroup("broadcast_cascade", host_pool, disk_pool);
     initializeBroadcastGroups({primary_group, cascade_group});
     std::vector<GroupSetPtr>        groups = {primary_group, cascade_group};
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups));

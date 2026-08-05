@@ -131,20 +131,15 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
             return result;
         }
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
-            const GroupSetPtr&      group_set = group_sets_[group_set_id];
-            const GroupSetResource& resource  = resources[i][group_set_id];
+            const GroupSetResource& resource = resources[i][group_set_id];
             RTP_LLM_CHECK_WITH_INFO(resource.isValidSteadyState()
-                                        && (!resource.hasTier(Tier::DEVICE)
-                                            || (resource.hasCompleteDeviceValue()
-                                                && resource.device_blocks.size() == group_set->devicePools().size())),
+                                        && (!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue()),
                                     "BlockTree insert requires an IDLE steady resource and complete DEVICE value: "
-                                    "key=%ld group_set_id=%zu state=%d tiers=%zu expected_width=%zu actual_width=%zu",
+                                    "key=%ld group_set_id=%zu state=%d tiers=%zu",
                                     cache_keys[i],
                                     group_set_id,
                                     static_cast<int>(resource.transfer_state),
-                                    resource.servingTierCount(),
-                                    group_set->devicePools().size(),
-                                    resource.device_blocks.size());
+                                    resource.servingTierCount());
         }
     }
 

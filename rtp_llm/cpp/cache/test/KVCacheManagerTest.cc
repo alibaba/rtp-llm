@@ -996,7 +996,7 @@ TEST_F(KVCacheManagerTest, TieredMemoryCacheIsOwnedOnlyByBlockTreeCache) {
     EXPECT_NE(manager->blockTreeCache()->groupSets().front()->hostPool(), nullptr);
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsEmptyMemoryRequestWithoutCoordinatorFallback) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForEmptyMemoryRequest) {
     auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     auto manager      = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(manager->init());
@@ -1004,9 +1004,20 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsEmptyMemoryRequestWithoutCoordi
     FunctionRequestPB request;
     request.mutable_mem_request();
     FunctionResponsePB response;
-    EXPECT_FALSE(manager->executeFunction(request, response));
+    EXPECT_TRUE(manager->executeFunction(request, response));
     ASSERT_TRUE(response.has_mem_response());
-    EXPECT_FALSE(response.mem_response().success());
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionFormsNoResponseForUnsupportedRequestType) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    auto manager      = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(manager->init());
+
+    FunctionRequestPB  request;
+    FunctionResponsePB response;
+    EXPECT_FALSE(manager->executeFunction(request, response));
+    EXPECT_FALSE(response.has_mem_response());
 }
 
 static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& manager, FunctionRequestPB& request) {
@@ -1029,10 +1040,10 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTiere
     FunctionResponsePB response;
     EXPECT_TRUE(manager->executeFunction(request, response));
     ASSERT_TRUE(response.has_mem_response());
-    EXPECT_TRUE(response.mem_response().success());
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOfRangeGroupedItems) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialUnavailableAndOutOfRangeGroupedItems) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig tiered_config;
     tiered_config.enable_memory_cache  = true;
@@ -1047,16 +1058,16 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOf
         mixed->CopyFrom(request.mem_request().copy_items(0));
         mixed->set_group_set_id(tiered_manager->blockTreeCache()->groupSets().size());
         FunctionResponsePB response;
-        EXPECT_FALSE(tiered_manager->executeFunction(request, response));
-        EXPECT_FALSE(response.mem_response().success());
+        EXPECT_TRUE(tiered_manager->executeFunction(request, response));
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
     }
     {
         FunctionRequestPB request;
         appendValidGroupedTransfer(tiered_manager, request);
         request.mutable_mem_request()->mutable_copy_items(0)->clear_group_blocks();
         FunctionResponsePB response;
-        EXPECT_FALSE(tiered_manager->executeFunction(request, response));
-        EXPECT_FALSE(response.mem_response().success());
+        EXPECT_TRUE(tiered_manager->executeFunction(request, response));
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
     }
     {
         KVCacheConfig unavailable_config;
@@ -1067,8 +1078,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOf
         // verify that a manager without the requested HOST tier rejects it.
         appendValidGroupedTransfer(tiered_manager, request);
         FunctionResponsePB response;
-        EXPECT_FALSE(unavailable_manager->executeFunction(request, response));
-        EXPECT_FALSE(response.mem_response().success());
+        EXPECT_TRUE(unavailable_manager->executeFunction(request, response));
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
     }
     {
         FunctionRequestPB request;
@@ -1086,8 +1097,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOf
         const size_t       unreferenced_before = block_tree_cache_test::unreferencedBlocksNum(*backing);
         const size_t       active_before       = backing->activeTreeCachedBlocksNum();
         FunctionResponsePB response;
-        EXPECT_FALSE(tiered_manager->executeFunction(request, response));
-        EXPECT_FALSE(response.mem_response().success());
+        EXPECT_TRUE(tiered_manager->executeFunction(request, response));
+        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
         EXPECT_EQ(backing->freeBlocksNum(), free_before);
         EXPECT_EQ(backing->usedBlocksNum(), used_before);
         EXPECT_EQ(block_tree_cache_test::unreferencedBlocksNum(*backing), unreferenced_before);
@@ -1118,6 +1129,8 @@ TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
     appendValidGroupedTransfer(manager, request);
     FunctionResponsePB response;
     EXPECT_TRUE(manager->executeFunction(request, response));
+    ASSERT_TRUE(response.has_mem_response());
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
 }
 
 TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {

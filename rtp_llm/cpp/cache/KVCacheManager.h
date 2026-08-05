@@ -123,6 +123,8 @@ public:
     asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
 
     // for every single rank
+    // Returns whether a trustworthy mem_response was formed, not whether the transfer
+    // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
     // handle read request from decode side (StartLoad RPC), delegate to coordinator

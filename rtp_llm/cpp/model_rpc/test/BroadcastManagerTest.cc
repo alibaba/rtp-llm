@@ -1,10 +1,14 @@
 #include <atomic>
 #include <chrono>
+#include <csignal>
+#include <sys/resource.h>
 #include <thread>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
+#include "grpcpp/alarm.h"
 
 #include "autil/NetUtil.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm::test {
@@ -21,23 +25,23 @@ public:
         if (context->IsCancelled()) {
             return ::grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
         }
-        response->mutable_mem_response()->set_success(mem_response_success_);
+        response->mutable_mem_response()->set_code(mem_response_code_);
         return rpc_response_status_;
     }
     void setSleepMillis(int ms) {
         sleep_millis_ = ms;
     }
-    void setMemResponseSuccess(bool success) {
-        mem_response_success_ = success;
+    void setMemResponseCode(MemoryOperationResponsePB::Code code) {
+        mem_response_code_ = code;
     }
     void setRpcResponseStatus(const ::grpc::Status& status) {
         rpc_response_status_ = status;
     }
 
 private:
-    int            sleep_millis_{0};
-    bool           mem_response_success_{true};
-    ::grpc::Status rpc_response_status_{::grpc::Status::OK};
+    int                             sleep_millis_{0};
+    MemoryOperationResponsePB::Code mem_response_code_{MemoryOperationResponsePB::OK};
+    ::grpc::Status                  rpc_response_status_{::grpc::Status::OK};
 };
 
 class TestRpcServer {
@@ -181,7 +185,7 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     EXPECT_EQ(responses.size(), server_addrs.size());
     for (size_t i = 0; i < responses.size(); ++i) {
         EXPECT_TRUE(responses[i].has_mem_response());
-        EXPECT_TRUE(responses[i].mem_response().success());
+        EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::OK);
     }
 
     manager.reset();
@@ -289,11 +293,11 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFai
         if (i == 0) {
             EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::INTERNAL);
             EXPECT_FALSE(responses[i].has_mem_response());
-            EXPECT_FALSE(responses[i].mem_response().success());
+            EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::CODE_UNSPECIFIED);
         } else {
             EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::OK);
             EXPECT_TRUE(responses[i].has_mem_response());
-            EXPECT_TRUE(responses[i].mem_response().success());
+            EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::OK);
         }
     }
 
@@ -303,14 +307,14 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFai
     }
 }
 
-TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemResponseNotSuccess) {
+TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemResponseFailed) {
     std::vector<std::unique_ptr<TestRpcServer>> servers;
     std::vector<std::string>                    server_addrs;
     for (int i = 0; i < 3; ++i) {
         auto service = std::make_unique<TestRpcService>();
-        // set the first request to mem response not success, so the final result should be false
+        // set the first request to report a transfer business failure over a gRPC OK response
         if (i == 0) {
-            service->setMemResponseSuccess(false);
+            service->setMemResponseCode(MemoryOperationResponsePB::FAILED);
         }
         auto server = std::make_unique<TestRpcServer>(std::move(service));
         ASSERT_TRUE(server->start());
@@ -340,9 +344,9 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_ResponseStatusOkButMemRespo
         EXPECT_EQ(ctx->status.error_code(), grpc::StatusCode::OK);
         EXPECT_TRUE(responses[i].has_mem_response());
         if (i == 0) {
-            EXPECT_FALSE(responses[i].mem_response().success());
+            EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::FAILED);
         } else {
-            EXPECT_TRUE(responses[i].mem_response().success());
+            EXPECT_EQ(responses[i].mem_response().code(), MemoryOperationResponsePB::OK);
         }
     }
 
@@ -506,6 +510,156 @@ TEST_F(BroadcastManagerTest, Broadcast_WaitDone_FailureStatePersistsAcrossTimeou
 
     server1->shutdown();
     server0->shutdown();
+}
+
+// ---------------------------- dispatch invariants ----------------------------
+
+namespace {
+
+using AsyncFunctionReader = std::unique_ptr<grpc::ClientAsyncResponseReader<FunctionResponsePB>>;
+
+AsyncFunctionReader realRpcCall(const std::shared_ptr<RpcService::Stub>&    stub,
+                                const std::shared_ptr<grpc::ClientContext>& ctx,
+                                const FunctionRequestPB&                    req,
+                                grpc::CompletionQueue*                      cq) {
+    return stub->AsyncExecuteFunction(ctx.get(), req, cq);
+}
+
+std::vector<std::string> startServers(size_t count, std::vector<std::unique_ptr<TestRpcServer>>& servers) {
+    std::vector<std::string> server_addrs;
+    for (size_t i = 0; i < count; ++i) {
+        auto server = std::make_unique<TestRpcServer>(std::make_unique<TestRpcService>());
+        if (!server->start()) {
+            return {};
+        }
+        server_addrs.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+    return server_addrs;
+}
+
+using FunctionBroadcastResult = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+
+void disableCoreDump() {
+    rlimit no_core;
+    no_core.rlim_cur = 0;
+    no_core.rlim_max = 0;
+    setrlimit(RLIMIT_CORE, &no_core);
+}
+
+std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext> makeIdleContext() {
+    auto ctx         = std::make_shared<FunctionBroadcastResult::WorkerRpcContext>();
+    ctx->server_addr = "127.0.0.1:0";
+    ctx->timeout_ms  = 1000;
+    return ctx;
+}
+
+}  // namespace
+
+TEST_F(BroadcastManagerTest, Broadcast_Fatal_FirstDispatchThrows) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    const std::vector<std::string>              server_addrs = startServers(2, servers);
+    ASSERT_EQ(server_addrs.size(), 2u);
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&,
+                       const std::shared_ptr<grpc::ClientContext>&,
+                       const FunctionRequestPB&,
+                       grpc::CompletionQueue*) -> AsyncFunctionReader {
+        throw std::runtime_error("dispatch failed before any rpc started");
+    };
+    EXPECT_THROW((manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/500, rpc_call)),
+                 rtp_llm::RTPException);
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_Fatal_FirstDispatchReturnsNullReader) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    const std::vector<std::string>              server_addrs = startServers(2, servers);
+    ASSERT_EQ(server_addrs.size(), 2u);
+
+    auto manager = std::make_unique<BroadcastManager>(server_addrs);
+    ASSERT_TRUE(manager->init());
+
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&,
+                       const std::shared_ptr<grpc::ClientContext>&,
+                       const FunctionRequestPB&,
+                       grpc::CompletionQueue*) -> AsyncFunctionReader { return nullptr; };
+    EXPECT_THROW((manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/500, rpc_call)),
+                 rtp_llm::RTPException);
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_Abort_LaterDispatchThrowsAfterPartialStart) {
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    // RTP_LLM_FAIL logs through the project logger, not the child's stderr, so only the
+    // exit signal is assertable here.
+    EXPECT_EXIT(
+        {
+            disableCoreDump();
+            StaticConfig::user_ft_core_dump_on_exception = true;
+            std::vector<std::unique_ptr<TestRpcServer>> servers;
+            const std::vector<std::string>              server_addrs = startServers(2, servers);
+            ASSERT_EQ(server_addrs.size(), 2u);
+
+            auto manager = std::make_unique<BroadcastManager>(server_addrs);
+            ASSERT_TRUE(manager->init());
+
+            std::vector<FunctionRequestPB> requests(manager->workerNum());
+            std::atomic<int>               dispatch_count{0};
+            auto                           rpc_call = [&dispatch_count](const std::shared_ptr<RpcService::Stub>&    stub,
+                                              const std::shared_ptr<grpc::ClientContext>& ctx,
+                                              const FunctionRequestPB&                    req,
+                                              grpc::CompletionQueue*                      cq) -> AsyncFunctionReader {
+                if (dispatch_count.fetch_add(1) == 0) {
+                    return realRpcCall(stub, ctx, req, cq);
+                }
+                throw std::runtime_error("dispatch failed after rank 0 already started");
+            };
+            (void)(manager->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/500, rpc_call));
+        },
+        ::testing::KilledBySignal(SIGABRT),
+        "");
+}
+
+// ---------------------------- completion queue invariants ----------------------------
+
+TEST_F(BroadcastManagerTest, WaitDone_Fatal_CqTagMismatch) {
+    auto ctx    = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+
+    grpc::Alarm alarm;
+    alarm.Set(
+        &ctx->completion_queue, std::chrono::system_clock::now(), reinterpret_cast<void*>(static_cast<intptr_t>(7)));
+
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+}
+
+TEST_F(BroadcastManagerTest, WaitDone_Fatal_CqEventNotOk) {
+    auto ctx    = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+
+    grpc::Alarm alarm;
+    alarm.Set(&ctx->completion_queue,
+              std::chrono::system_clock::now() + std::chrono::seconds(30),
+              reinterpret_cast<void*>(static_cast<intptr_t>(0)));
+    alarm.Cancel();
+
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+}
+
+TEST_F(BroadcastManagerTest, WaitDone_Fatal_CqShutdown) {
+    auto ctx    = makeIdleContext();
+    auto result = std::make_shared<FunctionBroadcastResult>(
+        std::vector<std::shared_ptr<FunctionBroadcastResult::WorkerRpcContext>>{ctx});
+
+    ctx->completion_queue.Shutdown();
+
+    EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
 }
 
 // ---------------------------- workerNum ----------------------------
