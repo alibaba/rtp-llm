@@ -113,6 +113,38 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
+
+    @Override
+    public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+                        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
+        if (shouldForwardToMaster()) {
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB forwarded =
+                    grpcForwarder.forwardCancelToMaster(request);
+            if (forwarded != null && forwarded.getFound()) {
+                responseObserver.onNext(forwarded);
+                responseObserver.onCompleted();
+                return;
+            }
+        }
+        FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response;
+        try {
+            routeService.cancel(request.getRequestId(), request.getReason());
+            RequestLifecycleSnapshot snapshot = routeService.getRequestState(
+                    request.getRequestId(), request.getBatchId());
+            response = FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
+                    .setFound(snapshot != null);
+            if (snapshot != null) {
+                response.setLifecycle(toLifecycleProto(snapshot));
+            }
+        } catch (Exception e) {
+            Logger.error("FlexlbService.cancel error, request_id={}", request.getRequestId(), e);
+            response = FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
+                    .setFound(false);
+        }
+        responseObserver.onNext(response.build());
+        responseObserver.onCompleted();
+    }
+
     @Override
     public void getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> responseObserver) {
