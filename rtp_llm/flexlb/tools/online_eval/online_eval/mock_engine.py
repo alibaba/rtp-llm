@@ -103,6 +103,11 @@ class TaskRuntime:
     start_ms: int = 0
     execution_time_ms: int = 0
     dp_rank: int = 0
+    # Time the request spent waiting in queue before processing started (ms).
+    waiting_time_ms: int = 0
+    # Error fields: 0 / "" for success; non-zero code + message for failures.
+    error_code: int = 0
+    error_message: str = ""
 
 
 # ATOMICITY INVARIANT: This class uses no locks. All critical sections contain only
@@ -405,16 +410,22 @@ class MockEngineState:
 
         prefill_ms = self.performance.prefill_ms(shapes)
         self._prefill_waiting += 1
+        wait_start = now_ms()
         async with self._prefill_semaphore:
             self._prefill_waiting -= 1
             await asyncio.sleep(self.performance.sleep_seconds(prefill_ms))
         end = now_ms()
+        actual_wait = max(0, now_ms() - wait_start)
 
         for shape in shapes:
             task = self._running.pop(shape.request_id, None)
             if task is None:
                 continue
             task.execution_time_ms = max(1, end - task.start_ms)
+            task.waiting_time_ms = actual_wait
+            if shape.request_id in self._cancelled:
+                task.error_code = 2  # ErrorCodePB.CANCELLED
+                task.error_message = "cancelled"
             self._finish_task(task)
             if self.cache.admit(shape.block_keys):
                 self._cache_version += 1
@@ -517,6 +528,11 @@ class MockEngineState:
         self._active_kv_tokens = max(0, self._active_kv_tokens - shape.input_len)
         if task is not None:
             task.execution_time_ms = max(1, end - task.start_ms)
+            # Decode has no semaphore queue; waiting time is effectively zero.
+            task.waiting_time_ms = 0
+            if shape.request_id in self._cancelled:
+                task.error_code = 2  # ErrorCodePB.CANCELLED
+                task.error_message = "cancelled"
             self._finish_task(task)
         if self.cache.admit(shape.block_keys):
             self._cache_version += 1
@@ -682,13 +698,17 @@ class MockEngineState:
             request_id=task.request_id,
             prefix_length=task.prefix_len,
             input_length=task.input_len,
-            waiting_time_ms=0,
+            waiting_time_ms=task.waiting_time_ms,
             iterate_count=1,
             end_time_ms=now_ms() if task.execution_time_ms else -1,
             dp_rank=task.dp_rank,
             batch_id=task.batch_id,
             phase=task.phase,
             execution_time_ms=task.execution_time_ms,
+            error_info=self.pb2.ErrorDetailsPB(
+                error_code=task.error_code,
+                error_message=task.error_message,
+            ),
         )
 
     def _output_pb(

@@ -8,6 +8,7 @@ import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 import org.flexlb.enums.ScheduleModeEnum;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -88,9 +89,27 @@ public class FlexlbConfig {
     // ========== Queue Configuration ==========
 
     /**
-     * Maximum queue length per model
+     * Maximum queue capacity for the {@code QueueingComponent} (DIRECT/QUEUE
+     * routing path). Requests that cannot be routed immediately (no available
+     * worker) enter this bounded FIFO queue.
+     *
+     * <p><b>Disambiguation:</b> This is distinct from:
+     * <ul>
+     *   <li>{@link #flexlbBatchQueueMaxSize} — per-WorkerBatcher queue depth
+     *       limit (BATCH routing path)</li>
+     *   <li>{@link #flexlbBatchMaxCapacity} — total capacity across all
+     *       batchers (global admission gate)</li>
+     *   <li>{@link #maxPrefillQueueSize} — prefill resource water-level
+     *       threshold (not a queue capacity; used for availability scoring)</li>
+     * </ul>
+     *
+     * <p>JSON alias {@code "maxQueueSize"} is kept for backward compatibility
+     * with existing deployment configs.
+     * Environment variable: QUEUEING_COMPONENT_QUEUE_MAX_SIZE
+     * (legacy: MAX_QUEUE_SIZE, still accepted for backward compat)
      */
-    private int maxQueueSize = 1000000;
+    @JsonAlias({"maxQueueSize"})
+    private int queueingComponentQueueMaxSize = 1000000;
 
     /**
      * Maximum retry count for failed routing attempts.
@@ -467,8 +486,12 @@ public class FlexlbConfig {
     private int flexlbBatchMaxCapacity = 1048576;
 
     /**
-     * Maximum queue depth per WorkerBatcher. Requests beyond this limit are
-     * rejected with QUEUE_FULL.
+     * Maximum queue depth per WorkerBatcher (BATCH routing path). Requests
+     * beyond this limit are rejected with QUEUE_FULL.
+     *
+     * <p><b>Disambiguation:</b> This is the per-batcher queue limit for the
+     * BATCH routing path, distinct from {@link #queueingComponentQueueMaxSize}
+     * which is the global queue for the DIRECT/QUEUE routing path.
      */
     private int flexlbBatchQueueMaxSize = 1024;
 

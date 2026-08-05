@@ -55,7 +55,7 @@ class QueueingComponentTest {
     @BeforeEach
     void setUp() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setMaxQueueSize(10);
+        config.setQueueingComponentQueueMaxSize(10);
         config.setScheduleWorkerSize(1);
         when(configService.loadBalanceConfig()).thenReturn(config);
         queueing = new QueueingComponent(configService, metrics, dynamicWorkerManager, consumed::add);

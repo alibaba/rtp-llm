@@ -44,9 +44,11 @@ message FlexlbScheduleRequestPB {
     // message and bytes are both length-delimited on the wire.
     bytes generate_input = 2;
     repeated int64 block_cache_keys = 3;
+    // Total input sequence length in tokens (prompt + cached prefix).
     int64 seq_len = 4;
     int64 generate_timeout = 5;
     int64 request_time_ms = 6;
+    // Maximum number of new tokens to generate (unit: tokens).
     int32 max_new_tokens = 7;
     int32 num_beams = 8;
     bool force_disable_sp_run = 9;

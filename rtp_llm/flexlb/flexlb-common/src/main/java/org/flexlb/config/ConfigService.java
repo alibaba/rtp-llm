@@ -35,7 +35,8 @@ public class ConfigService {
             "flexlbBatchMaxInflight",
             "flexlbBatchFixedMaxInflightBatches",
             "costFormula",
-            "prefillPredictorType");
+            "prefillPredictorType",
+            "hysteresisBiasPercent");
 
     private final FlexlbConfig flexlbConfig;
 
@@ -60,6 +61,7 @@ public class ConfigService {
 
         // If corresponding advanced environment variables exist, override and update
         applyEnvironmentOverrides(config, environment);
+        applyLegacyEnvVarCompat(config, environment);
         applyTrafficPolicyOverride(config, environment);
         applyPrefillFormulaOverride(config, environment);
 
@@ -73,6 +75,7 @@ public class ConfigService {
         // throws IllegalArgumentException for invalid schedule mode values.
         config.getDefaultScheduleModeEnum();
         validateCostFormula(config.getCostFormula());
+        validateHysteresisBiasPercent(config.getHysteresisBiasPercent());
 
         dumpEffectiveConfig(config);
         this.flexlbConfig = config;
@@ -327,6 +330,49 @@ public class ConfigService {
                     && c != '(' && c != ')' && c != ',' && !Character.isWhitespace(c)) {
                 throw new ConfigValidationException("costFormula",
                     "Invalid character '" + c + "' at position " + i + " in: " + formula);
+            }
+        }
+    }
+
+    /**
+     * Validate hysteresisBiasPercent at startup (fail-fast).
+     * The value is a percentage used for resource availability hysteresis.
+     * Valid range is [0, 100]; values outside this range are nonsensical
+     * (negative bias or >100% would invert the hysteresis logic).
+     *
+     * @param hysteresisBiasPercent the configured hysteresis bias percentage
+     * @throws ConfigValidationException if the value is outside [0, 100]
+     */
+    private void validateHysteresisBiasPercent(long hysteresisBiasPercent) {
+        if (hysteresisBiasPercent < 0 || hysteresisBiasPercent > 100) {
+            throw new ConfigValidationException("hysteresisBiasPercent",
+                "hysteresisBiasPercent must be in range [0, 100], got " + hysteresisBiasPercent);
+        }
+    }
+
+    /**
+     * Handle renamed config fields whose legacy environment variable names
+     * differ from the auto-generated name of the new field.
+     *
+     * <p>Currently maps:
+     * <ul>
+     *   <li>{@code MAX_QUEUE_SIZE} -> {@code QUEUEING_COMPONENT_QUEUE_MAX_SIZE}
+     *       (field renamed from {@code maxQueueSize} to
+     *       {@code queueingComponentQueueMaxSize} for disambiguation)</li>
+     * </ul>
+     */
+    private void applyLegacyEnvVarCompat(FlexlbConfig config, Map<String, String> environment) {
+        // MAX_QUEUE_SIZE -> queueingComponentQueueMaxSize
+        String legacyMaxQueueSize = environment.get("MAX_QUEUE_SIZE");
+        String newEnvVar = environment.get("QUEUEING_COMPONENT_QUEUE_MAX_SIZE");
+        if (legacyMaxQueueSize != null && !legacyMaxQueueSize.trim().isEmpty()
+                && (newEnvVar == null || newEnvVar.trim().isEmpty())) {
+            log.warn("Environment variable MAX_QUEUE_SIZE is deprecated. "
+                    + "Use QUEUEING_COMPONENT_QUEUE_MAX_SIZE instead.");
+            try {
+                config.setQueueingComponentQueueMaxSize(Integer.parseInt(legacyMaxQueueSize.trim()));
+            } catch (NumberFormatException e) {
+                throw new ConfigValidationException("MAX_QUEUE_SIZE", e.getMessage(), e);
             }
         }
     }

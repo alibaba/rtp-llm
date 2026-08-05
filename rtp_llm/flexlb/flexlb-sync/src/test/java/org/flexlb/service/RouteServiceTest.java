@@ -61,7 +61,7 @@ class RouteServiceTest {
     void setUp() {
         flexlbConfig = new FlexlbConfig();
         flexlbConfig.setScheduleWorkerSize(1);
-        flexlbConfig.setMaxQueueSize(10);
+        flexlbConfig.setQueueingComponentQueueMaxSize(10);
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
         routeService = new RouteService(configService, defaultRouter,
                 recentCacheKeyTraceReporter, NoOpFlexMonitor.getInstance(),

@@ -85,7 +85,7 @@ public class QueueingComponent {
         this.metrics = metrics;
         this.dynamicWorkerManager = dynamicWorkerManager;
         this.consumer = consumer;
-        this.queue = new LinkedBlockingDeque<>(configService.loadBalanceConfig().getMaxQueueSize());
+        this.queue = new LinkedBlockingDeque<>(configService.loadBalanceConfig().getQueueingComponentQueueMaxSize());
     }
 
     // ==================== Lifecycle ====================

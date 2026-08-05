@@ -25,13 +25,15 @@ import java.util.Map;
 public class PrefillResourceMeasure implements ResourceMeasure {
     private final long queueSizeThreshold;
     private final long hysteresisBiasPercent;
-    private final long maxQueueSize;
+    // Maximum prefill queue size used for water-level calculation.
+    // Sourced from config.maxPrefillQueueSize (NOT config.queueingComponentQueueMaxSize).
+    private final long maxPrefillQueueSize;
 
     public PrefillResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
         this.queueSizeThreshold = config.getPrefillQueueSizeThreshold();
         this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
-        this.maxQueueSize = config.getMaxPrefillQueueSize();
+        this.maxPrefillQueueSize = config.getMaxPrefillQueueSize();
     }
 
     @Override
@@ -87,10 +89,10 @@ public class PrefillResourceMeasure implements ResourceMeasure {
 
         if (queueSize <= 0) {
             return 0.0;
-        } else if (queueSize >= maxQueueSize) {
+        } else if (queueSize >= maxPrefillQueueSize) {
             return 100.0;
         } else {
-            return (queueSize * 100.0) / maxQueueSize;
+            return (queueSize * 100.0) / maxPrefillQueueSize;
         }
     }
 

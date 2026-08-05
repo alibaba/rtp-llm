@@ -46,7 +46,7 @@ class PrefillResourceMeasureTest {
     @Test
     void pending_and_received_tasks_contribute_to_water_level() {
         // Non-RUNNING tasks (PENDING, RECEIVED, KV_ALLOCATED) are counted as waiting.
-        // With maxQueueSize=10, 3 waiting tasks → water level = 30%
+        // With maxPrefillQueueSize=10, 3 waiting tasks → water level = 30%
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
@@ -75,7 +75,7 @@ class PrefillResourceMeasureTest {
     void water_level_counts_all_non_running_tasks_from_engine_reported_list() {
         // Engine reports a unified runningTaskList;
         // tasks with phase != RUNNING are counted as waiting.
-        // PENDING + RECEIVED + KV_ALLOCATED = 3 waiting → 30% with maxQueueSize=10
+        // PENDING + RECEIVED + KV_ALLOCATED = 3 waiting → 30% with maxPrefillQueueSize=10
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
@@ -99,7 +99,7 @@ class PrefillResourceMeasureTest {
         }
         worker.setRunningTaskList(runningTaskList);
 
-        // 12 waiting > maxQueueSize=10 → capped at 100%
+        // 12 waiting > maxPrefillQueueSize=10 → capped at 100%
         assertEquals(100.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
     }
 

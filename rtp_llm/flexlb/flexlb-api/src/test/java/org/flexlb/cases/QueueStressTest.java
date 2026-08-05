@@ -62,7 +62,7 @@ public class QueueStressTest {
      * Test scenario 1: Correct request rejection when queue is full
      * <p>
      * Test flow:
-     * 1. Set maxQueueSize = 10
+     * 1. Set queueingComponentQueueMaxSize = 10
      * 2. Set Worker resources unavailable, forcing all requests into queue
      * 3. Send 20 requests concurrently (exceeding queue capacity)
      * 4. Phase 1: ~10 requests rejected immediately with QUEUE_FULL (4502)
@@ -159,10 +159,10 @@ public class QueueStressTest {
      * Test scenario 2: Thread safety of concurrent enqueue operations
      * <p>
      * Test flow:
-     * 1. Set maxQueueSize = 500
+     * 1. Set queueingComponentQueueMaxSize = 500
      * 2. Use 900 threads to send 900 requests
      * 3. Use CountDownLatch to synchronize all threads starting simultaneously
-     * 4. Verify queue size does not exceed maxQueueSize, no data race or deadlock
+     * 4. Verify queue size does not exceed queueingComponentQueueMaxSize, no data race or deadlock
      */
     @SneakyThrows
     public void testConcurrentEnqueue() {
@@ -288,7 +288,7 @@ public class QueueStressTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
         configService.loadBalanceConfig().setDefaultScheduleMode("BATCH");
-        configService.loadBalanceConfig().setMaxQueueSize(100000);
+        configService.loadBalanceConfig().setQueueingComponentQueueMaxSize(100000);
         log.info("Test environment cleaned up");
     }
 }

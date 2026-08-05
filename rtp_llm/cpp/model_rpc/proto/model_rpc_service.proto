@@ -42,9 +42,11 @@ message RoleAddrPB {
 }
 
 message GenerateConfigPB {
+    // Maximum number of new tokens to generate (unit: tokens).
     int32 max_new_tokens = 1;
     int32 num_beams = 2;
     int32 num_return_sequences = 3;
+    // Minimum number of new tokens to generate (unit: tokens).
     int32 min_new_tokens = 4;
 
     int32 top_k = 5;
@@ -75,6 +77,7 @@ message GenerateConfigPB {
     bool return_softmax_probs = 30;
     bool return_cum_log_probs = 31;
     bool in_think_mode = 32;
+    // Maximum number of thinking tokens to generate (unit: tokens).
     int32 max_thinking_tokens = 33;
     repeated int32 end_think_token_ids = 34;
     bool gen_timeline = 35;
@@ -162,28 +165,44 @@ message GenerateInputPB {
 message AuxInfoPB {
     int32 cost_time_us = 1;
     int32 iter_count = 2;
+    // Input sequence length (unit: tokens).
     int32 input_len = 3;
+    // Total reused (prefix-cached) length (unit: tokens).
     int32 total_reuse_len = 4;
+    // Prefix-cached length for this request (unit: tokens).
     int32 prefix_len = 5;
+    // Output sequence length generated so far (unit: tokens).
     int32 output_len = 6;
     TensorPB cum_log_probs = 9;
+    // Number of tokens produced in the current step (unit: tokens).
     int32 step_output_len = 10;
     bool pd_sep = 11;
     int32 first_token_cost_time_us = 12;
     TensorPB softmax_probs = 13;
     int32 wait_time_us = 14;
 
+    // Local (in-node) reused length (unit: tokens).
     int32 local_reuse_len = 15;
+    // Remote (cross-node) reused length (unit: tokens).
     int32 remote_reuse_len = 16;
+    // Total reused length from prefill stage (unit: tokens).
     int32 prefill_total_reuse_len = 17;
+    // Local reused length from prefill stage (unit: tokens).
     int32 prefill_local_reuse_len = 18;
+    // Remote reused length from prefill stage (unit: tokens).
     int32 prefill_remote_reuse_len = 19;
+    // Total reused length from decode stage (unit: tokens).
     int32 decode_total_reuse_len = 20;
+    // Local reused length from decode stage (unit: tokens).
     int32 decode_local_reuse_len = 21;
+    // Remote reused length from decode stage (unit: tokens).
     int32 decode_remote_reuse_len = 22;
     string aux_string = 23;
+    // Memory-reused length (unit: tokens).
     int32 memory_reuse_len = 24;
+    // Memory-reused length from prefill stage (unit: tokens).
     int32 prefill_memory_reuse_len = 25;
+    // Memory-reused length from decode stage (unit: tokens).
     int32 decode_memory_reuse_len = 26;
 }
 
@@ -408,8 +427,11 @@ message TaskInfoPB {
     int64 request_id = 1;
     reserved 2;
     reserved "inter_request_id";
+    // Prefix-cached length (unit: tokens).
     int64 prefix_length = 3;
+    // Input sequence length (unit: tokens).
     int64 input_length = 4;
+    // Time this request spent waiting in queue before processing started (unit: ms).
     int64 waiting_time_ms = 5;
     int64 iterate_count = 6;
     int64 end_time_ms = 7;
@@ -454,7 +476,9 @@ message WorkerStatusPB {
     RoleTypePB role_type = 20;   // 类型安全的枚举字段
     // Static limits used by the running Engine. FlexLB uses these values to
     // avoid constructing a group that the Engine can never admit.
+    // Maximum sequence length the engine supports (unit: tokens).
     int64 max_seq_len = 21;
+    // Maximum total tokens allowed in one batch (unit: tokens).
     int64 max_batch_tokens_size = 22;
 }
 
@@ -587,9 +611,13 @@ message SideChannelPayloadPB {
     map<string, SideChannelTensorPB> tensors = 1;
     // Scalar fields that don't fit tensor format
     int64  first_generate_token_id = 2;
+    // Total reused length from prefix cache (unit: tokens).
     int32  total_reuse_len         = 3;
+    // Local (in-node) reused length (unit: tokens).
     int32  local_reuse_len         = 4;
+    // Remote (cross-node) reused length (unit: tokens).
     int32  remote_reuse_len        = 5;
+    // Memory-reused length (unit: tokens).
     int32  memory_reuse_len        = 6;
 }
 
