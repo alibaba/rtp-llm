@@ -188,7 +188,10 @@ class ResponseFormatBuilder:
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "response_format exceeds the supported JSON nesting depth",
             ) from e
-        except (JSONDecodeError, ValidationError, TypeError) as e:
+        except JSONDecodeError:
+            # Legacy GenerateConfig accepts arbitrary strings as plain text.
+            rf = parse_response_format("text")
+        except (ValidationError, TypeError) as e:
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 f"response_format invalid: {str(e)}",
