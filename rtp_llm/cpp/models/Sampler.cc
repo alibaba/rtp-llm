@@ -114,7 +114,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
 
     bool has_num_beams = std::any_of(num_beams_in, num_beams_in + inputs.batch_size, [](auto n) { return n > 1; })
                          || std::any_of(num_beams_out, num_beams_out + inputs.batch_size, [](auto n) { return n > 1; });
-    bool variable_num_beams = inputs.batch_size != inputs.batch_size_out;
+    const bool requires_independent_output = !std::equal(num_beams_in, num_beams_in + inputs.batch_size, num_beams_out);
 
     // allocate output tensors
     // Keep success on CUDA to avoid a blocking D2H copy: the GPU sampling kernel writes success
@@ -128,11 +128,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     // Use blocking transfer: on ROCm, hipMemcpyAsync from pageable memory is truly async
     // and can cause memory access faults if a kernel reads the buffer before transfer completes.
     auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
-    auto all_token_ids_out     = variable_num_beams ?
+    auto all_token_ids_out     = requires_independent_output ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
                                               torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA)) :
                                      inputs_token_ids_cuda;
-    auto all_cum_log_probs_out = variable_num_beams && inputs.cum_log_probs.defined() ?
+    auto all_cum_log_probs_out = requires_independent_output && inputs.cum_log_probs.defined() ?
                                      torch::empty({(int64_t)inputs.batch_size_out}, torch::kFloat32) :
                                      inputs.cum_log_probs;
 
@@ -236,12 +236,13 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  greedy_sampling_buffer_ptr});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
-                // TODO(zhangjianning.zjn): would be better to eliminate the copy
-                if (variable_num_beams) {
-                    token_ids_out.copy_(token_ids_in);
-                }
             } else {
                 success.fill_(true);
+            }
+            // execSampleGreedy updates token_ids_in in place. Mixed beam transitions use a
+            // separate output tensor even when the aggregate input/output row counts match.
+            if (requires_independent_output) {
+                token_ids_out.copy_(token_ids_in);
             }
         } else {
             RTP_LLM_LOG_DEBUG("current_num_beams_in is %d", cur_num_beams_in);

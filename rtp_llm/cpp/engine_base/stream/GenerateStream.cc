@@ -61,9 +61,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
-    if (generate_input_->generate_config->return_softmax_probs) {
-        softmax_probs_ = torch::zeros({(int64_t)init_batch_size, (int64_t)max_seq_len_}, torch::kFloat32);
-    }
     if (generate_input_->generate_config->return_all_hidden_states) {
         setReturnLastHiddenStates(true);
     }
@@ -93,6 +90,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     } else {
         const auto& err = processors_result.status();
         reportEventWithoutLock(StreamEvents::Error, err.code(), err.ToString());
+    }
+
+    if (calculateSoftmaxProbs()) {
+        softmax_probs_ = torch::zeros({(int64_t)maxBatchSize(), (int64_t)maxTokenNum()}, torch::kFloat32);
     }
 
     if (generateConfig()->random_seed.has_value()) {
@@ -249,6 +250,10 @@ int GenerateStream::maxNumBeams() const {
 
 bool GenerateStream::hasNumBeams() const {
     return generate_input_->generate_config->hasNumBeams();
+}
+
+bool GenerateStream::usesBeamSearchTokenLayoutForCurrentStep() const {
+    return currentNumBeams() > 1 || nextNumBeams() > 1;
 }
 
 bool GenerateStream::needTilingForSampling() const {
@@ -858,7 +863,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      generate_input_->inputLength(),
                                      maxTokenNum(),
                                      vocab_size_,
-                                     hasNumBeams(),
+                                     usesBeamSearchTokenLayoutForCurrentStep(),
                                      streamId(),
                                      error_token_id)) {
         reportEventWithoutLock(StreamEvents::Error,
@@ -979,17 +984,33 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
     loss_index_ += loss_size;
 }
 
-void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos) {
+void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                     int                  start_pos,
+                                     const torch::Tensor& src_batch_indices) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto probs_cpu = softmax_probs.is_cuda() ? softmax_probs.cpu() : softmax_probs;
+    RTP_LLM_CHECK(softmax_probs_.defined());
+    auto probs_cpu = softmax_probs.to(torch::kCPU, torch::kFloat32).contiguous();
     RTP_LLM_CHECK(probs_cpu.dim() == 2);
     RTP_LLM_CHECK(probs_cpu.size(0) == currentBatchSize());
     auto num_probs = probs_cpu.size(1);
-    for (int i = 0; i < currentBatchSize(); ++i) {
-        memcpy(softmax_probs_.data_ptr<float>() + i * softmax_probs_.size(1) + start_pos,
-               probs_cpu[i].data_ptr<float>(),
-               num_probs * sizeof(float));
+    RTP_LLM_CHECK(start_pos >= 0);
+    RTP_LLM_CHECK(start_pos + num_probs <= softmax_probs_.size(1));
+    RTP_LLM_CHECK(currentBatchSize() <= softmax_probs_.size(0));
+
+    if (src_batch_indices.defined()) {
+        auto indices_cpu = src_batch_indices.to(torch::kCPU, torch::kLong).contiguous();
+        RTP_LLM_CHECK(indices_cpu.dim() == 1);
+        RTP_LLM_CHECK(indices_cpu.numel() == currentBatchSize());
+        RTP_LLM_CHECK(indices_cpu.min().item<int64_t>() >= 0);
+        RTP_LLM_CHECK(indices_cpu.max().item<int64_t>() < softmax_probs_.size(0));
+
+        if (start_pos > 0) {
+            auto history = softmax_probs_.narrow(1, 0, start_pos).index_select(0, indices_cpu);
+            softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, 0, start_pos).copy_(history);
+        }
     }
+
+    softmax_probs_.narrow(0, 0, currentBatchSize()).narrow(1, start_pos, num_probs).copy_(probs_cpu);
 }
 
 torch::Tensor GenerateStream::getLoss() {
