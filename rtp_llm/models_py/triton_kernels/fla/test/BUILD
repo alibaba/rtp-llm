@@ -145,3 +145,29 @@ py_test(
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
 )
+
+py_test(
+    name = "test_aiter_flydsl_gdn_decode",
+    srcs = [
+        "test_aiter_flydsl_gdn_decode.py"
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
+    name = "test_aiter_flydsl_gdn_decode_rocm",
+    srcs = [
+        "test_aiter_flydsl_gdn_decode.py"
+    ],
+    main = "test_aiter_flydsl_gdn_decode.py",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
