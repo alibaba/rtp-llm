@@ -5,6 +5,7 @@ py_library(
     srcs = glob([
         "utils/*.py",
     ]),
+    deps = ["//rtp_llm:config"],
     visibility = ["//visibility:public"],
 )
 

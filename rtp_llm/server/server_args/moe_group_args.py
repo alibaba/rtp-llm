@@ -1,3 +1,4 @@
+from rtp_llm.config.moe_config import Fp4MoeOp
 from rtp_llm.server.server_args.util import str2bool
 
 
@@ -172,6 +173,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "fp8_per_block_ep_normal",
             "fp8_per_block_pure_cp",
             "fp8_per_block_pure_dp",
+            "sm120_fp8_grouped",
             "fp8_per_tensor_no_dp",
             "fp8_per_tensor_ep_low_latency",
             "fp8_per_tensor_ep_normal",
@@ -181,16 +183,28 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "fp4_ep_low_latency",
             "fp4_ep_normal",
             "fp4_no_dp",
+            "fp4_b12x",
         ],
         default="auto",
-        help="指定moe strategy, 默认为auto",
+        help=(
+            "指定moe strategy, 默认为auto。sm120_fp8_grouped 和 fp4_b12x "
+            "仅适用于 sm_120/121；fp4_b12x 还要求单卡 (ep_size=1)。"
+        ),
     )
     moe_group.add_argument(
         "--fp4_moe_op",
         env_name="FP4_MOE_OP",
         bind_to=(moe_config, "fp4_moe_op"),
         type=str,
-        choices=["auto", "trtllm", "cutedsl"],
-        default="auto",
-        help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
+        choices=[op.value for op in Fp4MoeOp],
+        default=Fp4MoeOp.AUTO.value,
+        help=(
+            "指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 "
+            "TensorRT-LLM), cutedsl (使用 CuTe DSL), b12x (仅支持 "
+            "sm_120/121 且 ep_size=1 的 flashinfer b12x；该架构没有其他"
+            "单卡 FP4 fallback)。折叠 scale 的临时容差可通过 "
+            "RTP_LLM_B12X_ZEROED_ENERGY_LIMIT 调整；设置 "
+            "RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT=1 可关闭 CUDA 12.9 "
+            "兼容路径并恢复 FlashInfer 原生门禁。"
+        ),
     )

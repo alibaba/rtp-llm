@@ -32,6 +32,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["MOE_STRATEGY"] = "fp4_b12x"
+        os.environ["FP4_MOE_OP"] = "b12x"
 
         sys.argv = ["prog"]
 
@@ -62,6 +64,8 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
+        self.assertEqual(py_env_configs.moe_config.moe_strategy, "fp4_b12x")
+        self.assertEqual(py_env_configs.moe_config.fp4_moe_op, "b12x")
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -91,6 +95,10 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--cache_store_rdma_worker_thread_count",
             "2",
+            "--moe_strategy",
+            "fp4_b12x",
+            "--fp4_moe_op",
+            "b12x",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -124,6 +132,8 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
+        self.assertEqual(py_env_configs.moe_config.moe_strategy, "fp4_b12x")
+        self.assertEqual(py_env_configs.moe_config.fp4_moe_op, "b12x")
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 

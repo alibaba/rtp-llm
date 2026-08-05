@@ -6,6 +6,7 @@ from typing import List, Optional
 import psutil
 import torch
 
+from rtp_llm.config.moe_config import Fp4MoeOp, resolve_fp4_moe_op
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops.compute_ops import (
     preprocess_gemm_weight_by_key,
@@ -357,13 +358,10 @@ class CudaImpl(GpuImpl):
             logging.warn(f"no nvml found: " + str(e))
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        if self.py_env_configs.moe_config.fp4_moe_op == "auto":
-            self.py_env_configs.moe_config.fp4_moe_op = "trtllm"
-            if (
-                self.py_env_configs.moe_config.use_deepep_moe
-                and self.py_env_configs.moe_config.use_deepep_low_latency
-            ):
-                self.py_env_configs.moe_config.fp4_moe_op = "cutedsl"
+        self.py_env_configs.moe_config.fp4_moe_op = resolve_fp4_moe_op(
+            self.py_env_configs.moe_config,
+            is_sm12x=self.arch // 10 == 12,
+        )
 
     def _get_mem_info(self) -> MemInfo:
         import pynvml
@@ -482,8 +480,17 @@ class CudaImpl(GpuImpl):
     def swizzle_blockscale(scale: torch.Tensor):
         """
         Swizzle the scale tensor into a blockwise interleaved format for NVFP4 quantization.
+
+        Pure byte movement (pad + blockwise interleave), so both of the 1-byte
+        carriers the FP4 block scales travel in are accepted: float8_e4m3fn as
+        produced by the weight loader, and the raw uint8 view returned by
+        flashinfer's fp4_quantize. The output keeps the input dtype.
+        Accepts [M, K] or [B, M, K] and returns the same rank.
         """
-        assert scale.dtype == torch.float8_e4m3fn
+        assert scale.dtype in (
+            torch.float8_e4m3fn,
+            torch.uint8,
+        ), f"unexpected block scale dtype {scale.dtype}"
         # Pad and blockwise interleave weight_scale
         scale_ndim = scale.ndim
         if scale.ndim == 2:
@@ -525,63 +532,9 @@ class CudaImpl(GpuImpl):
                 .view(torch.float8_e4m3fn)
             )
         else:
-            # Pad and blockwise interleave weight_scales
-            scales = weight_scale
-            scale_ndim = scales.ndim
-            if scale_ndim == 2:
-                scales = scales.unsqueeze(0)
-            assert scales.ndim == 3
-            B, M, K = scales.shape
-            round_up_multiple = lambda x, m: (x + m - 1) // m * m
-            M_padded = round_up_multiple(M, 128)
-            K_padded = round_up_multiple(K, 4)
-            padded_scales = torch.zeros((B, M_padded, K_padded), dtype=scales.dtype)
-            padded_scales[:B, :M, :K] = scales
-            batches, rows, cols = padded_scales.shape
-            assert rows % 128 == 0
-            assert cols % 4 == 0
-            padded_scales = padded_scales.reshape(
-                batches, rows // 128, 4, 32, cols // 4, 4
-            )
-            padded_scales = padded_scales.permute((0, 1, 4, 3, 2, 5))
-            padded_scales = padded_scales.contiguous().cuda()
-            padded_scales = (
-                padded_scales.reshape(M_padded, K_padded)
-                if scale_ndim == 2
-                else padded_scales.reshape(B, M_padded, K_padded)
-            )
             processed_weight = weight
-            processed_weight_scale = padded_scales
+            processed_weight_scale = CudaImpl.swizzle_blockscale(weight_scale)
         return [processed_weight, processed_weight_scale]
-
-    @staticmethod
-    def swizzle_blockscale(scale: torch.Tensor):
-        """
-        Swizzle the scale tensor into a blockwise interleaved format for NVFP4 quantization.
-        """
-        assert scale.dtype == torch.float8_e4m3fn
-        # Pad and blockwise interleave weight_scale
-        scale_ndim = scale.ndim
-        if scale.ndim == 2:
-            scale = scale.unsqueeze(0)
-        assert scale.ndim == 3
-        B, M, K = scale.shape
-        round_up_multiple = lambda x, m: (x + m - 1) // m * m
-        M_padded = round_up_multiple(M, 128)
-        K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
-        padded_scale[:B, :M, :K] = scale
-        batches, rows, cols = padded_scale.shape
-        assert rows % 128 == 0
-        assert cols % 4 == 0
-        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
-        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
-        return (
-            swizzled_scale.reshape(M_padded, K_padded)
-            if scale_ndim == 2
-            else swizzled_scale.reshape(B, M_padded, K_padded)
-        )
 
     @staticmethod
     def prepare_static_weights_for_trtllm_fp4_moe(
@@ -646,7 +599,7 @@ class CudaImpl(GpuImpl):
         if kernel_name not in [W.moe_w2, W.moe_w1]:
             return kernel, scale
 
-        if self.py_env_configs.moe_config.fp4_moe_op == "cutedsl":
+        if self.py_env_configs.moe_config.fp4_moe_op == Fp4MoeOp.CUTEDSL.value:
             # cutedsl moe needs gate+up format for w13
             if kernel_name == W.moe_w1:
                 kernel = torch.cat(
@@ -666,7 +619,16 @@ class CudaImpl(GpuImpl):
             swizzled_scale = self.swizzle_blockscale(scale)
             return kernel, swizzled_scale
 
-        if self.py_env_configs.moe_config.fp4_moe_op != "trtllm":
+        if self.py_env_configs.moe_config.fp4_moe_op == Fp4MoeOp.B12X.value:
+            # The SM120 b12x kernel is up-first: its SwiGLU applies silu to the
+            # SECOND half (gate) and multiplies the first half (up). w13 is
+            # already loaded as [up; gate], so NO half-swap is applied here
+            # (swapping would produce silu(up)*gate). Only swizzle the block
+            # scales into the Blackwell blockscale storage.
+            swizzled_scale = self.swizzle_blockscale(scale)
+            return kernel, swizzled_scale
+
+        if self.py_env_configs.moe_config.fp4_moe_op != Fp4MoeOp.TRTLLM.value:
             return kernel, scale
 
         from flashinfer.fused_moe.core import (
