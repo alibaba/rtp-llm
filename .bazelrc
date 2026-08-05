@@ -152,12 +152,27 @@ build:cuda13 --copt=-Wno-array-bounds
 build:cuda13 --copt=-Wno-unused-result
 build:cuda13 --copt=-Wno-array-parameter
 build:cuda13 --copt=-Wno-narrowing
+# gcc 12 (gcc-toolset-12) warns on torch 2.11's use of
+# std::hardware_destructive_interference_size in c10/cuda/CUDAEvent.h
+# (-Winterference-size); the global -Werror promotes it to an error.
+# cxxopt only: the flag is invalid for C compiles and would itself trip -Werror.
+build:cuda13 --cxxopt=-Wno-interference-size
 # cuda13 owns its own dep chain: torch 2.11+cu130, triton 3.6.0, dedicated
 # pip_gpu_cuda13_torch / torch_2.11_py310_cuda repos and a dedicated whl_deps
 # branch in arch_select.bzl.  Selects that need to treat cu13 the same as
 # cu12_9 use the using_cu12_9_or_13_x86 config_setting_group (BUILD).
 build:cuda13 --define=using_cuda13_x86=true
 build:cuda13 --define=using_cuda12_9_x86=false
+# gcc-toolset-12 binutils (objdump/ld.bfd) link against libctf.so.0 which
+# needs LIBCTF_1.1, but the LD_LIBRARY_PATH inherited from cuda12 starts
+# with /lib64 and resolves the older system libctf first.  That crashes
+# objdump during cuda_configure's SONAME check ("version `LIBCTF_1.1'
+# not found") and ld during linking.  Prepend gcc-toolset-12's libdir in
+# both the action env (compilation) and the repo env (repository rules,
+# e.g. local_config_cuda fetching).
+build:cuda13 --action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/"
+build:cuda13 --host_action_env LD_LIBRARY_PATH="/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/"
+build:cuda13 --repo_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/lib64:/opt/conda310/lib/:/usr/local/cuda/compat/:/usr/local/nvidia/lib64:/usr/lib64:/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs/:/usr/local/cuda/extras/CUPTI/lib64/
 # remote_kv_cache 3rdparty prebuilt (kv_cache_manager_client.so) is linked
 # against libcudart.so.12 — pulls a missing dep into libth_transformer.so on
 # cu13 toolchain. cuda13_arm already disables it; mirror here.

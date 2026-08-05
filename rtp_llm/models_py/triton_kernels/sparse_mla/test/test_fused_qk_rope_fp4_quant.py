@@ -153,6 +153,65 @@ class FusedQKRopeFp4QuantTest(TestCase):
             "fused QK FP4 K-output differs from FP8 QK K-output",
         )
 
+    def test_interleaved_output_matches_reference_kernels(self):
+        num_tokens = 13
+        q = torch.randn(
+            num_tokens, self.N_HEADS, self.HD, dtype=torch.bfloat16, device=self.device
+        )
+        k = torch.randn(num_tokens, self.HD, dtype=torch.bfloat16, device=self.device)
+        positions = torch.randint(
+            0, self.MAX_POS, (num_tokens,), dtype=torch.int64, device=self.device
+        )
+
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_fp4_quant import (
+            fused_q_rope_fp4_quant,
+            fused_qk_rope_fp4_quant,
+        )
+        from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
+            fused_qk_rope_quant,
+        )
+
+        q_fp4, q_scale, k_out = fused_qk_rope_fp4_quant(
+            q,
+            k,
+            positions,
+            self.cos_sin_cache,
+            self.N_HEADS,
+            self.HD,
+            self.ROPE_DIM,
+            is_neox_style=False,
+        )
+        ref_q_fp4, ref_q_scale = fused_q_rope_fp4_quant(
+            q,
+            positions,
+            self.cos_sin_cache,
+            self.N_HEADS,
+            self.HD,
+            self.ROPE_DIM,
+            is_neox_style=False,
+        )
+        _, _, ref_k_out = fused_qk_rope_quant(
+            q,
+            k,
+            positions,
+            self.cos_sin_cache,
+            self.N_HEADS,
+            self.HD,
+            self.ROPE_DIM,
+            is_neox_style=False,
+        )
+        torch.cuda.synchronize()
+
+        self.assertTrue(
+            torch.equal(q_fp4.view(torch.uint8), ref_q_fp4.view(torch.uint8))
+        )
+        self.assertTrue(
+            torch.equal(q_scale.view(torch.uint8), ref_q_scale.view(torch.uint8))
+        )
+        self.assertTrue(
+            torch.equal(k_out.view(torch.uint8), ref_k_out.view(torch.uint8))
+        )
+
     def test_empty_input_returns_empty(self):
         q = torch.empty(
             0, self.N_HEADS, self.HD, dtype=torch.bfloat16, device=self.device

@@ -95,6 +95,17 @@ py_test (
 )
 
 py_test (
+    name = "per_token_group_quant_fp4_test",
+    srcs = ["per_token_group_quant_fp4_test.py"],
+    deps = py_test_deps,
+    env = {
+        "DG_JIT_CACHE_DIR": "/tmp/.deep_gemm_jit_cache",
+    },
+    tags = ["open_skip", "SM100"],
+    exec_properties = {'gpu':'SM100_X86'},
+)
+
+py_test (
     name = "deep_gemm_fp8_fp4_unified_api_test",
     srcs = ["deep_gemm_fp8_fp4_unified_api_test.py"],
     deps = py_test_deps,
@@ -105,5 +116,17 @@ py_test (
         "DG_JIT_CACHE_DIR": "/tmp/.deep_gemm_jit_cache",
     },
     tags = ["open_skip", "SM100"],
+    exec_properties = {'gpu':'SM100_X86'},
+)
+
+py_test (
+    name = "mqa_logits_cp8_rank0_perf",
+    srcs = ["mqa_logits_cp8_rank0_perf.py"],
+    deps = py_test_deps,
+    env = {
+        "DG_JIT_CACHE_DIR": "/tmp/.deep_gemm_jit_cache",
+    },
+    size = "large",
+    tags = ["manual", "open_skip", "SM100"],
     exec_properties = {'gpu':'SM100_X86'},
 )

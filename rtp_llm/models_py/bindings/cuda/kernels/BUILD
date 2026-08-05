@@ -98,10 +98,12 @@ cc_library(
     srcs = [
         "per_token_group_quant_8bit.cu",
         "per_token_group_quant_8bit_v2.cu",
+        "per_token_group_quant_fp4.cu",
     ],
     hdrs = [
         "per_token_group_quant_8bit.h",
         "per_token_group_quant_8bit_v2.h",
+        "per_token_group_quant_fp4.h",
     ],
     deps = [
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",

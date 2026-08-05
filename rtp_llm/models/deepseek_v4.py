@@ -43,6 +43,9 @@ from rtp_llm.models.deepseek_v2 import (
     DeepSeekV3Mtp,
     DeepSeekV3MtpWeight,
 )
+from rtp_llm.models_py.modules.hybrid.indexer_quant_dtype import (
+    resolve_indexer_quant_dtype_from_env,
+)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -610,17 +613,7 @@ class DeepSeekV4(DeepSeekV2):
         config.attn_config.indexer_head_num = int(config_json["index_n_heads"])
         config.attn_config.indexer_topk = int(config_json["index_topk"])
         # Indexer Q/K quantization dtype — propagated to KV cache stride.
-        # FP4 is Blackwell-only and validated by the Indexer module at init.
-        import os as _os
-
-        _indexer_quant = (
-            _os.environ.get("RTP_LLM_INDEXER_QUANT_DTYPE", "fp8").strip().lower()
-        )
-        if _indexer_quant not in ("fp8", "fp4"):
-            raise ValueError(
-                f"RTP_LLM_INDEXER_QUANT_DTYPE={_indexer_quant!r} not supported"
-            )
-        config.attn_config.indexer_quant_dtype = _indexer_quant
+        config.attn_config.indexer_quant_dtype = resolve_indexer_quant_dtype_from_env()
 
         # ---- MoE ----
         scoring_func = config_json.get("scoring_func", "softmax")

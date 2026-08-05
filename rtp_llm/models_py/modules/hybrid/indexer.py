@@ -1,4 +1,3 @@
-import logging
 import os
 from typing import Any, Dict, Optional, Tuple
 
@@ -8,64 +7,12 @@ from torch import nn
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.hybrid.indexer_quant_dtype import (
+    validate_indexer_quant_dtype,
+)
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
-
-_INDEXER_QUANT_DTYPE_ENV = "RTP_LLM_INDEXER_QUANT_DTYPE"
-_SUPPORTED_INDEXER_QUANT_DTYPES = ("fp8", "fp4")
-_BLACKWELL_MIN_CC = (10, 0)
-
-# One-time PD-consistency banner. The indexer KV cache stride is decided at
-# config time on each instance; if the prefill instance resolves "fp4" and the
-# decode instance resolves "fp8" (or vice versa), the RDMA-transferred blocks
-# carry mismatched bytes-per-token and the decode side reads silently
-# corrupt logits. Until the GetPeerInfo RPC (model_rpc_service.proto:531)
-# carries this field for a real handshake check, log it loudly so an operator
-# can grep PD pairs for a mismatch:
-#   grep -h 'INDEXER_QUANT_BANNER' prefill.log decode.log
-_PD_BANNER_EMITTED = False
-
-
-def _emit_pd_consistency_banner(quant_dtype: str) -> None:
-    """Log resolved indexer dtype with role_type so prefill/decode logs can
-    be grep-compared. Only logs once per process."""
-    global _PD_BANNER_EMITTED
-    if _PD_BANNER_EMITTED:
-        return
-    _PD_BANNER_EMITTED = True
-    role = os.environ.get("ROLE_TYPE", "<unset>")
-    bytes_per_token = 68 if quant_dtype == "fp4" else 132  # HD=128
-    logging.info(
-        "INDEXER_QUANT_BANNER role=%s indexer_quant_dtype=%s "
-        "kv_stride_bytes_per_token=%d (must match peer in PD pair)",
-        role,
-        quant_dtype,
-        bytes_per_token,
-    )
-
-
-def _resolve_indexer_quant_dtype() -> str:
-    raw = os.environ.get(_INDEXER_QUANT_DTYPE_ENV, "fp8").strip().lower()
-    if raw not in _SUPPORTED_INDEXER_QUANT_DTYPES:
-        raise ValueError(
-            f"{_INDEXER_QUANT_DTYPE_ENV}={raw!r} not supported; "
-            f"expected one of {_SUPPORTED_INDEXER_QUANT_DTYPES}"
-        )
-    if raw == "fp4":
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                f"{_INDEXER_QUANT_DTYPE_ENV}=fp4 requires CUDA; no CUDA device available"
-            )
-        cc = torch.cuda.get_device_capability()
-        if cc < _BLACKWELL_MIN_CC:
-            raise RuntimeError(
-                f"{_INDEXER_QUANT_DTYPE_ENV}=fp4 requires Blackwell (SM>=10.0); "
-                f"current device capability {cc}"
-            )
-    _emit_pd_consistency_banner(raw)
-    return raw
-
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
@@ -102,23 +49,23 @@ class Indexer(nn.Module):
         # ``ENABLE_FUSE_KERNELS``) → ``self._fuse_logits_head_gate``. Keep it
         # out of the forward path so it's free at decode (no env / config
         # lookup per token).
-        self._quant_dtype = _resolve_indexer_quant_dtype()
+        self._quant_dtype = validate_indexer_quant_dtype(
+            getattr(attn_config, "indexer_quant_dtype", "fp8")
+        )
 
-        # Fused-logits-head-gate is FP8-only (its kernel folds q_scale into
-        # the gate, which FP4 doesn't have as fp32). The fused QK path has
-        # separate FP8 (``fused_rope_quant_qk``) and FP4
+        # Fused-logits-head-gate: FP8 folds q_scale into the gate; FP4 passes
+        # q_scale separately to mqa_logits but still uses the same fused GEMV.
+        # The fused QK path has separate FP8 (``fused_rope_quant_qk``) and FP4
         # (``fused_rope_quant_qk_fp4``) implementations — both run K's
         # RoPE+Hadamard and Q's RoPE+Hadamard+quant in one Triton launch.
         # Both honor the same ``enable_fuse_kernels`` master switch.
         _fuse_kernels = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_logits_head_gate = (
-            self._quant_dtype == "fp8"
-            and _fuse_kernels
-            and fused_logits_head_gate is not None
+            _fuse_kernels and fused_logits_head_gate is not None
         )
-        # FP4 decode-path fused QK kernel (one launch): K(RoPE+Had→bf16) +
-        # Q(RoPE+Had+FP4 e2m1+UE8M0/32). Mirrors the FP8 path's structure;
-        # K is then cache-written via ``quant_k_only``.
+        # FP4 fused QK kernel (one launch): K(RoPE+Had→bf16) +
+        # Q(RoPE+Had+FP4 e2m1+UE8M0/32). Used on decode and sparse prefill CP;
+        # K is cache-written via ``quant_k_only`` / ``quant_k_cp_only``.
         self._fuse_q_rope_quant_fp4 = self._quant_dtype == "fp4" and _fuse_kernels
 
         self.index_n_heads = attn_config.indexer_head_num
@@ -213,6 +160,11 @@ class Indexer(nn.Module):
             return False
         return self.parallelism_config.prefill_cp_config.is_enabled()
 
+    def _prefill_cp_fused_quant_enabled(self) -> bool:
+        return os.environ.get(
+            "DSV4_CP_PREFILL_INDEXER_FUSED_QUANT", "1"
+        ).strip().lower() in ("1", "true", "yes", "on")
+
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
 
@@ -223,10 +175,10 @@ class Indexer(nn.Module):
         # ``self._fuse_logits_head_gate`` is resolved at __init__ from
         # ``HWKernelConfig.enable_fuse_kernels`` and FP8 mode.
         scale = self.softmax_scale * self.weights_scale
-        if self._fuse_logits_head_gate and x.is_contiguous() and q_scale is not None:
+        if self._fuse_logits_head_gate and x.is_contiguous():
             return fused_logits_head_gate(
                 x,
-                q_scale,
+                None if self._quant_dtype == "fp4" else q_scale,
                 self.weights_proj.weight,
                 scale,
                 fallback_proj=self.weights_proj,
@@ -277,6 +229,48 @@ class Indexer(nn.Module):
 
         return q_fp8, q_scale
 
+    def _fused_forward_prefill_cp(
+        self,
+        q_lora: torch.Tensor,
+        x: torch.Tensor,
+        kv_cache: KVCache,
+        fmha_params: Any,
+        cp_params: Any,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if q_c_fp8 is not None and q_c_scale is not None:
+            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
+        else:
+            q = self.wq_b(q_lora)
+        q = q.view(-1, self.index_n_heads, self.index_head_dim)
+
+        if x_fp8 is not None and x_scale is not None:
+            k = self.wk(x_fp8, input_scales=x_scale)
+        else:
+            k = self.wk(x)
+        k = self.k_norm(k)
+
+        q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
+            q,
+            k,
+            cp_params.full_rope_pos_ids,
+        )
+        slot_mapping = (
+            cp_params.sharded_slot_mapping
+            if bool(getattr(cp_params, "kv_cache_sharded", False))
+            else fmha_params.slot_mapping
+        )
+        self.indexer_op.quant_k_cp_only(
+            key,
+            kv_cache,
+            slot_mapping,
+            cp_params.kv_restore_unpad_indices,
+        )
+        return q_fp8, q_scale
+
     def _fused_forward_decode_fp4(
         self,
         q_lora: torch.Tensor,
@@ -314,6 +308,57 @@ class Indexer(nn.Module):
         )
         self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
 
+        return q_fp4, q_scale_fp4
+
+    def _fused_forward_prefill_cp_fp4(
+        self,
+        q_lora: torch.Tensor,
+        x: torch.Tensor,
+        kv_cache: KVCache,
+        fmha_params: Any,
+        cp_params: Any,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """FP4 fused prefill CP: same structure as ``_fused_forward_prefill_cp``.
+
+        One fused QK kernel (``fused_rope_quant_qk_fp4``) produces local FP4 Q
+        plus bf16 K; K is all-gathered/restored and written via ``quant_k_cp_only``.
+
+        Returns ``(q_fp4, q_scale_fp4)``:
+          q_fp4:       int8  [local_tokens, n_heads, HD//2]
+          q_scale_fp4: int32 [local_tokens, n_heads]
+        """
+        if q_c_fp8 is not None and q_c_scale is not None:
+            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
+        else:
+            q = self.wq_b(q_lora)
+        q = q.view(-1, self.index_n_heads, self.index_head_dim)
+
+        if x_fp8 is not None and x_scale is not None:
+            k = self.wk(x_fp8, input_scales=x_scale)
+        else:
+            k = self.wk(x)
+        k = self.k_norm(k)
+
+        q_fp4, q_scale_fp4, key = self.indexer_op.fused_rope_quant_qk_fp4(
+            q,
+            k,
+            cp_params.full_rope_pos_ids,
+        )
+        slot_mapping = (
+            cp_params.sharded_slot_mapping
+            if bool(getattr(cp_params, "kv_cache_sharded", False))
+            else fmha_params.slot_mapping
+        )
+        self.indexer_op.quant_k_cp_only(
+            key,
+            kv_cache,
+            slot_mapping,
+            cp_params.kv_restore_unpad_indices,
+        )
         return q_fp4, q_scale_fp4
 
     def _get_q_k_bf16(
@@ -388,7 +433,7 @@ class Indexer(nn.Module):
 
     def _compute_topk(
         self,
-        q_fp8: torch.Tensor,
+        q_quant: torch.Tensor,
         weights: torch.Tensor,
         kv_cache: KVCache,
         fmha_params: Any,
@@ -400,7 +445,7 @@ class Indexer(nn.Module):
             getattr(attention_inputs, "is_target_verify", False)
         ):
             return self.indexer_op._get_topk_paged(
-                q_fp8,
+                q_quant,
                 weights,
                 kv_cache,
                 fmha_params,
@@ -410,7 +455,7 @@ class Indexer(nn.Module):
         if self._prefill_cp_enabled():
             assert cp_params is not None
             return self.indexer_op._get_topk_ragged_cp(
-                q_fp8,
+                q_quant,
                 weights,
                 kv_cache,
                 fmha_params,
@@ -426,10 +471,19 @@ class Indexer(nn.Module):
                 int(getattr(cp_params, "cp_size", 1)),
                 int(getattr(cp_params, "cp_rank", 0)),
                 kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
+                indexer_cp_plan=getattr(cp_params, "indexer_cp_plan", None),
+                indexer_cp_local_cu=getattr(cp_params, "indexer_cp_local_cu", None),
+                indexer_copy_dst_idx=getattr(cp_params, "indexer_copy_dst_idx", None),
+                indexer_src_for_padded=getattr(
+                    cp_params, "indexer_src_for_padded", None
+                ),
+                total_local_ids_is_identity=bool(
+                    getattr(cp_params, "total_local_ids_is_identity", False)
+                ),
                 q_scale_fp4=q_scale_fp4,
             )
         return self.indexer_op._get_topk_ragged(
-            q_fp8,
+            q_quant,
             weights,
             kv_cache,
             fmha_params,
@@ -459,65 +513,88 @@ class Indexer(nn.Module):
         if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None, "cp_params is required for sparse prefill CP"
 
-        # Decode-only fused QK paths. FP8 uses ``fused_rope_quant_qk``
-        # (returns FP8 e4m3 Q + fp32 scale); FP4 uses
-        # ``fused_rope_quant_qk_fp4`` (returns FP4 e2m1 Q + packed UE8M0/32
-        # int32 scale). Both produce a bf16 K and bypass the slow unfused
-        # ``apply_rope_and_rotate_q_k`` + Python quant path.
-        _decode_eligible = not attention_inputs.is_prefill and cp_params is None
-        if _decode_eligible and self._fuse_logits_head_gate:
-            q_fp8, q_scale = self._fused_forward_decode(
-                q_lora,
-                hidden_states,
-                kv_cache,
-                fmha_params,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
-            )
-        elif _decode_eligible and self._fuse_q_rope_quant_fp4:
-            q_fp8, q_scale = self._fused_forward_decode_fp4(
-                q_lora,
-                hidden_states,
-                kv_cache,
-                fmha_params,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
-            )
+        # Fused Q-RoPE-Hadamard-Quant path for sparse prefill CP.
+        if (
+            self._is_sparse_prefill_cp(attention_inputs)
+            and self._prefill_cp_fused_quant_enabled()
+            and cp_params.full_rope_pos_ids is not None
+        ):
+            if self._fuse_q_rope_quant_fp4:
+                q_quant, q_scale = self._fused_forward_prefill_cp_fp4(
+                    q_lora,
+                    hidden_states,
+                    kv_cache,
+                    fmha_params,
+                    cp_params,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                )
+            else:
+                q_quant, q_scale = self._fused_forward_prefill_cp(
+                    q_lora,
+                    hidden_states,
+                    kv_cache,
+                    fmha_params,
+                    cp_params,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                )
         else:
-            query, key = self._get_q_k_bf16(
-                q_lora,
-                hidden_states,
-                fmha_params,
-                cp_params,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
-            )
-            q_fp8, q_scale = self._quantize_q_k(
-                query, key, kv_cache, fmha_params, attention_inputs, cp_params
-            )
+            # Decode-only fused QK paths. FP8 uses ``fused_rope_quant_qk``
+            # (returns FP8 e4m3 Q + fp32 scale); FP4 uses
+            # ``fused_rope_quant_qk_fp4`` (returns FP4 e2m1 Q + packed UE8M0/32
+            # int32 scale). Both produce a bf16 K and bypass the slow unfused
+            # ``apply_rope_and_rotate_q_k`` + Python quant path.
+            _decode_eligible = not attention_inputs.is_prefill and cp_params is None
+            if _decode_eligible and self._fuse_q_rope_quant_fp4:
+                q_quant, q_scale = self._fused_forward_decode_fp4(
+                    q_lora,
+                    hidden_states,
+                    kv_cache,
+                    fmha_params,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                )
+            elif _decode_eligible and self._fuse_logits_head_gate:
+                q_quant, q_scale = self._fused_forward_decode(
+                    q_lora,
+                    hidden_states,
+                    kv_cache,
+                    fmha_params,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                )
+            else:
+                query, key = self._get_q_k_bf16(
+                    q_lora,
+                    hidden_states,
+                    fmha_params,
+                    cp_params,
+                    x_fp8,
+                    x_scale,
+                    q_c_fp8,
+                    q_c_scale,
+                )
+                q_quant, q_scale = self._quantize_q_k(
+                    query, key, kv_cache, fmha_params, attention_inputs, cp_params
+                )
 
-        # FP4 mode: q_scale is packed UE8M0 int32 [N, n_heads] for the
-        # deep_gemm fp8_fp4_*mqa_logits q tuple; weights are computed without
-        # q_scale absorption. FP8 mode: q_scale is float32 [N, n_heads, 1]
-        # and is folded into weights via the gate.
-        if self._quant_dtype == "fp4":
-            weights = self._get_logits_head_gate(hidden_states, None)
-            return self._compute_topk(
-                q_fp8,
-                weights,
-                kv_cache,
-                fmha_params,
-                attention_inputs,
-                cp_params,
-                q_scale_fp4=q_scale,
-            )
-        weights = self._get_logits_head_gate(hidden_states, q_scale)
+        is_fp4 = self._quant_dtype == "fp4"
+        weights = self._get_logits_head_gate(hidden_states, None if is_fp4 else q_scale)
         return self._compute_topk(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
+            q_quant,
+            weights,
+            kv_cache,
+            fmha_params,
+            attention_inputs,
+            cp_params,
+            q_scale_fp4=q_scale if is_fp4 else None,
         )

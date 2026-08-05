@@ -65,6 +65,7 @@ def _fused_logits_head_gate_kernel(
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
     W_IS_TRANSPOSED: tl.constexpr,
+    APPLY_Q_SCALE: tl.constexpr,
 ):
     pid_m = tl.program_id(0).to(tl.int64)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
@@ -105,13 +106,17 @@ def _fused_logits_head_gate_kernel(
             ).to(tl.float32)
             acc += tl.dot(x, tl.trans(w), out_dtype=tl.float32, input_precision="tf32")
 
-    # Load q_scale [BLOCK_M, BLOCK_N] (already squeezed from [T, N, 1])
-    qs = tl.load(
-        qs_ptr + offs_m[:, None] * stride_qs_t + offs_n[None, :],
-        mask=mask_m[:, None] & mask_n[None, :],
-        other=0.0,
-    )
-    out = acc * qs * scale_const
+    if (
+        APPLY_Q_SCALE
+    ):  # FP8: fold per-head q_scale; FP4: q_scale lives in mqa_logits q tuple.
+        qs = tl.load(
+            qs_ptr + offs_m[:, None] * stride_qs_t + offs_n[None, :],
+            mask=mask_m[:, None] & mask_n[None, :],
+            other=0.0,
+        )
+        out = acc * qs * scale_const
+    else:
+        out = acc * scale_const
 
     tl.store(
         out_ptr + offs_m[:, None] * stride_o_t + offs_n[None, :],
@@ -134,6 +139,7 @@ def _fused_logits_head_gate_small_t_kernel(
     stride_qs_t,
     stride_o_t,
     BLOCK_K: tl.constexpr,  # power-of-2 padded K (whole row in registers)
+    APPLY_Q_SCALE: tl.constexpr,
 ):
     """Small-T variant: one program per (token, head_n).
 
@@ -156,8 +162,11 @@ def _fused_logits_head_gate_small_t_kernel(
 
     acc = tl.sum(x * w, axis=0)  # scalar fp32
 
-    qs = tl.load(qs_ptr + t * stride_qs_t + n).to(tl.float32)
-    out = acc * qs * scale_const
+    if APPLY_Q_SCALE:
+        qs = tl.load(qs_ptr + t * stride_qs_t + n).to(tl.float32)
+        out = acc * qs * scale_const
+    else:
+        out = acc * scale_const
 
     tl.store(out_ptr + t * stride_o_t + n, out)
 
@@ -180,23 +189,24 @@ def _baseline_logits_head_gate(
 
 def fused_logits_head_gate(
     x: torch.Tensor,
-    q_scale: torch.Tensor,
+    q_scale: Optional[torch.Tensor],
     weight: torch.Tensor,
     scale_const: float,
     fallback_proj: Optional[torch.nn.Module] = None,
 ) -> torch.Tensor:
-    """Fused ``cast + GEMV + 2 muls`` for indexer's _get_logits_head_gate.
+    """Fused ``cast + GEMV + (optional q_scale) mul + scale`` for indexer's _get_logits_head_gate.
 
     Args:
         x:           [T, K] bf16 input (was ``x`` before ``.float()`` cast).
-        q_scale:     [T, N, 1] fp32 OR [T, N] fp32.
+        q_scale:     [T, N, 1] fp32 OR [T, N] fp32 for FP8; ``None`` for FP4 (Q scale
+                     is passed separately to ``fp8_fp4_mqa_logits``).
         weight:      [N, K] bf16 (``weights_proj.weight``).
         scale_const: ``softmax_scale * weights_scale`` (Python float).
         fallback_proj: optional callable used only when the fast path bails out
                        (matches the original ``self.weights_proj``).
 
     Returns:
-        ``[T, N, 1]`` fp32 tensor.
+        ``[T, N, 1]`` fp32 tensor when ``q_scale`` is set, else ``[T, N]`` fp32.
 
     Fast path conditions:
         - ``x.dtype == bf16`` (or fp16) and ``weight.dtype == bf16`` (or fp16)
@@ -213,15 +223,19 @@ def fused_logits_head_gate(
     N, K_w = weight.shape
     assert K == K_w, f"x.shape[1]={K} but weight.shape[1]={K_w}"
 
-    # Squeeze q_scale to [T, N]
-    if q_scale.dim() == 3:
-        assert q_scale.shape[-1] == 1
-        qs_2d = q_scale.squeeze(-1)
-    elif q_scale.dim() == 2:
-        qs_2d = q_scale
+    apply_q_scale = q_scale is not None
+    if apply_q_scale:
+        # Squeeze q_scale to [T, N]
+        if q_scale.dim() == 3:
+            assert q_scale.shape[-1] == 1
+            qs_2d = q_scale.squeeze(-1)
+        elif q_scale.dim() == 2:
+            qs_2d = q_scale
+        else:
+            raise ValueError(f"q_scale must be 2-D or 3-D, got {q_scale.shape}")
+        assert qs_2d.shape == (T, N), f"q_scale shape {qs_2d.shape} != (T={T}, N={N})"
     else:
-        raise ValueError(f"q_scale must be 2-D or 3-D, got {q_scale.shape}")
-    assert qs_2d.shape == (T, N), f"q_scale shape {qs_2d.shape} != (T={T}, N={N})"
+        qs_2d = x  # placeholder; unused when APPLY_Q_SCALE=False
 
     # Fast-path constraints. Production decode runs under CUDA Graph (launch
     # overhead amortized by capture+replay), so the Triton kernel can win at
@@ -240,8 +254,10 @@ def fused_logits_head_gate(
         and weight.dtype in (torch.bfloat16, torch.float16, torch.float32)
         and x.is_contiguous()
         and K <= MAX_K
-        and qs_2d.dtype == torch.float32
-        and qs_2d.is_contiguous()
+        and (
+            not apply_q_scale
+            or (qs_2d.dtype == torch.float32 and qs_2d.is_contiguous())
+        )
     )
 
     if not use_fast_path:
@@ -250,7 +266,11 @@ def fused_logits_head_gate(
                 "fused_logits_head_gate fast path unsupported and no "
                 "fallback_proj provided"
             )
-        return _baseline_logits_head_gate(x, q_scale, fallback_proj, scale_const)
+        if apply_q_scale:
+            return _baseline_logits_head_gate(x, q_scale, fallback_proj, scale_const)
+        x_fp32 = x.float()
+        w = fallback_proj(x_fp32)
+        return w.float() * scale_const
 
     out_2d = torch.empty((T, N), dtype=torch.float32, device=x.device)
 
@@ -271,10 +291,11 @@ def fused_logits_head_gate(
             x.stride(0),
             weight.stride(0),
             weight.stride(1),
-            qs_2d.stride(0),
+            qs_2d.stride(0) if apply_q_scale else 0,
             out_2d.stride(0),
             BLOCK_K=BLOCK_K,
             num_warps=num_warps,
+            APPLY_Q_SCALE=apply_q_scale,
         )
     else:
         # M=32 K=128 nw=4 ns=3 picked empirically across T=1024-8192 on DSV3.2
@@ -297,14 +318,15 @@ def fused_logits_head_gate(
             x.stride(0),
             weight.stride(0),
             weight.stride(1),
-            qs_2d.stride(0),
+            qs_2d.stride(0) if apply_q_scale else 0,
             out_2d.stride(0),
             BLOCK_M=BLOCK_M,
             BLOCK_K=BLOCK_K,
             BLOCK_N=BLOCK_N,
             W_IS_TRANSPOSED=w_is_transposed,
+            APPLY_Q_SCALE=apply_q_scale,
             num_warps=num_warps,
             num_stages=3,
         )
 
-    return out_2d.unsqueeze(-1)
+    return out_2d.unsqueeze(-1) if apply_q_scale else out_2d

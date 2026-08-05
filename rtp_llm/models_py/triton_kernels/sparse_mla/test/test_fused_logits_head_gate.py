@@ -104,6 +104,28 @@ class TestFusedLogitsHeadGate(unittest.TestCase):
                     p99 = sorted_rel[int(rel.numel() * 0.99)].item()
                     self.assertLess(p99, 5e-2, f"T={T} K={K} N={N}: p99 rel={p99}")
 
+    def test_fp4_path_without_q_scale(self):
+        """FP4 indexer: q_scale is passed separately to mqa_logits."""
+        device = "cuda"
+        for T in (1, 32, 1024):
+            with self.subTest(T=T):
+                K, N = 7168, 64
+                x = torch.randn(T, K, dtype=torch.bfloat16, device=device)
+                weight = (torch.randn(N, K, device=device) * 0.02).to(torch.float32)
+                scale_const = K**-0.5 * N**-0.5
+                linear = nn.Linear(K, N, bias=False, device=device)
+                linear.weight.data = weight.float()
+
+                ref = linear(x.float()) * scale_const
+                out = fused_logits_head_gate(
+                    x, None, weight, scale_const, fallback_proj=linear
+                )
+                self.assertEqual(out.shape, (T, N))
+                self.assertTrue(
+                    torch.allclose(out, ref, atol=1e-3, rtol=1e-2),
+                    f"T={T}: max_abs={(out - ref).abs().max().item()}",
+                )
+
     def test_fallback_path(self):
         """Out-of-range K triggers fallback."""
         device = "cuda"

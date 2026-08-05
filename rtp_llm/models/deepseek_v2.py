@@ -27,6 +27,9 @@ from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
     DeepseekV3RotaryEmbedding,
     DeepseekV3YarnRotaryEmbedding,
 )
+from rtp_llm.models_py.modules.hybrid.indexer_quant_dtype import (
+    resolve_indexer_quant_dtype_from_env,
+)
 from rtp_llm.ops import MlaOpsType
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer
 from rtp_llm.utils.model_weight import (
@@ -716,15 +719,9 @@ class DeepSeekV2(BaseModel):
                 config.attn_config.indexer_head_num = config_json["index_n_heads"]
                 config.attn_config.indexer_topk = config_json["index_topk"]
                 # Indexer Q/K quantization dtype — propagated to KV cache stride.
-                # FP4 is Blackwell-only and validated by the Indexer module.
-                _indexer_quant = (
-                    os.environ.get("RTP_LLM_INDEXER_QUANT_DTYPE", "fp8").strip().lower()
+                config.attn_config.indexer_quant_dtype = (
+                    resolve_indexer_quant_dtype_from_env()
                 )
-                if _indexer_quant not in ("fp8", "fp4"):
-                    raise ValueError(
-                        f"RTP_LLM_INDEXER_QUANT_DTYPE={_indexer_quant!r} not supported"
-                    )
-                config.attn_config.indexer_quant_dtype = _indexer_quant
                 config.index_topk_freq = int(config_json.get("index_topk_freq", 1))
                 config.index_skip_topk_offset = config_json.get(
                     "index_skip_topk_offset", None
