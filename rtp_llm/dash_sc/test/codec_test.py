@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
+    _PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV,
     FINISH_REASON_USE_PARAMETER_STATUS,
+    DashErrorSpec,
     DashScParameterError,
     OtherParams,
     SamplingParams,
@@ -1802,19 +1806,62 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
     def test_missing_output_ids_empty_generated(self) -> None:
         out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
-            dash_sc_request_id="r",
-            model_name="m",
-            go=go,
-            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-        )
+        with patch.dict(os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "0"}):
+            resp = build_stream_response_from_generate_outputs(
+                dash_sc_request_id="r",
+                model_name="m",
+                go=go,
+                request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+            )
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
         }
-        self.assertEqual(by_name["generated_ids"], struct.pack("<i", 0))
+        self.assertEqual(by_name["generated_ids"], b"")
         self.assertEqual(list(infer.outputs[0].shape), [1, 0])
+
+    def test_empty_generated_uses_eos_token_id_when_enabled(self) -> None:
+        out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
+        with patch.dict(os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "1"}):
+            resp = build_stream_response_from_generate_outputs(
+                dash_sc_request_id="r",
+                model_name="glm-5",
+                go=GenerateOutputs(generate_outputs=[out]),
+                request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+                eos_token_id=154820,
+            )
+        infer = resp.infer_response
+        generated_idx = next(
+            i
+            for i, output in enumerate(infer.outputs)
+            if output.name == "generated_ids"
+        )
+
+        self.assertEqual(list(infer.outputs[generated_idx].shape), [1, 1])
+        self.assertEqual(
+            _unpack_int32_le(infer.raw_output_contents[generated_idx]), [154820]
+        )
+
+    def test_terminal_empty_generated_is_empty_when_eos_pack_disabled(self) -> None:
+        out = GenerateOutput(output_ids=None, finished=True, aux_info=AuxInfo())
+        with patch.dict(os.environ, {_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV: "0"}):
+            resp = build_stream_response_from_generate_outputs(
+                dash_sc_request_id="r",
+                model_name="glm-5",
+                go=GenerateOutputs(generate_outputs=[out]),
+                request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+                eos_token_id=154820,
+            )
+        infer = resp.infer_response
+        generated_idx = next(
+            i
+            for i, output in enumerate(infer.outputs)
+            if output.name == "generated_ids"
+        )
+
+        self.assertEqual(list(infer.outputs[generated_idx].shape), [1, 0])
+        self.assertEqual(infer.raw_output_contents[generated_idx], b"")
 
 
 class PrependToGeneratedIdsTensorTest(TestCase):

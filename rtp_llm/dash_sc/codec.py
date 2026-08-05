@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -29,6 +30,16 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _DEFAULT_MAX_THINKING_TOKENS = 131072
 _DEFAULT_MAX_NEW_TOKENS = 131072
+_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV = "DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS"
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _pack_eos_for_empty_generated_ids() -> bool:
+    return (
+        os.environ.get(_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV, "").strip().lower()
+        in _TRUE_ENV_VALUES
+    )
+
 
 FINISH_REASON_LENGTH = 1
 FINISH_REASON_STOP_ENGINE_PARAM = 8
@@ -1126,23 +1137,19 @@ def _append_prompt_token_ids_output(
 def _append_generated_ids_output(
     infer: predict_v2_pb2.ModelInferResponse,
     generated_ids: list[int],
+    eos_token_id: int | None = None,
 ) -> None:
-    """``generated_ids``: INT32 little-endian, shape ``[1, len]``.
-
-    When empty, a 4-byte filler (single INT32 ``0``) is appended because
-    ``raw_input_contents`` indices must stay aligned with ``outputs``. The consumer
-    side (access_log ``_scan_response_outputs``) checks declared ``shape`` so the
-    filler byte does not leak into token accumulators.
-    """
-    raw = (
-        struct.pack("<%di" % len(generated_ids), *generated_ids)
-        if generated_ids
-        else struct.pack("<i", 0)
-    )
+    """Append ``generated_ids`` using the configured empty-payload policy."""
+    ids_to_pack = generated_ids
+    if not ids_to_pack and _pack_eos_for_empty_generated_ids():
+        if eos_token_id is None:
+            raise RuntimeError("eos_token_id is required to pack empty generated_ids")
+        ids_to_pack = [int(eos_token_id)]
+    raw = struct.pack("<%di" % len(ids_to_pack), *ids_to_pack) if ids_to_pack else b""
     out = infer.outputs.add()
     out.name = "generated_ids"
     out.datatype = "INT32"
-    out.shape[:] = [1, len(generated_ids)]
+    out.shape[:] = [1, len(ids_to_pack)]
     infer.raw_output_contents.append(raw)
 
 
@@ -1153,10 +1160,10 @@ def prepend_to_generated_ids_tensor(
     """Prepend ``token_ids`` to the already-appended ``generated_ids`` tensor on ``infer``.
 
     Returns ``False`` and leaves ``infer`` untouched when ``token_ids`` is empty, when
-    ``generated_ids`` is absent, when its declared shape is a zero-length / filler
-    payload, or when the frame already contains logprob tensors. Prompt echo tokens
-    have no sampled probability; callers must emit them in a separate no-logprob
-    frame instead of making the existing tensors misaligned.
+    ``generated_ids`` is absent, or when its declared shape is zero-length
+    (``shape[-1] <= 0``). On success, re-packs the raw bytes as
+    ``token_ids + existing_ids`` (INT32 little-endian) and updates ``shape`` to
+    ``[1, len(token_ids) + cur_len]``.
     """
     if not token_ids:
         return False
@@ -2014,7 +2021,7 @@ def build_stream_response_from_generate_outputs(
     if return_input_ids and request_input_ids is not None:
         _append_prompt_token_ids_output(infer, request_input_ids)
 
-    _append_generated_ids_output(infer, generated_ids)
+    _append_generated_ids_output(infer, generated_ids, eos_token_id=eos_token_id)
     _append_finish_reason_output(infer, finished, finish_reason_override)
     _append_finished_output(infer, finished)
     _append_aux_info_metrics_outputs(
@@ -2113,6 +2120,8 @@ def build_finish_reason_done_response(
     infer.id = dash_sc_request_id
     infer.model_name = model_name
     _append_generated_ids_output(infer, [])
+
+    # Business errors intentionally carry no generated_ids/token_ids output.
     _append_finish_reason_output(
         infer, finished=True, finish_reason_override=finish_reason
     )
