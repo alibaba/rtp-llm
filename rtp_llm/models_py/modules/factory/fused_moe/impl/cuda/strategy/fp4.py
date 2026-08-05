@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.config.moe_config import Fp4MoeOp, resolve_fp4_moe_op
+from rtp_llm.config.moe_config import Fp4MoeOp, MoeStrategyName, resolve_fp4_moe_op
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -32,7 +32,8 @@ class CudaFp4B12xNoDPStrategy(MoeStrategy):
             == Fp4MoeOp.B12X.value
         )
         checker.check(
-            config.moe_strategy == "fp4_b12x" or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.FP4_B12X.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
@@ -67,7 +68,8 @@ class CudaFp4NoDPStrategy(MoeStrategy):
             == Fp4MoeOp.TRTLLM.value
         )
         checker.check(
-            config.moe_strategy == "fp4_no_dp" or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.FP4_NO_DP.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
@@ -104,7 +106,8 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
             == Fp4MoeOp.CUTEDSL.value
         )
         checker.check(
-            config.moe_strategy == "fp4_ep_low_latency" or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.FP4_EP_LOW_LATENCY.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
@@ -138,7 +141,8 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
             == Fp4MoeOp.TRTLLM.value
         )
         checker.check(
-            config.moe_strategy == "fp4_ep_normal" or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.FP4_EP_NORMAL.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
