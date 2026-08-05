@@ -11,6 +11,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,13 +25,16 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -60,6 +64,9 @@ class DefaultRouterTest {
 
     @Mock
     private Request request;
+
+    @Mock
+    private RoutingQueueReporter routingQueueReporter;
 
     private DefaultRouter defaultRouter;
 
@@ -91,7 +98,7 @@ class DefaultRouterTest {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.RANDOM, fusionLoadBalancer);
 
         // Create scheduler instance
-        defaultRouter = new DefaultRouter(configService);
+        defaultRouter = new DefaultRouter(configService, routingQueueReporter);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
@@ -142,7 +149,25 @@ class DefaultRouterTest {
         assertNotNull(response, "Response should not be null");
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_AVAILABLE_WORKER");
+        verify(routingQueueReporter).reportRouteAttemptExecutionMetric(anyLong());
         // Note: The method logs an error but doesn't fail when status is null
+    }
+
+    @Test
+    void should_report_route_attempt_time_for_each_invocation() {
+        defaultRouter.route(balanceContext);
+        defaultRouter.route(balanceContext);
+
+        verify(routingQueueReporter, times(2)).reportRouteAttemptExecutionMetric(anyLong());
+    }
+
+    @Test
+    void should_report_route_attempt_time_when_route_throws() {
+        when(balanceContext.getRequest()).thenThrow(new IllegalStateException("invalid context"));
+
+        assertThrows(IllegalStateException.class, () -> defaultRouter.route(balanceContext));
+
+        verify(routingQueueReporter).reportRouteAttemptExecutionMetric(anyLong());
     }
 
     @Test

@@ -12,6 +12,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.Logger;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
@@ -30,8 +32,10 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
+    private final RoutingQueueReporter routingQueueReporter;
 
-    public DefaultRouter(ConfigService configService) {
+    public DefaultRouter(ConfigService configService, RoutingQueueReporter routingQueueReporter) {
+        this.routingQueueReporter = routingQueueReporter;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
@@ -52,34 +56,38 @@ public class DefaultRouter implements Router {
      */
     @Override
     public Response route(BalanceContext balanceContext) {
-        long startTimeInMicros = System.nanoTime() / 1000;
-        // 1. Validate request
-        Response validationResponse = validateRequest(balanceContext);
-        if (validationResponse != null) {
-            return validationResponse;
+        long routeAttemptStartNs = System.nanoTime();
+        try {
+            // 1. Validate request
+            Response validationResponse = validateRequest(balanceContext);
+            if (validationResponse != null) {
+                return validationResponse;
+            }
+
+            // 2. Get routing configuration
+            String requestId = balanceContext.getRequestId();
+            ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
+            List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
+            if (CollectionUtils.isEmpty(roleTypeList)) {
+                return Response.error(NO_AVAILABLE_WORKER);
+            }
+
+            // 3. Execute routing decision
+            RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
+
+            // 4. Build response based on routing result
+            Response response;
+            if (routingResult.success()) {
+                response = buildSuccessResponse(requestId, routingResult.serverStatusList());
+            } else {
+                rollBackRoutingFailure(balanceContext, routingResult);
+                response = buildFailureResponse(requestId, routingResult);
+            }
+
+            return response;
+        } finally {
+            routingQueueReporter.reportRouteAttemptExecutionMetric(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - routeAttemptStartNs));
         }
-
-        // 2. Get routing configuration
-        String requestId = balanceContext.getRequestId();
-        ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-        List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
-        if (CollectionUtils.isEmpty(roleTypeList)) {
-            return Response.error(NO_AVAILABLE_WORKER);
-        }
-
-        // 3. Execute routing decision
-        RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
-
-        // 4. Build response based on routing result
-        Response response;
-        if (routingResult.success()) {
-            response = buildSuccessResponse(requestId, routingResult.serverStatusList());
-        } else {
-            rollBackRoutingFailure(balanceContext, routingResult);
-            response = buildFailureResponse(requestId, routingResult);
-        }
-
-        return response;
     }
 
     /**

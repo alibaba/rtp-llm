@@ -370,6 +370,11 @@ public class MetricConstant {
     public static final String ROUTING_ROUTE_EXECUTION_TIME_MS = "app.routing.route.execution.time.ms";
 
     /**
+     * Duration of one Router.route invocation in milliseconds, excluding queue wait and retry delay.
+     */
+    public static final String ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS = "app.routing.route.attempt.execution.time.ms";
+
+    /**
      * Routing success QPS
      */
     public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";

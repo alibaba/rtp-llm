@@ -18,6 +18,7 @@ import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_REJECTED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_TIMEOUT_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_RETRY_QPS;
+import static org.flexlb.constant.MetricConstant.ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_ROUTE_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_SUCCESS_QPS;
 
@@ -51,6 +52,7 @@ public class RoutingQueueReporter {
         monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_ROUTE_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Routing status monitoring metrics
         monitor.register(ROUTING_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -70,6 +72,14 @@ public class RoutingQueueReporter {
 
     public void reportRouteExecutionMetric(long routeExecutionTimeMs) {
         monitor.report(ROUTING_ROUTE_EXECUTION_TIME_MS, tags, routeExecutionTimeMs);
+    }
+
+    /**
+     * Reports one {@code Router.route(...)} invocation. This excludes queue waiting and the
+     * retry interval between routing attempts.
+     */
+    public void reportRouteAttemptExecutionMetric(long routeAttemptTimeMs) {
+        monitor.report(ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS, tags, routeAttemptTimeMs);
     }
 
     public void reportTimeout() {
