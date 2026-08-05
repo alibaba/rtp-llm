@@ -6,10 +6,10 @@ from typing import Any, List, Optional, Type, Union
 import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
@@ -298,7 +298,6 @@ class BaseModel(object):
         model_type = self.model_config.model_type
         self.tokenizer = TokenizerFactory.create(ckpt_path, tokenizer_path, model_type)
         self._fill_tokenizer_special_tokens()
-        self._fill_grammar_tokenizer_info()
 
     def _fill_tokenizer_special_tokens(self) -> None:
         eos_token_id = self.tokenizer.eos_token_id
@@ -307,21 +306,18 @@ class BaseModel(object):
         if eos_token_id is not None:
             self.model_config.special_tokens.eos_token_id = int(eos_token_id)
 
-    def _fill_grammar_tokenizer_info(self) -> None:
+    def build_grammar_tokenizer_info(self) -> str:
         # Grammar tokenizer metadata is a startup-time compatibility contract, not
         # an optional per-request optimization.  Fail fast below if it cannot be
         # built: accepting ordinary requests with empty metadata would defer an
         # unsupported tokenizer or missing stop-token configuration until the
         # first grammar request reaches the engine.
-        if self.model_config.tokenizer_info_json:
-            return
-
         real_tokenizer = self.tokenizer.get_real_tokenizer()
         if real_tokenizer is None:
-            return
+            return ""
 
         try:
-            self.model_config.tokenizer_info_json = build_grammar_tokenizer_info_json(
+            return build_grammar_tokenizer_info_json(
                 real_tokenizer,
                 model_vocab_size=int(self.model_config.vocab_size or 0),
                 stop_token_ids=self._collect_tokenizer_info_stop_token_ids(),

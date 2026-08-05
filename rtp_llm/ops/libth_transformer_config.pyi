@@ -1038,7 +1038,6 @@ class ModelConfig:
     scoring_func: int
     special_tokens: SpecialTokens
     tokenizer_path: str
-    tokenizer_info_json: str
     type_vocab_size: int
     use_attention_linear_bias: bool
     use_fp32_to_compute_logit: bool

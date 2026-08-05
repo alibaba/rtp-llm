@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
-from rtp_llm.config.think_tag import normalize_think_tag
+from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     build_think_runtime,

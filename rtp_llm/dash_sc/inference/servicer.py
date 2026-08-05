@@ -35,11 +35,11 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.config.response_format_builder import (
     ReasoningFormat,
     ResponseFormatBuilder,
 )
-from rtp_llm.config.think_tag import normalize_think_tag
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -662,14 +662,14 @@ async def iter_real_model_stream_infer(
                 logging.warning(
                     "[DashScGrpc] [%s] add_thinking_params failed: %s", tag, e
                 )
-                generate_config.validate()
                 final_constraint = ResponseFormatBuilder(
                     generate_config,
                     reasoning_format=reasoning_format,
-                ).apply()
+                ).finalize()
+                generate_config.validate()
         else:
+            final_constraint = ResponseFormatBuilder(generate_config).finalize()
             generate_config.validate()
-            final_constraint = ResponseFormatBuilder(generate_config).apply()
         if runtime.eos_tokens and not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
         if extra_stop_word_ids:

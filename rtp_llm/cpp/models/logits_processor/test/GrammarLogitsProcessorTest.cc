@@ -21,15 +21,15 @@ namespace rtp_llm {
 static_assert(std::is_base_of_v<BaseLogitsProcessor, GrammarLogitsProcessor>);
 namespace {
 
-xgrammar::TokenizerInfo makeAsciiTokenizerInfo() {
+xgrammar::TokenizerInfo makeAsciiTokenizerInfo(int vocab_size = 128) {
     std::vector<std::string> vocab;
-    vocab.reserve(128);
-    for (int i = 0; i < 128; ++i) {
+    vocab.reserve(vocab_size);
+    for (int i = 0; i < vocab_size; ++i) {
         vocab.emplace_back(1, static_cast<char>(i));
     }
     return xgrammar::TokenizerInfo(vocab,
                                    xgrammar::VocabType::RAW,
-                                   /*vocab_size=*/128,
+                                   vocab_size,
                                    /*stop_token_ids=*/std::vector<int32_t>{0});
 }
 
@@ -41,8 +41,8 @@ GrammarConfig grammarConfig(bool terminate_without_stop_token = true) {
     return cfg;
 }
 
-std::shared_ptr<XGrammarBackend> makeBackend(bool terminate_without_stop_token = true) {
-    return XGrammarBackend::create(makeAsciiTokenizerInfo().SerializeJSON(),
+std::shared_ptr<XGrammarBackend> makeBackend(bool terminate_without_stop_token = true, int vocab_size = 128) {
+    return XGrammarBackend::create(makeAsciiTokenizerInfo(vocab_size).SerializeJSON(),
                                    grammarConfig(terminate_without_stop_token));
 }
 
@@ -642,6 +642,27 @@ TEST(GrammarLogitsProcessorTest, SpecVerifyRejectsGrammarVocabExceedingModelVoca
     EXPECT_EQ(cap_or.status().code(), ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB);
     EXPECT_TRUE(rowAllows(bm, words, 0, kEos));
     EXPECT_FALSE(rowAllows(bm, words, 0, kA));
+}
+
+TEST(GrammarLogitsProcessorTest, SpecVerifyRejectsEosOutsideModelVocabInSameBitmaskWord) {
+    auto backend = makeBackend(/*terminate_without_stop_token=*/true, /*vocab_size=*/127);
+    ASSERT_TRUE(backend);
+    auto proc = makeProcessorFromKey(backend, {"regex", "ab"}, /*eos_token_id=*/127);
+
+    const size_t         words = SpecLogitsProcessorRequest::bitmaskWordCount(127);
+    std::vector<int32_t> bm(2 * words, 0);
+    std::vector<int32_t> draft{kA};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = 1;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 127;
+
+    auto cap_or = proc->prepareSpeculative(req);
+    ASSERT_FALSE(cap_or.ok());
+    EXPECT_EQ(cap_or.status().code(), ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB);
 }
 
 TEST(GrammarLogitsProcessorTest, ClearBitmaskTokenRangeClearsFullWordsAndEdges) {

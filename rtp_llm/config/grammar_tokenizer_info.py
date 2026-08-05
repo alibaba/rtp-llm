@@ -9,6 +9,7 @@ def _build_encoded_vocab(
 ) -> Tuple[List[VocabToken], int]:
     if not vocab:
         raise ValueError("tokenizer vocab is empty")
+    model_vocab_size = int(model_vocab_size or 0)
     if model_vocab_size < 0:
         raise ValueError(f"negative model_vocab_size {model_vocab_size}")
 
@@ -20,7 +21,12 @@ def _build_encoded_vocab(
         max_id = max(max_id, token_id)
 
     tokenizer_vocab_size = max(len(vocab), max_id + 1)
-    vocab_size = max(int(model_vocab_size or 0), tokenizer_vocab_size)
+    if model_vocab_size > 0 and tokenizer_vocab_size > model_vocab_size:
+        raise ValueError(
+            f"tokenizer vocab size {tokenizer_vocab_size} exceeds model vocab size "
+            f"{model_vocab_size}; resize the model embeddings or use a matching tokenizer"
+        )
+    vocab_size = model_vocab_size or tokenizer_vocab_size
     if vocab_size <= 0:
         raise ValueError(f"vocab_size must be positive, got {vocab_size}")
 

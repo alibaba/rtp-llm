@@ -9,7 +9,6 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
-from rtp_llm.config.response_format_builder import ResponseFormatBuilder
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
@@ -105,9 +104,9 @@ def trans_input(input_py: GenerateInput):
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
-    # Request entrypoints finalize grammar before GenerateInput reaches the RPC boundary.
-    # Serialization must not mutate the shared GenerateConfig.
-    ResponseFormatBuilder.validate_finalized(input_py.generate_config)
+    # GenerateConfig owns validation and response-format finalization before the
+    # request crosses the RPC boundary.
+    input_py.generate_config.validate()
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens

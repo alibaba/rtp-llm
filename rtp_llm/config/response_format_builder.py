@@ -11,8 +11,7 @@ from rtp_llm.config.grammar_constraint import (
     load_json_field,
     normalize_grammar_value,
 )
-from rtp_llm.config.response_format import parse_response_format
-from rtp_llm.config.think_tag import normalize_think_tag
+from rtp_llm.config.response_format import normalize_think_tag, parse_response_format
 
 
 @dataclass(frozen=True)
@@ -104,6 +103,12 @@ class ResponseFormatBuilder:
             self._wrap_final_format_with_reasoning_envelope({"type": "any_text"})
         self.config._reasoning_envelope_applied = True
         self.config._reasoning_final_constraint = constraint
+        return constraint
+
+    def finalize(self) -> Optional[GrammarConstraint]:
+        """Apply response-format projection and verify the engine-ready state."""
+        constraint = self.apply()
+        self.validate_finalized(self.config)
         return constraint
 
     @classmethod

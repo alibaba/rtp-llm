@@ -211,6 +211,19 @@ class ModelRpcClientTest(TestCase):
                     if other_field != field:
                         self.assertFalse(input_pb.generate_config.HasField(other_field))
 
+    def test_trans_input_validate_finalizes_legacy_json_format(self):
+        config = GenerateConfig(json_format=True, response_format={})
+
+        input_pb = trans_input(self._make_generate_input(config))
+
+        self.assertFalse(config.json_format)
+        self.assertIsNone(config.response_format)
+        self.assertEqual(config.json_schema, '{"type":"object"}')
+        self.assertEqual(
+            input_pb.generate_config.json_schema.value,
+            '{"type":"object"}',
+        )
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()

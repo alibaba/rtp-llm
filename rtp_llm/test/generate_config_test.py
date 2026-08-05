@@ -631,8 +631,9 @@ class ResponseFormatProjectionTest(TestCase):
         cfg: GenerateConfig,
         reasoning_format: Optional[ReasoningFormat] = None,
     ):
+        if reasoning_format is not None:
+            ResponseFormatBuilder(cfg, reasoning_format=reasoning_format).finalize()
         cfg.validate()
-        ResponseFormatBuilder(cfg, reasoning_format=reasoning_format).apply()
 
     def _enable_thinking(
         self,
@@ -816,10 +817,10 @@ class ResponseFormatProjectionTest(TestCase):
             max_thinking_tokens=64,
         )
         reasoning_format = self._enable_thinking(cfg)
-        cfg.validate()
         final_constraint = ResponseFormatBuilder(
             cfg, reasoning_format=reasoning_format
-        ).apply()
+        ).finalize()
+        cfg.validate()
 
         cfg.in_think_mode = False
         ResponseFormatBuilder.restore_final_constraint(cfg, final_constraint)

@@ -76,7 +76,7 @@ std::shared_ptr<XGrammarBackend>& LogitsProcessorFactory::grammarBackend() {
 void LogitsProcessorFactory::init(const ModelConfig&   model_config,
                                   const GrammarConfig& grammar_config,
                                   const std::string&   tree_decode_config) {
-    grammarBackend() = XGrammarBackend::create(model_config.tokenizer_info_json, grammar_config);
+    grammarBackend() = XGrammarBackend::create(grammar_config.tokenizer_info_json, grammar_config);
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 }
 

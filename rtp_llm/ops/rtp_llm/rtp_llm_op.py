@@ -27,6 +27,9 @@ class RtpLLMOp:
 
     def start(self):
         self.weight = self.model.weight
+        self.engine_config.grammar_config.tokenizer_info_json = (
+            self.model.build_grammar_tokenizer_info()
+        )
         logging.info("engine_config: %s", self.engine_config.to_string())
         self.ft_op.init(  # type: ignore
             self.model,

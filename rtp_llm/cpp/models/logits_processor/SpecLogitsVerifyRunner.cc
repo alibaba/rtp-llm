@@ -209,9 +209,8 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const Ve
     auto packed_mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows))
                                .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
     auto row_indices_gpu = logits_row_indices_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
-    packed_mask_gpu.copy_(packed_mask_cpu, /*non_blocking=*/true);
-    row_indices_gpu.copy_(row_indices_cpu, /*non_blocking=*/true);
-    pending_host_upload_          = runtimeCreateEvent();
+    packed_mask_gpu.copy_(packed_mask_cpu);
+    row_indices_gpu.copy_(row_indices_cpu);
     result.packed_allow_mask_gpu  = std::move(packed_mask_gpu);
     result.logits_row_indices_gpu = std::move(row_indices_gpu);
 #endif
@@ -222,15 +221,6 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const Ve
     return result;
 }
 
-void SpecLogitsVerifyRunner::waitForPendingHostUploads() {
-#if USING_CUDA
-    if (pending_host_upload_) {
-        pending_host_upload_->synchronize();
-        pending_host_upload_.reset();
-    }
-#endif
-}
-
 SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTask& task) {
     RTP_LLM_PROFILE_SCOPE("spec_logits_verify_runner.run");
 
@@ -238,10 +228,6 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
         return LaunchResult{};
     }
     try {
-        // merged_bitmask_cpu_ and logits_row_indices_cpu_ back non-blocking H2D
-        // copies from the previous launch. Do not mutate them until those reads end.
-        waitForPendingHostUploads();
-
         const size_t B = task.total_streams;
         const int    P = task.propose_step;
         const size_t V = task.vocab_size;

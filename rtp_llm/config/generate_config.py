@@ -16,8 +16,11 @@ from pydantic import (
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.response_format import ResponseFormat, ResponseFormatInput
-from rtp_llm.config.think_tag import normalize_think_tag
+from rtp_llm.config.response_format import (
+    ResponseFormat,
+    ResponseFormatInput,
+    normalize_think_tag,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
@@ -444,18 +447,20 @@ class GenerateConfig(BaseModel):
     def is_same(self, config: "GenerateConfig") -> bool:
         return self.md5_value == config.md5_value
 
-    def _apply_updates(self, new: Dict[str, Any]) -> set[str]:
-        """更新已声明的 Pydantic 字段，并返回被消费的字段名。"""
-        model_fields = type(self).model_fields
-        updated_fields = set()
-        for key, value in new.items():
-            if key in model_fields:
-                setattr(self, key, value)
-                updated_fields.add(key)
-        return updated_fields
+    def update(self, new: Dict[str, Any]):
+        """批量更新字段。
 
-    def _post_update(self, new: Dict[str, Any]) -> None:
-        """补偿赋值时不会自动触发的字段及模型校验。"""
+        降级/重启用语义：
+          - 当条件不满足时，enable_cross_sequence_ban 会被自动降级为 False。
+          - 若后续 update 补齐了条件，且开关是因自动降级而关闭的（而非用户从未开启），
+            则会自动重新启用。这确保 request_extractor 两阶段合并不会导致误降级。
+          - 若用户在同一次 update 中显式传入 enable_cross_sequence_ban，视为用户重新表态，
+            自动重启用启发式不会覆盖其显式意图。
+        """
+        for key, value in new.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+        # setattr 不会触发 field_validator / model_validator，手动补偿：
         # 1) cross_seq_diverge_start_combo 的 clamp/类型兜底
         if "cross_seq_diverge_start_combo" in new:
             self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
@@ -470,24 +475,24 @@ class GenerateConfig(BaseModel):
         # 4) 跨序列去重兼容性
         self._check_cross_seq_ban_compatibility()
 
-    def update(self, new: Dict[str, Any]):
-        """批量更新字段。
-
-        降级/重启用语义：
-          - 当条件不满足时，enable_cross_sequence_ban 会被自动降级为 False。
-          - 若后续 update 补齐了条件，且开关是因自动降级而关闭的（而非用户从未开启），
-            则会自动重新启用。这确保 request_extractor 两阶段合并不会导致误降级。
-          - 若用户在同一次 update 中显式传入 enable_cross_sequence_ban，视为用户重新表态，
-            自动重启用启发式不会覆盖其显式意图。
-        """
-        self._apply_updates(new)
-        self._post_update(new)
-
     def update_and_pop(self, new: Dict[str, Any]):
         """批量更新字段并返回未被消费的 key。校验策略同 update()。"""
-        updated_fields = self._apply_updates(new)
-        self._post_update(new)
-        return {k: v for k, v in new.items() if k not in updated_fields}
+        to_remove: List[str] = []
+        for key, value in new.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+                to_remove.append(key)
+        # setattr 不会触发 field_validator / model_validator，手动补偿：
+        if "cross_seq_diverge_start_combo" in new:
+            self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
+                self.cross_seq_diverge_start_combo
+            )
+        if "num_return_sequences" in new:
+            self._diverge_depth_warned = False
+        if "enable_cross_sequence_ban" in new:
+            self._ban_auto_downgraded = False
+        self._check_cross_seq_ban_compatibility()
+        return {k: v for k, v in new.items() if k not in to_remove}
 
     @staticmethod
     def create_generate_config(
@@ -501,7 +506,9 @@ class GenerateConfig(BaseModel):
                 ExceptionType.ERROR_GENERATE_CONFIG_FORMAT,
                 f"generate_config validate failed: {str(e)}",
             )
-        config.validate()
+        # Thinking grammar needs the reasoning-format context supplied later by
+        # add_thinking_params(). Validate request fields here without finalizing it.
+        config._validate_fields()
         return config
 
     def convert_select_tokens(self, vocab_size, tokenizer):
@@ -546,7 +553,7 @@ class GenerateConfig(BaseModel):
             )
             self.end_think_token_ids = tokenized_result
         self.in_think_mode = in_think_mode
-        self.validate()
+        self._validate_fields()
 
         from rtp_llm.config.response_format_builder import (
             ReasoningFormat,
@@ -557,7 +564,9 @@ class GenerateConfig(BaseModel):
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
             )
-        return ResponseFormatBuilder(self, reasoning_format=reasoning_format).apply()
+        return ResponseFormatBuilder(
+            self, reasoning_format=reasoning_format
+        ).finalize()
 
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []
@@ -578,7 +587,7 @@ class GenerateConfig(BaseModel):
             if item not in self.stop_words_list:
                 self.stop_words_list.append(item)
 
-    def validate(self):
+    def _validate_fields(self) -> None:
         try:
             check_with_info(
                 is_union_positive_integer(self.top_k),
@@ -724,6 +733,16 @@ class GenerateConfig(BaseModel):
             self._normalize_grammar_fields()
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
+
+    def validate(self) -> None:
+        """Validate and finalize this config for engine serialization."""
+        self._validate_fields()
+
+        # Keep the engine-ready contract owned by GenerateConfig. The import is
+        # local to avoid a module cycle: ResponseFormatBuilder consumes this type.
+        from rtp_llm.config.response_format_builder import ResponseFormatBuilder
+
+        ResponseFormatBuilder(self).finalize()
 
     def _has_grammar_constraint(self) -> bool:
         return (

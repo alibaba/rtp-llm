@@ -137,11 +137,18 @@ class GrammarTokenizerInfoTest(unittest.TestCase):
     def test_build_encoded_vocab_preserves_sparse_token_ids(self):
         encoded_vocab, vocab_size = _build_encoded_vocab(
             {"zero": 0, "three": 3},
-            2,
+            0,
         )
 
         self.assertEqual(encoded_vocab, ["zero", "", "", "three"])
         self.assertEqual(vocab_size, 4)
+
+    def test_build_encoded_vocab_rejects_tokenizer_vocab_larger_than_model(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "tokenizer vocab size 5 exceeds model vocab size 4",
+        ):
+            _build_encoded_vocab({"zero": 0, "added": 4}, 4)
 
     def test_build_encoded_vocab_uses_larger_model_vocab_size(self):
         encoded_vocab, vocab_size = _build_encoded_vocab(

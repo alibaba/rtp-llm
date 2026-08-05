@@ -43,11 +43,13 @@ cc_test(
     name = "packed_mask_logits_cpu_fallback_test",
     srcs = ["PackedMaskLogitsCpuFallbackTest.cc"],
     deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/cuda/ops:flashinfer",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     copts = test_copts,
+    exec_properties = {"gpu": "H20"},
 )
 
 cc_test(

@@ -11,6 +11,11 @@ from pydantic import (
 )
 
 
+def normalize_think_tag(value: str) -> str:
+    """Convert the literal newline escapes accepted by THINK_*_TAG."""
+    return value.replace(r"\n", "\n")
+
+
 class ResponseFormatJSONSchema(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
