@@ -41,6 +41,13 @@ public final class BatchItem {
      */
     private volatile int priority = 50;
 
+    /**
+     * Absolute deadline timestamp (ms) for this request.
+     * Copied from {@link BalanceContext#getDeadlineMs()} at construction time.
+     * Used by {@link PriorityDeadlineBatcherAlgorithm} for deadline-aware sorting.
+     */
+    private volatile long deadlineMs;
+
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -83,6 +90,11 @@ public final class BatchItem {
     public int priority() { return priority; }
 
     public void setPriority(int priority) { this.priority = priority; }
+
+    /** Absolute deadline timestamp (ms). */
+    public long deadlineMs() { return deadlineMs; }
+
+    public void setDeadlineMs(long deadlineMs) { this.deadlineMs = deadlineMs; }
 
     // -- derived accessors --
 

@@ -88,6 +88,14 @@ public class BalanceContext {
      */
     private int priority = 50;
 
+    /**
+     * Absolute deadline timestamp (ms) for this request.
+     * Set by PriorityAdmissionScheduler before batcher submission.
+     * Used by PriorityDeadlineBatcherAlgorithm for deadline-aware sorting
+     * and expiry detection. Zero means deadline not set (use SLO fallback).
+     */
+    private long deadlineMs;
+
     private String errorMessage;
 
     //===================== Method ===================//

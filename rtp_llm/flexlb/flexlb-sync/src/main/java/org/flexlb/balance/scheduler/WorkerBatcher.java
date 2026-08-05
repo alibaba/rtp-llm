@@ -52,6 +52,9 @@ public class WorkerBatcher {
         if ("fixed_window".equalsIgnoreCase(algoName)) {
             return new FixedWindowBatcherAlgorithm();
         }
+        if ("priority_deadline".equalsIgnoreCase(algoName)) {
+            return new PriorityDeadlineBatcherAlgorithm();
+        }
         // Fallback: slo_budget for any unrecognized value
         return new SloBudgetBatcherAlgorithm();
     }

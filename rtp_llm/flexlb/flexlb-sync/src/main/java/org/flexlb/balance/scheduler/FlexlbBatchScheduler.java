@@ -155,6 +155,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
                     prefillEp, decodeEp, System.currentTimeMillis());
+            item.setDeadlineMs(ctx.getDeadlineMs());
             InflightEntry entry = new InflightEntry(item);
             InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
             if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
@@ -340,6 +341,24 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         if (entry != null) {
             synchronized (entry) {
                 timeoutEntry(entry, "batch SLO expired before dispatch");
+            }
+        } else if (!head.future().isDone() && !terminalStates.containsKey(head.requestId())) {
+            rollback(head);
+        }
+    }
+
+    @Override
+    public void onDeadlineExceeded(BatchItem head) {
+        InflightEntry entry = entryFor(head);
+        if (entry != null) {
+            synchronized (entry) {
+                rollbackOnce(entry);
+                removeFromPrefillBatch(entry);
+                RequestLifecycleSnapshot terminal = entry.lifecycle.timeout(
+                        "queue deadline exceeded, returned to scheduler");
+                completeError(head.future(), StrategyErrorType.BATCH_SLO_EXPIRED,
+                        "queue deadline exceeded, returned to scheduler");
+                finishEntry(entry, terminal);
             }
         } else if (!head.future().isDone() && !terminalStates.containsKey(head.requestId())) {
             rollback(head);

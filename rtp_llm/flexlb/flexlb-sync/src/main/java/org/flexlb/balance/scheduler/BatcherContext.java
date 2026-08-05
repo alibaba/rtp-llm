@@ -8,8 +8,11 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 /**
  * Controlled access to shared {@link WorkerBatcher} infrastructure.
@@ -27,6 +30,9 @@ public class BatcherContext {
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth;
     private final BatchSchedulerReporter reporter;
+
+    /** Monotonic version, bumped on every queue mutation. */
+    private final AtomicLong version = new AtomicLong(0);
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    BatchDecisionHandler handler,
@@ -91,6 +97,7 @@ public class BatcherContext {
         boolean removed = queue.remove(item);
         if (removed) {
             queueDepth.decrementAndGet();
+            version.incrementAndGet();
         }
         return removed;
     }
@@ -99,6 +106,7 @@ public class BatcherContext {
         int drained = queue.drainTo(dst);
         if (drained > 0) {
             queueDepth.addAndGet(-drained);
+            version.incrementAndGet();
         }
     }
 
@@ -176,6 +184,72 @@ public class BatcherContext {
         handler.onBatchReady(items, meta);
     }
 
+    // ---- versioned CAS API ----
+
+    /** Current monotonic version of the queue. */
+    long version() {
+        return version.get();
+    }
+
+    /**
+     * Immutable snapshot of the queue state with the current version.
+     * Use the returned version as expectedVersion for CAS operations.
+     */
+    QueueSnapshot snapshot() {
+        List<BatchItem> sorted = sortedItems();
+        List<QueueSnapshot.ItemSummary> summaries = sorted.stream()
+                .map(item -> new QueueSnapshot.ItemSummary(
+                        item.requestId(), item.priority(),
+                        item.deadlineMs(), item.seqLen()))
+                .collect(Collectors.toCollection(ArrayList::new));
+        return new QueueSnapshot(version.get(), queueDepth.get(), summaries);
+    }
+
+    /**
+     * Remove items by request ID if the queue version matches expectedVersion.
+     * Uses synchronized on the queue for atomicity.
+     *
+     * @return true if version matched and items were removed; false if version mismatch
+     */
+    synchronized boolean tryRemove(Set<Long> requestIds, long expectedVersion) {
+        if (version.get() != expectedVersion) {
+            return false;
+        }
+        boolean anyRemoved = false;
+        for (BatchItem item : new ArrayList<>(queue)) {
+            if (requestIds.contains(item.requestId())) {
+                if (queue.remove(item)) {
+                    queueDepth.decrementAndGet();
+                    anyRemoved = true;
+                }
+            }
+        }
+        if (anyRemoved) {
+            version.incrementAndGet();
+        }
+        return true;
+    }
+
+    /**
+     * Offer an item if the queue version matches expectedVersion and the queue is not full.
+     * Uses synchronized on the queue for atomicity.
+     *
+     * @return true if version matched and item was offered; false if version mismatch or queue full
+     */
+    synchronized boolean tryOffer(BatchItem item, long expectedVersion) {
+        if (version.get() != expectedVersion) {
+            return false;
+        }
+        int maxSize = cfg.getFlexlbBatchQueueMaxSize();
+        if (maxSize > 0 && queueDepth.get() >= maxSize) {
+            return false;
+        }
+        queue.add(item);
+        queueDepth.incrementAndGet();
+        version.incrementAndGet();
+        return true;
+    }
+
     /**
      * Remove head from queue and notify handler of expiry.
      * Only called by algorithms that support deadline-based expiry.
@@ -184,5 +258,15 @@ public class BatcherContext {
     void dropHead(BatchItem head) {
         remove(head);
         handler.onExpired(head);
+    }
+
+    /**
+     * Remove head from queue and notify handler that the deadline has been
+     * exceeded — the request should be returned to the scheduler for retry/fail
+     * rather than silently dropped.
+     */
+    void returnToScheduler(BatchItem head) {
+        remove(head);
+        handler.onDeadlineExceeded(head);
     }
 }

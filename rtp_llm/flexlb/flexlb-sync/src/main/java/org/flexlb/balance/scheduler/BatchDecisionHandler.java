@@ -32,4 +32,19 @@ public interface BatchDecisionHandler {
      * @param error non-null if the batcher is stopped; null if the queue is full
      */
     void onOfferFailure(BatchItem item, Throwable error);
+
+    /**
+     * Called when the head item's queue deadline has been exceeded.
+     *
+     * <p>Unlike {@link #onExpired}, this callback signals the scheduler that
+     * the request should be returned for retry/fail decision rather than
+     * silently dropped. Used by {@link PriorityDeadlineBatcherAlgorithm}.
+     *
+     * <p>Default implementation delegates to {@link #onExpired} for backward
+     * compatibility with algorithms that do not distinguish deadline expiry
+     * from SLO expiry.
+     */
+    default void onDeadlineExceeded(BatchItem item) {
+        onExpired(item);
+    }
 }
