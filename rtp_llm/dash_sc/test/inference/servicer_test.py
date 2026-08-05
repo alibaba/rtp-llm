@@ -35,6 +35,10 @@ from rtp_llm.dash_sc.codec import (
     LLMFinishReason,
     SamplingParams,
 )
+from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCompilationError,
+    GrammarValidator,
+)
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _dash_error_spec_for_ft_exception,
@@ -1769,12 +1773,15 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         # call emit_access_log strictly before report_frontend_rpc_done.
         servicer = DashScInferenceServicer(backend_visitor=self._terminal_visitor())
         order = MagicMock()
-        with patch(
-            "rtp_llm.dash_sc.inference.servicer.emit_access_log",
-            order.emit_access_log,
-        ), patch(
-            "rtp_llm.dash_sc.inference.servicer.report_frontend_rpc_done",
-            order.report_frontend_rpc_done,
+        with (
+            patch(
+                "rtp_llm.dash_sc.inference.servicer.emit_access_log",
+                order.emit_access_log,
+            ),
+            patch(
+                "rtp_llm.dash_sc.inference.servicer.report_frontend_rpc_done",
+                order.report_frontend_rpc_done,
+            ),
         ):
             await _drain(
                 servicer.ModelStreamInfer(
@@ -1891,6 +1898,140 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "response_format")
+
+    async def test_response_format_is_compiled_before_enqueue(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+        }
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"schema": schema},
+        }
+        validator = MagicMock(spec=GrammarValidator)
+        validator.validate_constraint.return_value = True
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, grammar_validator=validator
+        )
+        req = self._valid_infer_request()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            {"format": {"type": "any_text"}}
+        )
+        req.parameters["response_format"].string_param = json.dumps(response_format)
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        validator.validate_constraint.assert_called_once()
+        call_args = validator.validate_constraint.call_args.args
+        self.assertEqual(call_args[0].name, "json_schema")
+        self.assertEqual(call_args[0].value, schema)
+        self.assertEqual(call_args[1], "srv-1")
+
+    async def test_invalid_response_format_compile_is_rejected_before_enqueue(
+        self,
+    ) -> None:
+        validator = MagicMock(spec=GrammarValidator)
+        validator.validate_constraint.return_value = False
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, grammar_validator=validator
+        )
+        req = self._valid_infer_request()
+        req.parameters["response_format"].string_param = json.dumps(
+            {
+                "type": "json_schema",
+                "json_schema": {"schema": {"type": "not-a-real-json-type"}},
+            }
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "response_format")
+
+    async def test_invalid_structural_tag_compile_is_rejected_before_enqueue(
+        self,
+    ) -> None:
+        validator = MagicMock(spec=GrammarValidator)
+        validator.validate_constraint.return_value = False
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, grammar_validator=validator
+        )
+        req = self._valid_infer_request()
+        structural_tag = {"format": {"type": "any_text"}}
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            structural_tag
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        validator.validate_constraint.assert_called_once()
+        call_args = validator.validate_constraint.call_args.args
+        self.assertEqual(call_args[0].name, "structural_tag")
+        self.assertEqual(
+            call_args[0].value, {"type": "structural_tag", **structural_tag}
+        )
+        self.assertEqual(call_args[1], "srv-1")
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "tool_call_structural_tag")
+
+    async def test_xgrammar_compile_error_is_returned_before_enqueue(self) -> None:
+        error_message = "failed to compile grammar: Cannot find field defs/filter"
+        validator = MagicMock(spec=GrammarValidator)
+        validator.validate_constraint.side_effect = GrammarCompilationError(
+            error_message
+        )
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, grammar_validator=validator
+        )
+        req = self._valid_infer_request()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            {"format": {"type": "any_text"}}
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(
+            self, responses[0], "Cannot find field defs/filter"
+        )
+
+    async def test_xgrammar_resource_exhaustion_returns_400_before_enqueue(
+        self,
+    ) -> None:
+        validator = MagicMock(spec=GrammarValidator)
+        validator.validate_constraint.side_effect = GrammarCompilationError(
+            "std::bad_alloc"
+        )
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, grammar_validator=validator
+        )
+        req = self._valid_infer_request()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            {"format": {"type": "any_text"}}
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "std::bad_alloc")
 
     async def test_parser_type_error_is_not_masked_as_parameter_error(
         self,
@@ -2076,6 +2217,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     async def test_dash_generation_response_format_is_finalized_before_enqueue(
         self,
     ) -> None:
+        validator = MagicMock(spec=GrammarValidator)
+        validator.validate_constraint.return_value = True
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         tok = _dsv4_tokenizer()
         env_cfg = _GenerateEnvCfg()
@@ -2084,6 +2227,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             tokenizer=tok,
             generate_env_config=env_cfg,
             think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            grammar_validator=validator,
         )
         req = self._valid_infer_request()
         req.parameters["enable_thinking"].bool_param = True
@@ -2102,6 +2246,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(config.json_schema)
         self.assertIsNotNone(config.structural_tag)
         structural_tag = config.structural_tag
+        constraint = validator.validate_constraint.call_args.args[0]
+        self.assertEqual(constraint.name, "structural_tag")
+        self.assertEqual(constraint.value, structural_tag)
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["begin"], "<think>\n")
         self.assertEqual(elements[0]["end"], "</think>\n\n")

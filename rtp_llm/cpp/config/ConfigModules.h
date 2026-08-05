@@ -380,7 +380,7 @@ struct GrammarConfig {
     int                  num_workers                  = 8;
     std::string          tokenizer_info_json;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
-    int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
+    int64_t     compiler_cache_bytes = 1024 * 1024 * 1024;
     std::string to_string() const;
 };
 

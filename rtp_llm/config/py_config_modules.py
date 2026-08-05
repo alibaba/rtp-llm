@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+from dataclasses import dataclass
 from typing import Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
@@ -530,6 +531,27 @@ class DeepEPConfig:
         )
 
 
+@dataclass(slots=True)
+class GrammarAdmissionConfig:
+    """Dash-SC admission sandbox policy, separate from engine grammar semantics."""
+
+    queue_timeout_s: float = 30.0
+    compile_timeout_s: float = 30.0
+    # 0 selects an automatic size derived from CPU count and compiler threads.
+    sandbox_pool_size: int = 0
+    # Additional address-space headroom beyond the spawned worker's initialized baseline.
+    sandbox_process_memory_limit_mb: int = 1024
+
+    def to_string(self):
+        return (
+            f"queue_timeout_s: {self.queue_timeout_s}\n"
+            f"compile_timeout_s: {self.compile_timeout_s}\n"
+            f"sandbox_pool_size: {self.sandbox_pool_size}\n"
+            "sandbox_process_memory_limit_mb: "
+            f"{self.sandbox_process_memory_limit_mb}"
+        )
+
+
 class PyEnvConfigs:
     def __init__(self):
         self.server_config: ServerConfig = ServerConfig()
@@ -573,6 +595,7 @@ class PyEnvConfigs:
         self.grpc_config = GrpcConfig()
         self.dash_sc_grpc_config = DashScGrpcConfig()
         self.grammar_config = GrammarConfig()
+        self.grammar_admission_config = GrammarAdmissionConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -628,6 +651,11 @@ class PyEnvConfigs:
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
             "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
-            "[grammar_config]\n" + self.grammar_config.to_string() + "\n\n"
+            + "[grammar_config]\n"
+            + self.grammar_config.to_string()
+            + "\n\n"
+            + "[grammar_admission_config]\n"
+            + self.grammar_admission_config.to_string()
+            + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

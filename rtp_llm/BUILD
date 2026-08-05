@@ -115,6 +115,7 @@ requirement([
     # add qwen agent package
     "pydantic",
     "json5",
+    "jsonschema",
     "dashscope",
     "jieba",
     "openai",
@@ -135,6 +136,7 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
+    "xgrammar",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -635,6 +637,7 @@ whl_reqs = [
     "orjson",
     "aiohttp",
     "json5",
+    "jsonschema==4.26.0",
     "dashscope>=1.11.0",
     "jieba",
     "openai",
