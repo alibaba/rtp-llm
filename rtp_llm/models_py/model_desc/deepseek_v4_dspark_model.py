@@ -31,7 +31,6 @@ from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -55,23 +54,22 @@ from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
+from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
+    DSparkMarkovHead,
+    DSparkProposerMixin,
+)
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
-class DeepSeekV4DSparkModel(DeepSeekV4Model):
-    """Runtime-fixed-width DeepSeek-V4 DSpark proposer.
+class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
+    """DeepSeek-V4 implementation of the shared DSpark proposer.
 
-    Input contract (all token rows are request-major):
-
-    * ``input_ids``: ``[B * gamma]`` query block.  Column zero is the anchor;
-      the remaining columns are forced to the configured noise token here.
-    * ``input_hiddens``: target auxiliary features, flattenable to
-      ``[rows, len(target_layers) * hidden_size]``.
-    * ``dspark_ctx_lengths`` / ``dspark_ctx_starts``: number and source-row
-      start of newly committed feature rows for each request.
-    * ``attention_inputs.prefix_lengths``: committed sequence length *after*
-      those context rows and immediately before the query block.
+    The engine input contract, query-block geometry and Markov sampling tail
+    are inherited from :class:`DSparkProposerMixin`; this class implements the
+    model-specific hooks with DeepSeek-V4 specifics: mHC blocks, FP8 SWA
+    paged-cache injection, FlashMLA non-causal top-k indices and the
+    ``mtp.*`` checkpoint weights.
 
     Output ``draft_tokens`` and ``draft_probs`` are respectively
     ``[B, gamma]`` and ``[B, gamma, vocab]``.
@@ -113,7 +111,6 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 "DeepSeekV4DSparkModel requires a positive dspark_markov_rank"
             )
 
-        self._dspark_noise_token_id = int(noise_token_id)
         self._dspark_target_layer_ids = tuple(int(v) for v in target_layer_ids)
         self._dspark_markov_rank = int(markov_rank)
 
@@ -135,15 +132,18 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         if int(self._v4_args.window_size) <= 0:
             raise ValueError("DeepSeek-V4 DSpark requires a sliding window")
 
-        self._dspark_aux_dim = len(self._dspark_target_layer_ids) * int(
-            self._v4_args.dim
+        self.init_dspark_proposer(
+            width=int(self._gen_num_per_cycle),
+            noise_token_id=int(noise_token_id),
+            aux_feature_dim=len(self._dspark_target_layer_ids)
+            * int(self._v4_args.dim),
+            hidden_dim=int(self._v4_args.dim),
+            vocab_size=int(self._v4_args.vocab_size),
         )
         # Model-level weights are attached by ``_load_extra_weights`` after
         # the inherited V4Transformer has consumed the per-layer dictionaries.
         self.main_norm: Optional[RMSNorm] = None
         self.main_proj = None
-        self.markov_w1: Optional[torch.Tensor] = None
-        self.markov_w2: Optional[torch.Tensor] = None
 
         logging.info(
             "[DeepSeekV4DSparkModel] fixed gamma=%d noise=%d target_layers=%s "
@@ -193,31 +193,24 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         self.main_proj = _v4_fp8_linear(
             gw[W.v4_dspark_main_proj_w], gw[W.v4_dspark_main_proj_s]
         )
-        self.markov_w1 = gw[W.v4_dspark_markov_w1]
-        self.markov_w2 = gw[W.v4_dspark_markov_w2]
+        self.markov_head = DSparkMarkovHead(
+            gw[W.v4_dspark_markov_w1],
+            gw[W.v4_dspark_markov_w2],
+            vocab_size=int(self._v4_args.vocab_size),
+            rank=self._dspark_markov_rank,
+        )
 
-        if tuple(self.markov_w1.shape) != (
-            int(self._v4_args.vocab_size),
-            self._dspark_markov_rank,
-        ):
-            raise ValueError(
-                "unexpected DSpark markov_w1 shape: " f"{tuple(self.markov_w1.shape)}"
-            )
-        if tuple(self.markov_w2.shape) != tuple(self.markov_w1.shape):
-            raise ValueError(
-                "DSpark markov_w2 shape must match markov_w1, got "
-                f"{tuple(self.markov_w2.shape)} vs {tuple(self.markov_w1.shape)}"
-            )
+    # ------------------------------------------------------------------
+    # DSparkProposerMixin hooks
+    # ------------------------------------------------------------------
+
+    def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
+        assert self.main_norm is not None and self.main_proj is not None
+        return self.main_norm(self.main_proj(features))
 
     # ------------------------------------------------------------------
     # Framework/paged-cache metadata helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _optional_tensor(value: Any) -> Optional[torch.Tensor]:
-        if value is None or not isinstance(value, torch.Tensor):
-            return None
-        return value if value.numel() > 0 else None
 
     def _swa_block_table(self, attention_inputs: Any, batch_size: int) -> torch.Tensor:
         by_group = getattr(
@@ -284,115 +277,6 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         invalid = invalid | (block_ids <= 0)
         slots = block_ids * entries_per_block + (safe_pos % entries_per_block)
         return torch.where(invalid, torch.full_like(slots, -1), slots)
-
-    @staticmethod
-    def _map_context_rows(
-        starts: torch.Tensor,
-        lengths: torch.Tensor,
-        prefix_lengths: torch.Tensor,
-        row_count: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Map source feature rows to request ids and absolute positions.
-
-        Rows outside every ``[start, start + length)`` interval are padding
-        from a dense target-verify output and receive ``(-1, -1)``.  Keeping
-        this transform independent from the feature projection also makes its
-        packed/dense layout semantics directly unit-testable on CPU.
-        """
-        device = starts.device
-        if row_count == 0:
-            return (
-                torch.empty(0, dtype=torch.int32, device=device),
-                torch.empty(0, dtype=torch.int32, device=device),
-            )
-        batch_size = int(starts.numel())
-        if batch_size == 0:
-            raise ValueError("cannot map non-empty DSpark context without requests")
-
-        rows = torch.arange(row_count, device=device, dtype=torch.long)
-        req = torch.searchsorted(starts.contiguous(), rows, right=True) - 1
-        safe_req = req.clamp(0, batch_size - 1)
-        valid = (req >= 0) & (rows >= starts[safe_req])
-        valid = valid & (rows < starts[safe_req] + lengths[safe_req])
-
-        local_offset = rows - starts[safe_req]
-        positions = prefix_lengths[safe_req] - lengths[safe_req] + local_offset
-        req = torch.where(valid, req, torch.full_like(req, -1))
-        positions = torch.where(valid, positions, torch.full_like(positions, -1))
-        return req.to(torch.int32), positions.to(torch.int32)
-
-    def _project_target_features(
-        self,
-        inputs: PyModelInputs,
-        prefix_lengths: torch.Tensor,
-        batch_size: int,
-        device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return ``main_x, req_ids, positions`` for received target rows.
-
-        Explicit ``starts`` may describe a dense target-verify buffer with
-        holes after each request's accepted prefix.  ``searchsorted`` maps all
-        source rows to requests without a device-to-host length read; hole rows
-        retain a ``-1`` request/position and are skipped by the cache writer.
-        """
-        assert self.main_norm is not None and self.main_proj is not None
-        hidden = self._optional_tensor(getattr(inputs, "input_hiddens", None))
-        lengths = self._optional_tensor(getattr(inputs, "dspark_ctx_lengths", None))
-        if batch_size == 0:
-            return (
-                torch.empty(
-                    (0, int(self._v4_args.dim)),
-                    dtype=torch.bfloat16,
-                    device=device,
-                ),
-                torch.empty(0, dtype=torch.int32, device=device),
-                torch.empty(0, dtype=torch.int32, device=device),
-            )
-        if hidden is None:
-            raise RuntimeError("DSpark requires target features in input_hiddens")
-        if lengths is None or int(lengths.numel()) < batch_size:
-            raise RuntimeError(
-                "DSpark requires dspark_ctx_lengths with one value per request"
-            )
-
-        lengths = lengths[:batch_size].to(device=device, dtype=torch.long)
-        starts_in = self._optional_tensor(getattr(inputs, "dspark_ctx_starts", None))
-        if starts_in is None:
-            starts = lengths.cumsum(0) - lengths
-        else:
-            if int(starts_in.numel()) < batch_size:
-                raise RuntimeError(
-                    "DSpark dspark_ctx_starts has fewer values than the batch"
-                )
-            starts = starts_in[:batch_size].to(device=device, dtype=torch.long)
-
-        if hidden.numel() % self._dspark_aux_dim != 0:
-            raise RuntimeError(
-                "DSpark target feature tensor cannot be reshaped to the "
-                f"configured width {self._dspark_aux_dim}: "
-                f"shape={tuple(hidden.shape)}"
-            )
-        features = hidden.reshape(-1, self._dspark_aux_dim).to(device=device)
-        row_count = int(features.shape[0])
-        if row_count == 0:
-            return (
-                torch.empty(
-                    (0, int(self._v4_args.dim)),
-                    dtype=torch.bfloat16,
-                    device=device,
-                ),
-                torch.empty(0, dtype=torch.int32, device=device),
-                torch.empty(0, dtype=torch.int32, device=device),
-            )
-
-        main_x = self.main_norm(self.main_proj(features))
-        req, positions = self._map_context_rows(
-            starts,
-            lengths,
-            prefix_lengths,
-            row_count,
-        )
-        return main_x, req, positions
 
     def _build_noncausal_indices(
         self,
@@ -659,129 +543,20 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
     # Head / framework forward
     # ------------------------------------------------------------------
 
-    def _empty_outputs(self, batch_size: int, device: torch.device) -> PyModelOutputs:
-        gamma = self._gen_num_per_cycle
-        dim = int(self._v4_args.dim)
-        vocab = int(self._v4_args.vocab_size)
-        outputs = PyModelOutputs(
-            torch.zeros(
-                (batch_size * gamma, dim),
-                dtype=torch.bfloat16,
-                device=device,
-            )
-        )
-        outputs.draft_tokens = torch.zeros(
-            (batch_size, gamma), dtype=torch.int32, device=device
-        )
-        outputs.draft_probs = torch.zeros(
-            (batch_size, gamma, vocab), dtype=torch.float32, device=device
-        )
-        return outputs
-
-    def _forward_head(
-        self, hidden: torch.Tensor, anchors: torch.Tensor
-    ) -> PyModelOutputs:
-        assert self.markov_w1 is not None and self.markov_w2 is not None
-        batch_size, gamma = int(hidden.shape[0]), int(hidden.shape[1])
-        dim = int(self._v4_args.dim)
-
-        head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
-        # PyModelOutputs.hidden_states convention is post-final-norm and
-        # pre-lm-head.  Reuse it for the base DSpark logits and for the
-        # framework's (unused) regular logits output.
-        normalized = self.v4.norm(head_hidden)
-        base_logits = torch.mm(
-            normalized.to(self.v4.head_weight.dtype), self.v4.head_weight.t()
-        ).float()
-        base_logits = base_logits.view(batch_size, gamma, -1)
-
-        previous = anchors
-        tokens = []
-        probabilities = []
-        for step in range(gamma):
-            markov_embed = F.embedding(previous, self.markov_w1)
-            markov_bias = F.linear(markov_embed, self.markov_w2).float()
-            logits = base_logits[:, step] + markov_bias
-            probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-            next_token = torch.argmax(probs, dim=-1)
-            probabilities.append(probs)
-            tokens.append(next_token.to(torch.int32))
-            previous = next_token
-
-        outputs = PyModelOutputs(normalized)
-        outputs.draft_tokens = torch.stack(tokens, dim=1).contiguous()
-        outputs.draft_probs = torch.stack(probabilities, dim=1).contiguous()
-        return outputs
-
-    @torch.inference_mode()
-    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        if self.v4 is None:
-            raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
-        device = self.v4.embed.weight.device
-        gamma = self._gen_num_per_cycle
-
-        # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
-        # shapes without invoking any paged-cache or FlashMLA kernels.
-        if self.kv_cache is None:
-            input_tokens = int(inputs.input_ids.numel())
-            batch_size = max((input_tokens + gamma - 1) // gamma, 1)
-            logging.warning(
-                "[DeepSeekV4DSparkModel] forward with kv_cache=None; "
-                "returning warmup placeholders for batch=%d",
-                batch_size,
-            )
-            return self._empty_outputs(batch_size, device)
-
-        if not bool(self.fp8_kv_cache):
-            raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
-
+    def forward_query_block(
+        self,
+        query_ids: torch.Tensor,
+        query_positions: torch.Tensor,
+        main_x: torch.Tensor,
+        context_req_ids: torch.Tensor,
+        context_positions: torch.Tensor,
+        prefix_lengths: torch.Tensor,
+        active_requests: torch.Tensor,
+        inputs: PyModelInputs,
+        fmha_impl: Any,
+    ) -> torch.Tensor:
+        batch_size = int(query_ids.shape[0])
         attention_inputs = inputs.attention_inputs
-        input_lengths = self._optional_tensor(
-            getattr(attention_inputs, "input_lengths", None)
-        )
-        batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
-        expected_tokens = batch_size * gamma
-        if int(inputs.input_ids.numel()) != expected_tokens:
-            raise RuntimeError(
-                "DSpark input_ids must contain exactly B*gamma tokens: "
-                f"numel={inputs.input_ids.numel()}, batch={batch_size}, "
-                f"gamma={gamma}"
-            )
-
-        prefix = self._optional_tensor(
-            getattr(attention_inputs, "prefix_lengths", None)
-        )
-        if batch_size > 0 and (prefix is None or int(prefix.numel()) < batch_size):
-            raise RuntimeError(
-                "DSpark requires prefix_lengths with one value per request"
-            )
-        prefix_lengths = (
-            prefix[:batch_size].to(device=device, dtype=torch.int32)
-            if prefix is not None
-            else torch.empty(0, dtype=torch.int32, device=device)
-        )
-
-        raw_ids = inputs.input_ids.to(device=device, dtype=torch.int32).view(
-            batch_size, gamma
-        )
-        anchors = raw_ids[:, 0].clone()
-        query_ids = torch.full_like(raw_ids, self._dspark_noise_token_id)
-        if batch_size > 0:
-            query_ids[:, 0].copy_(anchors)
-        query_positions = prefix_lengths.to(torch.long).view(batch_size, 1)
-        query_positions = query_positions + torch.arange(
-            gamma, device=device, dtype=torch.long
-        ).view(1, gamma)
-
-        main_x, context_req_ids, context_positions = self._project_target_features(
-            inputs, prefix_lengths.to(torch.long), batch_size, device
-        )
-        ctx_lengths = self._optional_tensor(getattr(inputs, "dspark_ctx_lengths", None))
-        active_requests = (
-            ctx_lengths[:batch_size].to(device=device) > 0
-            if ctx_lengths is not None
-            else torch.zeros(batch_size, dtype=torch.bool, device=device)
-        )
         block_table = (
             self._swa_block_table(attention_inputs, batch_size)
             if batch_size > 0
@@ -801,7 +576,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             if fmha_impl is not None and hasattr(fmha_impl, "sched_meta_cache")
             else SimpleNamespace(sched_meta_cache={})
         )
-        hidden = self._forward_layers(
+        return self._forward_layers(
             query_ids,
             query_positions,
             main_x,
@@ -815,11 +590,45 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             write_cache_store_impl,
         )
 
-        # Empty DP ranks must still execute every MoE layer above so EP
-        # collectives remain balanced; only the non-collective head is skipped.
-        if batch_size == 0:
-            return self._empty_outputs(0, device)
-        return self._forward_head(hidden, anchors)
+    def compute_draft_logits(
+        self, hidden: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size, gamma = int(hidden.shape[0]), int(hidden.shape[1])
+        dim = int(self._v4_args.dim)
+
+        head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
+        # PyModelOutputs.hidden_states convention is post-final-norm and
+        # pre-lm-head.  Reuse it for the base DSpark logits and for the
+        # framework's (unused) regular logits output.
+        normalized = self.v4.norm(head_hidden)
+        base_logits = torch.mm(
+            normalized.to(self.v4.head_weight.dtype), self.v4.head_weight.t()
+        ).float()
+        return normalized, base_logits.view(batch_size, gamma, -1)
+
+    @torch.inference_mode()
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if self.v4 is None:
+            raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
+        device = self.v4.embed.weight.device
+        gamma = self._gen_num_per_cycle
+
+        # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
+        # shapes without invoking any paged-cache or FlashMLA kernels.
+        if self.kv_cache is None:
+            input_tokens = int(inputs.input_ids.numel())
+            batch_size = max((input_tokens + gamma - 1) // gamma, 1)
+            logging.warning(
+                "[DeepSeekV4DSparkModel] forward with kv_cache=None; "
+                "returning warmup placeholders for batch=%d",
+                batch_size,
+            )
+            return self.dspark_empty_outputs(batch_size, device)
+
+        if not bool(self.fp8_kv_cache):
+            raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
+
+        return self.run_draft_step(inputs, fmha_impl, device)
 
 
 __all__ = ["DeepSeekV4DSparkModel"]

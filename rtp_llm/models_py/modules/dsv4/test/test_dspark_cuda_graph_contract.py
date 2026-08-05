@@ -6,6 +6,7 @@ import torch
 
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
 
 
 def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
@@ -58,8 +59,15 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
 
     def test_runtime_gamma_controls_output_width(self) -> None:
         model = _dspark_harness(gamma=3)
+        model.init_dspark_proposer(
+            width=3,
+            noise_token_id=1,
+            aux_feature_dim=24,
+            hidden_dim=8,
+            vocab_size=17,
+        )
 
-        outputs = model._empty_outputs(batch_size=2, device=torch.device("cpu"))
+        outputs = model.dspark_empty_outputs(2, torch.device("cpu"))
 
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
         self.assertEqual(tuple(outputs.draft_tokens.shape), (2, 3))
@@ -74,7 +82,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         lengths = torch.tensor([3, 0], dtype=torch.int32)
         prefix = torch.tensor([10, 0], dtype=torch.int32)
 
-        req, positions = DeepSeekV4DSparkModel._map_context_rows(
+        req, positions = map_context_rows(
             starts, lengths, prefix, row_count=12
         )
 
@@ -88,7 +96,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         lengths = torch.tensor([3, 1], dtype=torch.int32)
         committed_ends = torch.tensor([123, 367], dtype=torch.int32)
 
-        req, positions = DeepSeekV4DSparkModel._map_context_rows(
+        req, positions = map_context_rows(
             starts, lengths, committed_ends, row_count=12
         )
 
