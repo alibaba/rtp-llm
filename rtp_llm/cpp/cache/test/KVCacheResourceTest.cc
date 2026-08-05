@@ -217,10 +217,12 @@ TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
     CacheConfig config;
     config.seq_size_per_block        = 1;
     config.kernel_seq_size_per_block = 0;
+    ASSERT_EQ(config.effectiveKernelSeqSizePerBlock(), 1u);
     ASSERT_EQ(config.kernelBlocksPerKvBlock(), 1u);
 
     config.seq_size_per_block        = 8;
     config.kernel_seq_size_per_block = 2;
+    ASSERT_EQ(config.effectiveKernelSeqSizePerBlock(), 2u);
     ASSERT_EQ(config.kernelBlocksPerKvBlock(), 4u);
 }
 

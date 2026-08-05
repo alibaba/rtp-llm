@@ -117,11 +117,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
-    const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
-                                                                   params.model_config_.attn_config.tokens_per_block;
-    const size_t runtime_kernel_tokens_per_block = cache_manager ?
-                                                       cache_manager->cacheConfig().kernel_seq_size_per_block :
-                                                       params.model_config_.attn_config.kernel_tokens_per_block;
+    const size_t runtime_tokens_per_block = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
+                                                            params.model_config_.attn_config.tokens_per_block;
+    const size_t configured_kernel_tokens_per_block =
+        cache_manager ? cache_manager->cacheConfig().effectiveKernelSeqSizePerBlock() :
+                        params.model_config_.attn_config.kernel_tokens_per_block;
+    const size_t runtime_kernel_tokens_per_block =
+        configured_kernel_tokens_per_block > 0 ? configured_kernel_tokens_per_block : runtime_tokens_per_block;
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
