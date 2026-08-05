@@ -258,14 +258,17 @@ class QuantizationConfig(ABC):
                     }
                 )
 
-        result = cls.from_config(
-            {
-                "bits": bits,
-                "method": quant_method,
-                "group_size": group_size,
-                "is_quanted": True,
-            }
-        )
+        normalized_config = {
+            "bits": bits,
+            "method": quant_method,
+            "group_size": group_size,
+            "is_quanted": True,
+        }
+        if quant_config and "weight_scale_format" in quant_config:
+            normalized_config["weight_scale_format"] = quant_config[
+                "weight_scale_format"
+            ]
+        result = cls.from_config(normalized_config)
         if quant_config and "exclude" in quant_config:
             result.exclude_modules = set(quant_config["exclude"])
         return result
@@ -387,6 +390,11 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         # used by the mega_moe path which performs its own internal BF16->FP4
         # conversion in MegaMoeWrapper.
         self.skip_moe = kwargs.get("skip_moe", False)
+        # Offline-converted FP8 checkpoints may store 128x128 block scales as
+        # native UE8M0 values.  Keeping this in the quant config lets the
+        # loader preserve that one-byte dtype and skip the expensive
+        # FP8 -> FP32 -> FP8 requantization performed for legacy checkpoints.
+        self.weight_scale_format = kwargs.get("weight_scale_format", "float32")
 
     @classmethod
     def get_method(cls) -> str:

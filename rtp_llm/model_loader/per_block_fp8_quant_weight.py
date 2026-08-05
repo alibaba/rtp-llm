@@ -355,6 +355,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         super().__init__(sub_weights, quant_config=quant_config, *args, **kwargs)
         self.kernel = sub_weights.get(kernel.name)
         self.scale = sub_weights.get(scale.name) if scale is not None else None
+        self.weight_scale_format = getattr(
+            quant_config, "weight_scale_format", "float32"
+        )
+        if self.scale is not None and self.weight_scale_format == "ue8m0":
+            self.scale.data_type = torch.float8_e8m0fnu
 
     def _get_qkv_quant_weight(self, src_weight_info: AttnAtomicWeight, group_size: int):
         assert src_weight_info.name == W.attn_qkv_w
@@ -781,6 +786,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             is_deep_gemm_e8m0_used,
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
+            _transform_scale_ue8m0,
+        )
 
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
@@ -816,9 +824,21 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 "mega_moe_fp8_se",
             ) and self.kernel.name in (W.moe_w1, W.moe_w2)
             if is_deep_gemm_e8m0_used() and not skip_moe_scale_repack:
-                kernel_weight, scale_weight = requant_weight_ue8m0(
-                    kernel_weight, scale_weight
-                )
+                if self.weight_scale_format == "ue8m0":
+                    if scale_weight.dtype != torch.float8_e8m0fnu:
+                        raise TypeError(
+                            "offline UE8M0 FP8 checkpoint scale was cast to an "
+                            f"unexpected dtype: {scale_weight.dtype}"
+                        )
+                    # The FP8 bits were already requantized offline.  Only
+                    # build DeepGEMM's runtime TMA scale layout here.
+                    scale_weight = _transform_scale_ue8m0(
+                        scale_weight.float(), mn=kernel_weight.shape[-2]
+                    )
+                else:
+                    kernel_weight, scale_weight = requant_weight_ue8m0(
+                        kernel_weight, scale_weight
+                    )
 
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
