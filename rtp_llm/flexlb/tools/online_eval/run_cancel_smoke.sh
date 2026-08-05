@@ -16,6 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEXLB_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 REPO_ROOT="$(cd "${FLEXLB_DIR}/../.." && pwd)"
 
+# Shared Java mock jar / JavaLoadClient helpers.
+source "${SCRIPT_DIR}/lib_load_client.sh"
+
 # -- Configurable parameters ----------------------------------------------
 
 RUN_ROOT="${RUN_ROOT:-${SCRIPT_DIR}/run}"
@@ -25,8 +28,16 @@ RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${RUN_ID}}"
 N_PREFILL="${N_PREFILL:-2}"
 N_DECODE="${N_DECODE:-4}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-55151}"
+MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-$((MOCK_BASE_GRPC_PORT - 1))}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
+# Java mock engine cluster.
+MOCK_MASTER_CONFIG="${MOCK_MASTER_CONFIG:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
+JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-4g}"
+JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
+JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
+JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-8}"
+JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-4}"
 
 FLEXLB_HTTP_PORT="${FLEXLB_HTTP_PORT:-18080}"
 FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-18081}"
@@ -198,19 +209,55 @@ echo "perf_config=${PERF_CONFIG_FILE}"
 
 if [[ "${START_MOCK}" == "1" ]]; then
   echo ""
-  echo "[1/4] Starting mock engine cluster (${N_PREFILL} prefill, ${N_DECODE} decode) ..."
-  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
+  echo "[1/4] Starting Java mock engine cluster (${N_PREFILL} prefill, ${N_DECODE} decode) ..."
+  if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
+    echo "  Java mock engine jar not found, building ..."
+    (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-mock-engine -am package -DskipTests)
+    if [[ ! -f "${JAVA_MOCK_ENGINE_JAR}" ]]; then
+      echo "Failed to build Java mock engine jar: ${JAVA_MOCK_ENGINE_JAR}" >&2
+      exit 1
+    fi
+  fi
+  java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
+    -XX:+ExitOnOutOfMemoryError \
+    -Xlog:gc*,safepoint:"${RUN_DIR}/mock_engine_gc.log":time,uptime,level,tags:filecount=3,filesize=20m \
+    -jar "${JAVA_MOCK_ENGINE_JAR}" \
     --n-prefill "${N_PREFILL}" \
     --n-decode "${N_DECODE}" \
     --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+    --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+    --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
     --performance "${PERF_CONFIG_FILE}" \
+    --master-config "${MOCK_MASTER_CONFIG}" \
     --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
     --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
     --endpoint-file "${ENDPOINT_FILE}" \
     --env-file "${FLEXLB_ENV_FILE}" \
     >"${RUN_DIR}/mock_engine.log" 2>&1 &
   MOCK_PID="$!"
-  wait_for_port "127.0.0.1" "${MOCK_BASE_GRPC_PORT}" 20
+  # The Java cluster binds all gRPC ports first, then the control HTTP port
+  # (base gRPC port - 1), then writes the discovery files.
+  wait_for_port "127.0.0.1" "${MOCK_HTTP_PORT}" 60
+  if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
+    echo "Java mock engine exited during startup" >&2
+    tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
+    exit 1
+  fi
+  for _ in $(seq 1 100); do
+    if [[ -s "${ENDPOINT_FILE}" ]]; then
+      break
+    fi
+    if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
+      echo "Java mock engine exited before writing discovery files" >&2
+      tail -50 "${RUN_DIR}/mock_engine.log" >&2 || true
+      exit 1
+    fi
+    sleep 0.1
+  done
+  if [[ ! -s "${ENDPOINT_FILE}" ]]; then
+    echo "Java mock engine did not write endpoint file: ${ENDPOINT_FILE}" >&2
+    exit 1
+  fi
   echo "  mock cluster started (pid=${MOCK_PID})"
 else
   if [[ ! -f "${ENDPOINT_FILE}" ]]; then

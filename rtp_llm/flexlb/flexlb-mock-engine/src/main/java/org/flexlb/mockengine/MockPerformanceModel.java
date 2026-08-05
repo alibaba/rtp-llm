@@ -10,17 +10,25 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private final int blockSize;
+    private volatile int blockSize;
     private final double sleepScale;
     private final double prefillScale;
     private final Double fixedPrefillMs;
     private final PrefillTimeFormula prefillFormula;
     private final List<DecodePoint> decodePoints;
     private final double decodeScale;
+    private volatile double jitterPct;
+    private volatile double cacheAdmissionRate;
+    private volatile Double overrideFixedPrefillMs;
+    private volatile Double overrideDecodeStepMs;
+    // Python /set_perf compatibility: decode_scale overrides the config-file
+    // decode scale (Python-compat /set_perf -> performance.decode_scale).
+    private volatile Double overrideDecodeScale;
 
     private MockPerformanceModel(int blockSize,
                                  double sleepScale,
@@ -28,7 +36,9 @@ final class MockPerformanceModel {
                                  Double fixedPrefillMs,
                                  PrefillTimeFormula prefillFormula,
                                  List<DecodePoint> decodePoints,
-                                 double decodeScale) {
+                                 double decodeScale,
+                                 double jitterPct,
+                                 double cacheAdmissionRate) {
         this.blockSize = blockSize;
         this.sleepScale = sleepScale;
         this.prefillScale = prefillScale;
@@ -36,6 +46,8 @@ final class MockPerformanceModel {
         this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
         this.decodeScale = decodeScale;
+        this.jitterPct = jitterPct;
+        this.cacheAdmissionRate = cacheAdmissionRate;
     }
 
     static MockPerformanceModel load(String performanceFile, String masterConfigFile) throws IOException {
@@ -62,8 +74,11 @@ final class MockPerformanceModel {
             }
         }
         points.sort(Comparator.comparingInt(DecodePoint::batchSize));
+        double jitterPct = performance.path("jitter_pct").asDouble(0.0);
+        double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale, fixedPrefillMs,
-                formula, List.copyOf(points), decode.path("scale").asDouble(1.0));
+                formula, List.copyOf(points), decode.path("scale").asDouble(1.0),
+                jitterPct, cacheAdmissionRate);
     }
 
     private static String loadPrefillFormula(String masterConfigFile) throws IOException {
@@ -108,7 +123,9 @@ final class MockPerformanceModel {
             return 0;
         }
         double latency;
-        if (prefillFormula != null) {
+        if (overrideFixedPrefillMs != null) {
+            latency = overrideFixedPrefillMs;
+        } else if (prefillFormula != null) {
             double[] batchVars = new double[5];
             batchVars[0] = requests.size();
             List<double[]> itemVars = new ArrayList<>(requests.size());
@@ -130,8 +147,46 @@ final class MockPerformanceModel {
         return scaledMs(latency * prefillScale);
     }
 
+    void setOverrideFixedPrefillMs(Double ms) {
+        this.overrideFixedPrefillMs = ms;
+    }
+
+    void setOverrideDecodeStepMs(Double ms) {
+        this.overrideDecodeStepMs = ms;
+    }
+
+    /** Python /set_perf {@code decode_scale}: replace the decode latency scale. */
+    void setOverrideDecodeScale(Double scale) {
+        this.overrideDecodeScale = scale;
+    }
+
+    /** Python launcher {@code --block-size}: override the block size from the perf config. */
+    void setBlockSize(int blockSize) {
+        this.blockSize = blockSize;
+    }
+
+    void setJitterPct(double pct) {
+        this.jitterPct = pct;
+    }
+
+    void setCacheAdmissionRate(double rate) {
+        this.cacheAdmissionRate = rate;
+    }
+
     long decodeMs(int outputLen, int activeBatchSize) {
-        return scaledMs(outputLen * interpolateStepMs(activeBatchSize) * decodeScale);
+        double stepMs = overrideDecodeStepMs != null ? overrideDecodeStepMs : interpolateStepMs(activeBatchSize);
+        double effectiveScale = overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
+        return scaledMs(outputLen * stepMs * effectiveScale);
+    }
+
+    boolean shouldAdmitCache() {
+        if (cacheAdmissionRate >= 1.0) {
+            return true;
+        }
+        if (cacheAdmissionRate <= 0.0) {
+            return false;
+        }
+        return ThreadLocalRandom.current().nextDouble() < cacheAdmissionRate;
     }
 
     private double interpolateStepMs(int activeBatchSize) {
@@ -155,7 +210,12 @@ final class MockPerformanceModel {
     }
 
     private long scaledMs(double latencyMs) {
-        return Math.max(1L, Math.round(Math.max(0.0, latencyMs) * sleepScale));
+        double scaled = Math.max(0.0, latencyMs) * sleepScale;
+        if (jitterPct > 0) {
+            double factor = 1.0 + ThreadLocalRandom.current().nextDouble(-jitterPct, jitterPct);
+            scaled = scaled * factor;
+        }
+        return Math.max(1L, Math.round(scaled));
     }
 
     int blockSize() {

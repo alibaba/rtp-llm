@@ -63,14 +63,16 @@ It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `intern
 ### 1. Start mock engines
 
 ```bash
-python3 rtp_llm/flexlb/tools/online_eval/mock_engine_cluster.py \
+java -jar rtp_llm/flexlb/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar \
   --n-prefill 2 \
   --n-decode 4 \
   --base-grpc-port 55151 \
-  --performance rtp_llm/flexlb/tools/online_eval/data/performance/dsv4_flash_performance.sample.json
+  --performance rtp_llm/flexlb/tools/online_eval/data/performance/dsv4_flash_performance.sample.json \
+  --endpoint-file rtp_llm/flexlb/tools/online_eval/run/endpoints.json \
+  --env-file rtp_llm/flexlb/tools/online_eval/run/flexlb_env.txt
 ```
 
-The script writes:
+The cluster writes:
 
 - `rtp_llm/flexlb/tools/online_eval/run/endpoints.json`
 - `rtp_llm/flexlb/tools/online_eval/run/flexlb_env.txt`
@@ -79,6 +81,9 @@ Use the `env ... <your-flexlb-api-start-command>` snippet from
 `flexlb_env.txt` when starting `flexlb-api`. The `DOMAIN_ADDRESS:*`
 environment keys contain `:`, so they must be passed through `env`; bash cannot
 `export` them directly.
+
+The cluster also serves an HTTP control API on `--base-grpc-port - 1` (55150 here);
+see `flexlb-mock-engine/README.md` for the endpoint schema.
 
 ### 2. Start flexlb-api
 
@@ -92,14 +97,18 @@ service discovery port as the engine HTTP port and derives gRPC as `http + 1`.
 ### 3. Run load client
 
 ```bash
-python3 rtp_llm/flexlb/tools/online_eval/flexlb_load_client.py \
-  rtp_llm/flexlb/tools/online_eval/data/online_logs/trace_30min.jsonl \
-  --flexlb-http-addr 127.0.0.1:7001 \
-  --schedule-mode batch \
-  --replay-speed 10 \
-  --limit 1000 \
-  --output-dir rtp_llm/flexlb/tools/online_eval/run/load_client
+TRACE_FILE=rtp_llm/flexlb/tools/online_eval/data/online_logs/trace_30min.jsonl \
+TARGET_ADDR=127.0.0.1:7001 \
+REPLAY_SPEED=10 \
+LIMIT=1000 \
+OUTPUT_DIR=rtp_llm/flexlb/tools/online_eval/run/load_client \
+java -cp rtp_llm/flexlb/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar \
+  org.flexlb.mockengine.JavaLoadClient
 ```
+
+The client is configured entirely through environment variables
+(`JavaLoadClient.Config.fromEnv`); the full list lives in
+`flexlb-mock-engine/README.md`.
 
 For master-enqueued batch requests, the client follows the frontend behavior:
 it calls `FetchResponse` on the selected prefill engine. For direct requests, it
@@ -140,6 +149,6 @@ is healthy only if:
 - prefill/decode load distribution is not strongly skewed;
 - mock engine running/available-KV snapshots do not show unbounded backlog.
 
-For capacity search, run the same trace with increasing `--replay-speed` or use
+For capacity search, run the same trace with increasing `REPLAY_SPEED` or use
 different trace slices. The practical capacity point is the highest completed
 QPS before TTFT p99, error rate, or queue backlog bends upward.

@@ -7,6 +7,7 @@ import java.util.Set;
 final class MockLruBlockCache {
     private final int capacity;
     private final LinkedHashMap<Long, Boolean> blocks;
+    private long evictions;
 
     MockLruBlockCache(int capacity) {
         this.capacity = Math.max(0, capacity);
@@ -36,8 +37,14 @@ final class MockLruBlockCache {
         while (blocks.size() > capacity) {
             Long eldest = blocks.keySet().iterator().next();
             blocks.remove(eldest);
+            evictions++;
         }
         return changed;
+    }
+
+    /** Total number of LRU evictions (Python {@code cache.evictions}). */
+    synchronized long evictions() {
+        return evictions;
     }
 
     synchronized Set<Long> snapshotKeys() {

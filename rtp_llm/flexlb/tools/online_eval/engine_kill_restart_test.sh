@@ -10,11 +10,13 @@ set -euo pipefail
 # kills a single mock ENGINE process while the Master stays running.
 #
 # Architecture note:
-#   mock_engine_cluster.py starts all engines within ONE Python process.
+#   The Java mock engine cluster runs all engines within ONE JVM.
 #   To kill a single engine independently, we start the "victim" engine as
-#   a separate process via run_single_engine.py.  The remaining engines
-#   run in the cluster process.  The Master discovers all engines via
-#   static DOMAIN_ADDRESS env vars (no health check, no dynamic removal).
+#   a standalone JVM (JavaMockEngineCluster with --n-prefill/--n-decode for
+#   exactly one engine of the killed role).  The remaining engines run in
+#   the cluster JVM.  The Master discovers all engines via static
+#   DOMAIN_ADDRESS env vars (no health check, no dynamic removal).
+#   (Java mock cluster + JavaLoadClient.)
 #
 # Flow:
 #   1.  Start mock engine cluster (surviving engines)
@@ -44,6 +46,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEXLB_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar}"
 TRACE_FILE="${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl"
+
+# Shared Java mock jar / JavaLoadClient helpers.
+source "${SCRIPT_DIR}/lib_load_client.sh"
 
 # -- Java setup ------------------------------------------------------------
 
@@ -92,13 +97,23 @@ FLEXLB_HTTP_PORT="${FLEXLB_HTTP_PORT:-18080}"
 FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-18081}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
+# Java mock engine cluster.
+MOCK_MASTER_CONFIG="${MOCK_MASTER_CONFIG:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
+JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-2g}"
+JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
+JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
+JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-8}"
+JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-4}"
 
-# Victim engine name and cache blocks
+# Victim engine name and cache blocks.
+# The standalone victim JVM names its engine starting from index 0 (e.g.
+# "prefill-0"), which differs from the Python era naming (prefill-N).  The
+# real name is detected from the victim's /snapshot after startup; set
+# VICTIM_NAME explicitly to override detection.
+VICTIM_NAME="${VICTIM_NAME:-}"
 if [[ "${KILL_TARGET}" == "prefill" ]]; then
-  VICTIM_NAME="prefill-$((N_PREFILL_TOTAL - 1))"
   VICTIM_CACHE_BLOCKS=${PREFILL_CACHE_BLOCKS}
 else
-  VICTIM_NAME="decode-$((N_DECODE_TOTAL - 1))"
   VICTIM_CACHE_BLOCKS=${DECODE_CACHE_BLOCKS}
 fi
 
@@ -255,18 +270,32 @@ start_victim_engine() {
     fi
     check_port_free "${VICTIM_HTTP_PORT}" || return 1
   }
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/run_single_engine.py" \
-    --host 127.0.0.1 \
-    --grpc-port "${VICTIM_GRPC_PORT}" \
-    --role "${KILL_TARGET}" \
-    --name "${VICTIM_NAME}" \
+  # Standalone victim JVM: exactly one engine of the killed role.  The
+  # endpoint file lives inside RUN_DIR so it never overwrites the cluster's
+  # endpoints.json.
+  local victim_n_prefill=0
+  local victim_n_decode=0
+  if [[ "${KILL_TARGET}" == "prefill" ]]; then
+    victim_n_prefill=1
+  else
+    victim_n_decode=1
+  fi
+  java -Xms1g -Xmx1g \
+    -XX:+ExitOnOutOfMemoryError \
+    -jar "${JAVA_MOCK_ENGINE_JAR}" \
+    --n-prefill "${victim_n_prefill}" \
+    --n-decode "${victim_n_decode}" \
+    --base-grpc-port "${VICTIM_GRPC_PORT}" \
     --performance "${PERF_CONFIG_FILE}" \
-    --cache-blocks "${VICTIM_CACHE_BLOCKS}" \
-    --total-kv-tokens 6291456 \
-    --block-size 1024 \
+    --master-config "${MOCK_MASTER_CONFIG}" \
+    --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
+    --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+    --endpoint-file "${RUN_DIR}/victim_endpoints.json" \
     >"${log_file}" 2>&1 &
   VICTIM_PID="$!"
-  wait_for_port "127.0.0.1" "${VICTIM_GRPC_PORT}" 20
+  # The Java cluster binds the gRPC port first, then the control HTTP port
+  # (base gRPC port - 1 = VICTIM_HTTP_PORT).
+  wait_for_port "127.0.0.1" "${VICTIM_HTTP_PORT}" 20
   # Verify the victim process is still alive after port came up
   # (guards against the case where gRPC binds first but HTTP fails, causing crash)
   if ! kill -0 "${VICTIM_PID}" 2>/dev/null; then
@@ -275,8 +304,39 @@ start_victim_engine() {
     cat "${log_file}" >&2
     return 1
   fi
-  echo "  victim engine started (pid=${VICTIM_PID})"
+  # Detect the actual engine name from the victim's /snapshot unless the
+  # caller pinned VICTIM_NAME (Java names standalone engines from index 0).
+  if [[ -z "${VICTIM_NAME}" ]]; then
+    local _detected
+    _detected=$(curl -s "http://127.0.0.1:${VICTIM_HTTP_PORT}/snapshot" | \
+      python3 -c "
+import json, sys
+role = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+    for e in data.get('engines', []):
+        if e.get('role') == role:
+            print(e.get('name', ''))
+            break
+except Exception:
+    pass
+" "${KILL_TARGET}" 2>/dev/null || true)
+    if [[ -z "${_detected}" ]]; then
+      echo "ERROR: could not detect victim engine name from snapshot" >&2
+      return 1
+    fi
+    VICTIM_NAME="${_detected}"
+    echo "  detected victim engine name: ${VICTIM_NAME}"
+  fi
+  echo "  victim engine started (pid=${VICTIM_PID}, name=${VICTIM_NAME})"
 }
+
+# Short inflight TTL so requests stranded on the killed engine are cleaned
+# up before the recovery verification (pre-existing issue: with the long
+# default TTL, ~230 zombie inflight entries saturate decode capacity and
+# recovery gets NO_DECODE_WORKER; the legacy Python baseline also failed
+# assertion 4 for the same reason).
+FLEXLB_INFLIGHT_TTL_MS="${FLEXLB_INFLIGHT_TTL_MS:-20000}"
 
 start_master() {
   local log_file="$1"
@@ -291,6 +351,7 @@ start_master() {
     "HYSTERESIS_BIAS_PERCENT=0" \
     "MAX_QUEUE_SIZE=5000" \
     "FLEXLB_BATCH_ALGORITHM=fixed_window" \
+    "FLEXLB_INFLIGHT_TTL_MS=${FLEXLB_INFLIGHT_TTL_MS}" \
     "FLEXLB_BATCH_FIXED_WAIT_MS=10" \
     "FLEXLB_BATCH_PREDICT_THRESHOLD_MS=550" \
     "FLEXLB_BATCH_SIZE_MAX=32" \
@@ -399,25 +460,49 @@ JSON
 # ===========================================================================
 
 echo ""
-echo "=== Step 1: Start mock engine cluster (${CLUSTER_N_PREFILL}P + ${CLUSTER_N_DECODE}D) ==="
+echo "=== Step 1: Start Java mock engine cluster (${CLUSTER_N_PREFILL}P + ${CLUSTER_N_DECODE}D) ==="
 ENDPOINT_FILE="${RUN_DIR}/endpoints.json"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
+ensure_java_mock_engine_jar || exit 1
+java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
+  -XX:+ExitOnOutOfMemoryError \
+  -Xlog:gc*,safepoint:"${RUN_DIR}/mock_engine_gc.log":time,uptime,level,tags:filecount=3,filesize=20m \
+  -jar "${JAVA_MOCK_ENGINE_JAR}" \
   --n-prefill "${CLUSTER_N_PREFILL}" \
   --n-decode "${CLUSTER_N_DECODE}" \
   --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+  --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+  --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
   --performance "${PERF_CONFIG_FILE}" \
+  --master-config "${MOCK_MASTER_CONFIG}" \
   --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
   --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
   --endpoint-file "${ENDPOINT_FILE}" \
   --env-file "${RUN_DIR}/flexlb_env.txt" \
   >"${RUN_DIR}/mock_engine.log" 2>&1 &
 MOCK_PID="$!"
-wait_for_port "127.0.0.1" "${MOCK_HTTP_PORT}" 20
+# The Java cluster binds all gRPC ports first, then the control HTTP port
+# (base gRPC port - 1), then writes the discovery files.
+wait_for_port "127.0.0.1" "${MOCK_HTTP_PORT}" 60
 # Verify mock cluster process is still alive (guards against crash during startup)
 if ! kill -0 "${MOCK_PID}" 2>/dev/null; then
   echo "ERROR: mock cluster process died during startup" >&2
   echo "--- mock engine log ---" >&2
   cat "${RUN_DIR}/mock_engine.log" >&2
+  exit 1
+fi
+for _ in $(seq 1 100); do
+  if [[ -s "${ENDPOINT_FILE}" ]]; then
+    break
+  fi
+  if ! kill -0 "${MOCK_PID}" 2>/dev/null; then
+    echo "ERROR: mock cluster died before writing discovery files" >&2
+    cat "${RUN_DIR}/mock_engine.log" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+if [[ ! -s "${ENDPOINT_FILE}" ]]; then
+  echo "ERROR: mock cluster did not write endpoint file: ${ENDPOINT_FILE}" >&2
   exit 1
 fi
 echo "  mock cluster started (pid=${MOCK_PID}, http=${MOCK_HTTP_PORT})"
@@ -446,14 +531,22 @@ echo ""
 echo "=== Step 4: Start load client ==="
 LOAD_CLIENT_DIR="${RUN_DIR}/load_client"
 mkdir -p "${LOAD_CLIENT_DIR}"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${TRACE_FILE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed "${LOAD_CLIENT_REPLAY_SPEED}" \
-  --limit "${LOAD_CLIENT_LIMIT}" \
-  --max-concurrency "${LOAD_CLIENT_CONCURRENCY}" \
-  --timeout-ms "${LOAD_CLIENT_TIMEOUT_MS}" \
-  --output-dir "${LOAD_CLIENT_DIR}" \
+# The Java client only writes summary.json/per_request.jsonl on a normal
+# exit (no signal handling), so bound the replay volume (LIMIT) so it
+# finishes by itself around T+40s, still covering steady-state + kill +
+# restart windows.  At 20x replay speed 2500 requests take ~37s.
+_java_limit="${LOAD_CLIENT_LIMIT}"
+if [[ "${_java_limit}" -le 0 ]]; then
+  _java_limit=2500
+fi
+run_java_load_client \
+  "TRACE_FILE=${TRACE_FILE}" \
+  "TARGET_ADDR=127.0.0.1:${FLEXLB_HTTP_PORT}" \
+  "REPLAY_SPEED=${LOAD_CLIENT_REPLAY_SPEED}" \
+  "LIMIT=${_java_limit}" \
+  "MAX_CONCURRENCY=${LOAD_CLIENT_CONCURRENCY}" \
+  "TIMEOUT_MS=${LOAD_CLIENT_TIMEOUT_MS}" \
+  "OUTPUT_DIR=${LOAD_CLIENT_DIR}" \
   >"${RUN_DIR}/load_client.log" 2>&1 &
 LOAD_CLIENT_PID="$!"
 echo "  load client started (pid=${LOAD_CLIENT_PID})"
@@ -603,29 +696,56 @@ sleep 5  # drain wait for in-flight to settle
 
 echo ""
 echo "=== Step 13: Recovery Verification ==="
+# Wait for the scheduler inflight left over from the kill period to drain.
+# Stranded requests are only cleaned up by the master's periodic inflight-TTL
+# sweep (fixedRate=60s); without waiting, the leftover entries keep decode
+# capacity saturated and recovery requests fail with NO_DECODE_WORKER (the
+# legacy Python baseline failed assertion 4 for the same reason).
+echo "  waiting for kill-period inflight to drain ..."
+for _ in $(seq 1 60); do
+  _inflight=$(curl -s "http://127.0.0.1:${FLEXLB_HTTP_PORT}/rtp_llm/inflight_status" 2>/dev/null \
+    | python3 -c "import json,sys
+try:
+    print(json.load(sys.stdin).get('scheduler_inflight', -1))
+except Exception:
+    print(-1)" 2>/dev/null || echo "-1")
+  if [[ "${_inflight}" -ge 0 && "${_inflight}" -le 5 ]]; then
+    echo "  inflight drained to ${_inflight}"
+    break
+  fi
+  sleep 2
+done
+echo "  inflight before recovery verification: ${_inflight}"
 RECOVERY_TRACE="${RUN_DIR}/recovery_trace.jsonl"
+# Tag each record with a run-unique marker: both load clients derive the
+# request_id from the raw record content, so the main client already left
+# matching ids in the master's terminal-state map (duplicate request_id),
+# which made assertion 4 fail 0/100 even on the legacy Python client.
 python3 -c "
-import json
+import json, time
+tag = '${KILL_TS}-' + str(int(time.time() * 1000))
 with open('${TRACE_FILE}') as f:
     for line in f:
         req = json.loads(line)
         if req.get('ol', 0) <= 200:
-            print(line, end='')
+            req['_rt'] = tag
+            print(json.dumps(req))
 " > "${RECOVERY_TRACE}" 2>/dev/null
 RECOVERY_TRACE_LINES=$(wc -l < "${RECOVERY_TRACE}" 2>/dev/null || echo 0)
 echo "  recovery trace: ${RECOVERY_TRACE_LINES} short-output requests (ol <= 200)"
 
 RECOVERY_VERIFY_DIR="${RUN_DIR}/recovery_verify"
 mkdir -p "${RECOVERY_VERIFY_DIR}"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-  "${RECOVERY_TRACE}" \
-  --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --replay-speed 0 \
-  --limit 100 \
-  --max-concurrency 10 \
-  --timeout-ms 10000 \
-  --output-dir "${RECOVERY_VERIFY_DIR}" \
-  >"${RUN_DIR}/recovery_verify.log" 2>&1 || true
+# Subshell so run_java_load_client's exec only replaces the subshell.
+( run_java_load_client \
+    "TRACE_FILE=${RECOVERY_TRACE}" \
+    "TARGET_ADDR=127.0.0.1:${FLEXLB_HTTP_PORT}" \
+    "REPLAY_SPEED=0" \
+    "LIMIT=100" \
+    "MAX_CONCURRENCY=10" \
+    "TIMEOUT_MS=10000" \
+    "OUTPUT_DIR=${RECOVERY_VERIFY_DIR}" \
+  >"${RUN_DIR}/recovery_verify.log" 2>&1 ) || true
 echo "  recovery verification completed"
 cat "${RECOVERY_VERIFY_DIR}/summary.json" 2>/dev/null || echo "  NOTE: recovery summary not available"
 # Master health check after recovery verification
@@ -833,6 +953,7 @@ def check_engines(snapshot):
             {
                 "name": e.get("name", "?"),
                 "role": e.get("role", "?"),
+                "grpc_addr": e.get("grpc_addr", "?"),
                 "running": e.get("running", 0),
                 "accepted": e.get("accepted", 0),
                 "completed": e.get("completed", 0),
@@ -845,6 +966,14 @@ def check_engines(snapshot):
 baseline_res = check_engines(baseline_snapshot)
 kill_res = check_engines(kill_snapshot)
 post_restart_res = check_engines(post_restart_snapshot)
+
+# The standalone victim JVM names its engine from index 0 (e.g. "prefill-0"),
+# which can collide with a surviving cluster engine name.  Identify the victim
+# by its gRPC address instead of by name.
+victim_grpc_addr = f"127.0.0.1:{victim_grpc_port}"
+
+def is_victim(engine):
+    return engine.get("grpc_addr", "") == victim_grpc_addr
 
 # -- Recovery verification data --
 recovery_summary = load_json("recovery_verify/summary.json")
@@ -861,11 +990,11 @@ if engine_mode == "multi":
     # Compare surviving engine accepted counts (same role as killed)
     baseline_accepted = sum(
         e.get("accepted", 0) for e in (baseline_res or {}).get("engines", [])
-        if e.get("role") == kill_target and e.get("name") != victim_name
+        if e.get("role") == kill_target and not is_victim(e)
     )
     kill_accepted = sum(
         e.get("accepted", 0) for e in (kill_res or {}).get("engines", [])
-        if e.get("role") == kill_target and e.get("name") != victim_name
+        if e.get("role") == kill_target and not is_victim(e)
     )
     surviving_engines_ok = kill_accepted > baseline_accepted
     assertion2_detail = (
@@ -1127,7 +1256,7 @@ if total > 0:
     if error_count > 0:
         w(f"- {error_count} requests failed during kill period (expected — engine unavailable)")
 if kill_res:
-    surviving = [e for e in kill_res.get("engines", []) if e.get("name") != victim_name]
+    surviving = [e for e in kill_res.get("engines", []) if not is_victim(e)]
     w(f"- Surviving engines during kill: {len(surviving)} engines")
 if post_restart_res:
     w(f"- Post-restart total running: {post_restart_res['total_running']}")

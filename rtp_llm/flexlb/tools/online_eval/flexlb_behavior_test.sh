@@ -6,8 +6,9 @@ set -euo pipefail
 #
 # FlexLB engine disconnect/reconnect behavior test.
 #
-# Uses mock_engine_cluster's HTTP API (/stop_engine, /start_engine) to test
-# FlexLB's behavior when an engine's gRPC server stops and restarts.
+# Uses the Java mock engine cluster's HTTP API (/stop_engine, /start_engine,
+# /set_perf) to test FlexLB's behavior when an engine's gRPC server stops
+# and restarts. (Java mock cluster + JavaLoadClient.)
 #
 # Scenarios:
 #   1. Stuck inflight TTL cleanup timing
@@ -24,6 +25,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEXLB_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar}"
 TRACE_FILE="${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl"
+
+# This test spawns many short-lived JavaLoadClient JVMs (synchronous
+# send_requests calls); keep the heap small so startup stays fast.
+JAVA_LOAD_CLIENT_JVM_XMS="${JAVA_LOAD_CLIENT_JVM_XMS:-1g}"
+JAVA_LOAD_CLIENT_JVM_XMX="${JAVA_LOAD_CLIENT_JVM_XMX:-1g}"
+
+# Shared Java mock jar / JavaLoadClient helpers.
+source "${SCRIPT_DIR}/lib_load_client.sh"
 
 # -- Java setup ------------------------------------------------------------
 export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21}"
@@ -50,6 +59,13 @@ FLEXLB_HTTP_PORT="${FLEXLB_HTTP_PORT:-18080}"
 FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-18081}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
+# Java mock engine cluster.
+MOCK_MASTER_CONFIG="${MOCK_MASTER_CONFIG:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
+JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-2g}"
+JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
+JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
+JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-8}"
+JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-4}"
 
 # Test-specific config (short TTL, low quota, short gRPC timeout)
 FLEXLB_INFLIGHT_TTL_MS="${FLEXLB_INFLIGHT_TTL_MS:-30000}"
@@ -194,24 +210,48 @@ setup_environment() {
   done
   sleep 1
 
-  # Start mock engine cluster
-  log "  starting mock cluster (${n_prefill}P + ${n_decode}D) ..."
+  # Start Java mock engine cluster
+  log "  starting Java mock cluster (${n_prefill}P + ${n_decode}D) ..."
   local endpoint_file="${scenario_dir}/endpoints.json"
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
+  ensure_java_mock_engine_jar || exit 1
+  java -Xms"${JAVA_MOCK_JVM_XMS}" -Xmx"${JAVA_MOCK_JVM_XMX}" \
+    -XX:+ExitOnOutOfMemoryError \
+    -jar "${JAVA_MOCK_ENGINE_JAR}" \
     --n-prefill "${n_prefill}" \
     --n-decode "${n_decode}" \
     --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
+    --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+    --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
     --performance "${PERF_CONFIG_FILE}" \
+    --master-config "${MOCK_MASTER_CONFIG}" \
     --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
     --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
     --endpoint-file "${endpoint_file}" \
     --env-file "${scenario_dir}/flexlb_env.txt" \
     >"${scenario_dir}/mock_engine.log" 2>&1 &
   MOCK_PID="$!"
-  wait_for_port "127.0.0.1" "${MOCK_HTTP_PORT}" 20
+  # The Java cluster binds all gRPC ports first, then the control HTTP port
+  # (base gRPC port - 1), then writes the discovery files.
+  wait_for_port "127.0.0.1" "${MOCK_HTTP_PORT}" 60
   if ! kill -0 "${MOCK_PID}" 2>/dev/null; then
     echo "ERROR: mock cluster died during startup" >&2
     cat "${scenario_dir}/mock_engine.log" >&2
+    exit 1
+  fi
+  local _w
+  for _w in $(seq 1 100); do
+    if [[ -s "${endpoint_file}" ]]; then
+      break
+    fi
+    if ! kill -0 "${MOCK_PID}" 2>/dev/null; then
+      echo "ERROR: mock cluster died before writing discovery files" >&2
+      cat "${scenario_dir}/mock_engine.log" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+  if [[ ! -s "${endpoint_file}" ]]; then
+    echo "ERROR: mock cluster did not write endpoint file: ${endpoint_file}" >&2
     exit 1
   fi
   log "  mock cluster started (pid=${MOCK_PID}, http=${MOCK_HTTP_PORT})"
@@ -388,15 +428,16 @@ send_requests() {
 
   mkdir -p "${output_dir}"
   log "  sending ${limit} requests (${label}) ..." >&2
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-    "${trace}" \
-    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-    --replay-speed 0 \
-    --limit "${limit}" \
-    --max-concurrency "${concurrency}" \
-    --timeout-ms "${timeout_ms}" \
-    --output-dir "${output_dir}" \
-    >"${output_dir}/load_client.log" 2>&1 || true
+  # Subshell so run_java_load_client's exec only replaces the subshell.
+  ( run_java_load_client \
+      "TRACE_FILE=${trace}" \
+      "TARGET_ADDR=127.0.0.1:${FLEXLB_HTTP_PORT}" \
+      "REPLAY_SPEED=0" \
+      "LIMIT=${limit}" \
+      "MAX_CONCURRENCY=${concurrency}" \
+      "TIMEOUT_MS=${timeout_ms}" \
+      "OUTPUT_DIR=${output_dir}" \
+    >"${output_dir}/load_client.log" 2>&1 ) || true
   # Parse summary
   local total ok errors
   total=$(python3 -c "import json; d=json.load(open('${output_dir}/summary.json')); print(d.get('total_requests',0))" 2>/dev/null || echo 0)
@@ -445,14 +486,14 @@ with open('${TRACE_FILE}') as f:
 
   # Step 3: Send requests asynchronously (background, do not wait for completion)
   log "T=0s: sending ${trace_lines} requests in background ..."
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-    "${long_trace}" \
-    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-    --replay-speed 0 \
-    --max-concurrency 20 \
-    --timeout-ms 30000 \
-    --output-dir "${sd}/load" \
-    >"${sd}/load_client.log" 2>&1 &
+  ( run_java_load_client \
+      "TRACE_FILE=${long_trace}" \
+      "TARGET_ADDR=127.0.0.1:${FLEXLB_HTTP_PORT}" \
+      "REPLAY_SPEED=0" \
+      "MAX_CONCURRENCY=20" \
+      "TIMEOUT_MS=30000" \
+      "OUTPUT_DIR=${sd}/load" \
+    >"${sd}/load_client.log" 2>&1 ) &
   local load_pid=$!
 
   # Step 4: Wait for requests to be enqueued (accepted > 0 on prefill-0)
@@ -823,14 +864,14 @@ with open('${TRACE_FILE}') as f:
 
   # Step 3: Send requests asynchronously (background)
   log "T=0s: sending ${trace_lines} requests in background ..."
-  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
-    "${long_trace}" \
-    --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-    --replay-speed 0 \
-    --max-concurrency 20 \
-    --timeout-ms 30000 \
-    --output-dir "${sd}/load" \
-    >"${sd}/load_client.log" 2>&1 &
+  ( run_java_load_client \
+      "TRACE_FILE=${long_trace}" \
+      "TARGET_ADDR=127.0.0.1:${FLEXLB_HTTP_PORT}" \
+      "REPLAY_SPEED=0" \
+      "MAX_CONCURRENCY=20" \
+      "TIMEOUT_MS=30000" \
+      "OUTPUT_DIR=${sd}/load" \
+    >"${sd}/load_client.log" 2>&1 ) &
   local load_pid=$!
 
   # Step 4: Wait for requests to be enqueued on prefill-0
