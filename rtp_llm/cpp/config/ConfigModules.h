@@ -269,7 +269,11 @@ struct HWKernelConfig {
     // strided_slice_copy_, _apply_output_bmm, etc.). Set ``false`` to
     // bypass to the unfused baseline path everywhere — useful for
     // debugging/verifying precision against the pre-fuse implementation.
-    bool        enable_fuse_kernels = true;
+    bool enable_fuse_kernels = true;
+    // Tri-state override for the speculative-prefill CUDA graph: "auto" keeps
+    // the MegaMoE policy in MtpExecutor, "on" forces the graph, "off" forces
+    // eager. The DISABLE_/FORCE_ env vars still win over it.
+    std::string sp_prefill_cuda_graph_mode = "auto";
     std::string to_string() const;
 };
 

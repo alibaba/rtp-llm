@@ -190,6 +190,22 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         ),
     )
 
+    hw_kernel_group.add_argument(
+        "--sp_prefill_cuda_graph_mode",
+        env_name="SP_PREFILL_CUDA_GRAPH_MODE",
+        bind_to=(hw_kernel_config, "sp_prefill_cuda_graph_mode"),
+        type=str,
+        default="auto",
+        choices=["auto", "on", "off"],
+        help=(
+            "投机采样 draft prefill 的 CUDA Graph 开关。"
+            "`auto`(默认) 沿用 MegaMoE 策略（MegaMoE + EP 时自动关闭），"
+            "`on` 强制开启，`off` 强制走 eager。"
+            "DISABLE_SP_PREFILL_CUDA_GRAPH / RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH "
+            "环境变量优先级高于此项。"
+        ),
+    )
+
 
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True

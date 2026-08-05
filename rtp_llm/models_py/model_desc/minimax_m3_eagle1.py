@@ -80,6 +80,11 @@ class MiniMaxM3Eagle1DecoderLayer(nn.Module):
 
 
 class MiniMaxM3Eagle1Model(GptModelBase):
+    # Draft prefill CUDA graph keeps max_bs*num_tokens_per_bs rows for fc/GEMM/MoE
+    # while attention consumes per-request qlen via cu_seqlens. Padded inactive
+    # rows reuse the same captured graph instead of requiring an exact token bucket.
+    cuda_graph_prefill_requires_full_token_capacity = True
+
     def __init__(
         self,
         model_config: ModelConfig,

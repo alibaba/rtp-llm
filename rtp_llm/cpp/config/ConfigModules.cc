@@ -210,7 +210,8 @@ std::string HWKernelConfig::to_string() const {
         << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
         << "deterministic_gemm: " << deterministic_gemm << "\n"
         << "deterministic_attn: " << deterministic_attn << "\n"
-        << "enable_fuse_kernels: " << enable_fuse_kernels;
+        << "enable_fuse_kernels: " << enable_fuse_kernels << "\n"
+        << "sp_prefill_cuda_graph_mode: " << sp_prefill_cuda_graph_mode;
     return oss.str();
 }
 

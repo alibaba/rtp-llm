@@ -700,6 +700,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("deterministic_gemm", &HWKernelConfig::deterministic_gemm)
         .def_readwrite("deterministic_attn", &HWKernelConfig::deterministic_attn)
         .def_readwrite("enable_fuse_kernels", &HWKernelConfig::enable_fuse_kernels)
+        .def_readwrite("sp_prefill_cuda_graph_mode", &HWKernelConfig::sp_prefill_cuda_graph_mode)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
@@ -720,10 +721,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.rocm_disable_custom_ag,
                                       self.deterministic_gemm,
                                       self.deterministic_attn,
-                                      self.enable_fuse_kernels);
+                                      self.enable_fuse_kernels,
+                                      self.sp_prefill_cuda_graph_mode);
             },
             [](py::tuple t) {
-                if (t.size() != 15 && t.size() != 17 && t.size() != 18)
+                if (t.size() != 15 && t.size() != 17 && t.size() != 18 && t.size() != 19)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -759,8 +761,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.rocm_disable_custom_ag       = t[14].cast<bool>();
                         c.deterministic_gemm           = t[15].cast<bool>();
                         c.deterministic_attn           = t[16].cast<bool>();
-                        if (t.size() == 18) {
+                        if (t.size() >= 18) {
                             c.enable_fuse_kernels = t[17].cast<bool>();
+                        }
+                        if (t.size() >= 19) {
+                            c.sp_prefill_cuda_graph_mode = t[18].cast<std::string>();
                         }
                     }
                 } catch (const std::exception& e) {

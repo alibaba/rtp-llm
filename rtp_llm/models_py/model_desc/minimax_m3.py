@@ -234,12 +234,32 @@ def _requested_target_verify_backend() -> str:
     requested_backend = (
         os.environ.get("RTP_LLM_M3_TARGET_VERIFY_BACKEND", "flashinfer").strip().lower()
     )
-    if requested_backend not in ("auto", "fa4", "flashinfer"):
+    if requested_backend not in ("auto", "fa4", "flashinfer", "trtllm"):
         raise ValueError(
             "RTP_LLM_M3_TARGET_VERIFY_BACKEND must be one of "
-            f"auto, fa4, flashinfer; got {requested_backend!r}"
+            f"auto, fa4, flashinfer, trtllm; got {requested_backend!r}"
         )
     return requested_backend
+
+
+@functools.lru_cache(maxsize=1)
+def _trtllm_target_verify_impl_class():
+    """trtllm-gen spec-decode impl, or None when it cannot be imported.
+
+    It consumes q_len > 1 natively, so unlike the FlashInfer decode-wrapper path
+    it needs neither the per-request row expansion nor a host-side plan() on
+    every CUDA graph replay -- its replay prepare is a device-side Triton fill.
+    """
+    try:
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
+            FlashInferTRTLLMSpecDecodeImpl,
+        )
+    except (ImportError, OSError) as error:
+        logging.warning(
+            "MiniMax-M3 trtllm target verify backend unavailable: %s", error
+        )
+        return None
+    return FlashInferTRTLLMSpecDecodeImpl
 
 
 def _target_verify_query_dtype(
@@ -644,11 +664,30 @@ class _MiniMaxM3ModelMixin:
         ):
             return super().prepare_fmha_impl(inputs, is_cuda_graph)
 
-        target_verify_impl = _target_verify_impl_class()
         attn_inputs.is_cuda_graph = is_cuda_graph
         attn_configs = self.config.getAttentionConfigs(
             self.parallelism_config.get_attn_tp_size()
         )
+
+        # Construct the trtllm-gen impl explicitly instead of falling through to
+        # the attention factory: there its selection would hinge on the order of
+        # PREFILL_MHA_IMPS and on the TRT impls happening to be disabled.
+        backend = _requested_target_verify_backend()
+        if backend in ("trtllm", "auto"):
+            trtllm_impl = _trtllm_target_verify_impl_class()
+            if trtllm_impl is not None and trtllm_impl.support(
+                attn_configs, attn_inputs
+            ):
+                return trtllm_impl(attn_configs, attn_inputs, self.parallelism_config)
+            if backend == "trtllm":
+                raise RuntimeError(
+                    "RTP_LLM_M3_TARGET_VERIFY_BACKEND=trtllm was requested but "
+                    "FlashInferTRTLLMSpecDecodeImpl does not support this "
+                    "configuration; it needs a non-MLA attention layer, SM100 or "
+                    "newer, and an FP8 KV cache"
+                )
+
+        target_verify_impl = _target_verify_impl_class()
         return target_verify_impl(attn_configs, attn_inputs, self.parallelism_config)
 
 

@@ -958,10 +958,16 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             draft_model_.reset(new PyWrappedModel(
                 model_params, params.py_sp_model, false, false, draft_cache_layer_layout.layer_to_groups));
             // Create a separate draft prefill model only when the draft itself keeps CUDA graph enabled.
-            const bool enable_cuda_graph           = model_params.hw_kernel_config.enable_cuda_graph;
-            const bool disable_sp_prefill_by_env   = kDisableSpPrefillCudaGraphByEnv;
-            const bool force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv;
-            const bool draft_has_moe               = model_params.description.ffn_conf.moe_configs.has_value();
+            const bool enable_cuda_graph         = model_params.hw_kernel_config.enable_cuda_graph;
+            const bool disable_sp_prefill_by_env = kDisableSpPrefillCudaGraphByEnv;
+            const bool draft_has_moe             = model_params.description.ffn_conf.moe_configs.has_value();
+            // sp_prefill_cuda_graph_mode: "auto" keeps the MegaMoE policy below,
+            // "on" forces the graph, "off" forces eager. The two env vars still
+            // win over it so existing diagnostic flows keep working.
+            const std::string& sp_prefill_mode = model_params.hw_kernel_config.sp_prefill_cuda_graph_mode;
+            const bool         mode_on         = sp_prefill_mode == "on";
+            const bool         mode_off        = sp_prefill_mode == "off";
+            const bool force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv || mode_on;
             // Keep speculative prefill replay disabled for a distributed MegaMoE
             // engine unless it is explicitly forced for diagnostics. Even when
             // the draft itself is dense, replay has shown rank-local latency
@@ -973,16 +979,22 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                 params.parallelism_config.ep_size > 1 || mtp_params->parallelism_config.ep_size > 1;
             const bool disable_sp_prefill_for_mega_moe =
                 uses_mega_moe && uses_ep_collective && !force_sp_prefill_cuda_graph;
-            const bool disable_sp_prefill_cuda_graph = disable_sp_prefill_by_env || disable_sp_prefill_for_mega_moe;
+            const bool disable_sp_prefill_by_mode    = mode_off && !kForceSpPrefillCudaGraphByEnv;
+            const bool disable_sp_prefill_cuda_graph =
+                disable_sp_prefill_by_env || disable_sp_prefill_by_mode || disable_sp_prefill_for_mega_moe;
             RTP_LLM_LOG_INFO("[speculative decoding] enable_cuda_graph=%d disable_sp_prefill_cuda_graph=%d "
+                             "sp_prefill_cuda_graph_mode=%s disable_by_mode=%d "
                              "disable_by_env=%d disable_for_mega_moe=%d force_sp_prefill_cuda_graph=%d "
                              "draft_has_moe=%d target_uses_mega_moe=%d draft_uses_mega_moe=%d "
                              "uses_ep_collective=%d "
                              "(set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_; "
+                             "set --sp_prefill_cuda_graph_mode on|off to override the MegaMoE policy; "
                              "set DISABLE_SP_PREFILL_CUDA_GRAPH=1 to skip the draft prefill CUDA graph capture only; "
                              "set RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH=1 for diagnostic replay on MegaMoE)",
                              static_cast<int>(enable_cuda_graph),
                              static_cast<int>(disable_sp_prefill_cuda_graph),
+                             sp_prefill_mode.c_str(),
+                             static_cast<int>(disable_sp_prefill_by_mode),
                              static_cast<int>(disable_sp_prefill_by_env),
                              static_cast<int>(disable_sp_prefill_for_mega_moe),
                              static_cast<int>(force_sp_prefill_cuda_graph),
