@@ -3,6 +3,11 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.autotpm.DecodeAdmissionTracker;
+import org.flexlb.balance.autotpm.DecodeEvictionCommitter;
+import org.flexlb.balance.autotpm.DecodeEvictionPlan;
+import org.flexlb.balance.autotpm.DecodeEvictionPlanner;
+import org.flexlb.balance.autotpm.DecodeReservation;
 import org.flexlb.balance.autotpm.EvictionPlanner;
 import org.flexlb.balance.autotpm.PlanCommitter;
 import org.flexlb.balance.autotpm.PrefillEvictionPlan;
@@ -17,6 +22,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.CancelReasonPB;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
@@ -69,6 +75,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private final EvictionPlanner evictionPlanner = new EvictionPlanner();
     private final PlanCommitter planCommitter = new PlanCommitter();
 
+    /** Phase 4: Decode-side admission tracker and eviction components. */
+    private final DecodeAdmissionTracker decodeAdmissionTracker = new DecodeAdmissionTracker();
+    private final DecodeEvictionPlanner decodeEvictionPlanner = new DecodeEvictionPlanner();
+    private final DecodeEvictionCommitter decodeEvictionCommitter = new DecodeEvictionCommitter();
+
     @Autowired
     public FlexlbBatchScheduler(ConfigService configService,
                                 Router router,
@@ -118,6 +129,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             WorkerBatcher batcher = prepared.prefillEp.getBatcher();
             ctx.setRouteSubmittedNanos(System.nanoTime());
             batcher.offer(prepared.item);
+            registerDecodeReservation(prepared.item);
             reporter.reportRouteSubmitTimeMs(
                     RoleType.PREFILL.name(),
                     prepared.prefillEp.getIp(),
@@ -172,6 +184,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 // Fast path: queue not full → direct CAS offer
                 if (maxSize <= 0 || snapshot.queueSize() < maxSize) {
                     if (batcherCtx.tryOffer(item, snapshot.version())) {
+                        tryDecodeAdmission(item);
                         return future; // queued; future completes on dispatch
                     }
                     continue; // version changed, retry
@@ -192,6 +205,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     for (BatchItem victim : result.victims()) {
                         evictVictim(victim);
                     }
+                    tryDecodeAdmission(item);
                     return future; // incoming queued; future completes on dispatch
                 }
                 Logger.debug("Eviction attempt {} failed ({}) request_id={}",
@@ -211,6 +225,181 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     "Submit failed: " + t.getMessage());
         }
         return future;
+    }
+
+    // ==================== Phase 4: Decode admission ====================
+
+    /**
+     * Register a decode reservation in the {@link DecodeAdmissionTracker}.
+     * Called after the request is admitted to the prefill queue (both
+     * {@code submit} and {@code submitWithEviction} paths).
+     *
+     * <p>Does NOT check decode capacity — that is done by {@link #tryDecodeAdmission}.
+     * Registration is best-effort: if no decode endpoint was selected (e.g.
+     * PD-fusion mode without separate decode), this is a no-op.
+     */
+    private void registerDecodeReservation(BatchItem item) {
+        DecodeEndpoint decodeEp = item.decodeEp();
+        if (decodeEp == null || item.decode() == null) {
+            return;
+        }
+        String epKey = decodeEp.ipPort();
+        DecodeReservation reservation = new DecodeReservation(
+                item.requestId(),
+                item.priority(),
+                item.deadlineMs(),
+                item.seqLen(),
+                epKey);
+        decodeAdmissionTracker.reserve(epKey, reservation);
+    }
+
+    /**
+     * Check decode capacity and run decode eviction if needed.
+     * Called after prefill admission succeeds in {@link #submitWithEviction}.
+     *
+     * <p>If the decode endpoint's slots or KV cache are insufficient for the
+     * incoming request, lower-priority victims on the same endpoint are evicted.
+     * The incoming reservation is registered after eviction succeeds.
+     *
+     * <p>MVP: best-effort. If decode eviction fails (no eligible victims),
+     * the request proceeds anyway — the engine will queue or reject it.
+     */
+    private void tryDecodeAdmission(BatchItem item) {
+        DecodeEndpoint decodeEp = item.decodeEp();
+        if (decodeEp == null || item.decode() == null) {
+            return;
+        }
+        String epKey = decodeEp.ipPort();
+        FlexlbConfig cfg = configService.loadBalanceConfig();
+        int maxVictims = cfg.getFlexlbPriorityEvictMaxVictims();
+
+        // Check slot capacity (decodeConcurrencyLimit)
+        long concurrencyLimit = cfg.getDecodeConcurrencyLimit();
+        int availableSlots = decodeAdmissionTracker.availableSlots(
+                epKey, (int) Math.max(0, concurrencyLimit));
+        boolean slotShortage = concurrencyLimit > 0 && availableSlots < 1;
+
+        // Check KV capacity
+        long totalKv = decodeEp.realKvTotal();
+        long availableKv = decodeAdmissionTracker.availableKv(epKey, totalKv);
+        long neededKv = item.seqLen();
+        boolean kvShortage = totalKv > 0 && availableKv < neededKv;
+
+        if (slotShortage || kvShortage) {
+            Logger.info("Decode admission eviction: ep={} reqId={} pri={} "
+                            + "slotShortage={} (avail={}, limit={}) kvShortage={} "
+                            + "(availKv={}, totalKv={}, neededKv={})",
+                    epKey, item.requestId(), item.priority(),
+                    slotShortage, availableSlots, concurrencyLimit,
+                    kvShortage, availableKv, totalKv, neededKv);
+
+            DecodeEvictionPlan plan;
+            if (slotShortage && kvShortage) {
+                plan = decodeEvictionPlanner.planCombinedEviction(
+                        decodeAdmissionTracker, epKey, item.priority(),
+                        1, neededKv, maxVictims);
+            } else if (slotShortage) {
+                plan = decodeEvictionPlanner.planSlotEviction(
+                        decodeAdmissionTracker, epKey, item.priority(),
+                        1, maxVictims);
+            } else {
+                plan = decodeEvictionPlanner.planKvEviction(
+                        decodeAdmissionTracker, epKey, item.priority(),
+                        neededKv, maxVictims);
+            }
+
+            if (!plan.isEmpty()) {
+                DecodeEvictionCommitter.CommitResult result =
+                        decodeEvictionCommitter.execute(plan, decodeAdmissionTracker);
+                if (result.isSuccess()) {
+                    for (DecodeReservation victim : result.victims()) {
+                        evictDecodeVictim(victim, item);
+                    }
+                    Logger.info("Decode eviction committed: {} victims from ep={}",
+                            result.victims().size(), epKey);
+                } else {
+                    Logger.warn("Decode eviction failed ({}): ep={} reqId={}",
+                            result.failureReason(), epKey, item.requestId());
+                }
+            } else {
+                Logger.warn("Decode eviction: no eligible victims ep={} reqId={} pri={}",
+                        epKey, item.requestId(), item.priority());
+            }
+        }
+
+        // Register the incoming reservation
+        registerDecodeReservation(item);
+    }
+
+    /**
+     * Evict a decode-side victim: release its DecodeEndpoint reservation
+     * and complete its future with PRIORITY_PREEMPTED.
+     */
+    private void evictDecodeVictim(DecodeReservation victim, BatchItem incoming) {
+        DecodeEndpoint decodeEp = incoming.decodeEp();
+        if (decodeEp != null) {
+            decodeEp.release(victim.requestId());
+        }
+        InflightEntry entry = inflight.get(victim.requestId());
+        if (entry != null) {
+            synchronized (entry) {
+                if (entry.lifecycle.isTerminal()) {
+                    return;
+                }
+                rollbackOnce(entry);
+                RequestLifecycleSnapshot terminal = entry.lifecycle.fail(
+                        "decode priority preempted by higher-priority request "
+                                + incoming.requestId());
+                completeError(entry.item.future(), StrategyErrorType.PRIORITY_PREEMPTED,
+                        "decode priority preempted by higher-priority request");
+                finishEntry(entry, terminal);
+            }
+        }
+        reporter.reportPriorityCancel("decode_eviction");
+        Logger.info("Decode eviction victim request_id={} priority={} ep={}",
+                victim.requestId(), victim.priority(), victim.decodeEndpointKey());
+    }
+
+    /**
+     * Release a decode reservation from the tracker (on rollback/cancel/complete).
+     */
+    private void releaseDecodeReservation(BatchItem item) {
+        DecodeEndpoint decodeEp = item.decodeEp();
+        if (decodeEp == null || item.decode() == null) {
+            return;
+        }
+        decodeAdmissionTracker.release(decodeEp.ipPort(), item.requestId());
+    }
+
+    /**
+     * Expose the decode admission tracker for testing/monitoring.
+     */
+    public DecodeAdmissionTracker getDecodeAdmissionTracker() {
+        return decodeAdmissionTracker;
+    }
+
+    /**
+     * Sync decode admission states from engine-reported task phases.
+     * Called periodically during {@link #reportBatchMetrics} to transition
+     * reservations from RESERVED_NOT_ACCEPTED → ACCEPTED_NOT_RUNNING → RUNNING
+     * based on the engine's running task list.
+     */
+    private void syncDecodeAdmissionStates(String epKey, DecodeEndpoint decodeEp) {
+        if (decodeEp == null || decodeEp.getStatus() == null) {
+            return;
+        }
+        Map<String, TaskInfo> runningTasks = decodeEp.getStatus().getRunningTaskList();
+        if (runningTasks == null || runningTasks.isEmpty()) {
+            return;
+        }
+        for (TaskInfo task : runningTasks.values()) {
+            TaskPhase phase = task.getPhase();
+            if (phase == TaskPhase.KV_ALLOCATED) {
+                decodeAdmissionTracker.markAccepted(epKey, task.getRequestId());
+            } else if (phase == TaskPhase.RUNNING) {
+                decodeAdmissionTracker.markRunning(epKey, task.getRequestId());
+            }
+        }
     }
 
     /**
@@ -709,6 +898,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     /** Rollback using endpoint references already held by the item (no registry lookup). */
     private void rollback(BatchItem item) {
+        releaseDecodeReservation(item);
         DecodeEndpoint decodeEp = item.decodeEp();
         if (decodeEp != null && item.decode() != null) {
             decodeEp.release(item.decode().getRequestId());
@@ -792,6 +982,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     private void finishEntry(InflightEntry entry,
                              RequestLifecycleSnapshot terminal) {
+        // Release decode reservation (if any) before removing the inflight entry.
+        // Safe to call even if rollback already released it (release is idempotent).
+        releaseDecodeReservation(entry.item);
         // Publish the tombstone before removing inflight. submit() then observes
         // at least one side of the handoff and cannot revive the request ID.
         terminalStates.put(terminal.requestId(), terminal);
@@ -889,9 +1082,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             entry.getValue().reportBatchMetrics(reporter);
         }
 
-        // Per-worker metrics: decode endpoints
+        // Per-worker metrics: decode endpoints + sync admission states
         for (Map.Entry<String, DecodeEndpoint> entry : endpointRegistry.getDecodeEndpoints().entrySet()) {
             entry.getValue().reportBatchMetrics(reporter);
+            syncDecodeAdmissionStates(entry.getKey(), entry.getValue());
         }
     }
 
