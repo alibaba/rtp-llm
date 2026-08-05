@@ -1,0 +1,105 @@
+{
+  "zone_name": "master",
+  "zone_process_setting": {
+    "global": {},
+    "resource_plan": {
+      "resources": [
+        {
+          "slot_resources": [
+            {
+              "name": "mem",
+              "type": "SCALAR",
+              "amount": 57344
+            }
+          ]
+        }
+      ],
+      "meta_tag_list": []
+    },
+    "process_info": {
+      "args": [],
+      "envs": [
+        [
+          "DEFAULT_SCHEDULE_MODE",
+          "BATCH"
+        ],
+        [
+          "FLEXLB_BATCH_ALGORITHM",
+          "priority_deadline"
+        ],
+        [
+          "FLEXLB_BATCH_QUEUE_MAX_SIZE",
+          "8"
+        ],
+        [
+          "FLEXLB_BATCH_FIXED_WAIT_MS",
+          "300"
+        ],
+        [
+          "FLEXLB_BATCH_MIN_SIZE",
+          "1"
+        ],
+        [
+          "FLEXLB_BATCH_SIZE_MAX",
+          "8"
+        ],
+        [
+          "FLEXLB_BATCH_MAX_INFLIGHT",
+          "100000"
+        ],
+        [
+          "FLEXLB_PRIORITY_EVICT_ENABLED",
+          "true"
+        ],
+        [
+          "FLEXLB_PRIORITY_LEVELS",
+          "30,40,50,60,70"
+        ],
+        [
+          "FLEXLB_PRIORITY_DEFAULT",
+          "50"
+        ],
+        [
+          "FLEXLB_PRIORITY_EVICT_MAX_VICTIMS",
+          "8"
+        ],
+        [
+          "AUTO_TPM_DANGER_THRESHOLD_MS",
+          "100"
+        ],
+        [
+          "AUTO_TPM_RESCUE_SCAN_INTERVAL_MS",
+          "100"
+        ],
+        [
+          "AUTO_TPM_CANCEL_RUNNING_ENABLED",
+          "false"
+        ],
+        [
+          "AUTO_TPM_CANCEL_CONFIRM_LATENCY_MS",
+          "2000"
+        ],
+        [
+          "DECODE_CONCURRENCY_LIMIT",
+          "128"
+        ],
+        [
+          "DECODE_LOAD_BALANCE_STRATEGY",
+          "COST_BASED_DECODE"
+        ],
+        [
+          "LOAD_BALANCE_STRATEGY",
+          "COST_BASED_PREFILL"
+        ],
+        [
+          "SYNC_REQUEST_TIMEOUT_MS",
+          "5000"
+        ],
+        [
+          "SYNC_STATUS_INTERVAL",
+          "50"
+        ]
+      ]
+    }
+  }
+}

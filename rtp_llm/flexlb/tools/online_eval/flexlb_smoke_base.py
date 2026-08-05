@@ -147,6 +147,7 @@ class FlexLBSmokeBase:
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         block_keys: Optional[List[int]] = None,
+        priority: int = 0,
     ):
         input_pb = self._build_generate_input(
             request_id,
@@ -155,7 +156,7 @@ class FlexLBSmokeBase:
             block_keys=block_keys,
         )
         keys = block_keys or [request_id * 100 + 1]
-        return self.schedule_pb2.FlexlbScheduleRequestPB(
+        msg = self.schedule_pb2.FlexlbScheduleRequestPB(
             request_id=request_id,
             generate_input=input_pb.SerializeToString(),
             block_cache_keys=keys,
@@ -169,6 +170,11 @@ class FlexLBSmokeBase:
             api_key="",
             cache_key_block_size=1024,
         )
+        # priority: 30/40/50/60/70 (higher = higher priority). 0 = unset
+        # (master resolves the proto default 0 → 50).
+        if priority > 0:
+            msg.priority = priority
+        return msg
 
     # -- Master gRPC helpers ----------------------------------------------
 
