@@ -161,6 +161,8 @@ if [[ ! -f "${TRACE_FILE}" ]]; then
   exit 1
 fi
 java -version 2>&1 | head -1
+# Fail fast on JDK < 21 before launching the mock engine jar / load client.
+require_java21
 echo "  JAR: ${FLEXLB_JAR}"
 echo "  Trace: ${TRACE_FILE} ($(wc -l < "${TRACE_FILE}") lines)"
 echo "  Disconnect target: ${DISCONNECT_TARGET} (role=${DISCONNECT_ROLE})"

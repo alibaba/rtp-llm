@@ -14,6 +14,10 @@ if [[ "${FLEXLB_NETWORK_ISOLATED}" == "1" \
 fi
 FLEXLB_FAIL_ON_CONCURRENT_TEST="${FLEXLB_FAIL_ON_CONCURRENT_TEST:-1}"
 
+# Shared JavaLoadClient helpers: env-var mapping (run_java_load_client) and
+# JDK 21 detection (java_major/detect_java21_home/require_java21).
+source "${SCRIPT_DIR}/lib_load_client.sh"
+
 TRACE_FILE="${TRACE_FILE:-${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl}"
 PERFORMANCE_FILE="${PERFORMANCE_FILE:-${SCRIPT_DIR}/data/performance/dsv4_flash_performance.sample.json}"
 PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
@@ -138,42 +142,7 @@ JAVA_MODULE_OPTS=(
 # Limit Reactor boundedElastic scheduler threads to prevent thread explosion
 JVM_SYSTEM_PROPS=(-Dreactor.schedulers.defaultBoundedElasticSize=64)
 
-java_major() {
-  local java_bin="${1:-java}"
-  "${java_bin}" -version 2>&1 | awk -F'[\".]' '/version/ {print ($2 == "1" ? $3 : $2); exit}'
-}
-
-detect_java21_home() {
-  if [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/java" ]]; then
-    if [[ "$(java_major "${JAVA_HOME}/bin/java")" -ge 21 ]]; then
-      echo "${JAVA_HOME}"
-      return 0
-    fi
-  fi
-  if [[ -n "${JAVA21_HOME:-}" && -x "${JAVA21_HOME}/bin/java" ]]; then
-    echo "${JAVA21_HOME}"
-    return 0
-  fi
-  if [[ -x "${HOME}/java21/bin/java" \
-        && "$(java_major "${HOME}/java21/bin/java")" -ge 21 ]]; then
-    echo "${HOME}/java21"
-    return 0
-  fi
-  local java_bin
-  while IFS= read -r java_bin; do
-    if [[ -x "${java_bin}" && "$(java_major "${java_bin}")" -ge 21 ]]; then
-      dirname "$(dirname "${java_bin}")"
-      return 0
-    fi
-  done < <(
-    {
-      alternatives --display java 2>/dev/null || true
-      update-alternatives --display java 2>/dev/null || true
-    } | awk '/bin\/java/ {print $1}' | sort -u
-  )
-  return 1
-}
-
+# java_major/detect_java21_home are provided by lib_load_client.sh.
 JAVA21_HOME_DETECTED="$(detect_java21_home || true)"
 if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
   export JAVA_HOME="${JAVA21_HOME_DETECTED}"
@@ -656,6 +625,54 @@ fi
 if [[ "${GRADIENT}" == "1" ]]; then
   CLIENT_ARGS+=(--gradient --gradient-max-speed "${GRADIENT_MAX_SPEED}" --gradient-start-speed "${GRADIENT_START_SPEED}")
 fi
+# Launch one load client instance. Args: output_dir, num_shards, shard_index,
+# max_concurrency, skip_server_latency (0/1). JavaLoadClient is env-var
+# configured (see JavaLoadClient.Config.fromEnv); all client parameters are
+# passed explicitly via lib_load_client.sh run_java_load_client — the single
+# source of truth for the JavaLoadClient env mapping — so no implicit default
+# or ambient leak applies. Variables without a script-level default are passed
+# through from the caller environment (empty = JavaLoadClient default).
+launch_load_client() {
+  local output_dir="$1"
+  local num_shards="$2"
+  local shard_index="$3"
+  local client_max_concurrency="$4"
+  local skip_server_latency="$5"
+  run_java_load_client \
+    "TRACE_FILE=${TRACE_FILE}" \
+    "TARGET_ADDR=${FLEXLB_HTTP_ADDR}" \
+    "GRPC_TARGET=${GRPC_TARGET:-}" \
+    "DURATION_S=${DURATION_S}" \
+    "MAX_CONCURRENCY=${client_max_concurrency}" \
+    "REPLAY_SPEED=${REPLAY_SPEED}" \
+    "LOAD_CLIENT_WORKERS=${LOAD_CLIENT_WORKERS}" \
+    "OUTPUT_DIR=${output_dir}" \
+    "NUM_SHARDS=${num_shards}" \
+    "SHARD_INDEX=${shard_index}" \
+    "LIMIT=${LIMIT}" \
+    "TIMEOUT_MS=${TIMEOUT_MS}" \
+    "SLA_TTFT_MS=${SLA_TTFT_MS}" \
+    "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
+    "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
+    "LOOP=${LOOP}" \
+    "N_CHANNELS=${FLEXLB_N_CHANNELS}" \
+    "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
+    "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
+    "RESPONSE_TIMEOUT=${RESPONSE_TIMEOUT:-120}" \
+    "SKIP_SERVER_LATENCY=${skip_server_latency}" \
+    "MODEL=${MODEL:-}" \
+    "API_KEY=${API_KEY:-}" \
+    "FLEXLB_EXPECT_FETCH_RESPONSE=${FLEXLB_EXPECT_FETCH_RESPONSE:-}" \
+    "GRADIENT=${GRADIENT}" \
+    "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}" \
+    "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}" \
+    "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
+    "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
+    "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
+    "ENABLE_FALLBACK=${ENABLE_FALLBACK:-0}" \
+    "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
+    "DRY_RUN=${DRY_RUN:-0}"
+}
 
 if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
   PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
