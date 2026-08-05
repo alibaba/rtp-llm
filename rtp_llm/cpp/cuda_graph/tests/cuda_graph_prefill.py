@@ -264,8 +264,53 @@ class TestCudaGraphPrefill(unittest.TestCase):
             f"current_real_graph_size: {current_real_graph_size}, batch_size: {batch_size}"
         )
 
+        reference_output = outputs1.hidden_states
+        real_tokens = inputs1.input_ids.numel()
+        padding_tokens = current_real_graph_size - real_tokens
+        if padding_tokens:
+            # BF16 GEMM algorithms and rounding depend on the row count. Match
+            # the captured token capacity in the eager numerical reference,
+            # using an independent dummy sequence to preserve all real requests.
+            reference_inputs = self.build_inputs(
+                batch_size, max_seq_len, kernel_seq_size_per_block, False
+            )
+            reference_inputs.input_ids = torch.cat(
+                [
+                    reference_inputs.input_ids,
+                    torch.zeros(padding_tokens, dtype=torch.int32, device=self.device),
+                ]
+            )
+            attention = reference_inputs.attention_inputs
+            attention.input_lengths = torch.cat(
+                [
+                    attention.input_lengths,
+                    torch.tensor(
+                        [padding_tokens], dtype=torch.int32, device=self.device
+                    ),
+                ]
+            )
+            attention.prefix_lengths = torch.zeros_like(attention.input_lengths)
+            attention.cu_seqlens_device = torch.cat(
+                [
+                    attention.cu_seqlens_device,
+                    torch.tensor(
+                        [current_real_graph_size], dtype=torch.int32, device=self.device
+                    ),
+                ]
+            )
+            attention.cu_kv_seqlens_device = attention.cu_seqlens_device.clone()
+            attention.padding_offset = self._calculate_padding_offset(
+                attention.input_lengths, attention.cu_seqlens_device
+            )
+            attention.context_total_kv_length = current_real_graph_size
+            attention.total_tokens = current_real_graph_size
+            reference_output = self.normal_model.forward(
+                reference_inputs
+            ).hidden_states[:real_tokens]
+            torch.cuda.synchronize()
+
         close_mask = torch.isclose(
-            outputs1.hidden_states, outputs3.hidden_states, rtol=1e-2, atol=1e-2
+            reference_output, outputs3.hidden_states, rtol=1e-2, atol=1e-2
         )
         pass_ratio = close_mask.float().mean().item()
         print(f"normal vs cuda_graph pass ratio: {pass_ratio*100:.2f}%", flush=True)
