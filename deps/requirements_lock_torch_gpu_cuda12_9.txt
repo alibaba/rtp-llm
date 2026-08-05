@@ -730,8 +730,8 @@ decord==0.6.0 ; platform_machine == "x86_64" \
 deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:2e291bcd8cd8da84a1eec52dc8d5c0033e264b4ac26e86f6c951410ca3adb247
     # via -r deps/requirements_torch_gpu_cuda12_9.txt
-deep-gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:430ea2635d204d7e2d182860c496d787d83e46ac81ee10043eaa86eb8eadf88d
+deep-gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/deep_gemm-2.5.0%2Bd7d5eca.cu129-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:172d346a313684c5f8ececed37466f66069eba2d7fec95a5634f1b766982cd98
     # via
     #   -r deps/requirements_torch_gpu_cuda12_9.txt
     #   rtp-kernel
