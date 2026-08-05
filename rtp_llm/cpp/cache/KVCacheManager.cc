@@ -603,9 +603,10 @@ void KVCacheManager::initConnectorCoordinator() {
 void KVCacheManager::initCacheEventPublisher() {
     try {
         const auto& publisher_type = kv_cache_config_.kv_cache_event_publisher_type;
-        // Completeness set for publication: only groups that actually insert
-        // reusable block chains (e.g. SWA groups are excluded). An empty set
-        // would mean "READY but never publishes", so fall back to Null instead.
+        // Completeness set for publication: only groups whose reuse chains are
+        // densely materialized (tail-sparse LINEAR/SWA groups are excluded).
+        // An empty set would mean "READY but never publishes", so fall back to
+        // Null instead.
         const auto reuse_group_ids = allocator_->reuseParticipatingGroupIds();
         const auto gate            = evaluateKVCacheEventPublisherGate(publisher_type,
                                                             warmup_,

@@ -250,6 +250,12 @@ class EnvArgumentParser(argparse.ArgumentParser):
 
         EnvArgumentParser._env_mappings[action.dest] = full_env_name
 
+    # Destinations whose env values are strictly validated against `choices`
+    # in mixed CLI + environment mode. Limited to arguments introduced together
+    # with this validation so that pre-existing deployments with stale invalid
+    # env values keep starting up; widening this set is a separate change.
+    _STRICT_ENV_CHOICE_DESTS = frozenset({"kv_cache_event_publisher_type"})
+
     def _validate_env_choice(
         self, action: argparse.Action, value: Any, env_name: str
     ) -> None:
@@ -265,6 +271,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
             env_name,
             option,
         )
+        if action.dest not in self._STRICT_ENV_CHOICE_DESTS:
+            # Preserve the legacy tolerance for pre-existing arguments: the
+            # invalid value is still bound (as before this validation existed)
+            # and only surfaced via the ERROR log above.
+            return
         self.error(
             f"argument {option}: invalid choice: "
             f"{value!r} (choose from {choices})"
@@ -289,7 +300,9 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 # Read values from environment variables for all registered arguments
                 for dest, env_name in self._env_mappings.items():
                     env_value = os.environ.get(env_name)
-                    if env_value is not None:
+                    # Empty strings are treated as "unset" on both env paths so
+                    # neither argparse nor the converters see them.
+                    if env_value:
                         # Find the action for this dest
                         action = None
                         for action_item in self._actions:
@@ -363,7 +376,9 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 # Only set from environment if the value wasn't provided via command line
                 if dest not in provided_args:
                     env_value = os.environ.get(env_name)
-                    if env_value is not None:
+                    # Empty strings are treated as "unset", matching the pure
+                    # environment-variable path above.
+                    if env_value:
                         # Find the action to get the type converter
                         action = None
                         for action_item in self._actions:

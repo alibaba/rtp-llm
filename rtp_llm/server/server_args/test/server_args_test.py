@@ -373,15 +373,56 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
 
-    def test_existing_env_choice_rejects_unknown_value_in_mixed_mode(self):
+    def test_existing_env_choice_tolerates_unknown_value_in_mixed_mode(self):
+        # Pre-existing arguments keep the legacy tolerance for stale invalid
+        # env values (only the new KV cache event argument is strict), so a
+        # deployment upgrade cannot be broken by an old typo; the problem is
+        # surfaced via an ERROR log instead.
         os.environ["PDFUSION_SCHEDULER_MODE"] = "unknown"
         sys.argv = ["prog", "--model_type", "qwen"]
 
         import rtp_llm.server.server_args.server_args
 
         importlib.reload(rtp_llm.server.server_args.server_args)
-        with self.assertRaises(SystemExit):
-            rtp_llm.server.server_args.server_args.setup_args()
+        with self.assertLogs(level="ERROR") as logs:
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "unknown",
+            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+        )
+        self.assertTrue(
+            any("PDFUSION_SCHEDULER_MODE" in message for message in logs.output)
+        )
+
+    def test_empty_env_value_is_treated_as_unset_in_mixed_mode(self):
+        os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = ""
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "none",
+            py_env_configs.kv_cache_config.kv_cache_event_publisher_type,
+        )
+
+    def test_empty_env_value_is_treated_as_unset_in_pure_env_mode(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = ""
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "none",
+            py_env_configs.kv_cache_config.kv_cache_event_publisher_type,
+        )
 
     def test_invalid_typed_env_value_warns_and_uses_default_in_mixed_mode(self):
         os.environ["KV_CACHE_EVENT_QUEUE_CAPACITY"] = "not-an-integer"

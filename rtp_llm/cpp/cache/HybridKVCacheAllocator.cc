@@ -74,15 +74,15 @@ std::vector<int> HybridKVCacheAllocator::independentEvictionGroupIds() const {
 }
 
 std::vector<int> HybridKVCacheAllocator::reuseParticipatingGroupIds() const {
-    // Mirror skipReuseCacheGroup(): only groups whose prefix reuse is enabled
-    // ever insert block chains into SharedBlockCache.
-    std::vector<int> group_ids;
-    for (size_t gid = 0; gid < kv_cache_groups_.size(); ++gid) {
-        if (kv_cache_groups_[gid]->prefixReuseEnabled()) {
-            group_ids.push_back(static_cast<int>(gid));
-        }
+    // Unlike skipReuseCacheGroup() (which admits tail-sparse LINEAR groups into
+    // the reuse surface), the publication completeness set only accepts groups
+    // that materialize every block position; see cacheGroupPublishesPrefixChain.
+    std::vector<CacheGroupPolicy> policies;
+    policies.reserve(kv_cache_groups_.size());
+    for (const auto& group : kv_cache_groups_) {
+        policies.push_back(group->policy());
     }
-    return group_ids;
+    return reuseParticipatingGroupIdsFromPolicies(policies);
 }
 
 bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {

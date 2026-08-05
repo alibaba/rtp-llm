@@ -122,9 +122,11 @@ disables the publisher while leaving inference available. `log` mode does not re
 The manager endpoint must be a resolved HTTP endpoint; this version does not perform KVCM service discovery or
 leader switching inside RTP-LLM.
 Publisher type values are case-sensitive for both CLI arguments and environment variables; invalid values are rejected
-during argument parsing. In mixed CLI + environment mode, this validation now applies to every server argument with
-`choices`, including the existing PDFusion scheduler mode, cache-store RDMA mode, KV-cache dtype, and MoE backend
-selectors. Clear any stale invalid environment value before upgrading. Environment values rejected by an explicit
+during argument parsing. In mixed CLI + environment mode, this strict `choices` validation applies only to the new
+`--kv_cache_event_publisher_type` argument; pre-existing arguments with `choices` (PDFusion scheduler mode, cache-store
+RDMA mode, KV-cache dtype, MoE backend selectors) keep their legacy tolerance for stale invalid env values and surface
+them via an ERROR log instead of failing startup. Empty environment values are treated as "unset" on both the pure-env
+and the mixed path. Environment values rejected by an explicit
 converter such as `str2bool` (e.g. a misspelled boolean) abort startup with an argparse error, matching the pure
 environment-variable mode. Only plain numeric conversion failures (`ValueError`/`TypeError`) retain the legacy
 fallback-to-default behavior and emit a warning naming the ignored variable.

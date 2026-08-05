@@ -116,8 +116,9 @@ public:
     LogicalCacheSnapshot logicalCacheSnapshot() const;
 
     // Installed during engine initialization and cleared before publisher shutdown.
-    // `required_group_ids` lists the groups that participate in prefix reuse; a key
-    // is publishable only when every listed group holds a matchable block.
+    // `required_group_ids` lists the groups whose reuse chains are densely
+    // materialized; a key is publishable only when every listed group holds a
+    // matchable block.
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
 
     void setPrefixTreeEnabled(bool enabled);
