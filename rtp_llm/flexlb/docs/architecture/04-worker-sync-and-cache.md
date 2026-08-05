@@ -45,6 +45,11 @@ ConcurrentHashMap），不是快照级：
 - 引擎状态到达 → `updateTaskStates()` 状态机对账：IN_TRANSIT→CONFIRMED→RUNNING→FINISHED，
   超时未确认判 LOST；`updateKvCacheTokens()` 在 `getAndSet` 引擎值前**加回在途任务的
   cache-miss 部分**，避免双重计数。
+- 状态转变耗时：`updateTaskStates()` 顺带产出 `TaskStateUpdateResult` 里的延迟列表——
+  FlexLB 观测值（dispatch→waiting confirm、waiting confirm→running）与引擎侧真实值
+  （received→waiting、waiting→running，取自 TaskInfoPB 的 `request_received_time_ms`/
+  `waiting_entered_time_ms`/`running_entered_time_ms`，`0` 视为未知跳过），由
+  `GrpcWorkerStatusRunner` 分别上报供对账。
 - `ExpirationCleaner`（`@Scheduled(fixedRate=3000)`）：移除 `statusLastUpdateTime` 超过
   3s 的 worker；按 `taskConfirmTimeoutMs`（默认 300,000ms）清理确认超时/LOST 任务并出
   pv 日志。

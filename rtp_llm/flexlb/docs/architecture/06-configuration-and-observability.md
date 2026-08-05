@@ -103,7 +103,12 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
   application.yml 里的 management 配置不生效。
 - 指标名集中在 `MetricConstant`（flexlb-common），主要族：
   - `app.engine.health.*` / `app.engine.worker.*`：同步成功周期、worker 数、并发、RT/QPS、
-    队列时间、任务表大小；
+    队列时间、任务表大小；worker status 状态转变耗时——FlexLB 观测值
+    （`app.engine.worker.status.observed.decision.to.waiting.ms`、
+    `...flexlb.observed.waiting.to.running.ms`）与引擎侧真实时间戳
+    （`app.engine.worker.status.engine.received.to.waiting.ms`、
+    `...engine.waiting.to.running.ms`，由 TaskInfoPB 的 `request_received_time_ms`/
+    `waiting_entered_time_ms`/`running_entered_time_ms` 计算）对账，差值即 FlexLB 观测延迟；
   - `app.routing.*`：队列长度/入队/超时/拒绝/取消 QPS、排队等待、路由执行耗时、
     单次路由尝试耗时（`app.routing.route.attempt.execution.time.ms`，不含 retry sleep）、
     成功/失败（tag `code`）/每次实际 retry 的重试 QPS（`RoutingQueueReporter`，全 PRECISE）；

@@ -126,7 +126,10 @@ public class WorkerStatus {
                                                   Map<String, TaskInfo> finishedTaskInfo) {
 
         List<CacheHitFeedback> cacheHitFeedbacks = new ArrayList<>();
-        List<Long> waitingTaskConfirmationLatenciesMs = new ArrayList<>();
+        List<Long> decisionToWaitingObservedLatenciesMs = new ArrayList<>();
+        List<Long> waitingToRunningObservedLatenciesMs = new ArrayList<>();
+        List<Long> engineWaitingToRunningLatenciesMs = new ArrayList<>();
+        List<Long> engineReceivedToWaitingLatenciesMs = new ArrayList<>();
         Iterator<Map.Entry<String, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, TaskInfo> entry = iterator.next();
@@ -135,6 +138,8 @@ public class WorkerStatus {
 
             TaskInfo finishedTask = finishedTaskInfo != null ? finishedTaskInfo.get(requestId) : null;
             if (finishedTask != null) {
+                boolean runningWasObserved = localTask.getTaskState() == TaskStateEnum.RUNNING;
+                boolean receivedToWaitingWasObserved = localTask.getRequestReceivedTimeMs() > 0;
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
                     Logger.debug("Task {} first confirmed by worker", requestId);
@@ -142,6 +147,19 @@ public class WorkerStatus {
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
                 updateTaskInputLength(localTask, finishedTask);
                 updateCacheHitFromEngine(localTask, finishedTask, "finished", cacheHitFeedbacks);
+                localTask.setRequestReceivedTimeMs(finishedTask.getRequestReceivedTimeMs());
+                localTask.setWaitingEnteredTimeMs(finishedTask.getWaitingEnteredTimeMs());
+                localTask.setRunningEnteredTimeMs(finishedTask.getRunningEnteredTimeMs());
+                if (!receivedToWaitingWasObserved && finishedTask.getRequestReceivedTimeMs() > 0
+                        && finishedTask.getWaitingEnteredTimeMs() > 0) {
+                    engineReceivedToWaitingLatenciesMs.add(Math.max(0,
+                            finishedTask.getWaitingEnteredTimeMs() - finishedTask.getRequestReceivedTimeMs()));
+                }
+                if (!runningWasObserved && finishedTask.getWaitingEnteredTimeMs() > 0
+                        && finishedTask.getRunningEnteredTimeMs() > 0) {
+                    engineWaitingToRunningLatenciesMs.add(Math.max(0,
+                            finishedTask.getRunningEnteredTimeMs() - finishedTask.getWaitingEnteredTimeMs()));
+                }
 
                 if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
                     long delta = localTask.estimatePrefillTime();
@@ -154,7 +172,16 @@ public class WorkerStatus {
 
             TaskInfo runningTask = runningTaskInfo != null ? runningTaskInfo.get(requestId) : null;
             if (runningTask != null) {
-                localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
+                long runningObservationTimeUs = System.nanoTime() / 1000;
+                boolean firstRunningObservation = localTask.getTaskState() != TaskStateEnum.RUNNING;
+                boolean receivedToWaitingWasObserved = localTask.getRequestReceivedTimeMs() > 0;
+
+                if (localTask.getWaitingConfirmTimeUs() > 0) {
+                    waitingToRunningObservedLatenciesMs.add(
+                            Math.max(0, runningObservationTimeUs - localTask.getWaitingConfirmTimeUs()) / 1000);
+                    localTask.setWaitingConfirmTimeUs(-1);
+                }
+                localTask.setLastActiveTimeUs(runningObservationTimeUs);
 
                 if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
@@ -171,6 +198,19 @@ public class WorkerStatus {
                 localTask.setIterateCount(runningTask.getIterateCount());
                 localTask.setEndTimeMs(runningTask.getEndTimeMs());
                 localTask.setDpRank(runningTask.getDpRank());
+                localTask.setRequestReceivedTimeMs(runningTask.getRequestReceivedTimeMs());
+                localTask.setWaitingEnteredTimeMs(runningTask.getWaitingEnteredTimeMs());
+                localTask.setRunningEnteredTimeMs(runningTask.getRunningEnteredTimeMs());
+
+                if (!receivedToWaitingWasObserved && runningTask.getRequestReceivedTimeMs() > 0
+                        && runningTask.getWaitingEnteredTimeMs() > 0) {
+                    engineReceivedToWaitingLatenciesMs.add(Math.max(0,
+                            runningTask.getWaitingEnteredTimeMs() - runningTask.getRequestReceivedTimeMs()));
+                }
+                if (firstRunningObservation && runningTask.getWaitingEnteredTimeMs() > 0 && runningTask.getRunningEnteredTimeMs() > 0) {
+                    engineWaitingToRunningLatenciesMs.add(Math.max(0,
+                            runningTask.getRunningEnteredTimeMs() - runningTask.getWaitingEnteredTimeMs()));
+                }
 
                 continue;
             }
@@ -178,12 +218,14 @@ public class WorkerStatus {
             TaskInfo waitingTask = waitingTaskInfo != null ? waitingTaskInfo.get(requestId) : null;
             if (waitingTask != null) {
                 boolean firstWaitingConfirmation = localTask.getTaskState() == TaskStateEnum.IN_TRANSIT;
+                boolean receivedToWaitingWasObserved = localTask.getRequestReceivedTimeMs() > 0;
                 long confirmationTimeUs = System.nanoTime() / 1000;
-                long masterDecisionToWaitingConfirmMs = firstWaitingConfirmation
+                long decisionToWaitingObservedMs = firstWaitingConfirmation
                         ? Math.max(0, confirmationTimeUs - localTask.getLastActiveTimeUs()) / 1000
                         : 0;
                 localTask.setLastActiveTimeUs(confirmationTimeUs);
                 if (firstWaitingConfirmation) {
+                    localTask.setWaitingConfirmTimeUs(confirmationTimeUs);
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
                     Logger.debug("Task {} first confirmed by worker (waiting)", requestId);
                 }
@@ -192,8 +234,15 @@ public class WorkerStatus {
                 updateCacheHitFromEngine(localTask, waitingTask, "waiting", cacheHitFeedbacks);
                 localTask.setWaitingTime(waitingTask.getWaitingTime());
                 localTask.setDpRank(waitingTask.getDpRank());
+                localTask.setWaitingEnteredTimeMs(waitingTask.getWaitingEnteredTimeMs());
+                localTask.setRequestReceivedTimeMs(waitingTask.getRequestReceivedTimeMs());
                 if (firstWaitingConfirmation) {
-                    waitingTaskConfirmationLatenciesMs.add(masterDecisionToWaitingConfirmMs);
+                    decisionToWaitingObservedLatenciesMs.add(decisionToWaitingObservedMs);
+                }
+                if (!receivedToWaitingWasObserved && waitingTask.getRequestReceivedTimeMs() > 0
+                        && waitingTask.getWaitingEnteredTimeMs() > 0) {
+                    engineReceivedToWaitingLatenciesMs.add(
+                            Math.max(0, waitingTask.getWaitingEnteredTimeMs() - waitingTask.getRequestReceivedTimeMs()));
                 }
 
                 continue;
@@ -204,7 +253,13 @@ public class WorkerStatus {
                 logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
             }
         }
-        return TaskStateUpdateResult.from(cacheHitFeedbacks, waitingTaskConfirmationLatenciesMs);
+        return TaskStateUpdateResult.from(
+                cacheHitFeedbacks,
+                decisionToWaitingObservedLatenciesMs,
+                waitingToRunningObservedLatenciesMs,
+                engineWaitingToRunningLatenciesMs,
+                engineReceivedToWaitingLatenciesMs
+        );
     }
 
     private void updateTaskInputLength(TaskInfo localTask, TaskInfo engineTask) {

@@ -111,10 +111,36 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
     /**
-     * Elapsed time from the master recording a local task to the first worker waiting confirmation.
+     * Elapsed time from the master recording a local task to the first worker waiting confirmation,
+     * as observed by FlexLB on the master side. Engine-side transition timestamps
+     * (waiting_entered_time_ms / running_entered_time_ms) are reported separately for reconciliation.
      */
-    public static final String ENGINE_WORKER_STATUS_MASTER_DECISION_TO_WAITING_CONFIRM_MS =
-            "app.engine.worker.status.master.decision.to.waiting.confirm.ms";
+    public static final String ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_MASTER_DECISION_TO_WAITING_CONFIRM_MS =
+            "app.engine.worker.status.observed.decision.to.waiting.ms";
+
+    /**
+     * Elapsed time from the first worker waiting confirmation to the first running observation,
+     * as observed by FlexLB on the master side. Engine-side transition timestamps
+     * (waiting_entered_time_ms / running_entered_time_ms) are reported separately for reconciliation.
+     */
+    public static final String ENGINE_WORKER_STATUS_FLEXLB_OBSERVED_WAITING_TO_RUNNING_MS =
+            "app.engine.worker.status.observed.waiting.to.running.ms";
+
+    /**
+     * Real waiting-to-running transition duration on the engine side, derived from the engine
+     * timestamps (running_entered_time_ms - waiting_entered_time_ms). Compared against the
+     * FlexLB-observed value to quantify FlexLB observation delay.
+     */
+    public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_WAITING_TO_RUNNING_MS =
+            "app.engine.worker.status.engine.waiting.to.running.ms";
+
+    /**
+     * Real received-to-waiting transition duration on the engine side, derived from the engine
+     * timestamps (waiting_entered_time_ms - request_received_time_ms). Compared against the
+     * FlexLB-observed master-decision-to-waiting value to quantify FlexLB observation delay.
+     */
+    public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS =
+            "app.engine.worker.status.engine.received.to.waiting.ms";
 
     /* ------------------------ Cache Health Monitoring -------------------------- */
 

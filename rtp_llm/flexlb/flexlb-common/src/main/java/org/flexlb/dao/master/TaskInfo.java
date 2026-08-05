@@ -33,6 +33,12 @@ public class TaskInfo {
     private long endTimeMs;
     @JsonProperty("dp_rank")
     private long dpRank;
+    @JsonProperty("waiting_entered_time_ms")
+    private long waitingEnteredTimeMs;
+    @JsonProperty("running_entered_time_ms")
+    private long runningEnteredTimeMs;
+    @JsonProperty("request_received_time_ms")
+    private long requestReceivedTimeMs;
 
     @JsonIgnore
     private double cacheHitDiscount = DEFAULT_CACHE_HIT_DISCOUNT;
@@ -40,6 +46,7 @@ public class TaskInfo {
     // Task state related fields
     private TaskStateEnum taskState = TaskStateEnum.CREATED;
     private long lastActiveTimeUs = System.nanoTime() / 1000;
+    private long waitingConfirmTimeUs = -1;
 
     public long estimatePrefillTime() {
         return estimatePrefillTimeMs(inputLength, prefixLength, cacheHitDiscount);

@@ -400,6 +400,17 @@ message TaskInfoPB {
     bool is_waiting = 9;
     // True only after the engine has resolved and prepared the cache hit.
     bool prefix_length_valid = 10;
+    // Wall clock time (ms) of the most recent entry into the waiting state.
+    // First enqueue = arrival time; preempted back to waiting = preemption time.
+    // 0 = unknown (edge paths that bypass the record point).
+    int64 waiting_entered_time_ms = 11;
+    // Wall clock time (ms) of the most recent entry into the running (scheduled) state.
+    // 0 = never entered running yet, or unknown.
+    int64 running_entered_time_ms = 12;
+    // Wall clock time (ms) when the engine received the request, before it entered the
+    // waiting queue. Reconciles against the master's dispatch-to-waiting observation.
+    // 0 = unknown (edge paths that bypass the record point).
+    int64 request_received_time_ms = 13;
 }
 
 message UpdateWeightsRequestPB {

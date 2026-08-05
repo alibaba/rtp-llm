@@ -176,7 +176,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         assertTrue(Mockito.mockingDetails(engineHealthReporter).getInvocations().stream().anyMatch(invocation -> {
             Object[] arguments = invocation.getArguments();
-            return invocation.getMethod().getName().equals("reportMasterDecisionToWaitingConfirmationLatency")
+            return invocation.getMethod().getName().equals("reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency")
                     && arguments.length == 5
                     && "test-model".equals(arguments[0])
                     && "127.0.0.1".equals(arguments[1])
@@ -184,5 +184,159 @@ class GrpcWorkerStatusCheckRunnerTest {
                     && "test-group".equals(arguments[3])
                     && (long) arguments[4] >= 5;
         }));
+    }
+
+    @Test
+    void shouldReportWaitingToRunningLatency_whenTaskMovesFromWaitingToRunning() {
+        String requestId = "request-1";
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+
+        TaskInfo localTask = new TaskInfo();
+        localTask.setRequestId(requestId);
+        workerStatus.putLocalTask(requestId, localTask);
+
+        EngineRpcService.TaskInfoPB waitingTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .setIsWaiting(true)
+                .build();
+        EngineRpcService.WorkerStatusPB waitingStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(100)
+                .setAlive(true)
+                .addRunningTaskInfo(waitingTask)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(waitingStatusPB);
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .build();
+        EngineRpcService.WorkerStatusPB runningStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(100)
+                .setAlive(true)
+                .addRunningTaskInfo(runningTask)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(runningStatusPB);
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        long waitingToRunningReportCount = Mockito.mockingDetails(engineHealthReporter)
+                .getInvocations().stream()
+                .filter(invocation -> {
+                    Object[] arguments = invocation.getArguments();
+                    return invocation.getMethod().getName().equals("reportFlexlbObservedWaitingToRunningLatency")
+                            && arguments.length == 5
+                            && "test-model".equals(arguments[0])
+                            && "127.0.0.1".equals(arguments[1])
+                            && RoleType.PREFILL.getCode().equals(arguments[2])
+                            && "test-group".equals(arguments[3])
+                            && (long) arguments[4] >= 0;
+                })
+                .count();
+        assertEquals(1, waitingToRunningReportCount);
+    }
+
+    @Test
+    void shouldReportEngineObservedWaitingToRunningLatency_fromEngineTimestamps() {
+        String requestId = "request-1";
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+
+        TaskInfo localTask = new TaskInfo();
+        localTask.setRequestId(requestId);
+        workerStatus.putLocalTask(requestId, localTask);
+
+        EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .setWaitingEnteredTimeMs(1_000L)
+                .setRunningEnteredTimeMs(1_250L)
+                .build();
+        EngineRpcService.WorkerStatusPB runningStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(100)
+                .setAlive(true)
+                .addRunningTaskInfo(runningTask)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(runningStatusPB);
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        long engineObservedReportCount = Mockito.mockingDetails(engineHealthReporter)
+                .getInvocations().stream()
+                .filter(invocation -> {
+                    Object[] arguments = invocation.getArguments();
+                    return invocation.getMethod().getName().equals("reportEngineObservedWaitingToRunningLatency")
+                            && arguments.length == 5
+                            && "test-model".equals(arguments[0])
+                            && "127.0.0.1".equals(arguments[1])
+                            && RoleType.PREFILL.getCode().equals(arguments[2])
+                            && "test-group".equals(arguments[3])
+                            && (long) arguments[4] == 250L;
+                })
+                .count();
+        assertEquals(1, engineObservedReportCount);
+    }
+
+    @Test
+    void shouldReportEngineObservedReceivedToWaitingLatency_fromEngineTimestamps() {
+        String requestId = "request-1";
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+
+        TaskInfo localTask = new TaskInfo();
+        localTask.setRequestId(requestId);
+        workerStatus.putLocalTask(requestId, localTask);
+
+        EngineRpcService.TaskInfoPB waitingTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .setIsWaiting(true)
+                .setRequestReceivedTimeMs(1_000L)
+                .setWaitingEnteredTimeMs(1_080L)
+                .build();
+        EngineRpcService.WorkerStatusPB waitingStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(100)
+                .setAlive(true)
+                .addRunningTaskInfo(waitingTask)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(waitingStatusPB);
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        long receivedToWaitingReportCount = Mockito.mockingDetails(engineHealthReporter)
+                .getInvocations().stream()
+                .filter(invocation -> {
+                    Object[] arguments = invocation.getArguments();
+                    return invocation.getMethod().getName().equals("reportEngineObservedReceivedToWaitingLatency")
+                            && arguments.length == 5
+                            && "test-model".equals(arguments[0])
+                            && "127.0.0.1".equals(arguments[1])
+                            && RoleType.PREFILL.getCode().equals(arguments[2])
+                            && "test-group".equals(arguments[3])
+                            && (long) arguments[4] == 80L;
+                })
+                .count();
+        assertEquals(1, receivedToWaitingReportCount);
     }
 }

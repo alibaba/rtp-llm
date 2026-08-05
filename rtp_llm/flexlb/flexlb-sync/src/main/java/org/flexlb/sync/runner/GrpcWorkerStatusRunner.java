@@ -208,8 +208,20 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void handleTaskStateUpdateResult(TaskStateUpdateResult updateResult) {
-        for (long latencyMs : updateResult.waitingTaskConfirmationLatenciesMs()) {
-            engineHealthReporter.reportMasterDecisionToWaitingConfirmationLatency(
+        for (long latencyMs : updateResult.decisionToWaitingObservedLatenciesMs()) {
+            engineHealthReporter.reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(
+                    modelName, ip, roleType.getCode(), group, latencyMs);
+        }
+        for (long latencyMs : updateResult.waitingToRunningObservedLatenciesMs()) {
+            engineHealthReporter.reportFlexlbObservedWaitingToRunningLatency(
+                    modelName, ip, roleType.getCode(), group, latencyMs);
+        }
+        for (long latencyMs : updateResult.engineWaitingToRunningLatenciesMs()) {
+            engineHealthReporter.reportEngineObservedWaitingToRunningLatency(
+                    modelName, ip, roleType.getCode(), group, latencyMs);
+        }
+        for (long latencyMs : updateResult.engineReceivedToWaitingLatenciesMs()) {
+            engineHealthReporter.reportEngineObservedReceivedToWaitingLatency(
                     modelName, ip, roleType.getCode(), group, latencyMs);
         }
         for (CacheHitFeedback feedback : updateResult.cacheHitFeedbacks()) {

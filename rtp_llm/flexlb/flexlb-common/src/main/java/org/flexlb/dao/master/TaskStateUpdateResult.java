@@ -10,16 +10,29 @@ import java.util.List;
  */
 public record TaskStateUpdateResult(
         List<CacheHitFeedback> cacheHitFeedbacks,
-        List<Long> waitingTaskConfirmationLatenciesMs) {
+        List<Long> decisionToWaitingObservedLatenciesMs,
+        List<Long> waitingToRunningObservedLatenciesMs,
+        List<Long> engineWaitingToRunningLatenciesMs,
+        List<Long> engineReceivedToWaitingLatenciesMs) {
 
-    private static final TaskStateUpdateResult EMPTY = new TaskStateUpdateResult(List.of(), List.of());
+    private static final TaskStateUpdateResult EMPTY =
+            new TaskStateUpdateResult(List.of(), List.of(), List.of(), List.of(), List.of());
 
     public static TaskStateUpdateResult from(
             List<CacheHitFeedback> cacheHitFeedbacks,
-            List<Long> waitingTaskConfirmationLatenciesMs) {
-        if (cacheHitFeedbacks.isEmpty() && waitingTaskConfirmationLatenciesMs.isEmpty()) {
+            List<Long> decisionToWaitingObservedLatenciesMs,
+            List<Long> waitingToRunningObservedLatenciesMs,
+            List<Long> engineWaitingToRunningLatenciesMs,
+            List<Long> engineReceivedToWaitingLatenciesMs) {
+        if (cacheHitFeedbacks.isEmpty()
+                && decisionToWaitingObservedLatenciesMs.isEmpty()
+                && waitingToRunningObservedLatenciesMs.isEmpty()
+                && engineWaitingToRunningLatenciesMs.isEmpty()
+                && engineReceivedToWaitingLatenciesMs.isEmpty()) {
             return EMPTY;
         }
-        return new TaskStateUpdateResult(cacheHitFeedbacks, waitingTaskConfirmationLatenciesMs);
+        return new TaskStateUpdateResult(
+                cacheHitFeedbacks, decisionToWaitingObservedLatenciesMs, waitingToRunningObservedLatenciesMs,
+                engineWaitingToRunningLatenciesMs, engineReceivedToWaitingLatenciesMs);
     }
 }

@@ -72,13 +72,13 @@ class EngineHealthReporterTest {
     void shouldRegisterMasterDecisionToWaitingConfirmationMetric() {
         reporter.init();
 
-        verify(monitor).register("app.engine.worker.status.master.decision.to.waiting.confirm.ms",
+        verify(monitor).register("app.engine.worker.status.observed.decision.to.waiting.ms",
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
     }
 
     @Test
     void shouldReportMasterDecisionToWaitingConfirmationLatency() {
-        reporter.reportMasterDecisionToWaitingConfirmationLatency(
+        reporter.reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(
                 "test-model", "10.0.0.1", "PREFILL", "test-group", 53);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
@@ -86,8 +86,74 @@ class EngineHealthReporterTest {
                 "engineIp", "10.0.0.1",
                 "role", "PREFILL",
                 "group", "test-group");
-        verify(monitor).report("app.engine.worker.status.master.decision.to.waiting.confirm.ms",
+        verify(monitor).report("app.engine.worker.status.observed.decision.to.waiting.ms",
                 expectedTags, 53.0);
+    }
+
+    @Test
+    void shouldRegisterWaitingToRunningMetric() {
+        reporter.init();
+
+        verify(monitor).register("app.engine.worker.status.observed.waiting.to.running.ms",
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+    }
+
+    @Test
+    void shouldReportWaitingToRunningLatency() {
+        reporter.reportFlexlbObservedWaitingToRunningLatency(
+                "test-model", "10.0.0.1", "PREFILL", "test-group", 42);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "group", "test-group");
+        verify(monitor).report("app.engine.worker.status.observed.waiting.to.running.ms",
+                expectedTags, 42.0);
+    }
+
+    @Test
+    void shouldRegisterEngineObservedWaitingToRunningMetric() {
+        reporter.init();
+
+        verify(monitor).register("app.engine.worker.status.engine.waiting.to.running.ms",
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+    }
+
+    @Test
+    void shouldReportEngineObservedWaitingToRunningLatency() {
+        reporter.reportEngineObservedWaitingToRunningLatency(
+                "test-model", "10.0.0.1", "PREFILL", "test-group", 42);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "group", "test-group");
+        verify(monitor).report("app.engine.worker.status.engine.waiting.to.running.ms",
+                expectedTags, 42.0);
+    }
+
+    @Test
+    void shouldRegisterEngineObservedReceivedToWaitingMetric() {
+        reporter.init();
+
+        verify(monitor).register("app.engine.worker.status.engine.received.to.waiting.ms",
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+    }
+
+    @Test
+    void shouldReportEngineObservedReceivedToWaitingLatency() {
+        reporter.reportEngineObservedReceivedToWaitingLatency(
+                "test-model", "10.0.0.1", "PREFILL", "test-group", 42);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "group", "test-group");
+        verify(monitor).report("app.engine.worker.status.engine.received.to.waiting.ms",
+                expectedTags, 42.0);
     }
 
     @Test

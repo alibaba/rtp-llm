@@ -382,12 +382,12 @@ class WorkerStatusTest {
             assertEquals(200, updated.getInputLength());
             assertEquals(100, updated.getWaitingTime());
             assertEquals(1, updated.getDpRank());
-            assertEquals(1, updateResult.waitingTaskConfirmationLatenciesMs().size());
-            assertTrue(updateResult.waitingTaskConfirmationLatenciesMs().getFirst() >= 5);
+            assertEquals(1, updateResult.decisionToWaitingObservedLatenciesMs().size());
+            assertTrue(updateResult.decisionToWaitingObservedLatenciesMs().getFirst() >= 5);
 
             var repeatedUpdateResult = workerStatus.updateTaskStates(
                     waitingTaskInfo, new HashMap<>(), new HashMap<>());
-            assertTrue(repeatedUpdateResult.waitingTaskConfirmationLatenciesMs().isEmpty());
+            assertTrue(repeatedUpdateResult.decisionToWaitingObservedLatenciesMs().isEmpty());
         }
 
         @Test
@@ -617,7 +617,8 @@ class WorkerStatusTest {
             Map<String, TaskInfo> runningTaskInfo = new HashMap<>();
             runningTaskInfo.put(String.valueOf(REQUEST_ID), runningTask);
 
-            workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
+            var updateResult =
+                    workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
 
             TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
             assertNotNull(updated);
@@ -627,10 +628,12 @@ class WorkerStatusTest {
             assertEquals(50, updated.getPrefillTime());
             assertEquals(2, updated.getIterateCount());
             assertEquals(12345L, updated.getEndTimeMs());
+            assertTrue(updateResult.waitingToRunningObservedLatenciesMs().isEmpty());
+            assertTrue(updateResult.engineWaitingToRunningLatenciesMs().isEmpty());
         }
 
         @Test
-        @DisplayName("Task in waiting then in running on next call should be RUNNING")
+        @DisplayName("Task in waiting then in running on next call should be RUNNING and report waiting-to-running latency once")
         void taskInWaitingThenInRunning_shouldBeRunning() {
             TaskInfo localTask = new TaskInfo();
             localTask.setRequestId(REQUEST_ID);
@@ -645,9 +648,166 @@ class WorkerStatusTest {
             TaskInfo runningTask = new TaskInfo();
             runningTask.setRequestId(REQUEST_ID);
             runningTaskInfo.put(String.valueOf(REQUEST_ID), runningTask);
-            workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
+
+            var runningUpdateResult =
+                    workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
 
             assertEquals(TaskStateEnum.RUNNING, workerStatus.getLocalTaskMap().get(REQUEST_ID).getTaskState());
+            assertEquals(1, runningUpdateResult.waitingToRunningObservedLatenciesMs().size());
+            assertTrue(runningUpdateResult.waitingToRunningObservedLatenciesMs().getFirst() >= 0);
+
+            var repeatedRunningUpdateResult =
+                    workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
+            assertTrue(repeatedRunningUpdateResult.waitingToRunningObservedLatenciesMs().isEmpty());
+        }
+
+        @Test
+        @DisplayName("Engine-observed waiting-to-running latency reported once from engine timestamps")
+        void taskWithEngineTimestamps_shouldReportEngineObservedLatencyOnce() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo runningTask = new TaskInfo();
+            runningTask.setRequestId(REQUEST_ID);
+            runningTask.setWaitingEnteredTimeMs(1_000L);
+            runningTask.setRunningEnteredTimeMs(1_250L);
+            Map<String, TaskInfo> runningTaskInfo = new HashMap<>();
+            runningTaskInfo.put(String.valueOf(REQUEST_ID), runningTask);
+
+            var firstResult =
+                    workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
+            assertEquals(1, firstResult.engineWaitingToRunningLatenciesMs().size());
+            assertEquals(250L, firstResult.engineWaitingToRunningLatenciesMs().getFirst());
+
+            var secondResult =
+                    workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
+            assertTrue(secondResult.engineWaitingToRunningLatenciesMs().isEmpty());
+        }
+
+        @Test
+        @DisplayName("Engine-observed received-to-waiting latency reported once from engine timestamps")
+        void taskWithEngineTimestamps_shouldReportEngineReceivedToWaitingLatencyOnce() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo waitingTask = new TaskInfo();
+            waitingTask.setRequestId(REQUEST_ID);
+            waitingTask.setRequestReceivedTimeMs(1_000L);
+            waitingTask.setWaitingEnteredTimeMs(1_080L);
+            Map<String, TaskInfo> waitingTaskInfo = new HashMap<>();
+            waitingTaskInfo.put(String.valueOf(REQUEST_ID), waitingTask);
+
+            var firstResult =
+                    workerStatus.updateTaskStates(waitingTaskInfo, new HashMap<>(), new HashMap<>());
+            assertEquals(1, firstResult.engineReceivedToWaitingLatenciesMs().size());
+            assertEquals(80L, firstResult.engineReceivedToWaitingLatenciesMs().getFirst());
+
+            var secondResult =
+                    workerStatus.updateTaskStates(waitingTaskInfo, new HashMap<>(), new HashMap<>());
+            assertTrue(secondResult.engineReceivedToWaitingLatenciesMs().isEmpty());
+        }
+
+        @Test
+        @DisplayName("First running observation reports engine received-to-waiting latency")
+        void taskFirstObservedRunning_shouldReportEngineReceivedToWaitingLatency() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo runningTask = new TaskInfo();
+            runningTask.setRequestId(REQUEST_ID);
+            runningTask.setRequestReceivedTimeMs(1_000L);
+            runningTask.setWaitingEnteredTimeMs(1_080L);
+            runningTask.setRunningEnteredTimeMs(1_250L);
+            Map<String, TaskInfo> runningTaskInfo = new HashMap<>();
+            runningTaskInfo.put(String.valueOf(REQUEST_ID), runningTask);
+
+            var updateResult =
+                    workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
+
+            assertEquals(1, updateResult.engineReceivedToWaitingLatenciesMs().size());
+            assertEquals(80L, updateResult.engineReceivedToWaitingLatenciesMs().getFirst());
+        }
+
+        @Test
+        @DisplayName("Running snapshot reports received-to-waiting after zero-timestamp pending confirmation")
+        void taskPendingThenRunning_shouldReportEngineReceivedToWaitingLatency() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo pendingTask = new TaskInfo();
+            pendingTask.setRequestId(REQUEST_ID);
+            Map<String, TaskInfo> pendingTaskInfo = new HashMap<>();
+            pendingTaskInfo.put(String.valueOf(REQUEST_ID), pendingTask);
+            workerStatus.updateTaskStates(pendingTaskInfo, new HashMap<>(), new HashMap<>());
+
+            TaskInfo runningTask = new TaskInfo();
+            runningTask.setRequestId(REQUEST_ID);
+            runningTask.setRequestReceivedTimeMs(1_000L);
+            runningTask.setWaitingEnteredTimeMs(1_080L);
+            runningTask.setRunningEnteredTimeMs(1_250L);
+            Map<String, TaskInfo> runningTaskInfo = new HashMap<>();
+            runningTaskInfo.put(String.valueOf(REQUEST_ID), runningTask);
+
+            var updateResult =
+                    workerStatus.updateTaskStates(new HashMap<>(), runningTaskInfo, new HashMap<>());
+
+            assertEquals(1, updateResult.engineReceivedToWaitingLatenciesMs().size());
+            assertEquals(80L, updateResult.engineReceivedToWaitingLatenciesMs().getFirst());
+        }
+
+        @Test
+        @DisplayName("Waiting snapshot reports received-to-waiting after zero-timestamp pending confirmation")
+        void taskPendingThenWaiting_shouldReportEngineReceivedToWaitingLatency() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo pendingTask = new TaskInfo();
+            pendingTask.setRequestId(REQUEST_ID);
+            Map<String, TaskInfo> pendingTaskInfo = new HashMap<>();
+            pendingTaskInfo.put(String.valueOf(REQUEST_ID), pendingTask);
+            workerStatus.updateTaskStates(pendingTaskInfo, new HashMap<>(), new HashMap<>());
+
+            TaskInfo waitingTask = new TaskInfo();
+            waitingTask.setRequestId(REQUEST_ID);
+            waitingTask.setRequestReceivedTimeMs(1_000L);
+            waitingTask.setWaitingEnteredTimeMs(1_080L);
+            Map<String, TaskInfo> waitingTaskInfo = new HashMap<>();
+            waitingTaskInfo.put(String.valueOf(REQUEST_ID), waitingTask);
+
+            var updateResult =
+                    workerStatus.updateTaskStates(waitingTaskInfo, new HashMap<>(), new HashMap<>());
+
+            assertEquals(1, updateResult.engineReceivedToWaitingLatenciesMs().size());
+            assertEquals(80L, updateResult.engineReceivedToWaitingLatenciesMs().getFirst());
+        }
+
+        @Test
+        @DisplayName("First finished observation reports engine transition latencies")
+        void taskFirstObservedFinished_shouldReportEngineTransitionLatencies() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo finishedTask = new TaskInfo();
+            finishedTask.setRequestId(REQUEST_ID);
+            finishedTask.setRequestReceivedTimeMs(1_000L);
+            finishedTask.setWaitingEnteredTimeMs(1_080L);
+            finishedTask.setRunningEnteredTimeMs(1_250L);
+            Map<String, TaskInfo> finishedTaskInfo = new HashMap<>();
+            finishedTaskInfo.put(String.valueOf(REQUEST_ID), finishedTask);
+
+            var updateResult =
+                    workerStatus.updateTaskStates(new HashMap<>(), new HashMap<>(), finishedTaskInfo);
+
+            assertEquals(1, updateResult.engineReceivedToWaitingLatenciesMs().size());
+            assertEquals(80L, updateResult.engineReceivedToWaitingLatenciesMs().getFirst());
+            assertEquals(1, updateResult.engineWaitingToRunningLatenciesMs().size());
+            assertEquals(170L, updateResult.engineWaitingToRunningLatenciesMs().getFirst());
         }
 
         @Test
