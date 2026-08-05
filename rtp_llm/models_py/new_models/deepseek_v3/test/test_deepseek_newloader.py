@@ -26,7 +26,10 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     extract_config_values,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
-from rtp_llm.models_py.new_models.deepseek_v3.model import DeepSeekV32Indexer
+from rtp_llm.models_py.new_models.deepseek_v3.model import (
+    DeepSeekV32DecoderLayer,
+    DeepSeekV32Indexer,
+)
 from rtp_llm.models_py.new_models.deepseek_v3.moe import (
     DeepSeekV32MoEBlock,
     _select_deepseek_noaux_topk,
@@ -930,8 +933,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             extract_config_values(config, _load_config(), _raw_config())
 
     def test_zero_explicit_shared_expert_width_uses_checkpoint_topology(self):
-        config = {"shared_expert_intermediate_size": 0}
-        cfg = extract_config_values(config, _load_config(), _raw_config())
+        raw = _raw_config()
+        raw["shared_expert_intermediate_size"] = 0
+        cfg = extract_config_values(_model_config(), _load_config(), raw)
         self.assertEqual(cfg["shared_expert_intermediate_size"], 8)
 
     def test_new_loader_rejects_unsupported_attention_and_ffn_tp_groups(self):
@@ -1103,6 +1107,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertIs(fake_op.calls[-1][1], kv_cache)
         self.assertIs(fake_op.calls[-1][2], attention_inputs)
 
+    @unittest.skipIf(
+        get_device_type() == DeviceType.ROCm,
+        "IndexerOp is not implemented on ROCm",
+    )
     def test_sparse_indexer_rope_cache_is_a_device_tracked_buffer(self):
         cache = torch.arange(32, dtype=torch.float32).reshape(8, 4)
         with torch.device("cpu"):
@@ -1126,6 +1134,76 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         )
         indexer.indexer_op.to(dtype=torch.float64)
         self.assertEqual(indexer.indexer_op.cos_sin_cache.dtype, torch.float64)
+        with self.assertRaisesRegex(RuntimeError, "expected torch.float32"):
+            indexer.indexer_op._validated_cos_sin_cache()
+
+    def test_linear_prefixes_preserve_layer_qualified_quantization_rules(self):
+        quant_config = QuantizationConfig(
+            "FP8_PER_BLOCK",
+            ignored_layers=[
+                "model.layers.3.self_attn.o_proj",
+                "model.layers.3.mlp.down_proj",
+            ],
+        )
+        layer = DeepSeekV32DecoderLayer(
+            hidden_size=128,
+            num_heads=2,
+            q_lora_rank=128,
+            kv_lora_rank=128,
+            nope_head_dim=64,
+            rope_head_dim=64,
+            v_head_dim=64,
+            layer_idx=3,
+            attn_tp_size=1,
+            attn_tp_rank=0,
+            ffn_tp_size=1,
+            ffn_tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            params_dtype=torch.bfloat16,
+            layernorm_eps=1e-6,
+            quant_config=quant_config,
+            model_config=_router_model_config(hidden_size=128),
+            parallelism_config=None,
+            moe_config=None,
+            is_moe_layer=False,
+            dense_intermediate_size=128,
+            prefix="layers.3",
+        )
+        self.assertEqual(layer.self_attn.q_a_proj.prefix, "layers.3.self_attn.q_a_proj")
+        self.assertEqual(layer.self_attn.o_proj.prefix, "layers.3.self_attn.o_proj")
+        self.assertEqual(layer.mlp.gate_up_proj.prefix, "layers.3.mlp.gate_up_proj")
+        self.assertEqual(layer.mlp.down_proj.prefix, "layers.3.mlp.down_proj")
+        self.assertTrue(quant_config.is_layer_ignored(layer.self_attn.o_proj.prefix))
+        self.assertTrue(quant_config.is_layer_ignored(layer.mlp.down_proj.prefix))
+
+        fake_indexer_op = torch.nn.Identity()
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_v3.model.IndexerOp",
+            return_value=fake_indexer_op,
+        ):
+            indexer = DeepSeekV32Indexer(
+                index_n_heads=1,
+                index_head_dim=2,
+                index_topk=1,
+                rope_head_dim=2,
+                hidden_size=2,
+                q_lora_rank=2,
+                layer_idx=3,
+                layernorm_eps=1e-6,
+                blocksize=64,
+                is_neox_style=False,
+                params_dtype=torch.float32,
+                prefix="layers.3.self_attn.indexer",
+            )
+        self.assertEqual(
+            indexer.wq_b.prefix,
+            "layers.3.self_attn.indexer.wq_b",
+        )
+        self.assertEqual(
+            indexer.weights_proj.prefix,
+            "layers.3.self_attn.indexer.weights_proj",
+        )
 
     def test_grouped_router_rejects_invalid_expert_partition(self):
         raw = _raw_config()
@@ -1169,7 +1247,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(derived.isdisjoint(dict(attention.named_parameters())))
         self.assertTrue(derived.isdisjoint(attention.state_dict()))
 
-    def test_no_q_lora_tp2_forward_uses_rank_local_heads(self):
+    def test_no_q_lora_tp2_forward_uses_row_parallel_reduction(self):
         attention = DeepSeekV32MlaAttention(
             hidden_size=8,
             num_heads=4,
@@ -1205,7 +1283,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         fmha_impl = ZeroFmha()
         hidden_states = torch.randn(3, 8)
         with mock.patch(
-            "rtp_llm.models_py.new_models.deepseek_v3.attention.all_reduce",
+            "rtp_llm.models_py.layers.linear.all_reduce",
             side_effect=lambda tensor, group: tensor,
         ) as reduce_mock:
             output = attention(hidden_states, fmha_impl)
@@ -1215,7 +1293,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         reduce_mock.assert_called_once()
         self.assertIs(reduce_mock.call_args.kwargs["group"], Group.TP)
 
-    def test_mla_output_projection_defers_tp_reduction_to_attention(self):
+    def test_mla_output_projection_owns_tp_reduction(self):
         attention = DeepSeekV32MlaAttention(
             hidden_size=8,
             num_heads=2,
@@ -1229,7 +1307,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             tp_rank=0,
             params_dtype=torch.float32,
         )
-        self.assertFalse(attention.o_proj.reduce_output)
+        self.assertTrue(attention.o_proj.reduce_output)
 
     def test_mla_fp8_derived_weights_support_tensor_and_channel_scales(self):
         weight = torch.tensor([[1.0, -2.0], [3.0, -4.0]], dtype=torch.float8_e4m3fn)
@@ -1861,6 +1939,14 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             DeepSeekV32MoEBlock(
                 moe_config=types.SimpleNamespace(fake_balance_expert=True),
                 **kwargs,
+            )
+
+        mismatched_shared = dict(kwargs)
+        mismatched_shared["has_shared_expert"] = True
+        with self.assertRaisesRegex(ValueError, "has_shared_expert"):
+            DeepSeekV32MoEBlock(
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                **mismatched_shared,
             )
 
         block = DeepSeekV32MoEBlock(
@@ -2625,6 +2711,20 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 )
                 self.assertIs(view["embedding"], model.embed_tokens.weight)
                 self.assertIs(view["lm_head"], model.lm_head.weight)
+
+    def test_initialize_failure_does_not_build_layout_or_release_weights(self):
+        model = _uninitialized_model(DeepSeekV32ForCausalLM)
+        model._mla_kernel_layout = None
+        model._keep_mla_checkpoint_weights = False
+        with (
+            mock.patch(
+                "rtp_llm.models_py.model_desc.module_base.GptModelBase.initialize",
+                return_value=False,
+            ),
+            mock.patch.object(model, "_ensure_mla_kernel_layout") as ensure_layout,
+        ):
+            self.assertFalse(model.initialize(None))
+        ensure_layout.assert_not_called()
 
     def test_mtp_block_rejects_inconsistent_inputs(self):
         block = MTPBlock(hidden_size=4, params_dtype=torch.float32)

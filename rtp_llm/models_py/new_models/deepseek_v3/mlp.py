@@ -68,6 +68,7 @@ class DeepSeekV32MLP(RtpModule):
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: torch.dtype = torch.bfloat16,
         reduce_output: bool = True,
+        prefix: str = "mlp",
     ):
         super().__init__()
         self.intermediate_size = intermediate_size
@@ -88,7 +89,7 @@ class DeepSeekV32MLP(RtpModule):
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=quant_config,
-            prefix="gate_up_proj",
+            prefix=f"{prefix}.gate_up_proj",
             bias=False,
             shard_names=["gate_proj", "up_proj"],
             params_dtype=params_dtype,
@@ -99,7 +100,7 @@ class DeepSeekV32MLP(RtpModule):
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=quant_config,
-            prefix="down_proj",
+            prefix=f"{prefix}.down_proj",
             bias=False,
             reduce_output=reduce_output,
             params_dtype=params_dtype,

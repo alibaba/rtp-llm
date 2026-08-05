@@ -19,7 +19,6 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.layers.linear import ColumnParallelLinear, RowParallelLinear
 from rtp_llm.models_py.layers.norm import RMSNorm
 from rtp_llm.models_py.module_base import RtpModule
@@ -45,7 +44,6 @@ class _CudaRuntimeFusedFp8Linear(nn.Module):
             "weight_scale", weight_scale.contiguous(), persistent=False
         )
         self._fp8_logical_output_size = weight.shape[0]
-        self.prefix = "fused_qkv_a_runtime"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_2d = x.view(-1, x.shape[-1]).contiguous()
@@ -268,6 +266,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: torch.dtype = torch.bfloat16,
         layernorm_eps: float = 1e-6,
+        prefix: str = "self_attn",
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -316,7 +315,7 @@ class DeepSeekV32MlaAttention(RtpModule):
             tp_size=q_a_tp_size,
             tp_rank=q_a_tp_rank,
             quant_config=a_proj_quant_config,
-            prefix="q_a_proj" if q_lora_rank > 0 else "q_proj",
+            prefix=f"{prefix}.q_a_proj" if q_lora_rank > 0 else f"{prefix}.q_proj",
             bias=False,
             params_dtype=params_dtype,
         )
@@ -328,7 +327,7 @@ class DeepSeekV32MlaAttention(RtpModule):
             tp_size=1,
             tp_rank=0,
             quant_config=a_proj_quant_config,
-            prefix="kv_a_proj_with_mqa",
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
             bias=False,
             params_dtype=params_dtype,
         )
@@ -348,7 +347,7 @@ class DeepSeekV32MlaAttention(RtpModule):
                 tp_size=tp_size,
                 tp_rank=tp_rank,
                 quant_config=quant_config,
-                prefix="q_b_proj",
+                prefix=f"{prefix}.q_b_proj",
                 bias=False,
                 params_dtype=params_dtype,
             )
@@ -374,7 +373,7 @@ class DeepSeekV32MlaAttention(RtpModule):
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=kv_b_quant_config,
-            prefix="kv_b_proj",
+            prefix=f"{prefix}.kv_b_proj",
             bias=False,
             params_dtype=params_dtype,
         )
@@ -385,9 +384,9 @@ class DeepSeekV32MlaAttention(RtpModule):
             tp_size=tp_size,
             tp_rank=tp_rank,
             quant_config=quant_config,
-            prefix="o_proj",
+            prefix=f"{prefix}.o_proj",
             bias=False,
-            reduce_output=False,
+            reduce_output=True,
             params_dtype=params_dtype,
         )
 
@@ -692,6 +691,4 @@ class DeepSeekV32MlaAttention(RtpModule):
                 device=hidden_states.device,
             )
         attn_output = self.o_proj(attn_output)
-        if self.tp_size > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
         return attn_output

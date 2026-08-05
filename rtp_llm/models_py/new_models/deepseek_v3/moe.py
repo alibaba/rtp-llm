@@ -278,6 +278,7 @@ class DeepSeekV32MoEBlock(RtpModule):
         topk_method: str = "greedy",
         has_moe_norm: bool = False,
         correction_bias: bool = False,
+        prefix: str = "mlp",
     ):
         super().__init__()
         if moe_config is None:
@@ -314,22 +315,17 @@ class DeepSeekV32MoEBlock(RtpModule):
         self.correction_bias = correction_bias
         self.group_limited = topk_method == "group_limited_greedy"
 
-        def config_value(name: str, default: Any) -> Any:
-            if isinstance(model_config, dict):
-                return model_config.get(name, default)
-            return getattr(model_config, name, default)
-
         routing_config = {
-            "hidden_size": (config_value("hidden_size", hidden_size), hidden_size),
-            "expert_num": (config_value("expert_num", num_experts), num_experts),
-            "moe_k": (config_value("moe_k", top_k), top_k),
+            "hidden_size": (model_config.hidden_size, hidden_size),
+            "expert_num": (model_config.expert_num, num_experts),
+            "moe_k": (model_config.moe_k, top_k),
             "has_moe_norm": (
-                config_value("has_moe_norm", has_moe_norm),
+                model_config.has_moe_norm,
                 has_moe_norm,
             ),
-            "moe_n_group": (config_value("moe_n_group", n_group), n_group),
+            "moe_n_group": (model_config.moe_n_group, n_group),
             "moe_topk_group": (
-                config_value("moe_topk_group", topk_group),
+                model_config.moe_topk_group,
                 topk_group,
             ),
         }
@@ -343,8 +339,9 @@ class DeepSeekV32MoEBlock(RtpModule):
                 f"DeepSeek routing config mismatch at layer {layer_idx}: "
                 + ", ".join(mismatches)
             )
+        device_type = get_device_type()
         fast_select_topk_candidate = (
-            get_device_type() == DeviceType.Cuda
+            device_type == DeviceType.Cuda
             and not correction_bias
             and scoring_func == 0
             and not self.group_limited
@@ -373,34 +370,34 @@ class DeepSeekV32MoEBlock(RtpModule):
         # reference algorithm below instead of failing during construction.
         self._use_fast_group_topk = (
             correction_bias
-            and get_device_type() == DeviceType.Cuda
+            and device_type == DeviceType.Cuda
             and not (top_k == 1 and has_moe_norm)
         )
         self.group_topk = GroupTopK() if self._use_fast_group_topk else None
         if (
-            get_device_type() == DeviceType.Cuda
-            and not self._use_fast_select_topk
+            not self._use_fast_select_topk
             and not self._use_fast_group_topk
+            and layer_idx == 0
         ):
-            if layer_idx == 0:
-                logger.info(
-                    "DeepSeek layer %d uses reference PyTorch MoE routing "
-                    "(method=%s scoring_func=%d groups=%d/%d scaling=%s "
-                    "renormalize=%s)",
-                    layer_idx,
-                    topk_method,
-                    scoring_func,
-                    topk_group,
-                    n_group,
-                    routed_scaling_factor,
-                    has_moe_norm,
-                )
+            logger.info(
+                "DeepSeek layer %d uses reference PyTorch MoE routing "
+                "(device=%s method=%s scoring_func=%d groups=%d/%d scaling=%s "
+                "renormalize=%s)",
+                layer_idx,
+                device_type,
+                topk_method,
+                scoring_func,
+                topk_group,
+                n_group,
+                routed_scaling_factor,
+                has_moe_norm,
+            )
         if fake_balance_expert:
             if parallelism_config is None:
                 raise ValueError(
                     "fake_balance_expert requires a complete parallelism_config"
                 )
-            if get_device_type() != DeviceType.Cuda:
+            if device_type != DeviceType.Cuda:
                 raise RuntimeError("fake_balance_expert is supported only on CUDA")
             self.fake_balance_expert = FakeBalanceExpert(
                 expert_num=num_experts,
@@ -411,6 +408,12 @@ class DeepSeekV32MoEBlock(RtpModule):
             )
         else:
             self.fake_balance_expert = None
+
+        if has_shared_expert != (shared_expert_intermediate_size > 0):
+            raise ValueError(
+                "has_shared_expert must match whether "
+                "shared_expert_intermediate_size is positive"
+            )
 
         # Routed experts
         self.experts = BaseMoEExperts(
@@ -428,12 +431,13 @@ class DeepSeekV32MoEBlock(RtpModule):
             moe_config=moe_config,
             quant_config=quant_config,
             layer_idx=layer_idx,
+            prefix=f"{prefix}.experts",
         )
 
         # Shared expert. HF key is `mlp.shared_experts.{gate,up,down}_proj`
         # (PLURAL). DeepSeek-V3.2 has no shared-expert gating — the routed
         # MoE output is summed directly with shared_experts(hidden_states).
-        if has_shared_expert and shared_expert_intermediate_size > 0:
+        if has_shared_expert:
             self.shared_experts = DeepSeekV32MLP(
                 hidden_size=hidden_size,
                 intermediate_size=shared_expert_intermediate_size,
@@ -442,6 +446,7 @@ class DeepSeekV32MoEBlock(RtpModule):
                 quant_config=quant_config,
                 params_dtype=params_dtype,
                 reduce_output=True,
+                prefix=f"{prefix}.shared_experts",
             )
         else:
             self.shared_experts = None

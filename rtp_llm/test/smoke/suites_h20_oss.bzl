@@ -4,8 +4,10 @@ def h20_oss_suites():
     # H20 (SM9x) — Architecture-grouped suites
     # ============================================================================
 
-    # Qwen3 dense newloader production boundary: public server startup, TP2,
-    # prefill/decode, final logits, and CUDA Graph replay.
+    # Newloader production boundaries for Qwen3 dense and DeepSeek V3.2.
+    # DeepSeek score-model coverage includes MLA, FP8 KV, TP2, DeepEP, and
+    # CUDA Graph; MTP is kept as a separate TP1 non-graph smoke to fit the
+    # H20 memory envelope while still exercising score+draft loading/decoding.
     native.test_suite(
         name = "smoke_h20_newloader",
         tests = [

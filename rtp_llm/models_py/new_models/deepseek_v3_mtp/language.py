@@ -31,6 +31,7 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     build_rope_cache,
     checkpoint_path,
     extract_config_values,
+    keep_mla_checkpoint_weights,
     nonnegative_int,
     positive_int,
     read_config_json,
@@ -160,6 +161,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             fmha_config=fmha_config,
             device_resource_config=device_resource_config,
         )
+        self._keep_mla_checkpoint_weights = keep_mla_checkpoint_weights()
         self._mla_kernel_layout = None
 
         ckpt_path = checkpoint_path(model_config)
@@ -250,7 +252,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             num_experts=cfg["num_experts"],
             top_k=cfg["top_k"],
             shared_expert_intermediate_size=cfg["shared_expert_intermediate_size"],
-            has_shared_expert=True,
+            has_shared_expert=cfg["shared_expert_intermediate_size"] > 0,
             scoring_func=cfg["scoring_func"],
             routed_scaling_factor=cfg["routed_scaling_factor"],
             n_group=cfg["n_group"],
@@ -265,6 +267,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             indexer_is_neox_style=cfg["indexer_is_neox_style"],
             cos_sin_cache=cos_sin_cache,
             blocksize=cfg["blocksize"],
+            prefix="layers.0",
         )
         self.layers.append(layer)
 

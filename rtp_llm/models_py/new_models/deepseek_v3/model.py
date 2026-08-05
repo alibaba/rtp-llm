@@ -63,6 +63,7 @@ class DeepSeekV32Indexer(RtpModule):
         params_dtype: torch.dtype = torch.bfloat16,
         cos_sin_cache: Optional[torch.Tensor] = None,
         parallelism_config: Any = None,
+        prefix: str = "self_attn.indexer",
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -86,7 +87,7 @@ class DeepSeekV32Indexer(RtpModule):
             tp_size=1,
             tp_rank=0,
             quant_config=quant_config,
-            prefix="wq_b",
+            prefix=f"{prefix}.wq_b",
             bias=False,
             params_dtype=params_dtype,
         )
@@ -99,7 +100,7 @@ class DeepSeekV32Indexer(RtpModule):
             tp_size=1,
             tp_rank=0,
             quant_config=quant_config,
-            prefix="wk",
+            prefix=f"{prefix}.wk",
             bias=False,
             params_dtype=params_dtype,
         )
@@ -120,7 +121,7 @@ class DeepSeekV32Indexer(RtpModule):
             tp_size=1,
             tp_rank=0,
             quant_config=None,
-            prefix="weights_proj",
+            prefix=f"{prefix}.weights_proj",
             bias=False,
             params_dtype=torch.float32,
         )
@@ -320,6 +321,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
         indexer_is_neox_style: bool = False,
         cos_sin_cache: Optional[torch.Tensor] = None,
         blocksize: int = 64,
+        prefix: str = "layer",
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -343,6 +345,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
             quant_config=quant_config,
             params_dtype=params_dtype,
             layernorm_eps=layernorm_eps,
+            prefix=f"{prefix}.self_attn",
         )
         self.post_attention_layernorm = RMSResNorm(
             hidden_size, eps=layernorm_eps, params_dtype=params_dtype
@@ -373,6 +376,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
                 topk_method=topk_method,
                 has_moe_norm=has_moe_norm,
                 correction_bias=correction_bias,
+                prefix=f"{prefix}.mlp",
             )
         else:
             self.mlp = DeepSeekV32MLP(
@@ -382,6 +386,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
                 tp_rank=ffn_tp_rank,
                 quant_config=quant_config,
                 params_dtype=params_dtype,
+                prefix=f"{prefix}.mlp",
             )
 
         # Register the indexer as a *child of self_attn*, not of this layer,
@@ -407,6 +412,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
                 params_dtype=params_dtype,
                 cos_sin_cache=cos_sin_cache,
                 parallelism_config=parallelism_config,
+                prefix=f"{prefix}.self_attn.indexer",
             )
         else:
             self.self_attn.indexer = None

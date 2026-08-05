@@ -38,6 +38,31 @@ inline KVCacheSpecPtr makeMhaSpec(const std::string& tag,
     return SpecBuilder::build(desc, ctx);
 }
 
+inline KVCacheSpecPtr makeMlaSpec(const std::string& tag,
+                                  size_t             tokens_per_block,
+                                  rtp_llm::DataType  dtype,
+                                  uint32_t           kv_lora_rank,
+                                  uint32_t           rope_head_dim) {
+    AttentionConfigs attn_config;
+    attn_config.kv_lora_rank  = kv_lora_rank;
+    attn_config.rope_head_dim = rope_head_dim;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
+    desc.dtype      = dtype;
+
+    SpecBuildContext ctx;
+    ctx.dtype              = dtype;
+    ctx.seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
+    return SpecBuilder::build(desc, ctx);
+}
+
 inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
                                      size_t             tokens_per_block,
                                      rtp_llm::DataType  dtype,

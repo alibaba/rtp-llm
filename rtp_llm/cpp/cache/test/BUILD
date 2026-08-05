@@ -63,6 +63,7 @@ cc_test(
     srcs = ["BlockPoolConfigHelperTest.cc"],
     copts = test_copts,
     deps = [
+        ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:block_pool_config",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

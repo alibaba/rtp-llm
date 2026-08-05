@@ -99,11 +99,25 @@ class IndexerOp(nn.Module):
         self.index_head_dim = index_head_dim
         self.index_topk = index_topk
         self.rope_head_dim = rope_head_dim
+        if cos_sin_cache is not None and cos_sin_cache.dtype != torch.float32:
+            raise TypeError(
+                "IndexerOp cos_sin_cache must use torch.float32, got "
+                f"{cos_sin_cache.dtype}"
+            )
         self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
         self.blocksize = blocksize
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+
+    def _validated_cos_sin_cache(self) -> Optional[torch.Tensor]:
+        cache = self.cos_sin_cache
+        if cache is not None and cache.dtype != torch.float32:
+            raise RuntimeError(
+                "IndexerOp cos_sin_cache dtype changed after construction: "
+                f"expected torch.float32, got {cache.dtype}"
+            )
+        return cache
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -127,13 +141,14 @@ class IndexerOp(nn.Module):
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
         # Apply RoPE (same as vllm indexer rope)
-        if self.cos_sin_cache is not None:
+        cos_sin_cache = self._validated_cos_sin_cache()
+        if cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
                 q_rope=q_pe,
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=positions,
                 interleave=not self.is_neox_style,
             )
@@ -171,13 +186,14 @@ class IndexerOp(nn.Module):
         q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
-        if self.cos_sin_cache is not None and full_rope_pos_ids is not None:
+        cos_sin_cache = self._validated_cos_sin_cache()
+        if cos_sin_cache is not None and full_rope_pos_ids is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=q_pe,
                 k=k_pe.unsqueeze(1),
                 q_rope=q_pe,
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=full_rope_pos_ids,
                 interleave=not self.is_neox_style,
             )
@@ -206,13 +222,14 @@ class IndexerOp(nn.Module):
         k_pe = k[:, : self.index_head_dim - self.rope_head_dim]
 
         # Apply RoPE (same as vllm indexer rope)
-        if self.cos_sin_cache is not None:
+        cos_sin_cache = self._validated_cos_sin_cache()
+        if cos_sin_cache is not None:
             rope._apply_rope_pos_ids_cos_sin_cache(
                 q=k_pe.unsqueeze(1),
                 k=k_pe.unsqueeze(1),
                 q_rope=k_pe.unsqueeze(1),
                 k_rope=k_pe.unsqueeze(1),
-                cos_sin_cache=self.cos_sin_cache,
+                cos_sin_cache=cos_sin_cache,
                 pos_ids=positions,
                 interleave=not self.is_neox_style,
             )
