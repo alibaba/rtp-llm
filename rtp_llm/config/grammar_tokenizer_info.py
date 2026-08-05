@@ -21,18 +21,15 @@ def _build_encoded_vocab(
         max_id = max(max_id, token_id)
 
     tokenizer_vocab_size = max(len(vocab), max_id + 1)
-    if model_vocab_size > 0 and tokenizer_vocab_size > model_vocab_size:
-        raise ValueError(
-            f"tokenizer vocab size {tokenizer_vocab_size} exceeds model vocab size "
-            f"{model_vocab_size}; resize the model embeddings or use a matching tokenizer"
-        )
     vocab_size = model_vocab_size or tokenizer_vocab_size
     if vocab_size <= 0:
         raise ValueError(f"vocab_size must be positive, got {vocab_size}")
 
     encoded_vocab: List[VocabToken] = [""] * vocab_size
     for token, token_id in vocab.items():
-        encoded_vocab[int(token_id)] = token
+        token_id = int(token_id)
+        if token_id < vocab_size:
+            encoded_vocab[token_id] = token
     return encoded_vocab, vocab_size
 
 
