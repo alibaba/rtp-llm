@@ -1,4 +1,5 @@
-# xgrammar v0.2.2; picojson in-tree, dlpack via @rtp_llm//3rdparty/dlpack.
+# Build overlay for the xgrammar source pinned in repositories.bzl.
+# picojson is in-tree; dlpack is provided by @rtp_llm//3rdparty/dlpack.
 
 # Public xgrammar/*.h headers; dlpack flows transitively via xgrammar/matcher.h.
 cc_library(
@@ -30,16 +31,12 @@ cc_library(
 
 cc_library(
     name = "xgrammar",
-    srcs = glob(
-        [
-            "cpp/*.cc",
-            "cpp/support/*.cc",
-        ],
-        exclude = [
-            "cpp/nanobind/**",
-            # cpp/testing.cc must stay in: defines xgrammar::PrintTokenByIds used by matcher/compiled_grammar operator<<.
-        ],
-    ),
+    # cpp/testing.cc must stay in: it defines xgrammar::PrintTokenByIds, used by
+    # matcher/compiled_grammar operator<<.
+    srcs = glob([
+        "cpp/*.cc",
+        "cpp/support/*.cc",
+    ]),
     defines = [
         "XGRAMMAR_ENABLE_CPPTRACE=0",
     ],

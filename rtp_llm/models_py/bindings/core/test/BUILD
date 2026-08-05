@@ -17,6 +17,7 @@ exec_ops_test_deps = [
 ] + torch_deps()
 
 cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
+packed_mask_logits_test_filter = "ExecOpsTest.testRuntimeApplyPackedMaskLogits*"
 
 cc_test(
     name = "exec_ops_test",
@@ -33,6 +34,17 @@ cc_test(
     name = "cache_store_op_test",
     srcs = ["ExecOpsTest.cc"],
     args = ["--gtest_filter=" + cache_store_test_filter],
+    deps = exec_ops_test_deps,
+    copts = test_copts,
+    exec_properties = {"gpu": "H20"},
+)
+
+# Run the packed-mask boundary cases against the production CUDA kernel in
+# default wildcard test gates while keeping the broader ExecOps suite manual.
+cc_test(
+    name = "packed_mask_logits_cuda_test",
+    srcs = ["ExecOpsTest.cc"],
+    args = ["--gtest_filter=" + packed_mask_logits_test_filter],
     deps = exec_ops_test_deps,
     copts = test_copts,
     exec_properties = {"gpu": "H20"},

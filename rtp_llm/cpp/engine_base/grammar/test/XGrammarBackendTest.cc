@@ -142,7 +142,7 @@ TEST(XGrammarBackendTest, CreateMatcherFromStructuralTagWithBoundedAnyTextTokenE
     ASSERT_TRUE(result.ok()) << result.status().ToString();
 }
 
-TEST(XGrammarBackendTest, CompileStructuralTagRejectsMultipleBoundedRegions) {
+TEST(XGrammarBackendTest, CompileStructuralTagSupportsMultipleBoundedRegions) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
     GrammarKeyCpp key{"structural_tag",
@@ -151,9 +151,7 @@ TEST(XGrammarBackendTest, CompileStructuralTagRejectsMultipleBoundedRegions) {
                       R"({"type":"any_text","max_tokens":1}]}})"};
 
     auto result = backend->createMatcherFromKey(key);
-    EXPECT_FALSE(result.ok());
-    EXPECT_EQ(result.status().code(), absl::StatusCode::kInvalidArgument);
-    EXPECT_FALSE(result.status().message().empty());
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
 }
 
 TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {

@@ -1,7 +1,7 @@
 import pickle
 import unittest
 
-from libth_transformer_config import GrammarConfig
+from rtp_llm.ops import GrammarConfig
 
 
 def _new_grammar_config():
