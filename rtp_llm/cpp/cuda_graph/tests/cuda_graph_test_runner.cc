@@ -21,7 +21,8 @@ public:
                       int64_t                  kernel_tokens_per_block,
                       std::vector<int>         prefill_capture_seq_lens,
                       int64_t                  hidden_size,
-                      std::vector<std::string> group_tags) {
+                      std::vector<std::string> group_tags,
+                      int64_t                  num_tokens_per_bs) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = true;
@@ -29,7 +30,7 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
+        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs > 0 ? num_tokens_per_bs : max_seq_len);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
@@ -84,6 +85,18 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
 
+    torch::Tensor getCurrentPaddingOffsetForTest() const {
+        if (runner_ == nullptr) {
+            throw std::runtime_error("CudaGraphRunner is not initialized");
+        }
+        const int graph_key =
+            runner_->is_prefill_cuda_graph_mode_ ? state_.current_real_graph_seq_len : state_.current_real_graph_bs;
+        const auto graph_it = runner_->graph_instances_.find(graph_key);
+        RTP_LLM_CHECK_WITH_INFO(
+            graph_it != runner_->graph_instances_.end(), "CUDA graph key %d was not captured", graph_key);
+        return graph_it->second.mem_hold_.py_model_inputs_.attention_inputs.padding_offset.clone();
+    }
+
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -115,7 +128,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags") = std::vector<std::string>{})
+             py::arg("group_tags")        = std::vector<std::string>{},
+             py::arg("num_tokens_per_bs") = 0)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -129,5 +143,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("num_tokens_per_bs") = 1)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("getCurrentPaddingOffsetForTest", &CudaGraphTestRunner::getCurrentPaddingOffsetForTest);
 }

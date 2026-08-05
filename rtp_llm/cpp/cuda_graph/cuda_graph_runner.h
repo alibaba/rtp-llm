@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <pybind11/embed.h>
 #include <pybind11/pybind11.h>
@@ -16,6 +17,8 @@
 namespace py = pybind11;
 
 namespace rtp_llm {
+
+class CudaGraphTestRunner;
 
 class CudaGraphRunner: public GraphBase {
 public:
@@ -88,6 +91,8 @@ public:
     static CudaGraphRunner* createForDecode(py::object py_instance, GraphParams params);
 
 private:
+    friend class CudaGraphTestRunner;
+
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic
@@ -101,6 +106,7 @@ private:
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
+    void recordFusedPrefillCaptureLengths(int graph_key, const PyModelInputs& inputs);
     // Common memory hold creation logic
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();
@@ -145,19 +151,23 @@ private:
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
-    CaptureMemoryHold                      capture_mem_hold_;
-    torch::Tensor                          position_encoding_;
-    torch::Tensor                          token_type_embedding_;
-    float                                  input_embedding_scalar_;
-    c10::ScalarType                        model_data_type_;
-    at::TensorOptions                      options_cuda_int32_;
-    at::TensorOptions                      options_cpu_int32_;
-    at::TensorOptions                      options_cuda_float_;
-    cuda_graph::GraphPoolHandle            shared_graph_pool_{};
+    // Immutable capture-time length bounds. GraphInstance input tensors are
+    // replay buffers and are overwritten in place after each canRun check.
+    std::unordered_map<int, std::pair<torch::Tensor, torch::Tensor>> fused_prefill_capture_lengths_;
+    CaptureMemoryHold                                                capture_mem_hold_;
+    torch::Tensor                                                    position_encoding_;
+    torch::Tensor                                                    token_type_embedding_;
+    float                                                            input_embedding_scalar_;
+    c10::ScalarType                                                  model_data_type_;
+    at::TensorOptions                                                options_cuda_int32_;
+    at::TensorOptions                                                options_cpu_int32_;
+    at::TensorOptions                                                options_cuda_float_;
+    cuda_graph::GraphPoolHandle                                      shared_graph_pool_{};
 
     std::vector<std::string>      kv_cache_group_tags_;
     int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
     mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
+    mutable std::atomic<uint64_t> fused_prefill_replay_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

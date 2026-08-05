@@ -15,6 +15,7 @@ from libth_transformer_config import (
     check_rope_cache,
     get_rope_cache_once,
 )
+from rtp_llm.utils.attention_errors import InvalidFusedPrefillInputError
 
 
 @dataclass
@@ -40,6 +41,12 @@ class FusedRopeKVCachePrefillOpBase:
         self.attn_configs = attn_configs
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
+        if attn_inputs.input_lengths.numel() == 0:
+            raise InvalidFusedPrefillInputError(
+                "FusedRopeKVCachePrefillOpBase.prepare requires non-empty "
+                "input_lengths for a prefill batch "
+                f"(is_prefill={attn_inputs.is_prefill}, batch_size=0)"
+            )
         if (
             attn_inputs.kv_cache_kernel_block_id is not None
             and attn_inputs.kv_cache_kernel_block_id.numel() > 0
@@ -49,11 +56,20 @@ class FusedRopeKVCachePrefillOpBase:
             )
         else:
             kv_cache_offset = None
-        kv_cache_offset_h = None # not used
+        kv_cache_offset_h = None  # not used
 
         position_ids = attn_inputs.combo_position_ids
         if attn_inputs.context_parallel_info is not None:
             position_ids = attn_inputs.context_parallel_info.prefill_shuffle_indices
+
+        # Encoder-only requests legitimately carry no prefix vector, but an
+        # empty input_lengths means a zero-sized prefill batch and must not be
+        # silently turned into max_seq_len=0.
+        max_prefix_length = (
+            attn_inputs.prefix_lengths.max().item()
+            if attn_inputs.prefix_lengths.numel() > 0
+            else 0
+        )
 
         return FusedRopeAttnParams(
             kv_cache_offset,
@@ -66,7 +82,7 @@ class FusedRopeKVCachePrefillOpBase:
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths.max().item(),
-            attn_inputs.prefix_lengths.max().item(),
+            max_prefix_length,
             attn_inputs.context_total_kv_length,
             False,
             get_scalar_type(attn_inputs.dtype),
@@ -188,9 +204,16 @@ class FusedRopeKVCacheDecodeOp:
             num_pages = kv_cache.kv_cache_base.shape[0]
             # convert_offset_to_block_array encodes K offset = page*2, V offset = page*2+1,
             # so max offset is 2*num_pages-1 and scale buffer needs 2*num_pages blocks.
-            needed = 2 * num_pages * self.attn_configs.kernel_tokens_per_block * self.attn_configs.kv_head_num
+            needed = (
+                2
+                * num_pages
+                * self.attn_configs.kernel_tokens_per_block
+                * self.attn_configs.kv_head_num
+            )
             if self._dummy_scale is None or self._dummy_scale.numel() < needed:
-                self._dummy_scale = torch.ones(needed, dtype=torch.float32, device=kv_cache.kv_cache_base.device)
+                self._dummy_scale = torch.ones(
+                    needed, dtype=torch.float32, device=kv_cache.kv_cache_base.device
+                )
             return self._dummy_scale
         return None
 
@@ -203,7 +226,9 @@ class FusedRopeKVCacheDecodeOp:
         rope_config = self.attn_configs.rope_config
         rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
         assert params.kv_cache_offset is not None
-        assert params.sequence_lengths.is_pinned(), "sequence_lengths is not pinned memory"
+        assert (
+            params.sequence_lengths.is_pinned()
+        ), "sequence_lengths is not pinned memory"
         return decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
@@ -246,7 +271,7 @@ class FusedRopeKVCacheDecodeOp:
         kv_cache_offset = convert_offset_to_block_array(
             attn_inputs.kv_cache_kernel_block_id_device
         )
-        kv_cache_offset_h = None # not used
+        kv_cache_offset_h = None  # not used
         return FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,

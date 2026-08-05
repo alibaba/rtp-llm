@@ -9,7 +9,12 @@ from rtp_llm.ops import AttentionConfigs
 
 
 class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
-    """Rotary positional embedding for Multi-Head Attention (MHA)."""
+    """Split RoPE reference used by tests and non-fused compatibility paths.
+
+    PyFlashinfer production prefill uses FusedRopeKVCachePrefillOpBase so RoPE
+    and cache writes share one launch. Keep this implementation independent as
+    a readable oracle rather than wiring it back into that production path.
+    """
 
     def __init__(
         self,

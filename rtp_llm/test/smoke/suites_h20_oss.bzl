@@ -220,6 +220,32 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="dense_fp8kv_pyflashinfer_prefill",
+                task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_flashinfer_prefill.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flashinfer_native 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0 --frontend_server_count 1",
+                gpu_type=["H20"],
+            ),
+            # Both reuse goldens below diverge from the same prompt without reuse
+            # at the first token: prefix=0 attends over BF16 activation K/V via
+            # the ragged impl, while a reused prefix routes to the paged impl and
+            # reads all K/V back from the FP8 cache. That divergence is drift of
+            # the FP8 read-back path, not a fused cache-write defect.
+            # The cudagraph case below exercises decode graph reuse; fused
+            # prefill replay bounds/fallback are covered by the real-runner
+            # cuda_graph_tagged_cache_test, not by this end-to-end smoke.
+            smoke_test(
+                name="dense_fp8kv_flashinfer_cudagraph_reuse",
+                task_info="data/model/qwen25/q_r_fp8_flashinfer_device_reuse.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 8 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1 --disable_flashinfer_native 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0 --frontend_server_count 1 --reuse_cache 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8kv_flashinfer_prefill_memory_reuse",
+                task_info="data/model/qwen25/q_r_fp8_flashinfer_memory_reuse.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 8 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flashinfer_native 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0 --frontend_server_count 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="dense_fp8_prequant_tp2",
                 task_info="data/model/qwen3/q_r_block_fp8.json",
                 smoke_args="--disable_flashinfer_native 1 --act_type BF16 --reserver_runtime_mem_mb 8192 --tp_size 2 --warm_up 0",

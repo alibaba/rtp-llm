@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     BaseAttentionTest,
     compare_tensors,
 )
-from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
+from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -29,37 +29,6 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
 
         # Call parent setUp for common initialization
         super().setUp()
-
-    def _create_kv_cache(
-        self,
-        total_blocks: int,
-        seq_size_per_block: int,
-        num_kv_heads: int,
-        head_dim: int,
-        dtype: torch.dtype = torch.float16,
-    ):
-        """Helper to create empty KV cache for prefill"""
-        kv_cache = LayerKVCache()
-
-        # Create combined KV cache with shape [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
-        # Initialize with zeros since we'll write to it during prefill
-        kv_cache_combined = torch.zeros(
-            total_blocks,
-            2,  # K and V
-            num_kv_heads,
-            seq_size_per_block,
-            head_dim,
-            dtype=dtype,
-            device=self.device,
-        )
-
-        kv_cache.kv_cache_base = kv_cache_combined
-
-        # Extract separate K and V for reference computation
-        k_cache = kv_cache_combined[:, 0, :, :, :]
-        v_cache = kv_cache_combined[:, 1, :, :, :]
-
-        return kv_cache, k_cache, v_cache
 
     def _test_prefill_correctness(
         self,

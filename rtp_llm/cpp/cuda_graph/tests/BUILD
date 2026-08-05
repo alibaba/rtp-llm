@@ -13,6 +13,18 @@ cc_test(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "fused_prefill_replay_validation_test",
+    srcs = ["fused_prefill_replay_validation_test.cc"],
+    copts = copts(),
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:fused_prefill_replay_validation",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

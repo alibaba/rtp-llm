@@ -10,6 +10,19 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+py_test(
+    name = "test_attention_non_cuda_import",
+    srcs = ["test_attention_non_cuda_import.py"],
+    deps = py_test_deps,
+    # py_standalone_testlib loads CUDA-linked shared extensions before the test
+    # can force DeviceType.Cpu. Run on H20, then reject all CUDA attention and
+    # rtp_kernel imports inside the subprocess to exercise the non-CUDA branch.
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
 # Library for attention reference implementation
 py_library(
     name = "atten_test_util",
@@ -252,7 +265,31 @@ py_test(
     srcs = [
         "test_flashinfer_prefill/test_mha_rotary_emb.py",
     ],
-    deps = py_test_deps,
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+# Production-wrapper coverage for fused PyFlashinfer prefill preprocessing.
+# H20 only: this PR fixes and validates the H20 FP8 KV-cache prefill path.
+# SM120 backend coverage is independent and intentionally unchanged here.
+py_test(
+    name = "test_py_flashinfer_fused_prefill",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_fused_prefill.py",
+        "base_attention_test.py",
+    ],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
     tags = ["H20"],
     exec_properties = {
         'gpu': 'H20',

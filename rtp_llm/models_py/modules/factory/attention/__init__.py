@@ -123,18 +123,22 @@ else:
         except (ImportError, AttributeError, ValueError):
             pass  # Skip SparseMlaImpl if CUDA < 12.9 or flash_mla not available
 
-    from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
-        PyFlashinferDecodeImpl,
-        PyFlashinferPagedPrefillImpl,
-        PyFlashinferPrefillImpl,
-    )
+    # PPU uses the FlashInfer-compatible implementations below as its MHA
+    # backends. Keep them available on PPU while avoiding CUDA-only imports on
+    # CPU and the other non-CUDA device types.
+    if device_type in (DeviceType.Cuda, DeviceType.Ppu):
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+            PyFlashinferDecodeImpl,
+            PyFlashinferPagedPrefillImpl,
+            PyFlashinferPrefillImpl,
+        )
 
-    PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
-    PREFILL_MHA_IMPS.append(PyFlashinferPagedPrefillImpl)
-    DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
+        PREFILL_MHA_IMPS.append(PyFlashinferPrefillImpl)
+        PREFILL_MHA_IMPS.append(PyFlashinferPagedPrefillImpl)
+        DECODE_MHA_IMPS.append(PyFlashinferDecodeImpl)
 
-    from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
-        CPFlashInferImpl,
-    )
+        from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer import (
+            CPFlashInferImpl,
+        )
 
-    PREFILL_MHA_IMPS.append(CPFlashInferImpl)
+        PREFILL_MHA_IMPS.append(CPFlashInferImpl)

@@ -78,6 +78,7 @@ void CudaGraphRunner::capturePrefill() {
         }
         // Prefill reshapes common metadata after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
+        recordFusedPrefillCaptureLengths(seq_len, inputs);
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);

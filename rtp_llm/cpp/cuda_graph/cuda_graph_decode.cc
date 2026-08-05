@@ -61,6 +61,7 @@ void CudaGraphRunner::captureDecode() {
         inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
         // capture-specific metadata above was written after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
+        recordFusedPrefillCaptureLengths(bs, inputs);
 
         graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
         graph_instances_[bs].mem_hold_.attn_pyobj_ =

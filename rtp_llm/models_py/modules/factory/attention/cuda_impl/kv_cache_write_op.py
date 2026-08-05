@@ -9,7 +9,12 @@ from rtp_llm.ops.compute_ops import LayerKVCache
 
 
 class KVCacheWriteOp:
-    """Operator for writing key-value pairs to paged KV cache."""
+    """Split cache-write reference for tests and compatibility paths.
+
+    PyFlashinfer production prefill writes through the fused RoPE/KV-cache op.
+    This independent FlashInfer implementation remains useful as an oracle and
+    must not become part of the fused path it validates.
+    """
 
     def __init__(
         self,

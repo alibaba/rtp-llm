@@ -14,6 +14,7 @@ from rtp_llm.ops import (
     RopeStyle,
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.utils.attention_errors import InvalidFusedPrefillInputError
 from rtp_llm.utils.model_weight import W
 
 AttentionImpl = Union[FMHAImplBase, MlaImplBase]
@@ -180,6 +181,11 @@ def get_fmha_impl(
             if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
 
+        except InvalidFusedPrefillInputError:
+            # Empty/malformed prefill metadata is a request invariant failure,
+            # not an implementation-selection signal. Do not silently route it
+            # to a later backend and obscure the original cause.
+            raise
         except Exception as e:
             # If instantiation fails, continue to next impl
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")

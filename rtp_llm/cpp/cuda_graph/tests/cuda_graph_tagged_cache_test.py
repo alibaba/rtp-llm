@@ -49,6 +49,22 @@ class TaggedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class PaddingOffsetModel:
+    """Graph-safe model whose output proves the captured graph consumed padding."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        attention_inputs = inputs.attention_inputs
+        if isinstance(attention_inputs, dict):
+            attention_inputs = attention_inputs["full"]
+        offsets = attention_inputs.padding_offset[: inputs.input_hiddens.shape[0]].to(
+            device=inputs.input_hiddens.device, non_blocking=True
+        )
+        return PyModelOutputs(inputs.input_hiddens + offsets.unsqueeze(-1))
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -108,9 +124,7 @@ def _build_decode_inputs(
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
     attention_inputs.is_target_verify = False
-    attention_inputs.prefix_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.input_lengths = torch.ones(
         batch_size, dtype=torch.int32
     ).pin_memory()
@@ -171,37 +185,40 @@ def _build_target_verify_inputs(
     tags: list[str],
     values: dict[str, int],
     batch_size: int = 1,
-    query_len: int = 5,
+    query_len: int | list[int] = 5,
     prefix_len: int = 11,
     is_prefill: bool = True,
 ) -> PyModelInputs:
-    token_count = batch_size * query_len
+    query_lengths = (
+        [query_len] * batch_size if isinstance(query_len, int) else list(query_len)
+    )
+    if len(query_lengths) != batch_size:
+        raise ValueError("query_len must contain one entry per batch item")
+    token_count = sum(query_lengths)
 
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = is_prefill
     attention_inputs.is_target_verify = True
-    attention_inputs.input_lengths = torch.full(
-        (batch_size,), query_len, dtype=torch.int32
+    attention_inputs.input_lengths = torch.tensor(
+        query_lengths, dtype=torch.int32
     ).pin_memory()
     attention_inputs.prefix_lengths = torch.full(
         (batch_size,), prefix_len, dtype=torch.int32
     ).pin_memory()
-    attention_inputs.sequence_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.sequence_lengths_plus_1_device = (
         attention_inputs.prefix_lengths.cuda() + 1
     )
 
-    cu_q = torch.arange(
-        0, token_count + 1, query_len, dtype=torch.int32
+    cu_q = torch.tensor(
+        [0, *torch.tensor(query_lengths, dtype=torch.int32).cumsum(0).tolist()],
+        dtype=torch.int32,
     ).pin_memory()
     attention_inputs.cu_seqlens = cu_q
     attention_inputs.cu_seqlens_device = cu_q.cuda()
-    attention_inputs.cu_kv_seqlens_device = torch.arange(
-        0,
-        batch_size * (query_len + prefix_len) + 1,
-        query_len + prefix_len,
+    kv_lengths = [length + prefix_len for length in query_lengths]
+    attention_inputs.cu_kv_seqlens_device = torch.tensor(
+        [0, *torch.tensor(kv_lengths, dtype=torch.int32).cumsum(0).tolist()],
         dtype=torch.int32,
         device="cuda",
     )
@@ -212,13 +229,57 @@ def _build_target_verify_inputs(
         attention_inputs.decode_cu_seqlens.cuda()
     )
 
-    attention_inputs.context_total_kv_length = batch_size * (
-        query_len + prefix_len
+    attention_inputs.context_total_kv_length = sum(kv_lengths)
+
+    block_count = (max(kv_lengths) + TOKENS_PER_BLOCK - 1) // TOKENS_PER_BLOCK
+    return _build_common_inputs(
+        attention_inputs,
+        tags,
+        values,
+        batch_size=batch_size,
+        token_count=token_count,
+        block_count=block_count,
     )
 
-    block_count = (
-        prefix_len + query_len + TOKENS_PER_BLOCK - 1
-    ) // TOKENS_PER_BLOCK
+
+def _build_mtp_prefill_inputs(
+    tags: list[str],
+    values: dict[str, int],
+    input_lengths: list[int],
+    prefix_lengths: list[int],
+) -> PyModelInputs:
+    batch_size = len(input_lengths)
+    token_count = sum(input_lengths)
+    kv_lengths = [
+        q_len + prefix_len for q_len, prefix_len in zip(input_lengths, prefix_lengths)
+    ]
+
+    attention_inputs = PyAttentionInputs()
+    attention_inputs.is_prefill = True
+    attention_inputs.is_target_verify = False
+    attention_inputs.input_lengths = torch.tensor(
+        input_lengths, dtype=torch.int32
+    ).pin_memory()
+    attention_inputs.prefix_lengths = torch.tensor(
+        prefix_lengths, dtype=torch.int32
+    ).pin_memory()
+    attention_inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
+
+    cu_q = torch.tensor(
+        [0, *torch.tensor(input_lengths, dtype=torch.int32).cumsum(0).tolist()],
+        dtype=torch.int32,
+    ).pin_memory()
+    attention_inputs.cu_seqlens = cu_q
+    attention_inputs.cu_seqlens_device = cu_q.cuda()
+    attention_inputs.cu_kv_seqlens_device = torch.tensor(
+        [0, *torch.tensor(kv_lengths, dtype=torch.int32).cumsum(0).tolist()],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    attention_inputs.context_total_kv_length = sum(kv_lengths)
+
+    max_kv_length = max(kv_lengths)
+    block_count = (max_kv_length + TOKENS_PER_BLOCK - 1) // TOKENS_PER_BLOCK
     return _build_common_inputs(
         attention_inputs,
         tags,
@@ -327,19 +388,20 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             [2],
             GROUP_TAGS,
             True,
+            2,
         )
 
         valid = _build_target_verify_inputs(
             GROUP_TAGS,
             {"full": 2, "aux": 1},
             batch_size=2,
-            query_len=1,
+            query_len=2,
             prefix_len=1,
         )
         self.assertTrue(runner.canRun(valid))
 
         missing = _build_target_verify_inputs(
-            ["full"], {"full": 2}, batch_size=2, query_len=1, prefix_len=1
+            ["full"], {"full": 2}, batch_size=2, query_len=2, prefix_len=1
         )
         self.assertFalse(runner.canRun(missing))
 
@@ -347,7 +409,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             ["full", "wrong"],
             {"full": 2, "wrong": 1},
             batch_size=2,
-            query_len=1,
+            query_len=2,
             prefix_len=1,
         )
         self.assertFalse(runner.canRun(wrong))
@@ -356,7 +418,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             GROUP_TAGS,
             {"full": 2, "aux": 1},
             batch_size=2,
-            query_len=1,
+            query_len=2,
             prefix_len=1,
             is_prefill=False,
         )
@@ -408,6 +470,162 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     output.hidden_states,
                     expected_signature.unsqueeze(0).expand_as(output.hidden_states),
                 )
+
+    def test_target_verify_rebuilds_padding_offset_from_capture_step(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            PaddingOffsetModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+            True,
+            5,
+        )
+        inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            batch_size=2,
+            query_len=3,
+            prefix_len=11,
+        )
+
+        self.assertTrue(runner.canRun(inputs))
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        expected_active = torch.tensor(
+            [0, 0, 0, 2, 2, 2], dtype=output.hidden_states.dtype, device="cuda"
+        )
+        torch.testing.assert_close(
+            output.hidden_states,
+            expected_active.unsqueeze(-1).expand_as(output.hidden_states),
+        )
+        torch.testing.assert_close(
+            runner.getCurrentPaddingOffsetForTest(),
+            torch.tensor([0, 0, 0, 2, 2, 2, 0, 0, 0, 0], dtype=torch.int32),
+        )
+
+        long_inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            batch_size=2,
+            query_len=[1, 5],
+            prefix_len=11,
+        )
+        self.assertTrue(runner.canRun(long_inputs))
+        runner.forward(long_inputs)
+        torch.testing.assert_close(
+            runner.getCurrentPaddingOffsetForTest(),
+            torch.tensor([0, 4, 4, 4, 4, 4, 0, 0, 0, 0], dtype=torch.int32),
+        )
+
+        short_inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            batch_size=2,
+            query_len=[1, 1],
+            prefix_len=11,
+        )
+        self.assertTrue(runner.canRun(short_inputs))
+        short_output = runner.forward(short_inputs)
+        torch.cuda.synchronize()
+        expected_short = torch.tensor(
+            [0, 4], dtype=short_output.hidden_states.dtype, device="cuda"
+        )
+        torch.testing.assert_close(
+            short_output.hidden_states,
+            expected_short.unsqueeze(-1).expand_as(short_output.hidden_states),
+        )
+        torch.testing.assert_close(
+            runner.getCurrentPaddingOffsetForTest(),
+            torch.tensor([0, 4, 0, 0, 0, 0, 0, 0, 0, 0], dtype=torch.int32),
+        )
+
+        longer_than_capture = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            batch_size=2,
+            query_len=6,
+            prefix_len=11,
+        )
+        self.assertFalse(runner.canRun(longer_than_capture))
+
+        changed_prefix_presence = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            batch_size=2,
+            query_len=3,
+            prefix_len=0,
+        )
+        self.assertFalse(runner.canRun(changed_prefix_presence))
+
+    def test_mtp_prefill_rebuilds_padding_offset_from_capture_step(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            PaddingOffsetModel(),
+            2,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [5, 10],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            5,
+        )
+        inputs = _build_mtp_prefill_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            input_lengths=[3, 2],
+            prefix_lengths=[11, 11],
+        )
+
+        self.assertTrue(runner.canRun(inputs))
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        expected = torch.tensor(
+            [0, 0, 0, 2, 2], dtype=output.hidden_states.dtype, device="cuda"
+        )
+        torch.testing.assert_close(
+            output.hidden_states, expected.unsqueeze(-1).expand_as(output.hidden_states)
+        )
+        torch.testing.assert_close(
+            runner.getCurrentPaddingOffsetForTest(),
+            torch.tensor([0, 0, 0, 2, 2], dtype=torch.int32),
+        )
+
+        no_prefix = _build_mtp_prefill_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            input_lengths=[3, 2],
+            prefix_lengths=[0, 0],
+        )
+        self.assertFalse(runner.canRun(no_prefix))
+
+    def test_embedding_short_replay_clears_full_padding_buffer(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            PaddingOffsetModel(),
+            1,
+            8,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [8],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+        )
+        inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 2, "aux": 1}, seq_len=5)
+        self.assertTrue(runner.canRun(inputs))
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            output.hidden_states, torch.zeros_like(output.hidden_states)
+        )
+        torch.testing.assert_close(
+            runner.getCurrentPaddingOffsetForTest(),
+            torch.zeros(8, dtype=torch.int32),
+        )
 
 
 if __name__ == "__main__":

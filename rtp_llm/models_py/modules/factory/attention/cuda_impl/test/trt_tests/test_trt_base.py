@@ -1,7 +1,7 @@
 """Base class for TRT attention tests with shared utilities"""
 
 import math
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -153,9 +153,50 @@ class TRTLLMFMHAv2TestBase(BaseAttentionTest):
         batch_size: int,
         input_lengths: List[int],
         seq_size_per_block: int,
-        prefix_lengths: List[int] = None,
+        dtype: torch.dtype = torch.float16,
+        with_kv_cache_block_ids: bool = True,
+        prefix_lengths: Optional[List[int]] = None,
+        empty_prefix: bool = False,
+        block_ids: Optional[torch.Tensor] = None,
+        is_cuda_graph: bool = False,
     ) -> PyAttentionInputs:
-        """Helper to create PyAttentionInputs for prefill (non-padded mode)"""
+        """Route standard fixtures to the shared contract and TRT legacy cases to their named builder."""
+        if (
+            dtype != torch.float16
+            or not with_kv_cache_block_ids
+            or empty_prefix
+            or block_ids is not None
+            or is_cuda_graph
+        ):
+            return super()._create_prefill_attention_inputs(
+                batch_size,
+                input_lengths,
+                seq_size_per_block,
+                dtype=dtype,
+                with_kv_cache_block_ids=with_kv_cache_block_ids,
+                prefix_lengths=prefix_lengths,
+                empty_prefix=empty_prefix,
+                block_ids=block_ids,
+                is_cuda_graph=is_cuda_graph,
+            )
+        return self._create_trt_prefill_attention_inputs(
+            batch_size, input_lengths, seq_size_per_block, prefix_lengths
+        )
+
+    def _create_trt_prefill_attention_inputs(
+        self,
+        batch_size: int,
+        input_lengths: List[int],
+        seq_size_per_block: int,
+        prefix_lengths: Optional[List[int]],
+    ) -> PyAttentionInputs:
+        """Build the TRT test's non-identity physical-page fixture.
+
+        TRT reference tests intentionally write all prefix+new KV and reverse
+        physical page IDs to prove kernels consume block tables. That semantic
+        fixture differs from BaseAttentionTest's production-shaped builder, so
+        callers select it by name instead of relying on an implicit override.
+        """
         print(
             f"\n[_create_prefill_attention_inputs] batch_size={batch_size}, input_lengths={input_lengths}, "
             f"seq_size_per_block={seq_size_per_block}, prefix_lengths={prefix_lengths}",

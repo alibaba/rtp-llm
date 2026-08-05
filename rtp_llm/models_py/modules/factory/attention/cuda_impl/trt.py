@@ -334,6 +334,8 @@ class FlashInferTRTLLMFMHAv2PagedPrefillImpl(FMHAImplBase):
         self.attn_inputs = attn_inputs
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self._captured_rope_max_seq_len = self.rope_params.max_seq_len
+        self._captured_rope_max_prefix_length = self.rope_params.max_prefix_length
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
@@ -355,14 +357,14 @@ class FlashInferTRTLLMFMHAv2PagedPrefillImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        common.refresh_fused_rope_params(
+            self.rope_params,
+            self.rope_kvcache_impl,
+            attn_inputs,
+            captured_max_seq_len=self._captured_rope_max_seq_len,
+            captured_max_prefix_length=self._captured_rope_max_prefix_length,
+        )
         self.fmha_impl.prepare_cuda_graph(self.fmha_params)
-        new_kv_cache_offset = self.rope_kvcache_impl.prepare(
-            attn_inputs
-        ).kv_cache_offset
-        if new_kv_cache_offset is not None:
-            common.copy_kv_cache_offset(
-                self.rope_params.kv_cache_offset, new_kv_cache_offset
-            )
 
 
 class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
@@ -380,6 +382,8 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
         self.attn_inputs = attn_inputs
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self._captured_rope_max_seq_len = self.rope_params.max_seq_len
+        self._captured_rope_max_prefix_length = self.rope_params.max_prefix_length
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
     @classmethod
@@ -405,14 +409,11 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
-        self.fmha_impl.prepare_cuda_graph(self.fmha_params)
-        new_kv_cache_offset = self.rope_kvcache_impl.prepare(
-            attn_inputs
-        ).kv_cache_offset
-        assert (self.rope_params.kv_cache_offset is None) == (
-            new_kv_cache_offset is None
+        common.refresh_fused_rope_params(
+            self.rope_params,
+            self.rope_kvcache_impl,
+            attn_inputs,
+            captured_max_seq_len=self._captured_rope_max_seq_len,
+            captured_max_prefix_length=self._captured_rope_max_prefix_length,
         )
-        if new_kv_cache_offset is not None:
-            common.copy_kv_cache_offset(
-                self.rope_params.kv_cache_offset, new_kv_cache_offset
-            )
+        self.fmha_impl.prepare_cuda_graph(self.fmha_params)

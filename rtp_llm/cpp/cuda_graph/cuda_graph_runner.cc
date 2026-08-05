@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
+#include "rtp_llm/cpp/cuda_graph/fused_prefill_replay_validation.h"
 
 #include <algorithm>
 #include <cstring>
@@ -287,28 +288,66 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                 .fill_(0);
         }
     } else {
-        if (isEmbeddingStylePrefillCudaGraph()) {
-            auto* input_lengths      = inputs.attention_inputs.input_lengths.data_ptr<int32_t>();
-            auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
-            int   cumulative_padding = 0;
-            int   token_idx          = 0;
-            for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
-                const int input_length = input_lengths[batch_idx];
-                std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
-                token_idx += input_length;
-                cumulative_padding += state.current_real_graph_seq_len - input_length;
-            }
-        } else {
-            optimizedCopyAsync(inputs.attention_inputs.padding_offset,
-                               py_model_inputs_.attention_inputs.padding_offset,
-                               state.current_seq_len * sizeof(int));
-        }
-
         if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
             auto* batch_size_ptr = py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params
                                        ->cuda_graph_prefill_batch_size.data_ptr<int>();
             *batch_size_ptr = state.current_batch_size;
         }
+    }
+
+    if (inputs.attention_inputs.is_prefill) {
+        // padding_offset is runner-owned metadata whose stride is fixed by the
+        // selected graph capture. Rebuild it for every prefill-style replay
+        // (embedding, MTP draft, and target verify), independent of whichever
+        // attention backend the Python factory selected during capture.
+        const int graph_key =
+            is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+        const auto capture_it = fused_prefill_capture_lengths_.find(graph_key);
+        RTP_LLM_CHECK_WITH_INFO(capture_it != fused_prefill_capture_lengths_.end(),
+                                "CUDA graph key %d has no immutable fused prefill length bounds",
+                                graph_key);
+
+        int captured_max_input_length = 0;
+        RTP_LLM_CHECK_WITH_INFO(getNonNegativeHostLengthMax(capture_it->second.first, false, captured_max_input_length),
+                                "CUDA graph key %d has invalid captured input_lengths",
+                                graph_key);
+
+        const auto& replay_input_lengths = inputs.attention_inputs.input_lengths;
+        auto&       padding_offset       = py_model_inputs_.attention_inputs.padding_offset;
+        RTP_LLM_CHECK_WITH_INFO(replay_input_lengths.defined() && replay_input_lengths.is_cpu()
+                                    && replay_input_lengths.scalar_type() == torch::kInt32
+                                    && replay_input_lengths.is_contiguous() && replay_input_lengths.dim() == 1
+                                    && replay_input_lengths.numel() >= state.current_batch_size,
+                                "invalid replay input_lengths while rebuilding CUDA graph padding_offset");
+        RTP_LLM_CHECK_WITH_INFO(padding_offset.defined() && padding_offset.is_cpu()
+                                    && padding_offset.scalar_type() == torch::kInt32 && padding_offset.is_contiguous()
+                                    && padding_offset.dim() == 1,
+                                "invalid captured padding_offset buffer for CUDA graph key %d",
+                                graph_key);
+
+        const auto* input_lengths_ptr  = replay_input_lengths.data_ptr<int32_t>();
+        auto*       padding_ptr        = padding_offset.data_ptr<int32_t>();
+        int64_t     token_idx          = 0;
+        int         cumulative_padding = 0;
+        for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
+            const int input_length = input_lengths_ptr[batch_idx];
+            RTP_LLM_CHECK_WITH_INFO(input_length >= 0 && input_length <= captured_max_input_length,
+                                    "replay input length %d is outside capture range [0, %d] for graph key %d",
+                                    input_length,
+                                    captured_max_input_length,
+                                    graph_key);
+            RTP_LLM_CHECK_WITH_INFO(token_idx + input_length <= padding_offset.numel(),
+                                    "replay padding_offset needs %lld elements but capture buffer has %lld",
+                                    static_cast<long long>(token_idx + input_length),
+                                    static_cast<long long>(padding_offset.numel()));
+            std::fill_n(padding_ptr + token_idx, input_length, cumulative_padding);
+            token_idx += input_length;
+            cumulative_padding += captured_max_input_length - input_length;
+        }
+        // Only [0, token_idx) is consumed for the replay's real packed rows.
+        // Clear the rest on every replay so a shorter batch cannot observe
+        // historical offsets left by a longer replay of the same graph.
+        std::fill(padding_ptr + token_idx, padding_ptr + padding_offset.numel(), 0);
     }
 
     // Multi-group cache: H2H strided copies for group-local block tables.
@@ -450,6 +489,40 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
     if (graph_it == graph_instances_.end()) {
         RTP_LLM_LOG_WARNING("CUDA graph key %d was not captured, fallback to normal run", graph_key);
         return false;
+    }
+
+    if (inputs.attention_inputs.is_prefill) {
+        const auto capture_it = fused_prefill_capture_lengths_.find(graph_key);
+        if (capture_it == fused_prefill_capture_lengths_.end()) {
+            RTP_LLM_LOG_WARNING(
+                "CUDA graph key %d has no immutable fused prefill length bounds, fallback to normal run", graph_key);
+            return false;
+        }
+        const auto replay_validation = validateFusedPrefillReplayLengths(capture_it->second.first,
+                                                                         capture_it->second.second,
+                                                                         inputs.attention_inputs.input_lengths,
+                                                                         inputs.attention_inputs.prefix_lengths);
+        if (!replay_validation.compatible()) {
+            const uint64_t fallback_count =
+                fused_prefill_replay_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+            // Log the first fallback and then at powers of two. The Python
+            // replay guard remains a fail-fast safety net, but incompatible
+            // requests normally leave the graph path here before input copies.
+            if ((fallback_count & (fallback_count - 1)) == 0) {
+                RTP_LLM_LOG_WARNING(
+                    "fused prefill inputs are incompatible with CUDA graph key %d: reason=%s, "
+                    "capture_max_input=%d, replay_max_input=%d, capture_max_prefix=%d, replay_max_prefix=%d; "
+                    "fallback to normal run (fallback_count=%llu)",
+                    graph_key,
+                    fusedPrefillReplayValidationStatusName(replay_validation.status),
+                    replay_validation.captured_max_input_length,
+                    replay_validation.replay_max_input_length,
+                    replay_validation.captured_max_prefix_length,
+                    replay_validation.replay_max_prefix_length,
+                    static_cast<unsigned long long>(fallback_count));
+            }
+            return false;
+        }
     }
 
     size_t      copy_numel            = 0;
@@ -928,6 +1001,26 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
     refreshTaggedAttentionInputs(inputs);
+}
+
+void CudaGraphRunner::recordFusedPrefillCaptureLengths(int graph_key, const PyModelInputs& inputs) {
+    if (!inputs.attention_inputs.is_prefill) {
+        return;
+    }
+    const auto& input_lengths  = inputs.attention_inputs.input_lengths;
+    const auto& prefix_lengths = inputs.attention_inputs.prefix_lengths;
+    RTP_LLM_CHECK_WITH_INFO(input_lengths.defined() && input_lengths.is_cpu()
+                                && input_lengths.scalar_type() == torch::kInt32 && input_lengths.is_contiguous()
+                                && input_lengths.dim() == 1 && input_lengths.numel() > 0,
+                            "CUDA graph key %d has invalid capture input_lengths",
+                            graph_key);
+    RTP_LLM_CHECK_WITH_INFO(prefix_lengths.defined() && prefix_lengths.is_cpu()
+                                && prefix_lengths.scalar_type() == torch::kInt32 && prefix_lengths.is_contiguous()
+                                && prefix_lengths.dim() == 1,
+                            "CUDA graph key %d has invalid capture prefix_lengths",
+                            graph_key);
+    fused_prefill_capture_lengths_.insert_or_assign(graph_key,
+                                                    std::make_pair(input_lengths.clone(), prefix_lengths.clone()));
 }
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
