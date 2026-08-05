@@ -1,4 +1,4 @@
-from rtp_llm.config.moe_config import Fp4MoeOp
+from rtp_llm.config.moe_config import Fp4MoeOp, MoeStrategyName
 from rtp_llm.server.server_args.util import str2bool
 
 
@@ -162,30 +162,8 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         env_name="MOE_STRATEGY",
         bind_to=(moe_config, "moe_strategy"),
         type=str,
-        choices=[
-            "auto",
-            "no_auant_ep_low_latency",
-            "no_auant_cpp",
-            "no_auant_dp_normal",
-            "fp8_per_block_no_dp_masked",
-            "fp8_per_block_no_dp",
-            "fp8_per_block_ep_low_latency",
-            "fp8_per_block_ep_normal",
-            "fp8_per_block_pure_cp",
-            "fp8_per_block_pure_dp",
-            "sm120_fp8_grouped",
-            "fp8_per_tensor_no_dp",
-            "fp8_per_tensor_ep_low_latency",
-            "fp8_per_tensor_ep_normal",
-            "w4a8_int4_per_channel_no_dp",
-            "w4a8_int4_per_channel_ep_low_latency",
-            "w4a8_int4_per_channel_ep_normal",
-            "fp4_ep_low_latency",
-            "fp4_ep_normal",
-            "fp4_no_dp",
-            "fp4_b12x",
-        ],
-        default="auto",
+        choices=[strategy.value for strategy in MoeStrategyName],
+        default=MoeStrategyName.AUTO.value,
         help=(
             "指定moe strategy, 默认为auto。sm120_fp8_grouped 和 fp4_b12x "
             "仅适用于 sm_120/121；fp4_b12x 还要求单卡 (ep_size=1)。"

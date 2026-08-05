@@ -71,17 +71,52 @@ class StrategyRegistry:
         logger.debug(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
 
         if not candidates:
-            logger.error(
-                f"No suitable MOE strategy found. Config details: "
+            from rtp_llm.config.moe_config import Fp4MoeOp, resolve_fp4_moe_op
+            from rtp_llm.models_py.utils.arch import get_sm
+
+            sm12x = None
+            try:
+                major, minor = get_sm()
+                gpu_arch = f"sm{major}{minor}"
+                sm12x = major == 12
+            except Exception:
+                # Diagnostics must not hide the original strategy-selection error.
+                gpu_arch = "unknown"
+
+            try:
+                if sm12x is None:
+                    raise RuntimeError("GPU architecture is unavailable")
+                resolved_fp4_moe_op = resolve_fp4_moe_op(
+                    config.moe_config, is_sm12x=sm12x
+                )
+            except Exception:
+                resolved_fp4_moe_op = "unknown"
+
+            details = (
                 f"quant_config={config.model_config.quant_config}, "
-                f"ep_size={config.ep_size}, "
-                f"world_size={config.world_size}, "
+                f"ep_size={config.ep_size}, world_size={config.world_size}, "
                 f"tp_size={config.tp_size}, "
-                f"use_deepep_low_latency={config.moe_config.use_deepep_low_latency if config.moe_config else False}"
+                f"use_deepep_low_latency="
+                f"{config.moe_config.use_deepep_low_latency}, "
+                f"moe_strategy={config.moe_strategy!r}, "
+                f"fp4_moe_op={config.moe_config.fp4_moe_op!r}, "
+                f"resolved_fp4_moe_op={resolved_fp4_moe_op!r}, "
+                f"gpu_arch={gpu_arch!r}"
             )
+            migration_hint = ""
+            if config.moe_config.fp4_moe_op != Fp4MoeOp.AUTO.value:
+                migration_hint = (
+                    " Explicit fp4_moe_op is preserved across backend process "
+                    "serialization; if this is a legacy explicit setting, set "
+                    "fp4_moe_op='auto' or choose an operator supported by this "
+                    "GPU."
+                )
+            logger.error(f"No suitable MOE strategy found. Config details: {details}")
             raise ValueError(
-                f"No suitable MOE strategy found for configuration. "
-                f"Please check quant_config, ep_size, and parallelism settings."
+                "No suitable MOE strategy found for configuration: "
+                f"{details}. Check the explicit MoE strategy/operator, GPU "
+                "architecture, quantization, and parallelism settings."
+                f"{migration_hint}"
             )
 
         # Sort candidates by priority (descending, higher priority first)

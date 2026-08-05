@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 
+from rtp_llm.config.moe_config import MoeStrategyName
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -37,7 +38,8 @@ class CudaSm120Fp8GroupedGemmNoDPStrategy(MoeStrategy):
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(is_sm12x())
         checker.check(
-            config.moe_strategy == "sm120_fp8_grouped" or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.SM120_FP8_GROUPED.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
@@ -68,8 +70,8 @@ class CudaFp8PerBlockNoDPStrategy(MoeStrategy):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(
-            config.moe_strategy == "fp8_per_block_no_dp"
-            or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_NO_DP.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
@@ -99,7 +101,9 @@ class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
-        checker.check(config.moe_strategy == "fp8_per_block_no_dp_masked")
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_NO_DP_MASKED.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (
@@ -137,7 +141,9 @@ class CudaFp8PerBlockPureDPStrategy(MoeStrategy):
             and config.dp_size > 1
             and config.ep_size == config.dp_size
         )
-        checker.check(config.moe_strategy == "fp8_per_block_pure_dp")
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_PURE_DP.value
+        )
         checker.check(is_pure_dp_ep)
 
     def get_attributes(self) -> StrategyAttributes:
@@ -178,7 +184,9 @@ class CudaFp8PerBlockPureCPStrategy(MoeStrategy):
             and config.ep_size > 1
             and config.parallelism_config.prefill_cp_config.is_enabled()
         )
-        checker.check(config.moe_strategy == "fp8_per_block_pure_cp")
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_PURE_CP.value
+        )
         checker.check(is_pure_cp_ep)
 
     def get_attributes(self) -> StrategyAttributes:
@@ -209,8 +217,8 @@ class CudaFp8PerBlockEpLowLatencyStrategy(MoeStrategy):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(
-            config.moe_strategy == "fp8_per_block_ep_low_latency"
-            or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_EP_LOW_LATENCY.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
@@ -241,8 +249,8 @@ class CudaFp8PerBlockEpNormalStrategy(MoeStrategy):
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(
-            config.moe_strategy == "fp8_per_block_ep_normal"
-            or config.moe_strategy == "auto"
+            config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_EP_NORMAL.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
         )
 
     def get_attributes(self) -> StrategyAttributes:
