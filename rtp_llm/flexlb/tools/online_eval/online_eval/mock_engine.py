@@ -168,15 +168,26 @@ class MockEngineState:
         self._injected_queue_depth = 0
         self._recent_prefill_times: list[float] = []
         self._recent_decode_times: list[float] = []
+        # Cached last WorkerStatusPB response, used by the freeze_worker_status
+        # injection to replay a frozen heartbeat (status_version not bumped)
+        # while keeping the gRPC server reachable.
+        self._last_worker_status: object | None = None
 
     def set_injection(self, config: dict) -> None:
         """Set error-injection / timeout-simulation config.
 
         Supported keys:
-          enqueue_error  – enqueue_batch returns empty-successes response
-          fetch_error    – fetch_response yields one frame then raises grpc.RpcError
-          generate_error – generate_stream raises grpc.RpcError immediately
-          no_respond     – prefill/decode sleep but never queue responses (stream hangs)
+          enqueue_error      – enqueue_batch returns empty-successes response
+          fetch_error        – fetch_response yields one frame then raises grpc.RpcError
+          generate_error     – generate_stream raises grpc.RpcError immediately
+          no_respond         – prefill/decode sleep but never queue responses (stream hangs)
+          omit_request_ids   – list[int]; worker_status hides these requestIds from
+                               running_task_info and finished_task_list so FlexLB
+                               evicts the bound engineTask as stale after
+                               STALE_EVICT_ROUNDS consecutive rounds.
+          freeze_worker_status – bool; worker_status replays the last cached
+                                 response without bumping status_version, simulating
+                                 a frozen heartbeat with gRPC still reachable.
         """
         self.inject_config = dict(config)
 
@@ -283,7 +294,37 @@ class MockEngineState:
             await queue.put(SENTINEL)
 
     async def worker_status(self, request) -> object:
+        # freeze_worker_status injection: replay the last cached response
+        # verbatim without recomputing or bumping status_version. This
+        # simulates an engine whose gRPC server is still reachable but whose
+        # status heartbeat has frozen — it lets us verify that FlexLB's
+        # consecutiveFailures (gRPC-error) detection path does NOT fire while
+        # the stale-round eviction path behaviour can be observed separately.
+        if self.inject_config.get("freeze_worker_status"):
+            if self._last_worker_status is not None:
+                logger.info(
+                    "worker_status frozen engine=%s replay version=%d",
+                    self.name,
+                    self._last_worker_status.status_version,
+                )
+                return self._last_worker_status
+            # No cached status yet (freeze set before the first report):
+            # fall through to build and cache one below.
+
         latest = int(getattr(request, "latest_finished_version", -1))
+        # selective_omit injection: hide specific requestIds from both the
+        # running and finished task lists so FlexLB never observes them.
+        # After STALE_EVICT_ROUNDS (3) consecutive calibrate rounds the bound
+        # engineTask is evicted as stale — this triggers STALE eviction for
+        # individual requests without killing the whole engine.
+        omit_ids = {int(x) for x in (self.inject_config.get("omit_request_ids") or [])}
+        # When omitting specific requestIds, bump status_version on every call
+        # so FlexLB's GrpcWorkerStatusRunner sees versionAdvanced=true and
+        # invokes calibrate (which includes evictStaleEngineTasks). Without
+        # this bump, versionAdvanced would be false and calibrate would be
+        # skipped entirely, preventing STALE eviction from ever firing.
+        if omit_ids:
+            self._status_version += 1
         status = self.pb2.WorkerStatusPB(
             role=self.role.upper(),
             role_type=self._role_pb(),
@@ -308,12 +349,19 @@ class MockEngineState:
             total_kv_cache=self.total_kv_tokens,
         )
         for task in self._running.values():
+            if omit_ids and task.request_id in omit_ids:
+                continue
             status.running_task_info.append(self._task_pb(task))
         filtered_count = 0
         for version, task_pb in self._finished:
             if version > latest:
+                if omit_ids and int(task_pb.request_id) in omit_ids:
+                    continue
                 status.finished_task_list.append(task_pb)
                 filtered_count += 1
+        # Cache the freshly built status so a subsequent freeze_worker_status
+        # injection can replay it verbatim.
+        self._last_worker_status = status
         return status
 
     async def cache_status(self, request) -> object:
