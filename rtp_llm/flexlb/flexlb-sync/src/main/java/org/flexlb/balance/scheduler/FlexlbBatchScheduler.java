@@ -379,6 +379,30 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     }
 
     /**
+     * Remove inflight entry for deadline rescue re-admission.
+     *
+     * <p>Unlike {@link #cancelRequest}, this does NOT complete the future —
+     * the rescue flow will re-admit the request via
+     * {@link PriorityAdmissionScheduler#submit} and propagate the new
+     * future's result to the original caller.
+     *
+     * <p>Removes from both {@code inflight} and {@code terminalStates} so
+     * that {@link #prepare} does not reject the re-admission as a
+     * duplicate request ID. Also rolls back any held decode reservation
+     * and decode endpoint inflight so the old resources are released
+     * before the re-admission routes to a (potentially different) endpoint.
+     *
+     * @param requestId the request to remove from inflight tracking
+     */
+    public void removeInflightForRescue(long requestId) {
+        InflightEntry entry = inflight.remove(requestId);
+        terminalStates.remove(requestId);
+        if (entry != null) {
+            rollbackOnce(entry);
+        }
+    }
+
+    /**
      * Sync decode admission states from engine-reported task phases.
      * Called periodically during {@link #reportBatchMetrics} to transition
      * reservations from RESERVED_NOT_ACCEPTED → ACCEPTED_NOT_RUNNING → RUNNING

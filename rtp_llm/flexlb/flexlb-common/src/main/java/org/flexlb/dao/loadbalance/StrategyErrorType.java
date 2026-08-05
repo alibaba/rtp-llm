@@ -34,7 +34,11 @@ public enum StrategyErrorType {
     // Request was preempted from the prefill queue by a higher-priority incoming
     // request. Non-retryable at the scheduler level to avoid re-entering the same
     // full queue; the client may retry with backoff.
-    PRIORITY_PREEMPTED(8514, false);
+    PRIORITY_PREEMPTED(8514, false),
+    // Deadline rescue re-admission failed after max transfers or eviction failure.
+    // Non-retryable: the request has exhausted its rescue budget and must fail
+    // to avoid infinite migration.
+    DEADLINE_RESCUE_FAILED(8515, false);
 
     private final int errorCode;
     private final String errorMsg;

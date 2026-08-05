@@ -434,6 +434,39 @@ public class FlexlbConfig {
      */
     private int flexlbPriorityDefault = 50;
 
+    // ========== Auto-Tpm Deadline Rescue Configuration ==========
+
+    /**
+     * Danger-zone threshold in milliseconds. Requests whose remaining
+     * deadline ({@code deadline - now}) falls below this value are
+     * considered in danger of missing their SLO and become eligible
+     * for deadline rescue.
+     * Environment variable: AUTO_TPM_DANGER_THRESHOLD_MS.
+     */
+    private long autoTpmDangerThresholdMs = 100L;
+
+    /**
+     * Maximum number of times a single request can be rescued (transferred
+     * between endpoints) before it is permanently failed with
+     * {@code DEADLINE_RESCUE_FAILED}. Bounds migration storms.
+     * Environment variable: AUTO_TPM_MAX_TRANSFER.
+     */
+    private int autoTpmMaxTransfer = 1;
+
+    /**
+     * Maximum number of requests rescued in a single scan tick.
+     * Bounds scan throughput and resource consumption per tick.
+     * Environment variable: AUTO_TPM_MAX_RESCUE_PER_TICK.
+     */
+    private int autoTpmMaxRescuePerTick = 32;
+
+    /**
+     * Interval in milliseconds between deadline rescue scans.
+     * Used by the {@code @Scheduled} annotation on the scan method.
+     * Environment variable: AUTO_TPM_RESCUE_SCAN_INTERVAL_MS.
+     */
+    private long autoTpmRescueScanIntervalMs = 100L;
+
     /**
      * Resolve and validate the request priority. If the raw priority is 0
      * (unset in proto3) or not in the configured valid levels, return the
