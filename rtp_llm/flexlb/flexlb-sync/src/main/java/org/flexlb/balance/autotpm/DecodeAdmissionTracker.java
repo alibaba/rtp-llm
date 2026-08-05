@@ -88,6 +88,7 @@ public class DecodeAdmissionTracker {
         DecodeReservation r = getReservation(endpointKey, requestId);
         if (r != null && r.state() != DecodeAdmissionState.RUNNING) {
             r.setState(DecodeAdmissionState.RUNNING);
+            r.setRunningSinceMs(System.currentTimeMillis());
             log.debug("DecodeAdmissionTracker markRunning: ep={} reqId={}",
                     endpointKey, requestId);
         }
@@ -245,7 +246,7 @@ public class DecodeAdmissionTracker {
 
     // =================--- Internal Helpers ---====================
 
-    private DecodeReservation getReservation(String endpointKey, long requestId) {
+    public DecodeReservation getReservation(String endpointKey, long requestId) {
         ConcurrentHashMap<Long, DecodeReservation> epMap =
                 reservationsByEndpoint.get(endpointKey);
         return epMap != null ? epMap.get(requestId) : null;

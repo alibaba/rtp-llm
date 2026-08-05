@@ -38,7 +38,11 @@ public enum StrategyErrorType {
     // Deadline rescue re-admission failed after max transfers or eviction failure.
     // Non-retryable: the request has exhausted its rescue budget and must fail
     // to avoid infinite migration.
-    DEADLINE_RESCUE_FAILED(8515, false);
+    DEADLINE_RESCUE_FAILED(8515, false),
+    // Running preemption timeout: a RUNNING decode victim was cancelled but
+    // did not release its reservation within autoTpmCancelConfirmLatencyMs.
+    // Non-retryable: the preemption attempt has exhausted its wait budget.
+    PREEMPT_TIMEOUT(8516, false);
 
     private final int errorCode;
     private final String errorMsg;

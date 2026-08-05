@@ -11,6 +11,9 @@ import org.flexlb.balance.autotpm.DecodeReservation;
 import org.flexlb.balance.autotpm.EvictionPlanner;
 import org.flexlb.balance.autotpm.PlanCommitter;
 import org.flexlb.balance.autotpm.PrefillEvictionPlan;
+import org.flexlb.balance.autotpm.PreemptRateLimiter;
+import org.flexlb.balance.autotpm.RunningPreemptCommitter;
+import org.flexlb.balance.autotpm.RunningPreemptPlanner;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -80,6 +83,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private final DecodeEvictionPlanner decodeEvictionPlanner = new DecodeEvictionPlanner();
     private final DecodeEvictionCommitter decodeEvictionCommitter = new DecodeEvictionCommitter();
 
+    /** Phase 6: Running preemption components. */
+    private final RunningPreemptPlanner runningPreemptPlanner = new RunningPreemptPlanner();
+    private final PreemptRateLimiter preemptRateLimiter;
+    private final RunningPreemptCommitter runningPreemptCommitter;
+
     @Autowired
     public FlexlbBatchScheduler(ConfigService configService,
                                 Router router,
@@ -94,6 +102,19 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         this.reporter = reporter;
         // Initialize Snowflake batch ID generator with master identity
         this.batchIdGenerator = new BatchIdGenerator(detectLocalIp(), detectPort(environment));
+
+        // Phase 6: Initialize running preemption components.
+        // Rate limiter limits are read once at startup; the cancel action
+        // is a method reference to this.cancelRequest (safe — not invoked
+        // until execute() is called, which is after construction completes).
+        FlexlbConfig initCfg = configService.loadBalanceConfig();
+        this.preemptRateLimiter = new PreemptRateLimiter(
+                initCfg.getAutoTpmPreemptPerNodeQpsLimit(),
+                initCfg.getAutoTpmPreemptGlobalQpsLimit());
+        this.runningPreemptCommitter = new RunningPreemptCommitter(
+                this::cancelRequest,
+                decodeAdmissionTracker,
+                preemptRateLimiter);
     }
 
     private static String detectLocalIp() {
@@ -308,6 +329,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         neededKv, maxVictims);
             }
 
+            boolean phase4Succeeded = false;
             if (!plan.isEmpty()) {
                 DecodeEvictionCommitter.CommitResult result =
                         decodeEvictionCommitter.execute(plan, decodeAdmissionTracker);
@@ -315,6 +337,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     for (DecodeReservation victim : result.victims()) {
                         evictDecodeVictim(victim, item);
                     }
+                    phase4Succeeded = true;
                     Logger.info("Decode eviction committed: {} victims from ep={}",
                             result.victims().size(), epKey);
                 } else {
@@ -325,10 +348,92 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 Logger.warn("Decode eviction: no eligible victims ep={} reqId={} pri={}",
                         epKey, item.requestId(), item.priority());
             }
+
+            // Phase 6: Running preemption fallback when Phase 4 can't find
+            // non-RUNNING victims. Only active when autoTpmCancelRunningEnabled=true.
+            if (!phase4Succeeded) {
+                tryRunningPreemption(item, epKey, cfg, slotShortage, kvShortage,
+                        neededKv, concurrencyLimit, totalKv);
+            }
         }
 
         // Register the incoming reservation
         registerDecodeReservation(item);
+    }
+
+    /**
+     * Phase 6: Running preemption fallback.
+     *
+     * <p>Called when Phase 4 decode eviction cannot free enough capacity
+     * (no non-RUNNING victims found, or commit failed). When
+     * {@code autoTpmCancelRunningEnabled=true}, attempts to preempt RUNNING
+     * decode victims to free capacity for the incoming request.
+     *
+     * <p>Guarantees:
+     * <ul>
+     *   <li>Master switch off ({@code autoTpmCancelRunningEnabled=false}):
+     *       zero preemptions — method returns immediately</li>
+     *   <li>Hard rule: {@code victim.priority < incoming.priority} (enforced by planner)</li>
+     *   <li>Critical section: requests running &lt; criticalSectionMs not preempted</li>
+     *   <li>Per-node + global QPS limited by {@link PreemptRateLimiter}</li>
+     *   <li>Cancel reason: {@code CANCEL_REASON_PRIORITY_PREEMPTED}</li>
+     *   <li>Release wait bounded by {@code autoTpmCancelConfirmLatencyMs}</li>
+     * </ul>
+     *
+     * @param item           the incoming request item
+     * @param epKey          decode endpoint key (ip:port)
+     * @param cfg            current FlexLB config
+     * @param slotShortage   true if decode slots are insufficient
+     * @param kvShortage     true if decode KV cache is insufficient
+     * @param neededKv       KV tokens needed by the incoming request
+     * @param concurrencyLimit decode concurrency limit (slots)
+     * @param totalKv        total KV cache on the decode endpoint
+     */
+    private void tryRunningPreemption(BatchItem item, String epKey, FlexlbConfig cfg,
+                                       boolean slotShortage, boolean kvShortage,
+                                       long neededKv, long concurrencyLimit,
+                                       long totalKv) {
+        if (!cfg.isAutoTpmCancelRunningEnabled()) {
+            return; // master switch off — zero preempt
+        }
+
+        int maxVictims = cfg.getAutoTpmEvictMaxVictimsPerDecision();
+        long criticalSectionMs = cfg.getAutoTpmPreemptCriticalSectionMs();
+        long confirmTimeoutMs = cfg.getAutoTpmCancelConfirmLatencyMs();
+
+        List<DecodeReservation> candidates = runningPreemptPlanner.findPreemptCandidates(
+                decodeAdmissionTracker, epKey, item.priority(),
+                1, neededKv, criticalSectionMs, maxVictims);
+
+        if (candidates.isEmpty()) {
+            Logger.info("Running preempt: no eligible RUNNING victims ep={} reqId={} pri={}",
+                    epKey, item.requestId(), item.priority());
+            return;
+        }
+
+        for (DecodeReservation victim : candidates) {
+            boolean success = runningPreemptCommitter.execute(
+                    victim, epKey, confirmTimeoutMs);
+            if (success) {
+                reporter.reportPriorityCancel("running_preempt");
+                Logger.info("Running preempt succeeded: victim reqId={} pri={} kv={} ep={}",
+                        victim.requestId(), victim.priority(),
+                        victim.kvTokensRequired(), epKey);
+
+                // Check if the shortage is resolved after this preemption
+                boolean slotResolved = !slotShortage
+                        || decodeAdmissionTracker.availableSlots(
+                                epKey, (int) Math.max(0, concurrencyLimit)) >= 1;
+                boolean kvResolved = !kvShortage
+                        || decodeAdmissionTracker.availableKv(epKey, totalKv) >= neededKv;
+                if (slotResolved && kvResolved) {
+                    break; // enough capacity freed
+                }
+            } else {
+                Logger.warn("Running preempt failed: victim reqId={} ep={}",
+                        victim.requestId(), epKey);
+            }
+        }
     }
 
     /**

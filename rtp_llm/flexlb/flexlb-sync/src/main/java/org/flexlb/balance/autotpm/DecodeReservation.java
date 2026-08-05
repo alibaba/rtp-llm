@@ -19,6 +19,7 @@ public final class DecodeReservation {
     private final String decodeEndpointKey;
     private final long createdAtMs;
     private volatile DecodeAdmissionState state;
+    private volatile long runningSinceMs;
 
     public DecodeReservation(long requestId, int priority, long deadlineMs,
                              long kvTokensRequired, String decodeEndpointKey) {
@@ -71,6 +72,21 @@ public final class DecodeReservation {
 
     public void setState(DecodeAdmissionState state) {
         this.state = state;
+    }
+
+    /**
+     * Timestamp (ms) when this reservation entered RUNNING state.
+     * Used by {@link RunningPreemptPlanner} to enforce the critical-section
+     * protection — requests that just started running are not preempted.
+     *
+     * @return wall-clock ms when RUNNING was set, or 0 if never RUNNING
+     */
+    public long runningSinceMs() {
+        return runningSinceMs;
+    }
+
+    public void setRunningSinceMs(long runningSinceMs) {
+        this.runningSinceMs = runningSinceMs;
     }
 
     /**

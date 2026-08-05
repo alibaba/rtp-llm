@@ -467,6 +467,56 @@ public class FlexlbConfig {
      */
     private long autoTpmRescueScanIntervalMs = 100L;
 
+    // ========== Auto-Tpm Running Preemption (Phase 6) ==========
+
+    /**
+     * Master switch for running preemption. When enabled, the scheduler may
+     * cancel RUNNING decode requests (via {@code CANCEL_REASON_PRIORITY_PREEMPTED})
+     * to free capacity for a higher-priority incoming request, when Phase 4
+     * decode eviction cannot find non-RUNNING victims.
+     * Default false — zero preemptions when off.
+     * Environment variable: AUTO_TPM_CANCEL_RUNNING_ENABLED.
+     */
+    private boolean autoTpmCancelRunningEnabled = false;
+
+    /**
+     * Maximum latency in milliseconds to wait for a cancelled running request
+     * to release its decode reservation. If the reservation is not released
+     * within this timeout, the preemption is considered failed and the incoming
+     * request is not admitted via preemption.
+     * Environment variable: AUTO_TPM_CANCEL_CONFIRM_LATENCY_MS.
+     */
+    private long autoTpmCancelConfirmLatencyMs = 2000L;
+
+    /**
+     * Maximum number of victims (running preemption or decode eviction) per
+     * single admission decision. Bounds the work done per incoming request.
+     * Environment variable: AUTO_TPM_EVICT_MAX_VICTIMS_PER_DECISION.
+     */
+    private int autoTpmEvictMaxVictimsPerDecision = 8;
+
+    /**
+     * Per-node (per decode endpoint) QPS limit for running preemption.
+     * At most this many running requests are preempted per second per endpoint.
+     * Environment variable: AUTO_TPM_PREEMPT_PER_NODE_QPS_LIMIT.
+     */
+    private int autoTpmPreemptPerNodeQpsLimit = 10;
+
+    /**
+     * Global QPS limit for running preemption across all decode endpoints.
+     * At most this many running requests are preempted per second total.
+     * Environment variable: AUTO_TPM_PREEMPT_GLOBAL_QPS_LIMIT.
+     */
+    private int autoTpmPreemptGlobalQpsLimit = 50;
+
+    /**
+     * Critical section duration in milliseconds. Running requests that have
+     * been in RUNNING state for less than this duration are not preempted,
+     * giving them a grace period to make progress before they can be cancelled.
+     * Environment variable: AUTO_TPM_PREEMPT_CRITICAL_SECTION_MS.
+     */
+    private long autoTpmPreemptCriticalSectionMs = 200L;
+
     /**
      * Resolve and validate the request priority. If the raw priority is 0
      * (unset in proto3) or not in the configured valid levels, return the
