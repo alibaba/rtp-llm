@@ -56,7 +56,7 @@ class QueueSchedulerTest {
     void setUp() {
         config = new FlexlbConfig();
         config.setScheduleWorkerSize(1);
-        config.setMaxQueueSize(10);
+        config.setQueueingComponentQueueMaxSize(10);
         config.setMaxRetryCount(3); // Explicitly set for test, default is 0 (unlimited)
         lenient().when(configService.loadBalanceConfig()).thenReturn(config);
         inflightStore = new InflightStore(mock(BatchSchedulerReporter.class), configService);
@@ -148,7 +148,7 @@ class QueueSchedulerTest {
 
     @Test
     void submit_shouldReturnQueueFullWhenQueueIsFull() throws Exception {
-        config.setMaxQueueSize(1);
+        config.setQueueingComponentQueueMaxSize(1);
         // Rebuild the scheduler so the bounded deque picks up the new capacity
         scheduler = new QueueScheduler(router, configService, metrics, dynamicWorkerManager,
                 inflightStore, new FlexlbMetricHelper(null, MetricConstant.PATH_QUEUE));
@@ -178,6 +178,23 @@ class QueueSchedulerTest {
         verify(metrics).reportTimeout();
     }
 
+    @Test
+    void submit_shouldRejectDuplicateRequestId() throws Exception {
+        // First submit registers the request in InflightStore and enqueues it
+        CompletableFuture<Response> first = scheduler.submit(createContext(42L));
+        assertFalse(first.isDone());
+        assertEquals(1, scheduler.queueSize());
+
+        // Second submit with the same requestId must be rejected with INVALID_REQUEST
+        Response rejected = scheduler.submit(createContext(42L)).get(1, TimeUnit.SECONDS);
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), rejected.getCode());
+        assertTrue(rejected.getErrorMessage().contains("duplicate request_id"));
+
+        // The duplicate must NOT occupy a second queue slot
+        assertEquals(1, scheduler.queueSize());
+    }
+
     // ==================== Cancel cascade (queue slot release) ====================
 
     @Test
@@ -186,7 +203,11 @@ class QueueSchedulerTest {
         CompletableFuture<Response> result = scheduler.submit(createContext(1L));
         assertEquals(1, scheduler.queueSize());
 
-        assertTrue(scheduler.cancel("1"));
+        // Inline the cancel cascade (previously scheduler.cancel("1"),
+        // now owned by RouteService): store.get → item.cancel → fireOnCancel
+        InflightItem item = inflightStore.get("1");
+        assertTrue(item.cancel());
+        item.fireOnCancel();
 
         assertEquals(0, scheduler.queueSize()); // slot freed, not dead-occupied
         assertTrue(result.isCompletedExceptionally());
@@ -199,10 +220,10 @@ class QueueSchedulerTest {
         InflightItem item = inflightStore.get("1");
 
         assertTrue(item.cancel());
-        item.scheduler().onCancel(item); // queued → removed
+        item.fireOnCancel(); // queued → removed
         assertEquals(0, scheduler.queueSize());
         // A second cascade against an absent entry must not throw.
-        item.scheduler().onCancel(item);
+        item.fireOnCancel();
         assertEquals(0, scheduler.queueSize());
     }
 

@@ -127,18 +127,30 @@ public class RouteService {
     /**
      * Cancel an inflight request by its string-form request ID.
      *
-     * <p>Delegates to {@link AbstractScheduler#cancel(String)} on the batch
-     * scheduler — the underlying logic is scheduler-agnostic because all three
-     * schedulers share the same global {@link InflightStore}, and the owning
-     * scheduler is resolved via {@link InflightItem#scheduler()} inside the
-     * delegate. This eliminates the previously duplicated cancel implementation
-     * (review F9).
+     * <p>Looks up the {@link InflightItem} in the global {@link InflightStore},
+     * atomically cancels it via CAS, and — when the cancel wins the CAS —
+     * triggers the owning scheduler's {@link AbstractScheduler#onCancel}
+     * hook through {@link InflightItem#fireOnCancel()} to release
+     * path-specific resources (e.g. a queue slot). The owning scheduler
+     * is resolved via {@link InflightItem#scheduler()}, so all three
+     * scheduling paths (BATCH/QUEUE/DIRECT) are covered by the same store.
+     *
+     * <p>Returns {@code false} if the request was not found (already evicted
+     * or never tracked) or is already terminal.
      *
      * @param requestId string-form request ID
      * @return {@code true} if the request was found and cancelled
      */
     public boolean cancel(String requestId) {
-        return batchScheduler.cancel(requestId);
+        InflightItem item = globalInflightStore.get(requestId);
+        if (item == null) {
+            return false;
+        }
+        boolean cancelled = item.cancel();
+        if (cancelled) {
+            item.fireOnCancel();
+        }
+        return cancelled;
     }
 
     /**

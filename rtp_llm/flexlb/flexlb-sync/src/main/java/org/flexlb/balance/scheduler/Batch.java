@@ -22,8 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * additionally distinguishes the terminal kind (COMPLETED/FAILED/TIMED_OUT).
  *
  * <p>Thread-safety: {@link CopyOnWriteArrayList} for read-heavy access
- * (status callbacks, metric reporting) with infrequent mutation
- * (item removal during repack).
+ * (status callbacks, metric reporting). Items are never physically
+ * removed — {@link #removeItem} is a no-op to preserve index alignment
+ * for {@link #complete} (see F7).
  */
 public final class Batch implements InflightEntry {
 
@@ -117,7 +118,17 @@ public final class Batch implements InflightEntry {
      * Complete all items with their respective responses.
      *
      * <p>Each inner list in {@code responsesByDp} corresponds to the items
-     * in {@link #itemsByDp} at the same index. Items are completed in order.
+     * in {@link #itemsByDp} at the same index, matched by <b>original
+     * position</b>. Items that were already driven terminal by repack,
+     * cancel, or early failure are naturally skipped — their
+     * {@link InflightItem#complete(Response)} CAS returns false (no-op),
+     * so the response is harmlessly discarded while surviving items at
+     * their original positions receive the correct response.
+     *
+     * <p>This position-stable alignment is preserved because
+     * {@link #removeItem} is a no-op: items are never physically removed
+     * from {@link #itemsByDp}, preventing index drift when a middle item
+     * is repacked out.
      *
      * @param responsesByDp per-DP response lists, aligned with {@link #itemsByDp}
      */
@@ -139,20 +150,30 @@ public final class Batch implements InflightEntry {
     // ---- item management ----
 
     /**
-     * Remove a single item from all DP lists (used during repack or
-     * when an item completes/fails before batch dispatch).
+     * No-op: items remain at their original positions so that
+     * {@link #complete} can match responses by original index without
+     * position drift from repack removals.
      *
-     * <p>Checks {@code terminated} to prevent recursion when called from
-     * {@link InflightItem#terminate(TerminalReason)} during batch-level
-     * termination.
+     * <p>Previously this method physically removed the item from
+     * {@link #itemsByDp} (CopyOnWriteArrayList). When a middle item was
+     * repacked out, the surviving items shifted down, breaking the
+     * index alignment between {@code itemsByDp} and the caller-built
+     * {@code responsesByDp} in {@link #complete} — some items received
+     * the wrong response or were never marked complete.
      *
-     * @param item the item to remove
+     * <p>With this no-op, terminal items stay in place and are
+     * harmlessly skipped by the CAS guard in
+     * {@link InflightItem#complete(Response)}. The batch is released
+     * as a unit in {@link #cleanupBatchLevel()}.
+     *
+     * <p>The {@code terminated} check is retained to document that
+     * batch-level {@link #terminate(TerminalReason)} iterates items and
+     * calls {@link InflightItem#terminate(TerminalReason)}, which
+     * recurses back into this method.
      */
     void removeItem(InflightItem item) {
         if (terminated.get()) return; // prevent recursion during batch terminate
-        for (List<InflightItem> dpItems : itemsByDp) {
-            dpItems.remove(item);
-        }
+        // intentionally no-op — see javadoc above
     }
 
     // ---- private helpers ----

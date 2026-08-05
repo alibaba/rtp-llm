@@ -109,6 +109,24 @@ public final class InflightItem implements InflightEntry {
         return scheduler;
     }
 
+    /**
+     * Invoke the owning scheduler's {@link AbstractScheduler#onCancel}
+     * hook if this item has a scheduler. Called from {@code RouteService.cancel}
+     * after the cancel CAS wins, to release path-specific resources (e.g.
+     * a queue slot). Public so that {@code RouteService} (in another package)
+     * can trigger the cascade; the actual {@code onCancel} is protected and
+     * accessible from here because {@code InflightItem} is in the same package.
+     *
+     * <p>Best-effort: the request may already have left the scheduler's
+     * structures, so the hook must be idempotent.
+     */
+    public void fireOnCancel() {
+        AbstractScheduler s = scheduler;
+        if (s != null) {
+            s.onCancel(this);
+        }
+    }
+
     public PrefillEndpoint prefillEp() {
         return prefillEp;
     }

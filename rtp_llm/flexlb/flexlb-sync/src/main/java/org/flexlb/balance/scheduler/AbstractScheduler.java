@@ -14,7 +14,8 @@ import java.util.concurrent.CompletableFuture;
  *   <li>{@link InflightStore} registration via {@link #register} — atomic
  *       duplicate detection, active-count accounting, and terminal-state
  *       wiring on the result future</li>
- *   <li>{@link #cancel(String)} — CAS-guarded cancel through the store</li>
+ *   <li>{@link #onCancel(InflightItem)} — protected hook for path-specific
+ *       cancel cleanup, driven from {@code RouteService}</li>
  *   <li>{@link #reportMetrics()} — periodic path-specific metrics hook</li>
  * </ul>
  *
@@ -74,39 +75,20 @@ public abstract class AbstractScheduler {
     }
 
     /**
-     * Cancel an inflight request by its string-form request ID.
-     *
-     * <p>Looks up the {@link InflightItem} in the global store and atomically
-     * cancels it via CAS. When the cancel wins the CAS, the owning scheduler's
-     * {@link #onCancel} hook is invoked to release path-specific resources.
-     * Returns {@code false} if the request was not found (already evicted or
-     * never tracked) or is already terminal.
-     *
-     * @param requestId string-form request ID (see {@link InflightItem#requestId()})
-     * @return {@code true} if the request was found and cancelled
-     */
-    public boolean cancel(String requestId) {
-        InflightItem item = globalStore.get(requestId);
-        if (item == null) {
-            return false;
-        }
-        boolean cancelled = item.cancel();
-        if (cancelled && item.scheduler() != null) {
-            item.scheduler().onCancel(item);
-        }
-        return cancelled;
-    }
-
-    /**
      * Hook invoked after a cancel wins the terminal CAS, letting the owning
      * scheduler release path-specific resources (e.g. a queue slot) with
      * best-effort semantics — the request may already have left the
      * scheduler's structures.
      *
-     * <p>Default implementation is a no-op. Public (not protected) because
-     * the cascade is driven from {@code RouteService} in another package.
+     * <p>Protected: the cancel cascade is driven from {@code RouteService}
+     * via {@link InflightItem#fireOnCancel()}, which is in the same package
+     * and can access this protected method. Subclasses override to add
+     * path-specific cleanup (e.g. {@link QueueScheduler} removes the queued
+     * request).
+     *
+     * <p>Default implementation is a no-op.
      */
-    public void onCancel(InflightItem item) {
+    protected void onCancel(InflightItem item) {
         // default: no path-specific cancel cleanup
     }
 

@@ -13,6 +13,8 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Per-worker request batcher that owns the queue, lifecycle, and all side
@@ -37,6 +39,10 @@ public class WorkerBatcher {
     private volatile boolean stopped;
     private final FixedWindowBatcherAlgorithm algorithm;
     private final BatcherContext ctx;
+
+    /** Guard + signal for the run-loop's blocking wait when the queue is empty. */
+    private final ReentrantLock waitLock = new ReentrantLock();
+    private final Condition notEmpty = waitLock.newCondition();
 
     public WorkerBatcher(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                          BatchSchedulerReporter reporter) {
@@ -69,6 +75,7 @@ public class WorkerBatcher {
             long sortKey = algorithm.computeSortKey(ctx, item);
             item.setSortKey(sortKey);
             queue.add(item);
+            signalNotEmpty();
         } catch (RuntimeException | Error e) {
             queueDepth.decrementAndGet();
             throw e;
@@ -170,9 +177,38 @@ public class WorkerBatcher {
         }
     }
 
+    /**
+     * Block until the queue is non-empty, using {@link Condition#await()}
+     * instead of the previous {@code take()+put()} round-trip which caused
+     * invalid re-sorting of the priority queue and wasted operations.
+     *
+     * <p>The fast path checks {@link PriorityBlockingQueue#peek()} without
+     * holding the lock. Only when the queue is empty does the thread
+     * acquire {@link #waitLock} and await on {@link #notEmpty}, which is
+     * signalled by {@link #offer(BatchItem)} after each successful add.
+     */
     private void waitForNonEmpty() throws InterruptedException {
-        BatchItem item = queue.take();
-        queue.put(item);
+        if (queue.peek() != null) {
+            return;
+        }
+        waitLock.lock();
+        try {
+            while (queue.peek() == null) {
+                notEmpty.await();
+            }
+        } finally {
+            waitLock.unlock();
+        }
+    }
+
+    /** Signal the run-loop thread that an item has been added. */
+    private void signalNotEmpty() {
+        waitLock.lock();
+        try {
+            notEmpty.signal();
+        } finally {
+            waitLock.unlock();
+        }
     }
 
     private boolean reserveQueueSlot(int maxSize) {

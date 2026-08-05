@@ -37,7 +37,9 @@ import java.util.concurrent.TimeoutException;
  *   <li>Register the pipeline-derived future in the global
  *       {@link InflightStore} so that timeout-driven terminal transitions are
  *       captured (cancel completes the raw future exceptionally through the
- *       item, which propagates through the pipeline)</li>
+ *       item, which propagates through the pipeline). Duplicate request IDs
+ *       are rejected with {@link StrategyErrorType#INVALID_REQUEST} without
+ *       enqueuing</li>
  *   <li>Enqueue; a full queue completes the request with
  *       {@link StrategyErrorType#QUEUE_FULL}</li>
  * </ol>
@@ -91,12 +93,16 @@ public class QueueScheduler extends DirectScheduler {
                 })
                 .toFuture();
 
-        // Track the pipeline-derived future so timeout / cancel transitions
-        // are observed as terminal states. Duplicates proceed untracked —
-        // queue semantics never reject a request for tracking reasons.
+        // Atomic registration — duplicate request IDs (active or tombstone
+        // within TTL) are rejected with INVALID_REQUEST, aligning with the
+        // BATCH path behaviour. The duplicate is never enqueued, preventing
+        // the same request from occupying two sets of resources.
         InflightItem existing = register(ctx, resultFuture);
         if (existing != null) {
-            Logger.warn("Duplicate request_id: {}, processing untracked", ctx.getRequestId());
+            Response errorResp = Response.error(StrategyErrorType.INVALID_REQUEST);
+            errorResp.setErrorMessage("duplicate request_id: " + ctx.getRequestId());
+            workerFuture.complete(errorResp);
+            return resultFuture;
         }
 
         if (!queueing.enqueue(ctx)) {
@@ -124,7 +130,7 @@ public class QueueScheduler extends DirectScheduler {
      * second line of defence if the removal races a concurrent dequeue.
      */
     @Override
-    public void onCancel(InflightItem item) {
+    protected void onCancel(InflightItem item) {
         queueing.removeIfQueued(item.ctx());
     }
 
