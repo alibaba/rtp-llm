@@ -214,9 +214,39 @@ def h20_oss_suites():
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="dense_fp8kv_flashinfer_cudagraph",
+                task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_cudagraph.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1 --disable_flashinfer_native 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="dense_fp8kv_flashinfer_prefill",
                 task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_flashinfer_prefill.json",
                 smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flashinfer_native 0 --frontend_server_count 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8kv_pyflashinfer_prefill",
+                task_info="data/model/qwen25/q_r_new_model_py_fp8_kv_cache_flashinfer_prefill.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flashinfer_native 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0 --frontend_server_count 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8kv_flashinfer_prefill_reuse",
+                task_info="data/model/qwen25/q_r_fp8_flashinfer_device_reuse.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 8 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flashinfer_native 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0 --frontend_server_count 1 --reuse_cache 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8kv_flashinfer_cudagraph_reuse",
+                task_info="data/model/qwen25/q_r_fp8_flashinfer_device_reuse.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 8 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 1 --disable_flashinfer_native 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0 --frontend_server_count 1 --reuse_cache 1",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="dense_fp8kv_flashinfer_prefill_memory_reuse",
+                task_info="data/model/qwen25/q_r_fp8_flashinfer_memory_reuse.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 8 --act_type BF16 --test_block_num 1000 --fp8_kv_cache 1 --enable_cuda_graph 0 --disable_flashinfer_native 0 --enable_flashinfer_trt_fmha_v2 0 --enable_paged_flashinfer_trt_fmha_v2 0 --enable_flashinfer_trtllm_gen 0 --frontend_server_count 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1",
                 gpu_type=["H20"],
             ),
             smoke_test(

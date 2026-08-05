@@ -16,7 +16,13 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
-from rtp_llm.ops import AttentionConfigs, RopeStyle
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPagedPrefillImpl,
+    PyFlashinferPrefillAttnOp,
+    PyFlashinferPrefillImpl,
+    PyFlashinferPrefillPagedAttnOp,
+)
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQOut,
     LayerKVCache,
@@ -567,6 +573,513 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             "\n✓ All implementations (Reference, Python, C++) produce consistent results"
         )
         print("=" * 80)
+
+    def _write_fp8_reference_cache(
+        self,
+        cache: LayerKVCache,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        input_lengths: list[int],
+        prefix_lengths: list[int],
+        block_ids: torch.Tensor,
+        page_size: int,
+    ) -> None:
+        """Write RoPE output with the fused op's saturating E4M3 contract."""
+        token_index = 0
+        for batch_index, input_length in enumerate(input_lengths):
+            for request_token_index in range(input_length):
+                cache_position = prefix_lengths[batch_index] + request_token_index
+                page_index = int(
+                    block_ids[batch_index, cache_position // page_size].item()
+                )
+                page_offset = cache_position % page_size
+                cache.kv_cache_base[page_index, 0, :, page_offset, :] = (
+                    key[token_index].clamp(-448, 448).to(torch.float8_e4m3fn)
+                )
+                cache.kv_cache_base[page_index, 1, :, page_offset, :] = (
+                    value[token_index].clamp(-448, 448).to(torch.float8_e4m3fn)
+                )
+                token_index += 1
+
+    def test_fused_paged_prefill_fp8_accuracy(self):
+        """Compare fused paged prefill with an explicit FP8 cache reference."""
+        if not self.device_initialized:
+            self.skipTest("device initialization is required")
+
+        batch_size = 4
+        seq_len = 512
+        sequence_lengths = [seq_len] * batch_size
+        total_tokens = sum(sequence_lengths)
+        num_heads = 32
+        num_kv_heads = 8
+        head_dim = 128
+        page_size = 64
+        hidden_size = (num_heads + 2 * num_kv_heads) * head_dim
+
+        config = create_test_attn_config(
+            head_num=num_heads,
+            kv_head_num=num_kv_heads,
+            size_per_head=head_dim,
+            tokens_per_block=page_size,
+            dtype=torch.bfloat16,
+        )
+        config.need_rope_kv_cache = True
+        config.kv_cache_dtype = KvCacheDataType.FP8
+        config.is_causal = True
+
+        input_lengths = torch.tensor(sequence_lengths, dtype=torch.int32)
+        cu_seqlens = torch.arange(
+            0,
+            total_tokens + 1,
+            seq_len,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        pages_per_request = math.ceil(seq_len / page_size)
+        block_ids = torch.arange(
+            batch_size * pages_per_request, dtype=torch.int32
+        ).reshape(batch_size, pages_per_request)
+        positions = torch.arange(seq_len, dtype=torch.int32, device=self.device).repeat(
+            batch_size
+        )
+
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = True
+        attn_inputs.input_lengths = input_lengths.pin_memory()
+        attn_inputs.prefix_lengths = torch.zeros(
+            batch_size, dtype=torch.int32
+        ).pin_memory()
+        attn_inputs.sequence_lengths = input_lengths.pin_memory()
+        attn_inputs.kv_cache_block_id = block_ids
+        attn_inputs.kv_cache_block_id_device = block_ids.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id = block_ids
+        attn_inputs.kv_cache_kernel_block_id_device = block_ids.to(self.device)
+        attn_inputs.cu_seqlens_device = cu_seqlens
+        attn_inputs.cu_kv_seqlens_device = cu_seqlens
+        attn_inputs.combo_position_ids = positions
+        attn_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
+
+        qkv_source = (
+            torch.randn(
+                total_tokens,
+                hidden_size,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+            * 0.5
+        )
+        num_pages = batch_size * pages_per_request
+
+        def make_cache() -> LayerKVCache:
+            cache = LayerKVCache()
+            cache.kv_cache_base = torch.zeros(
+                num_pages,
+                2,
+                num_kv_heads,
+                page_size,
+                head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=self.device,
+            )
+            cache.kv_scale_base = torch.ones(
+                num_pages,
+                2 * num_kv_heads * page_size,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            return cache
+
+        # Reference pipeline: Python RoPE plus explicit saturating FP8 writes.
+        split_attn = PyFlashinferPrefillPagedAttnOp(config, attn_inputs)
+        split_params = split_attn.prepare(attn_inputs)
+        split_rope = MhaRotaryEmbeddingOp(config)
+        split_rope.set_params(split_params)
+        split_cache = make_cache()
+
+        # Proposed fused pipeline wired through the production implementation.
+        fused_impl = PyFlashinferPagedPrefillImpl(config, attn_inputs)
+        fused_cache = make_cache()
+
+        split_input = qkv_source.clone()
+        split_q, split_k, split_v = split_rope.forward(split_input)
+        self._write_fp8_reference_cache(
+            split_cache,
+            split_k,
+            split_v,
+            sequence_lengths,
+            [0] * batch_size,
+            block_ids,
+            page_size,
+        )
+        split_output = split_attn.forward(split_q, split_cache)
+
+        fused_output = fused_impl.forward(qkv_source.clone(), fused_cache)
+
+        torch.testing.assert_close(
+            fused_cache.kv_cache_base.float(),
+            split_cache.kv_cache_base.float(),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+        torch.testing.assert_close(
+            fused_output.float(), split_output.float(), rtol=2e-2, atol=2e-2
+        )
+
+    def test_fused_ragged_prefill_fp8_accuracy(self):
+        """Compare fused ragged prefill with an explicit FP8 cache reference."""
+        if not self.device_initialized:
+            self.skipTest("device initialization is required")
+
+        batch_size = 4
+        seq_len = 512
+        total_tokens = batch_size * seq_len
+        num_heads = 32
+        num_kv_heads = 8
+        head_dim = 128
+        page_size = 64
+        hidden_size = (num_heads + 2 * num_kv_heads) * head_dim
+
+        config = create_test_attn_config(
+            head_num=num_heads,
+            kv_head_num=num_kv_heads,
+            size_per_head=head_dim,
+            tokens_per_block=page_size,
+            dtype=torch.bfloat16,
+        )
+        config.need_rope_kv_cache = True
+        config.kv_cache_dtype = KvCacheDataType.FP8
+        config.is_causal = True
+
+        lengths = torch.full((batch_size,), seq_len, dtype=torch.int32)
+        cu_seqlens = torch.arange(
+            0,
+            total_tokens + 1,
+            seq_len,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        pages_per_request = math.ceil(seq_len / page_size)
+        block_ids = torch.arange(
+            batch_size * pages_per_request, dtype=torch.int32
+        ).reshape(batch_size, pages_per_request)
+
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = True
+        attn_inputs.input_lengths = lengths.pin_memory()
+        attn_inputs.prefix_lengths = torch.zeros(
+            batch_size, dtype=torch.int32
+        ).pin_memory()
+        attn_inputs.sequence_lengths = lengths.pin_memory()
+        attn_inputs.kv_cache_block_id = block_ids
+        attn_inputs.kv_cache_block_id_device = block_ids.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id = block_ids
+        attn_inputs.kv_cache_kernel_block_id_device = block_ids.to(self.device)
+        attn_inputs.cu_seqlens_device = cu_seqlens
+        attn_inputs.cu_kv_seqlens_device = cu_seqlens
+        attn_inputs.combo_position_ids = torch.arange(
+            seq_len, dtype=torch.int32, device=self.device
+        ).repeat(batch_size)
+        attn_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
+
+        qkv_source = (
+            torch.randn(
+                total_tokens,
+                hidden_size,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+            * 0.5
+        )
+        num_pages = batch_size * pages_per_request
+
+        def make_cache() -> LayerKVCache:
+            cache = LayerKVCache()
+            cache.kv_cache_base = torch.zeros(
+                num_pages,
+                2,
+                num_kv_heads,
+                page_size,
+                head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=self.device,
+            )
+            cache.kv_scale_base = torch.ones(
+                num_pages,
+                2 * num_kv_heads * page_size,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            return cache
+
+        split_attn = PyFlashinferPrefillAttnOp(config)
+        split_params = split_attn.prepare(attn_inputs)
+        split_rope = MhaRotaryEmbeddingOp(config)
+        split_rope.set_params(split_params)
+        split_cache = make_cache()
+
+        fused_impl = PyFlashinferPrefillImpl(config, attn_inputs)
+        fused_cache = make_cache()
+
+        split_input = qkv_source.clone()
+        split_q, split_k, split_v = split_rope.forward(split_input)
+        self._write_fp8_reference_cache(
+            split_cache,
+            split_k,
+            split_v,
+            [seq_len] * batch_size,
+            [0] * batch_size,
+            block_ids,
+            page_size,
+        )
+        split_qkv = torch.cat(
+            [
+                split_q.flatten(1),
+                split_k.flatten(1),
+                split_v.flatten(1),
+            ],
+            dim=-1,
+        )
+        split_output = split_attn.forward(split_qkv, split_cache)
+        fused_output = fused_impl.forward(qkv_source.clone(), fused_cache)
+
+        torch.testing.assert_close(
+            fused_cache.kv_cache_base.float(),
+            split_cache.kv_cache_base.float(),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+        torch.testing.assert_close(
+            fused_output.float(), split_output.float(), rtol=2e-2, atol=2e-2
+        )
+
+    def test_fused_paged_prefill_prefix_and_reused_blocks(self):
+        """Fused writes must preserve prefix offsets and reordered block IDs."""
+        if not self.device_initialized:
+            self.skipTest("device initialization is required")
+
+        input_lengths = [5, 3]
+        prefix_lengths = [8, 0]
+        sequence_lengths = [13, 3]
+        total_tokens = sum(input_lengths)
+        num_heads = 8
+        num_kv_heads = 2
+        head_dim = 128
+        page_size = 8
+        num_pages = 6
+
+        config = create_test_attn_config(
+            head_num=num_heads,
+            kv_head_num=num_kv_heads,
+            size_per_head=head_dim,
+            tokens_per_block=page_size,
+            dtype=torch.bfloat16,
+        )
+        config.need_rope_kv_cache = True
+        config.kv_cache_dtype = KvCacheDataType.FP8
+        config.is_causal = True
+
+        block_ids = torch.tensor([[5, 4], [2, 3]], dtype=torch.int32)
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_prefill = True
+        attn_inputs.input_lengths = torch.tensor(
+            input_lengths, dtype=torch.int32
+        ).pin_memory()
+        attn_inputs.prefix_lengths = torch.tensor(
+            prefix_lengths, dtype=torch.int32
+        ).pin_memory()
+        attn_inputs.sequence_lengths = torch.tensor(
+            sequence_lengths, dtype=torch.int32
+        ).pin_memory()
+        attn_inputs.kv_cache_block_id = block_ids
+        attn_inputs.kv_cache_block_id_device = block_ids.to(self.device)
+        attn_inputs.kv_cache_kernel_block_id = block_ids
+        attn_inputs.kv_cache_kernel_block_id_device = block_ids.to(self.device)
+        attn_inputs.cu_seqlens_device = torch.tensor(
+            [0, 5, 8], dtype=torch.int32, device=self.device
+        )
+        attn_inputs.cu_kv_seqlens_device = attn_inputs.cu_seqlens_device
+        attn_inputs.combo_position_ids = torch.tensor(
+            [8, 9, 10, 11, 12, 0, 1, 2],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        attn_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
+
+        qkv = torch.randn(
+            total_tokens,
+            (num_heads + 2 * num_kv_heads) * head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        value_start = (num_heads + num_kv_heads) * head_dim
+        qkv[0::2, value_start:] = 1000
+        qkv[1::2, value_start:] = -1000
+        cache_seed = torch.randn(
+            num_pages,
+            2,
+            num_kv_heads,
+            page_size,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        ).to(torch.float8_e4m3fn)
+
+        def make_cache() -> LayerKVCache:
+            cache = LayerKVCache()
+            cache.kv_cache_base = cache_seed.clone()
+            cache.kv_scale_base = torch.ones(
+                num_pages,
+                2 * num_kv_heads * page_size,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            return cache
+
+        split_attn = PyFlashinferPrefillPagedAttnOp(config, attn_inputs)
+        split_params = split_attn.prepare(attn_inputs)
+        split_rope = MhaRotaryEmbeddingOp(config)
+        split_rope.set_params(split_params)
+        split_cache = make_cache()
+        query, key, value = split_rope.forward(qkv.clone())
+        self._write_fp8_reference_cache(
+            split_cache,
+            key,
+            value,
+            input_lengths,
+            prefix_lengths,
+            block_ids,
+            page_size,
+        )
+        split_output = split_attn.forward(query, split_cache)
+
+        fused_cache = make_cache()
+        fused_impl = PyFlashinferPagedPrefillImpl(config, attn_inputs)
+        fused_output = fused_impl.forward(qkv.clone(), fused_cache)
+
+        torch.testing.assert_close(
+            fused_cache.kv_cache_base.float(),
+            split_cache.kv_cache_base.float(),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+        torch.testing.assert_close(
+            fused_output.float(), split_output.float(), rtol=2e-2, atol=2e-2
+        )
+
+    def test_fused_paged_prefill_fp8_cuda_graph_replay(self):
+        """Capture and replay fused preprocessing with a changed block table."""
+        if not self.device_initialized:
+            self.skipTest("device initialization is required")
+
+        batch_size = 2
+        seq_len = 16
+        page_size = 16
+        num_heads = 8
+        num_kv_heads = 2
+        head_dim = 128
+        total_tokens = batch_size * seq_len
+
+        config = create_test_attn_config(
+            head_num=num_heads,
+            kv_head_num=num_kv_heads,
+            size_per_head=head_dim,
+            tokens_per_block=page_size,
+            dtype=torch.bfloat16,
+        )
+        config.need_rope_kv_cache = True
+        config.kv_cache_dtype = KvCacheDataType.FP8
+        config.is_causal = True
+
+        def make_inputs(block_ids: torch.Tensor, is_graph: bool) -> PyAttentionInputs:
+            inputs = PyAttentionInputs()
+            inputs.is_prefill = True
+            inputs.is_cuda_graph = is_graph
+            lengths = torch.full((batch_size,), seq_len, dtype=torch.int32)
+            inputs.input_lengths = lengths.pin_memory()
+            inputs.prefix_lengths = torch.zeros(
+                batch_size, dtype=torch.int32
+            ).pin_memory()
+            inputs.sequence_lengths = lengths.pin_memory()
+            inputs.kv_cache_block_id = block_ids
+            inputs.kv_cache_block_id_device = block_ids.to(self.device)
+            inputs.kv_cache_kernel_block_id = block_ids
+            inputs.kv_cache_kernel_block_id_device = block_ids.to(self.device)
+            inputs.cu_seqlens_device = torch.tensor(
+                [0, seq_len, total_tokens],
+                dtype=torch.int32,
+                device=self.device,
+            )
+            inputs.cu_kv_seqlens_device = inputs.cu_seqlens_device
+            inputs.combo_position_ids = torch.arange(
+                seq_len, dtype=torch.int32, device=self.device
+            ).repeat(batch_size)
+            inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
+            return inputs
+
+        def make_cache() -> LayerKVCache:
+            cache = LayerKVCache()
+            cache.kv_cache_base = torch.zeros(
+                batch_size,
+                2,
+                num_kv_heads,
+                page_size,
+                head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=self.device,
+            )
+            cache.kv_scale_base = torch.ones(
+                batch_size,
+                2 * num_kv_heads * page_size,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            return cache
+
+        capture_blocks = torch.tensor([[0], [1]], dtype=torch.int32)
+        replay_blocks = torch.tensor([[1], [0]], dtype=torch.int32)
+        capture_inputs = make_inputs(capture_blocks, True)
+        replay_inputs = make_inputs(replay_blocks, True)
+        graph_impl = PyFlashinferPagedPrefillImpl(config, capture_inputs)
+        graph_cache = make_cache()
+        static_qkv = torch.randn(
+            total_tokens,
+            (num_heads + 2 * num_kv_heads) * head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            for _ in range(3):
+                graph_impl.forward(static_qkv, graph_cache)
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = graph_impl.forward(static_qkv, graph_cache)
+
+        replay_qkv = torch.randn_like(static_qkv)
+        graph_impl.prepare_cuda_graph(replay_inputs)
+        static_qkv.copy_(replay_qkv)
+        graph_cache.kv_cache_base.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+
+        eager_inputs = make_inputs(replay_blocks, False)
+        eager_impl = PyFlashinferPagedPrefillImpl(config, eager_inputs)
+        eager_cache = make_cache()
+        eager_output = eager_impl.forward(replay_qkv, eager_cache)
+
+        torch.testing.assert_close(
+            graph_cache.kv_cache_base.float(),
+            eager_cache.kv_cache_base.float(),
+            rtol=1e-2,
+            atol=1e-2,
+        )
+        torch.testing.assert_close(
+            graph_output.float(), eager_output.float(), rtol=2e-2, atol=2e-2
+        )
 
 
 if __name__ == "__main__":
