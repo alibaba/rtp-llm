@@ -7,6 +7,7 @@ import psutil
 import torch
 
 from rtp_llm.config.moe_config import Fp4MoeOp, resolve_fp4_moe_op
+from rtp_llm.device.b12x_fp4 import prepare_b12x_blockscale
 from rtp_llm.device.device_base import DeviceBase, MemInfo
 from rtp_llm.ops.compute_ops import (
     preprocess_gemm_weight_by_key,
@@ -23,6 +24,10 @@ def prepare_static_weights_for_fp4_moe(
     kernel: torch.Tensor,
     scale: torch.Tensor,
     cache_permute_indices: Optional[dict[torch.Size, torch.Tensor]] = None,
+    *,
+    scale_2: Optional[torch.Tensor] = None,
+    input_scale: Optional[torch.Tensor] = None,
+    b12x_zeroed_energy_limit: Optional[float] = None,
 ):
     """Prepare an FP4 MoE weight pair for a concrete executor layout."""
     if kernel_name not in (W.moe_w1, W.moe_w2):
@@ -57,10 +62,25 @@ def prepare_static_weights_for_fp4_moe(
         return kernel, CudaImpl.swizzle_blockscale(scale)
 
     if op is Fp4MoeOp.B12X:
+        if b12x_zeroed_energy_limit is None:
+            raise ValueError(
+                "b12x_zeroed_energy_limit must be provided for B12X weight "
+                "preparation"
+            )
         # The SM120 kernel is up-first: SwiGLU applies silu to the second
         # (gate) half and multiplies the first (up) half. The loader already
-        # produces [up; gate], so only the blockscale is swizzled here.
-        return kernel, CudaImpl.swizzle_blockscale(scale)
+        # produces [up; gate]. Complete every scale transformation here so the
+        # executor receives a kernel-ready, read-only weight dictionary.
+        swizzled_scale = CudaImpl.swizzle_blockscale(scale)
+        prepared_scale = prepare_b12x_blockscale(
+            "w1" if kernel_name == W.moe_w1 else "w2",
+            kernel,
+            swizzled_scale,
+            scale_2,
+            input_scale,
+            b12x_zeroed_energy_limit,
+        )
+        return kernel, prepared_scale
 
     if cache_permute_indices is None:
         raise ValueError("trtllm FP4 MoE weight preparation requires a cache")
@@ -663,6 +683,9 @@ class CudaImpl(GpuImpl):
         scale_name: str,
         kernel: torch.Tensor,
         scale: torch.Tensor,
+        *,
+        scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
     ):
         return prepare_static_weights_for_fp4_moe(
             self.py_env_configs.moe_config.fp4_moe_op,
@@ -671,6 +694,11 @@ class CudaImpl(GpuImpl):
             kernel,
             scale,
             self._cache_permute_indices,
+            scale_2=scale_2,
+            input_scale=input_scale,
+            b12x_zeroed_energy_limit=(
+                self.py_env_configs.moe_config.b12x_zeroed_energy_limit
+            ),
         )
 
 

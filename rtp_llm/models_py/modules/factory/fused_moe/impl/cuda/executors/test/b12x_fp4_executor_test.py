@@ -105,7 +105,7 @@ class B12xFp4ExecutorTestBase:
     def _generate_weights(
         self, fp4_quantize, w2_expert_scales: Optional[List[float]] = None
     ):
-        from rtp_llm.config.moe_config import Fp4MoeOp
+        from rtp_llm.config.moe_config import B12X_ZEROED_ENERGY_LIMIT_DEFAULT, Fp4MoeOp
         from rtp_llm.device.device_impl import prepare_static_weights_for_fp4_moe
 
         E = self.NUM_EXPERTS
@@ -148,15 +148,33 @@ class B12xFp4ExecutorTestBase:
         w2_sf_linear = torch.stack(w2_sf_l)  # [E, H, I//16] fp8
         w13_gs = torch.stack(w13_gs_l).reshape(E)  # [E]
         w2_gs = torch.stack(w2_gs_l).reshape(E)  # [E]
+        w13_scale_2 = 1.0 / w13_gs
+        w2_scale_2 = 1.0 / w2_gs
+        w13_input_scale = torch.full((E,), 0.001, dtype=torch.float32, device="cuda")
+        w2_input_scale = torch.full((E,), 0.002, dtype=torch.float32, device="cuda")
 
         # Exercise the production boundary that owns the B12X weight ordering
-        # and blockscale layout. Keep ref_pack from the preprocessed tensors so
-        # an accidental gate/up swap here cannot also mutate the reference.
+        # and blockscale layout. ref_pack below keeps the original per-expert
+        # lists, so preprocessing cannot also mutate the reference tensors.
         w13_fp4, w13_sf_sw = prepare_static_weights_for_fp4_moe(
-            Fp4MoeOp.B12X.value, W.moe_w1, W.moe_s1, w13_fp4, w13_sf_linear
+            Fp4MoeOp.B12X.value,
+            W.moe_w1,
+            W.moe_s1,
+            w13_fp4,
+            w13_sf_linear,
+            scale_2=w13_scale_2,
+            input_scale=w13_input_scale,
+            b12x_zeroed_energy_limit=B12X_ZEROED_ENERGY_LIMIT_DEFAULT,
         )
         w2_fp4, w2_sf_sw = prepare_static_weights_for_fp4_moe(
-            Fp4MoeOp.B12X.value, W.moe_w2, W.moe_s2, w2_fp4, w2_sf_linear
+            Fp4MoeOp.B12X.value,
+            W.moe_w2,
+            W.moe_s2,
+            w2_fp4,
+            w2_sf_linear,
+            scale_2=w2_scale_2,
+            input_scale=w2_input_scale,
+            b12x_zeroed_energy_limit=B12X_ZEROED_ENERGY_LIMIT_DEFAULT,
         )
 
         weights: Dict[str, torch.Tensor] = {
@@ -164,8 +182,12 @@ class B12xFp4ExecutorTestBase:
             W.moe_w2: w2_fp4,
             W.moe_s1: w13_sf_sw,
             W.moe_s2: w2_sf_sw,
-            W.moe_w1_s2: 1.0 / w13_gs,  # weight_scale_2 (w13)
-            W.moe_w2_s2: 1.0 / w2_gs,  # weight_scale_2 (w2)
+            W.moe_w1_s2: w13_scale_2,  # weight_scale_2 (w13)
+            W.moe_w2_s2: w2_scale_2,  # weight_scale_2 (w2)
+            # B12x uses dynamic per-block activation quantization, but real
+            # ModelOpt checkpoints still carry these calibration tensors.
+            W.moe_w1_i_s: w13_input_scale,
+            W.moe_w2_i_s: w2_input_scale,
         }
         ref_pack = {
             "w13_fp4": w13_fp4_l,
@@ -178,7 +200,10 @@ class B12xFp4ExecutorTestBase:
         return weights, ref_pack
 
     def _generate_fold_boundary_weights(
-        self, *, all_scales_underflow: bool
+        self,
+        *,
+        all_scales_underflow: bool,
+        zeroed_energy_limit: float = 0.001,
     ) -> Dict[str, torch.Tensor]:
         """Construct already-swizzled scales on a deterministic e4m3 boundary."""
         from rtp_llm.utils.model_weight import W
@@ -209,11 +234,34 @@ class B12xFp4ExecutorTestBase:
         # 2^-9 * 0.25 = 2^-11, below half of e4m3's minimum subnormal,
         # so the selected entries deterministically round to zero.
         weight_scale_2 = torch.full((E,), 0.25, dtype=torch.float32, device=device)
+        w1 = torch.zeros((E, 2 * I, H // 2), dtype=torch.uint8, device=device)
+        w2 = torch.zeros((E, H, I // 2), dtype=torch.uint8, device=device)
+        from rtp_llm.config.moe_config import Fp4MoeOp
+        from rtp_llm.device.device_impl import prepare_static_weights_for_fp4_moe
+
+        w1, w1_sf_mma = prepare_static_weights_for_fp4_moe(
+            Fp4MoeOp.B12X.value,
+            W.moe_w1,
+            W.moe_s1,
+            w1,
+            w1_sf,
+            scale_2=weight_scale_2,
+            b12x_zeroed_energy_limit=zeroed_energy_limit,
+        )
+        w2, w2_sf_mma = prepare_static_weights_for_fp4_moe(
+            Fp4MoeOp.B12X.value,
+            W.moe_w2,
+            W.moe_s2,
+            w2,
+            w2_sf,
+            scale_2=weight_scale_2,
+            b12x_zeroed_energy_limit=zeroed_energy_limit,
+        )
         return {
-            W.moe_w1: torch.zeros((E, 2 * I, H // 2), dtype=torch.uint8, device=device),
-            W.moe_w2: torch.zeros((E, H, I // 2), dtype=torch.uint8, device=device),
-            W.moe_s1: w1_sf,
-            W.moe_s2: w2_sf,
+            W.moe_w1: w1,
+            W.moe_w2: w2,
+            W.moe_s1: w1_sf_mma,
+            W.moe_s2: w2_sf_mma,
             W.moe_w1_s2: weight_scale_2,
             W.moe_w2_s2: weight_scale_2.clone(),
         }
@@ -334,8 +382,10 @@ class B12xFp4ExecutorTestBase:
         )
         self.assertIs(weights[W.moe_s1], executor.w1_sf_mma)
         self.assertIs(weights[W.moe_s2], executor.w2_sf_mma)
-        self.assertNotIn(W.moe_w1_s2, weights)
-        self.assertNotIn(W.moe_w2_s2, weights)
+        self.assertIn(W.moe_w1_s2, weights)
+        self.assertIn(W.moe_w2_s2, weights)
+        self.assertIn(W.moe_w1_i_s, weights)
+        self.assertIn(W.moe_w2_i_s, weights)
         topk_ids = topk_ids.to(executor.topk_ids_dtype)
         payload = ExpertForwardPayload(
             expert_x=hidden_states,
@@ -444,52 +494,27 @@ class B12xFp4ExecutorSmallWeightTest(B12xFp4ExecutorTestBase, unittest.TestCase)
     HIDDEN_SIZE = 256
     MOE_INTERMEDIATE_SIZE = 128
 
-    def test_b12x_fp4_executor_rejects_underflowing_scales(self):
+    def test_b12x_preparation_rejects_underflowing_scales(self):
         reason = _skip_reason()
         if reason:
             self.skipTest(reason)
 
-        from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
-            FusedMoEQuantConfig,
-        )
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_fp4_executor import (
-            B12xFp4Executor,
-        )
+        with self.assertRaisesRegex(
+            ValueError, "of the total scale energy from the GEMM"
+        ):
+            self._generate_fold_boundary_weights(all_scales_underflow=True)
 
-        config = self._generate_config()
-        weights = self._generate_fold_boundary_weights(all_scales_underflow=True)
-        quant_config = FusedMoEQuantConfig(
-            quant_dtype=torch.uint8,
-            block_shape=[self.BLOCK_SIZE, self.BLOCK_SIZE],
-        )
-        with self.assertRaisesRegex(ValueError, "total scale energy"):
-            B12xFp4Executor(config, quant_config, weights)
-
-    def test_b12x_fp4_executor_warns_for_negligible_underflow(self):
+    def test_b12x_weight_preparation_logs_negligible_underflow_at_info(self):
         reason = _skip_reason()
         if reason:
             self.skipTest(reason)
 
-        from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
-            FusedMoEQuantConfig,
-        )
-        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_fp4_executor import (
-            B12xFp4Executor,
-        )
-
-        config = self._generate_config()
-        weights = self._generate_fold_boundary_weights(all_scales_underflow=False)
-        quant_config = FusedMoEQuantConfig(
-            quant_dtype=torch.uint8,
-            block_shape=[self.BLOCK_SIZE, self.BLOCK_SIZE],
-        )
-        with self.assertLogs(B12xFp4Executor.__module__, level="WARNING") as logs:
-            executor = B12xFp4Executor(config, quant_config, weights)
+        with self.assertLogs("rtp_llm.device.b12x_fp4", level="INFO") as logs:
+            self._generate_fold_boundary_weights(all_scales_underflow=False)
 
         messages = "\n".join(logs.output)
         self.assertIn("w1 blockscale entries underflowed e4m3", messages)
         self.assertIn("w2 blockscale entries underflowed e4m3", messages)
-        self.assertEqual(executor.local_num_experts, self.NUM_EXPERTS)
 
 
 class B12xFp4ExecutorCudaGraphTest(B12xFp4ExecutorTestBase, unittest.TestCase):
@@ -648,7 +673,7 @@ class B12xFp4ExecutorCudaGraphTest(B12xFp4ExecutorTestBase, unittest.TestCase):
             payload, "silu", None, None, False, None
         ).fused_expert_output
 
-        self.assertGreater(num_prefill_tokens, executor._b12x_moe.max_num_tokens)
+        self.assertGreater(num_prefill_tokens, executor._graph_max_num_tokens)
         self.assertIsNotNone(executor._b12x_moe_eager)
         self.assertEqual(tuple(output.shape), (num_prefill_tokens, self.HIDDEN_SIZE))
         self.assertTrue(torch.isfinite(output).all())

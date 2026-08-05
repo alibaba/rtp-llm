@@ -51,11 +51,13 @@ class MoEConfigAdapter:
         self.hidden_size = model_config.hidden_size
         self.data_type = model_config.data_type
         self.head_num = model_config.attn_config.head_num
-        self.ll_num_max_token = moe_config.ll_num_max_token
-        self.masked_max_token_num = moe_config.masked_max_token_num
-        self.moe_strategy = moe_config.moe_strategy
-        self.use_mori_ep = moe_config.use_mori_ep
-        self.use_deepep_moe = moe_config.use_deepep_moe
+        self.ll_num_max_token = self.moe_config.ll_num_max_token
+        self.masked_max_token_num = self.moe_config.masked_max_token_num
+        self.moe_strategy = self.moe_config.moe_strategy
+        self.use_mori_ep = self.moe_config.use_mori_ep
+        self.use_deepep_moe = self.moe_config.use_deepep_moe
+        self.b12x_zeroed_energy_limit = self.moe_config.b12x_zeroed_energy_limit
+        self.b12x_disable_cuda12_9_compat = self.moe_config.b12x_disable_cuda12_9_compat
         self.enable_cuda_graph = enable_cuda_graph
 
     @property
