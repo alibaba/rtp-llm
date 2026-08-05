@@ -726,6 +726,23 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
     const auto& lm_head = weights_.lm_head;
 
     if (lm_head) {
+        if (description_.output_vocab_size > 0) {
+            const auto gather_world_size = static_cast<size_t>(device_props_.tp_size);
+            RTP_LLM_CHECK_WITH_INFO(description_.output_vocab_padded_size >= description_.output_vocab_size,
+                                    "invalid output vocabulary layout: K=%zu, P=%zu",
+                                    description_.output_vocab_size,
+                                    description_.output_vocab_padded_size);
+            RTP_LLM_CHECK_WITH_INFO(description_.output_vocab_padded_size % gather_world_size == 0,
+                                    "output vocabulary padded size %zu is not divisible by gather world size %zu",
+                                    description_.output_vocab_padded_size,
+                                    gather_world_size);
+            const auto expected_local_rows = description_.output_vocab_padded_size / gather_world_size;
+            RTP_LLM_CHECK_WITH_INFO(lm_head->kernel.dim() == 2
+                                        && static_cast<size_t>(lm_head->kernel.size(0)) == expected_local_rows,
+                                    "output vocabulary LM head rows mismatch: expected %zu, got %ld",
+                                    expected_local_rows,
+                                    lm_head->kernel.dim() > 0 ? lm_head->kernel.size(0) : -1);
+        }
         printTorchTensorData(lm_output_indexes, "lm_output_indexes");
 
         buffer_holder_.hold_host(lm_output_indexes);
@@ -744,6 +761,14 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
             logits = tpSyncEmbeddingOrLogits(logits);
+        }
+        if (description_.output_vocab_size > 0) {
+            RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
+                                        && static_cast<size_t>(logits.size(1)) == description_.output_vocab_padded_size,
+                                    "output vocabulary gathered width mismatch: expected %zu, got %ld",
+                                    description_.output_vocab_padded_size,
+                                    logits.dim() > 1 ? logits.size(1) : -1);
+            logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
         }
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");

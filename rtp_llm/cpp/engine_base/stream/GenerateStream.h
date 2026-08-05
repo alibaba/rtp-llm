@@ -358,6 +358,10 @@ public:
         return vocab_size_;
     }
 
+    size_t outputVocabSize() const {
+        return output_vocab_size_;
+    }
+
     size_t outputTokenLen() const {
         return seqLength() - inputLength();
     }
@@ -601,6 +605,7 @@ protected:
     std::vector<StreamState>              sub_generate_status_;
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
+    size_t                                output_vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_ = 0;

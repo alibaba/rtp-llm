@@ -70,6 +70,8 @@ public:
                 model_config.data_type,
                 model_config.layernorm_eps,
                 (size_t)model_config.vocab_size,
+                model_config.output_vocab_ids.size(),
+                (size_t)model_config.output_vocab_padded_size,
                 model_config.layernorm_type == rtp_llm::LayerNormType::post_layernorm,
                 model_config.input_embedding_scalar,
                 model_config.residual_scalar,

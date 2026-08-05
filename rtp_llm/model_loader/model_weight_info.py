@@ -44,6 +44,41 @@ def create_scalar_ones(ts: List[torch.Tensor]):
     return torch.ones([1], dtype=torch.float32).to(ts[0].device)
 
 
+def select_output_vocab_rows(
+    ts: List[torch.Tensor],
+    origin_func,
+    output_vocab_ids: Tuple[int, ...],
+    expected_vocab_size: int,
+    expected_hidden_size: int,
+) -> torch.Tensor:
+    tensor = origin_func(ts)
+    if tensor.dim() != 2:
+        raise ValueError(
+            f"output vocabulary pruning requires a 2-D LM head, got shape {tuple(tensor.shape)}"
+        )
+    if tensor.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError(
+            "output vocabulary pruning requires an FP16, BF16, or FP32 LM head, "
+            f"got dtype {tensor.dtype}"
+        )
+    if tensor.shape[1] != expected_hidden_size:
+        raise ValueError(
+            "output vocabulary pruning LM head hidden size mismatch: "
+            f"expected {expected_hidden_size}, got {tensor.shape[1]}"
+        )
+    if tensor.shape[0] < expected_vocab_size:
+        raise ValueError(
+            "output vocabulary pruning LM head does not cover the model vocabulary: "
+            f"expected at least {expected_vocab_size} rows, got {tensor.shape[0]}"
+        )
+    if output_vocab_ids[-1] >= tensor.shape[0]:
+        raise ValueError(
+            f"output token id {output_vocab_ids[-1]} exceeds LM head rows {tensor.shape[0]}"
+        )
+    indices = torch.tensor(output_vocab_ids, dtype=torch.long, device=tensor.device)
+    return tensor.index_select(0, indices).contiguous()
+
+
 class ModelWeightInfo:
     layer_weights: Union[List[WeightModule], List[List[WeightModule]]]
     weights: List[WeightModule]
@@ -238,6 +273,7 @@ class ModelDeployWeightInfo:
 
         self.tie_word_embeddings = model_config.tie_word_embeddings
         self.enable_fp32_lm_head = model_config.enable_fp32_lm_head
+        self.output_vocab_ids = tuple(model_config.output_vocab_ids)
         self.weight_style = WeightStyle.NONE
 
         # for mla
@@ -301,6 +337,11 @@ class ModelDeployWeightInfo:
         weight_info = self._get_weight_info()
         # avoid circular import
 
+        if self.output_vocab_ids and self.weight_style != WeightStyle.NONE:
+            raise ValueError(
+                "output vocabulary pruning does not support special checkpoint weight styles"
+            )
+
         if weight_info.layer_weights and not isinstance(
             weight_info.layer_weights[0], List
         ):
@@ -324,13 +365,99 @@ class ModelDeployWeightInfo:
         if self._quant_algo is not None and self._quant_algo.isQuant():
             weight_info = weight_info.to_quant_weight_info(self._quant_config)
 
+        if self.output_vocab_ids:
+            weight_info = ModelWeightInfo(
+                list(weight_info.weights), weight_info.layer_weights
+            )
+            self._validate_output_vocab_sources(weight_info)
+
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
             weight_info = self._fix_tie_lm_head(weight_info)
 
-        if self.enable_fp32_lm_head:
+        if self.enable_fp32_lm_head and not self.output_vocab_ids:
             weight_info = self._fix_fp32_lm_head(weight_info)
 
+        if self.output_vocab_ids:
+            weight_info = self._replace_output_vocab_lm_head(weight_info)
+
+        return weight_info
+
+    def _get_single_global_weight(
+        self, weight_info: ModelWeightInfo, name: str
+    ) -> WeightModule:
+        matches = [weight for weight in weight_info.weights if weight.name == name]
+        if len(matches) != 1:
+            raise ValueError(
+                "output vocabulary pruning requires exactly one "
+                f"{name} descriptor, got {len(matches)}"
+            )
+        return matches[0]
+
+    def _validate_plain_output_weight(
+        self, weight: WeightModule, source_name: str
+    ) -> AtomicWeight:
+        if type(weight) is not AtomicWeight:
+            raise ValueError(
+                "output vocabulary pruning only supports an exact plain AtomicWeight "
+                f"for {source_name}, got {type(weight).__name__}"
+            )
+        if weight.weight_style != WeightStyle.NONE:
+            raise ValueError(
+                "output vocabulary pruning does not support "
+                f"{source_name} weight style {weight.weight_style}"
+            )
+        if (
+            weight.is_lora
+            or weight.lora_a_process_func is not None
+            or weight.lora_b_process_func is not None
+            or weight.lora_a_split_func is not None
+            or weight.lora_b_split_func is not None
+        ):
+            raise ValueError(
+                f"output vocabulary pruning does not support LoRA on {source_name}"
+            )
+        return weight
+
+    def _validate_output_vocab_sources(self, weight_info: ModelWeightInfo) -> None:
+        if self.model_config.has_lm_head_bias or any(
+            weight.name == W.lm_head_b for weight in weight_info.weights
+        ):
+            raise ValueError("output vocabulary pruning does not support LM head bias")
+
+        lm_head = self._get_single_global_weight(weight_info, W.lm_head)
+        self._validate_plain_output_weight(lm_head, W.lm_head)
+        if self.tie_word_embeddings:
+            embedding = self._get_single_global_weight(weight_info, W.embedding)
+            self._validate_plain_output_weight(embedding, W.embedding)
+            if len(lm_head.weights) != 1 or len(embedding.weights) != 1:
+                raise ValueError(
+                    "output vocabulary pruning tied LM head requires exactly one "
+                    "checkpoint source for both LM head and embedding"
+                )
+
+    def _replace_output_vocab_lm_head(
+        self, weight_info: ModelWeightInfo
+    ) -> ModelWeightInfo:
+        lm_head = self._validate_plain_output_weight(
+            self._get_single_global_weight(weight_info, W.lm_head), W.lm_head
+        )
+        replacement = AtomicWeight(
+            W.lm_head,
+            list(lm_head.weights),
+            functools.partial(
+                select_output_vocab_rows,
+                origin_func=lm_head.process_fun,
+                output_vocab_ids=self.output_vocab_ids,
+                expected_vocab_size=self.model_config.vocab_size,
+                expected_hidden_size=self._hidden_size,
+            ),
+            data_type=(
+                torch.float32 if self.enable_fp32_lm_head else lm_head.data_type
+            ),
+        )
+        lm_head_index = weight_info.weights.index(lm_head)
+        weight_info.weights[lm_head_index] = replacement
         return weight_info
 
     def _fix_weight_style_layer_weight(self, origin_weight_info: ModelWeightInfo):
@@ -509,6 +636,10 @@ class ModelDeployWeightInfo:
             self._filter_ckpt_files_by_weight_info(database, weight_info)
             return weight_info
         elif database.is_ft_style:
+            if self.output_vocab_ids:
+                raise ValueError(
+                    "output vocabulary pruning does not support pre-sharded FT checkpoints"
+                )
             return None
         else:
             raise Exception("Unknown database class")

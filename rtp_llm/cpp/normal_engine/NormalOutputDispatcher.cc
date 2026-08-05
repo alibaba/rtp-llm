@@ -43,6 +43,41 @@ std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_
     return error_info;
 }
 
+bool NormalOutputDispatcher::restoreCurrentTokenIds(const GenerateStreamPtr& stream,
+                                                    torch::Tensor&           batch_token_ids,
+                                                    torch::Tensor&           current_token_ids,
+                                                    size_t                   token_position) const {
+    if (output_vocab_ids_.empty()) {
+        return true;
+    }
+
+    RTP_LLM_CHECK(batch_token_ids.device().is_cpu() && current_token_ids.device().is_cpu());
+    RTP_LLM_CHECK(batch_token_ids.scalar_type() == torch::kInt32 && current_token_ids.scalar_type() == torch::kInt32);
+    RTP_LLM_CHECK(batch_token_ids.dim() == 2 && current_token_ids.dim() == 2);
+    RTP_LLM_CHECK(batch_token_ids.is_contiguous() && current_token_ids.is_contiguous());
+    RTP_LLM_CHECK(batch_token_ids.size(0) == current_token_ids.size(0));
+    RTP_LLM_CHECK(current_token_ids.size(1) == 1);
+    RTP_LLM_CHECK(token_position < static_cast<size_t>(batch_token_ids.size(1)));
+
+    const auto token_stride = static_cast<size_t>(batch_token_ids.size(1));
+    auto*      batch_data   = batch_token_ids.data_ptr<int32_t>();
+    auto*      current_data = current_token_ids.data_ptr<int32_t>();
+    for (int64_t row = 0; row < current_token_ids.size(0); ++row) {
+        const auto compact_id = current_data[row];
+        if (compact_id < 0 || static_cast<size_t>(compact_id) >= output_vocab_ids_.size()) {
+            stream->reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                                "compact output token id " + std::to_string(compact_id)
+                                    + " is outside configured output vocabulary size "
+                                    + std::to_string(output_vocab_ids_.size()));
+            return false;
+        }
+        const auto canonical_id                         = static_cast<int32_t>(output_vocab_ids_[compact_id]);
+        current_data[row]                               = canonical_id;
+        batch_data[row * token_stride + token_position] = canonical_id;
+    }
+    return true;
+}
+
 absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                               const MergedOutput& merge_outputs) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -260,6 +295,25 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
             new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_position];
     }
 
+    if (!output_vocab_ids_.empty()) {
+        for (int i = 0; i < cur_batch_size; ++i) {
+            if (success_cpu.defined() && !success_cpu.data_ptr<bool>()[batch_idx_in + i]) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "sampler generate token id failed");
+                return;
+            }
+        }
+        for (int i = 0; i < next_batch_size; ++i) {
+            const auto compact_id = new_tokens.data_ptr<int32_t>()[i];
+            if (compact_id < 0 || static_cast<size_t>(compact_id) >= output_vocab_ids_.size()) {
+                stream->reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                                    "compact output token id " + std::to_string(compact_id)
+                                        + " is outside configured output vocabulary size "
+                                        + std::to_string(output_vocab_ids_.size()));
+                return;
+            }
+        }
+    }
+
     torch::Tensor current_softmax_result;
     if (stream->calculateSoftmaxProbs()) {
         auto batch_softmax_input = raw_logits.to(torch::kFloat32).contiguous();
@@ -276,6 +330,10 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     }
 
     auto error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
+
+    if (!restoreCurrentTokenIds(stream, batch_new_all_token_ids, new_tokens, token_position)) {
+        return;
+    }
 
     RTP_LLM_LOG_DEBUG("stream [%ld], new_tokens size = [%ld]", stream->streamId(), new_tokens.numel());
 

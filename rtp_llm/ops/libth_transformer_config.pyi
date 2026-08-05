@@ -1024,6 +1024,8 @@ class ModelConfig:
     moe_style: int
     moe_topk_group: int
     num_layers: int
+    output_vocab_ids: list[int]
+    output_vocab_padded_size: int
     partial_rotary_factor: float
     position_ids_style: int
     pre_seq_len: int

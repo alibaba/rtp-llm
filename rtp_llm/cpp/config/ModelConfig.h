@@ -82,15 +82,17 @@ public:
     bool use_norm_input_residual    = false;
     bool use_norm_attn_out_residual = false;
 
-    int64_t max_seq_len                = 0;
-    int64_t gen_num_per_cycle          = 0;  // speculative decoding: tokens per cycle
-    int64_t vocab_size                 = 0;
-    int64_t input_vocab_size           = 0;  // 0 if not set
-    int64_t type_vocab_size            = 0;
-    int64_t embedding_size             = 0;
-    int64_t expert_num                 = 0;
-    int64_t moe_k                      = 0;
-    bool    moe_normalize_expert_scale = false;
+    int64_t              max_seq_len       = 0;
+    int64_t              gen_num_per_cycle = 0;  // speculative decoding: tokens per cycle
+    int64_t              vocab_size        = 0;
+    std::vector<int64_t> output_vocab_ids;
+    int64_t              output_vocab_padded_size   = 0;
+    int64_t              input_vocab_size           = 0;  // 0 if not set
+    int64_t              type_vocab_size            = 0;
+    int64_t              embedding_size             = 0;
+    int64_t              expert_num                 = 0;
+    int64_t              moe_k                      = 0;
+    bool                 moe_normalize_expert_scale = false;
     // 0 for no moe; 1 for all layer moe; 2 for partial layer moe
     int64_t moe_style = 0;
     // 0 for softmax; 1 for sigmoid

@@ -67,6 +67,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (!model_config_.output_vocab_ids.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
+                                "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
+        RTP_LLM_CHECK_WITH_INFO(!runtime_config.warm_up_with_loss,
+                                "output vocabulary pruning does not support warm_up_with_loss");
+    }
 #if !USING_CUDA
     // On ROCm, this constructor runs on a gRPC handler thread that defaults to
     // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go

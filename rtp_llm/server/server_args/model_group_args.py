@@ -85,3 +85,16 @@ def init_model_group_args(parser, model_args):
         default=None,
         help="是否将lm_head权重加载为fp32精度，默认为true",
     )
+    model_group.add_argument(
+        "--enable_output_vocab_pruning",
+        env_name="ENABLE_OUTPUT_VOCAB_PRUNING",
+        bind_to=(model_args, "enable_output_vocab_pruning"),
+        type=str2bool,
+        nargs="?",
+        const=True,
+        default=False,
+        help=(
+            "Use output_tokens.json from the checkpoint directory to prune the "
+            "LM head. Flat or grouped token strings/IDs form one static set."
+        ),
+    )

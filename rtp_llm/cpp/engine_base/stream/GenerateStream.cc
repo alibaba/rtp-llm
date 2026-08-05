@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <typeinfo>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
 #include <ATen/cuda/CUDAGeneratorImpl.h>
@@ -14,11 +16,36 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, size_t output_vocab_size) {
+    if (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f) {
+        return "output vocabulary pruning does not support active repetition, presence, or frequency penalties";
+    }
+    if (config.no_repeat_ngram_size.value_or(0) > 0) {
+        return "output vocabulary pruning does not support no_repeat_ngram_size";
+    }
+    if (config.in_think_mode) {
+        return "output vocabulary pruning does not support think mode";
+    }
+    if (config.return_logits || config.return_prompt_logits || config.return_all_probs != ReturnAllProbsMode::NONE
+        || config.calculate_loss != 0 || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
+        return "output vocabulary pruning does not support full-vocabulary logits, probabilities, labels, or loss";
+    }
+    if (config.hasNumBeams() && output_vocab_size <= 2 * static_cast<size_t>(config.maxNumBeams())) {
+        return "output vocabulary size must be greater than twice the maximum beam width";
+    }
+    return std::nullopt;
+}
+
+}  // namespace
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
@@ -30,6 +57,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
+    output_vocab_size_(model_config.output_vocab_ids.size()),
     stream_cache_resource_(std::make_shared<StreamCacheResource>(
         this, resource_context, input->need_release_resource, input->generate_config->adapter_name)),
     need_release_resource_(input->need_release_resource),
@@ -83,10 +111,37 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
     setReturnAllProbs(generate_input_->generate_config->return_all_probs);
 
+    int64_t processor_eos_token_id = special_tokens_.eos_token_id;
+    if (output_vocab_size_ > 0) {
+        const auto& output_vocab_ids = model_config.output_vocab_ids;
+        const auto  eos_it =
+            std::lower_bound(output_vocab_ids.begin(), output_vocab_ids.end(), special_tokens_.eos_token_id);
+        if (eos_it == output_vocab_ids.end() || *eos_it != special_tokens_.eos_token_id) {
+            reportError(ErrorCode::INVALID_PARAMS, "primary EOS token is absent from the configured output vocabulary");
+            return;
+        }
+        processor_eos_token_id = std::distance(output_vocab_ids.begin(), eos_it);
+
+        if (auto error = validateOutputVocabRequest(*generateConfig(), output_vocab_size_)) {
+            reportError(ErrorCode::INVALID_PARAMS, *error);
+            return;
+        }
+    }
+
     auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
-        generate_input_, init_batch_size, maxBatchSize(), special_tokens_.eos_token_id);
+        generate_input_, init_batch_size, maxBatchSize(), processor_eos_token_id);
     if (processors_result.ok()) {
-        logits_processor_list_ = std::move(processors_result.value());
+        auto processors = std::move(processors_result.value());
+        if (output_vocab_size_ > 0) {
+            for (const auto& processor : processors) {
+                if (typeid(*processor) != typeid(MultiSeqLogitsProcessor)) {
+                    reportError(ErrorCode::INVALID_PARAMS,
+                                "output vocabulary pruning only supports the MultiSeq logits processor");
+                    return;
+                }
+            }
+        }
+        logits_processor_list_ = std::move(processors);
     } else {
         const auto& err = processors_result.status();
         reportEventWithoutLock(StreamEvents::Error, err.code(), err.ToString());

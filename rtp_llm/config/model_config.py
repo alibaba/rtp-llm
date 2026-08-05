@@ -57,6 +57,7 @@ class ModelConfig(CppModelConfig):
         "is_mtp",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
+        "enable_output_vocab_pruning",
         "has_lm_head_bias",
         "tie_word_embeddings",
         "quantization",
@@ -135,6 +136,8 @@ class ModelConfig(CppModelConfig):
         "has_moe_norm",
         "prefix_projection",
         "reverse_e_h_norm",
+        "output_vocab_ids",
+        "output_vocab_padded_size",
     }
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -515,6 +518,7 @@ class ModelConfig(CppModelConfig):
         self.is_mtp: bool = False
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
+        self.enable_output_vocab_pruning: bool = False
         self.has_lm_head_bias: bool = False
         self.tie_word_embeddings: bool = False
         # Model loading related fields
@@ -907,6 +911,10 @@ def build_model_config(
 
     if model_args.enable_fp32_lm_head is not None:
         model_config.enable_fp32_lm_head = model_args.enable_fp32_lm_head
+
+    model_config.output_vocab_ids = []
+    model_config.output_vocab_padded_size = 0
+    model_config.enable_output_vocab_pruning = model_args.enable_output_vocab_pruning
 
     # Apply model override args
     if model_args.json_model_override_args:
