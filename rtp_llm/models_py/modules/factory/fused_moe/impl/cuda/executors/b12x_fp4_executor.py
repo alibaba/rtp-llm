@@ -2,11 +2,17 @@ import logging
 import math
 import os
 import threading
-from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 import torch
 
+from rtp_llm.device.flashinfer_b12x_adapter import (
+    DISABLE_CUDA12_9_COMPAT_ENV,
+    convert_b12x_blockscale_to_mma_layout,
+    create_b12x_wrappers,
+    get_b12x_kernel_tile_n,
+    get_disable_cuda12_9_compat,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -23,13 +29,10 @@ from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
 
-_version_gate_warned = False
-_version_gate_lock = threading.Lock()
 _runtime_config_logged = False
 _runtime_config_lock = threading.Lock()
 _ZEROED_ENERGY_LIMIT = 0.001
 _ZEROED_ENERGY_LIMIT_ENV = "RTP_LLM_B12X_ZEROED_ENERGY_LIMIT"
-_DISABLE_CUDA12_9_COMPAT_ENV = "RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT"
 _E4M3_MIN_NORMAL = 2.0**-6
 _B12X_TOPK_IDS_DTYPE = torch.int32
 _B12X_TOPK_WEIGHTS_DTYPE = torch.float32
@@ -54,17 +57,6 @@ def _get_zeroed_energy_limit() -> float:
     return limit
 
 
-def _get_disable_cuda12_9_compat() -> bool:
-    raw_value = os.getenv(_DISABLE_CUDA12_9_COMPAT_ENV)
-    if raw_value is None:
-        return False
-    if raw_value not in ("0", "1"):
-        raise ValueError(
-            f"{_DISABLE_CUDA12_9_COMPAT_ENV} must be 0 or 1, got {raw_value!r}"
-        )
-    return raw_value == "1"
-
-
 def _log_runtime_config_once(
     zeroed_energy_limit: float, disable_cuda12_9_compat: bool
 ) -> None:
@@ -77,30 +69,10 @@ def _log_runtime_config_once(
             "is not used and activation global scales are fixed to 1",
             _ZEROED_ENERGY_LIMIT_ENV,
             zeroed_energy_limit,
-            _DISABLE_CUDA12_9_COMPAT_ENV,
+            DISABLE_CUDA12_9_COMPAT_ENV,
             disable_cuda12_9_compat,
         )
         _runtime_config_logged = True
-
-
-def _get_kernel_tile_n() -> int:
-    """Read the gate/up split width from the pinned FlashInfer implementation."""
-    try:
-        from flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch import (
-            _level_tile_n,
-        )
-    except (ImportError, AttributeError) as error:
-        raise RuntimeError(
-            "b12x FP4 requires the FlashInfer sm12x _level_tile_n API; "
-            "check the pinned flashinfer-python version"
-        ) from error
-
-    tile_n = _level_tile_n()
-    if not isinstance(tile_n, int) or tile_n <= 0:
-        raise RuntimeError(
-            f"FlashInfer returned an invalid b12x tile width: {tile_n!r}"
-        )
-    return tile_n
 
 
 def _validate_b12x_weight_shapes(
@@ -353,61 +325,6 @@ def _validate_execute_inputs(
     return expert_x, topk_ids, topk_weights
 
 
-@contextmanager
-def _relaxed_b12x_cuda_version_gate():
-    """Temporarily relax the CUDA>=13 gate while constructing a b12x wrapper."""
-    from flashinfer.jit import cpp_ext
-
-    # Serializing the entire context prevents overlapping executor construction
-    # from saving and later restoring another context's temporary lambda.
-    with _version_gate_lock:
-        try:
-            original = cpp_ext.get_cuda_version
-        except AttributeError as error:
-            raise RuntimeError(
-                "b12x FP4 requires flashinfer.jit.cpp_ext.get_cuda_version; "
-                "check the pinned flashinfer-python version"
-            ) from error
-        real_version = original()
-        if (
-            real_version.major >= 13
-            or (
-                real_version.major,
-                real_version.minor,
-            )
-            < (12, 9)
-            or _get_disable_cuda12_9_compat()
-        ):
-            # Native gate already passes, or version is too low:
-            # let flashinfer raise its own error.
-            yield
-            return
-        global _version_gate_warned
-        if not _version_gate_warned:
-            logger.warning(
-                "b12x NVFP4 MoE: temporarily reporting CUDA 13.0 to flashinfer "
-                "while constructing the wrapper (real CUDA %s).",
-                real_version,
-            )
-            _version_gate_warned = True
-        fake_version = type(real_version)("13.0")
-        constructing_thread = threading.get_ident()
-
-        def get_compatible_cuda_version():
-            # The third-party probe is process-global. Restrict the relaxed
-            # value to the wrapper-construction thread so unrelated FlashInfer
-            # work running concurrently still observes the real toolchain.
-            if threading.get_ident() == constructing_thread:
-                return fake_version
-            return original()
-
-        cpp_ext.get_cuda_version = get_compatible_cuda_version
-        try:
-            yield
-        finally:
-            cpp_ext.get_cuda_version = original
-
-
 class B12xFp4Executor(FusedMoeExpertExecutor):
     """flashinfer b12x CuTe DSL fused NVFP4 MoE executor for sm_120/sm_121."""
 
@@ -449,9 +366,6 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
                 f"{config.ll_num_max_token}"
             )
 
-        from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
-        from flashinfer.fused_moe.cute_dsl import B12xMoEWrapper
-
         self.w1 = weights.get(W.moe_w1, None)  # [E, 2*I, H//2] uint8, up-first
         self.w2 = weights.get(W.moe_w2, None)  # [E, H, I//2] uint8
         w1_sf = weights.get(W.moe_s1, None)  # fp8_e4m3, swizzled blockscale
@@ -477,7 +391,7 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
             w1_scale_2,
             w2_scale_2,
             self.num_experts,
-            _get_kernel_tile_n(),
+            get_b12x_kernel_tile_n(),
         )
         E, two_i, _ = self.w1.shape
 
@@ -492,7 +406,7 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
         # layout the kernel consumes; m = weight rows (2*I for w13, H for w2),
         # k = contraction dim.
         zeroed_energy_limit = _get_zeroed_energy_limit()
-        _log_runtime_config_once(zeroed_energy_limit, _get_disable_cuda12_9_compat())
+        _log_runtime_config_once(zeroed_energy_limit, get_disable_cuda12_9_compat())
 
         # Folding requantizes to e4m3. Measured behavior on sm_120:
         # - Overflow becomes NaN (torch e4m3 cast does not saturate): fatal.
@@ -541,12 +455,11 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
             return folded
 
         w1_sf_folded = fold_blockscale("w1", w1_sf, w1_scale_2)
-        self.w1_sf_mma = convert_sf_to_mma_layout(
+        self.w1_sf_mma = convert_b12x_blockscale_to_mma_layout(
             w1_sf_folded.reshape(-1).contiguous(),
             m=two_i,
             k=self.hidden_size,
             num_groups=E,
-            sf_vec_size=16,
         )
         # ModelWeights owns this dictionary for the model lifetime. Replacing
         # the source scale here releases the old swizzled tensor after layer
@@ -555,12 +468,11 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
         del w1_sf_folded, w1_sf, w1_scale_2
 
         w2_sf_folded = fold_blockscale("w2", w2_sf, w2_scale_2)
-        self.w2_sf_mma = convert_sf_to_mma_layout(
+        self.w2_sf_mma = convert_b12x_blockscale_to_mma_layout(
             w2_sf_folded.reshape(-1).contiguous(),
             m=self.hidden_size,
             k=self.intermediate_size,
             num_groups=E,
-            sf_vec_size=16,
         )
         weights[W.moe_s2] = self.w2_sf_mma
         weights.pop(W.moe_w1_s2, None)
@@ -590,20 +502,9 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
             quant_mode="nvfp4",
             source_format="modelopt",
         )
-        # FusedMoeFactory constructs executors under torch.inference_mode().
-        # FlashInfer mutates its routing workspace on every run, so allocate
-        # wrapper-owned buffers as normal tensors while keeping model weights
-        # as inference tensors.
-        with torch.inference_mode(False), _relaxed_b12x_cuda_version_gate():
-            self._b12x_moe = B12xMoEWrapper(
-                **wrapper_args,
-                use_cuda_graph=config.enable_cuda_graph,
-            )
-            self._b12x_moe_eager = (
-                B12xMoEWrapper(**wrapper_args, use_cuda_graph=False)
-                if config.enable_cuda_graph
-                else None
-            )
+        self._b12x_moe, self._b12x_moe_eager = create_b12x_wrappers(
+            wrapper_args, config.enable_cuda_graph
+        )
 
     @property
     def local_num_experts(self) -> int:

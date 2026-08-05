@@ -6,21 +6,31 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.moe_config import Fp4MoeOp
 from rtp_llm.device.device_impl import CudaImpl, prepare_static_weights_for_fp4_moe
+from rtp_llm.device.flashinfer_b12x_adapter import (
+    DISABLE_CUDA12_9_COMPAT_ENV,
+    SUPPORTED_FLASHINFER_VERSION,
+    _load_b12x_symbols,
+    get_b12x_kernel_tile_n,
+    get_disable_cuda12_9_compat,
+    relaxed_b12x_cuda_version_gate,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_fp4_executor import (
-    _DISABLE_CUDA12_9_COMPAT_ENV,
     _E4M3_MIN_NORMAL,
     _ZEROED_ENERGY_LIMIT,
     _ZEROED_ENERGY_LIMIT_ENV,
     B12xFp4Executor,
-    _get_disable_cuda12_9_compat,
     _get_zeroed_energy_limit,
-    _relaxed_b12x_cuda_version_gate,
     _validate_b12x_weight_shapes,
     _validate_execute_inputs,
     _validate_folded_blockscale,
 )
+from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -85,7 +95,14 @@ class B12xWeightPreparationTest(unittest.TestCase):
         )
 
     def test_rejects_zero_graph_capacity_before_weight_preparation(self):
-        config = Mock(enable_cuda_graph=True, ll_num_max_token=0)
+        moe_config = MoeConfig()
+        moe_config.ll_num_max_token = 0
+        config = MoEConfigAdapter(
+            model_config=ModelConfig(),
+            parallelism_config=ParallelismConfig(),
+            moe_config=moe_config,
+            enable_cuda_graph=True,
+        )
         with self.assertRaisesRegex(ValueError, "ll_num_max_token > 0"):
             B12xFp4Executor(config, Mock(), {})
 
@@ -211,14 +228,14 @@ class B12xFoldValidationTest(unittest.TestCase):
     def test_parses_cuda12_9_compat_switch_strictly(self):
         for value, expected in (("0", False), ("1", True)):
             with self.subTest(value=value), patch.dict(
-                os.environ, {_DISABLE_CUDA12_9_COMPAT_ENV: value}
+                os.environ, {DISABLE_CUDA12_9_COMPAT_ENV: value}
             ):
-                self.assertEqual(_get_disable_cuda12_9_compat(), expected)
+                self.assertEqual(get_disable_cuda12_9_compat(), expected)
         for value in ("true", "yes", "2", ""):
             with self.subTest(value=value), patch.dict(
-                os.environ, {_DISABLE_CUDA12_9_COMPAT_ENV: value}
+                os.environ, {DISABLE_CUDA12_9_COMPAT_ENV: value}
             ), self.assertRaisesRegex(ValueError, "must be 0 or 1"):
-                _get_disable_cuda12_9_compat()
+                get_disable_cuda12_9_compat()
 
     def test_rejects_invalid_zeroed_energy_limit_override(self):
         for value in ("invalid", "nan", "-0.1", "1.1"):
@@ -363,7 +380,7 @@ class B12xFlashInferCompatibilityTest(unittest.TestCase):
     def test_patches_cuda_12_9_only_inside_context(self):
         probe = self._probe("12.9")
         with patch.object(self.cpp_ext, "get_cuda_version", probe):
-            with _relaxed_b12x_cuda_version_gate():
+            with relaxed_b12x_cuda_version_gate():
                 self.assertEqual(str(self.cpp_ext.get_cuda_version()), "13.0")
                 self.assertIsNot(self.cpp_ext.get_cuda_version, probe)
             self.assertIs(self.cpp_ext.get_cuda_version, probe)
@@ -372,7 +389,7 @@ class B12xFlashInferCompatibilityTest(unittest.TestCase):
         probe = self._probe("12.9")
         observed_versions = []
         with patch.object(self.cpp_ext, "get_cuda_version", probe):
-            with _relaxed_b12x_cuda_version_gate():
+            with relaxed_b12x_cuda_version_gate():
                 worker = threading.Thread(
                     target=lambda: observed_versions.append(
                         str(self.cpp_ext.get_cuda_version())
@@ -385,39 +402,34 @@ class B12xFlashInferCompatibilityTest(unittest.TestCase):
 
     def test_compatibility_patch_can_be_disabled(self):
         probe = self._probe("12.9")
-        with patch.dict(os.environ, {_DISABLE_CUDA12_9_COMPAT_ENV: "1"}), patch.object(
+        with patch.dict(os.environ, {DISABLE_CUDA12_9_COMPAT_ENV: "1"}), patch.object(
             self.cpp_ext, "get_cuda_version", probe
         ):
-            with _relaxed_b12x_cuda_version_gate():
+            with relaxed_b12x_cuda_version_gate():
                 self.assertIs(self.cpp_ext.get_cuda_version, probe)
 
     def test_does_not_patch_cuda_13_or_unsupported_cuda(self):
-        for version in ("13.0", "12.8"):
+        for version in ("13.0", "12.10", "12.8"):
             probe = self._probe(version)
             with self.subTest(version=version), patch.object(
                 self.cpp_ext, "get_cuda_version", probe
             ):
-                with _relaxed_b12x_cuda_version_gate():
+                with relaxed_b12x_cuda_version_gate():
                     self.assertIs(self.cpp_ext.get_cuda_version, probe)
 
     def test_restores_probe_when_construction_raises(self):
         probe = self._probe("12.9")
         with patch.object(self.cpp_ext, "get_cuda_version", probe):
             with self.assertRaisesRegex(RuntimeError, "construction failed"):
-                with _relaxed_b12x_cuda_version_gate():
+                with relaxed_b12x_cuda_version_gate():
                     raise RuntimeError("construction failed")
             self.assertIs(self.cpp_ext.get_cuda_version, probe)
 
     def test_pinned_flashinfer_apis_exist(self):
-        from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
-        from flashinfer.fused_moe.cute_dsl import B12xMoEWrapper
-        from flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch import (
-            _level_tile_n,
-        )
+        import flashinfer
 
-        self.assertTrue(callable(convert_sf_to_mma_layout))
-        self.assertTrue(callable(B12xMoEWrapper))
-        self.assertGreater(_level_tile_n(), 0)
+        self.assertEqual(flashinfer.__version__, SUPPORTED_FLASHINFER_VERSION)
+        self.assertGreater(get_b12x_kernel_tile_n(), 0)
 
 
 if __name__ == "__main__":

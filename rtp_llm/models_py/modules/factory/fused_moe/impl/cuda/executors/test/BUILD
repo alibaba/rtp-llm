@@ -105,11 +105,13 @@ py_test (
     name = "b12x_fp4_executor_test",
     srcs = ["b12x_fp4_executor_test.py"],
     deps = [
+        "//rtp_llm:device",
         "//rtp_llm/models_py:modules",
         "//rtp_llm:config",
         "//rtp_llm:testlib",
         "//rtp_llm:flashinfer-python",
         "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:utils",
     ],
     env = {"GPU_COUNT": "1"},
     tags = ["open_skip", "RTX_5000_PRO"],
@@ -119,10 +121,15 @@ py_test (
 py_test(
     name = "b12x_fp4_executor_validation_test",
     srcs = ["b12x_fp4_executor_validation_test.py"],
+    # CPU-only contract and pinned-vendor-API canary. It imports CUDA packages
+    # but does not initialize a device or launch kernels.
     deps = [
+        "//rtp_llm:config",
         "//rtp_llm:device",
         "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
         "//rtp_llm:flashinfer-python",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:utils",
     ],
 )

@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 
+NVFP4_BLOCK_SIZE = 16
+
 
 def _validate_compressed_targets(group_name: str, group_config: Dict[str, Any]) -> None:
     targets = group_config.get("targets")
