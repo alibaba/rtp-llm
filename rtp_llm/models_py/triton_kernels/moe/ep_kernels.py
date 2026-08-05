@@ -13,13 +13,38 @@ logger = logging.getLogger(__name__)
 
 
 @triton.jit
+def _count_tokens_per_expert_kernel(
+    recv_topk,
+    recv_topk_stride0,
+    recv_topk_stride1,
+    num_tokens_per_expert,
+    total_entries,
+    topk_num: tl.constexpr,
+    num_experts: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    token_ids = offsets // topk_num
+    topk_ids = offsets % topk_num
+    expert_ids = tl.load(
+        recv_topk + token_ids * recv_topk_stride0 + topk_ids * recv_topk_stride1,
+        mask=offsets < total_entries,
+        other=-1,
+    )
+    valid = (offsets < total_entries) & (expert_ids >= 0) & (expert_ids < num_experts)
+    tl.atomic_add(num_tokens_per_expert + expert_ids, 1, mask=valid)
+
+
+@triton.jit
 def _fwd_kernel_ep_scatter_1(
     num_recv_tokens_per_expert,
     expert_start_loc,
     m_indices,
+    m_indices_size,
     num_experts: tl.constexpr,
     BLOCK_E: tl.constexpr,
     BLOCK_EXPERT_NUM: tl.constexpr,
+    ALIGN_M: tl.constexpr,
 ):
     cur_expert = tl.program_id(0).to(tl.int64)
     offset_cumsum = tl.arange(0, BLOCK_EXPERT_NUM)
@@ -28,6 +53,7 @@ def _fwd_kernel_ep_scatter_1(
         mask=offset_cumsum < num_experts,
         other=0,
     )
+    tokens_per_expert = ((tokens_per_expert + ALIGN_M - 1) // ALIGN_M) * ALIGN_M
     cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
     tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
     cur_expert_start = tl.load(expert_start_loc + cur_expert).to(tl.int64)
@@ -36,9 +62,12 @@ def _fwd_kernel_ep_scatter_1(
     off_expert = tl.arange(0, BLOCK_E).to(tl.int64)
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
         start_m_i64 = start_m.to(tl.int64)
+        offs = start_m_i64 + off_expert
         tl.store(
-            m_indices_start_ptr + start_m_i64 + off_expert,
+            m_indices_start_ptr + offs,
             cur_expert.to(tl.int32),
+            mask=(offs < cur_expert_token_num)
+            & (cur_expert_start + offs < m_indices_size),
         )
 
 
@@ -64,6 +93,7 @@ def _fwd_kernel_ep_scatter_2(
     output_index,
     output_index_stride0,
     output_index_stride1,
+    output_capacity,
     topk_num: tl.constexpr,
     num_experts: tl.constexpr,
     HIDDEN_SIZE: tl.constexpr,
@@ -92,9 +122,11 @@ def _fwd_kernel_ep_scatter_2(
             if expert_id >= 0 and expert_id < num_experts:
                 dest_token_index_int32 = tl.atomic_add(expert_start_loc + expert_id, 1)
                 dest_token_index = dest_token_index_int32.to(tl.int64)
+                dest_is_valid = dest_token_index < output_capacity
                 tl.store(
                     output_index + token_id * output_index_stride0 + topk_index,
                     dest_token_index_int32,
+                    mask=dest_is_valid,
                 )
                 output_tensor_ptr = (
                     output_tensor + dest_token_index * output_tensor_stride0
@@ -102,11 +134,15 @@ def _fwd_kernel_ep_scatter_2(
                 output_tensor_scale_ptr = (
                     output_tensor_scale + dest_token_index * output_tensor_scale_stride0
                 )
-                tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
+                tl.store(
+                    output_tensor_ptr + offset_in,
+                    to_copy,
+                    mask=mask & dest_is_valid,
+                )
                 tl.store(
                     output_tensor_scale_ptr + index_in_s * output_tensor_scale_stride1,
                     to_copy_s,
-                    mask=mask_s,
+                    mask=mask_s & dest_is_valid,
                 )
 
 
@@ -123,6 +159,8 @@ def ep_scatter(
     m_indices: torch.Tensor,
     output_index: torch.Tensor,
     scale_ue8m0: bool = False,
+    align_m: int = 128,
+    derive_counts_from_topk: bool = False,
 ):
     BLOCK_E = 128  # token num of per expert is aligned to 128
     BLOCK_D = 128  # block size of quantization
@@ -137,17 +175,39 @@ def ep_scatter(
         # hence the effective size of this dimension is divided by 4.
         scale_hidden_size = ceil_div(scale_hidden_size, 4)
 
-    assert m_indices.shape[0] % BLOCK_E == 0
+    assert m_indices.shape[0] % align_m == 0
     assert recv_x_scale.dtype == output_tensor_scale.dtype
     assert recv_x_scale.shape[1] == output_tensor_scale.shape[1] == scale_hidden_size
+    layout_num_tokens_per_expert = num_recv_tokens_per_expert
+    if derive_counts_from_topk:
+        # SM120 CUDA Graph workspace is derived from recv_topk shape. DeepEP
+        # metadata may include padded/redundant counts, so derive the layout
+        # from valid assignments to keep writes within that static capacity.
+        layout_num_tokens_per_expert = torch.zeros_like(num_recv_tokens_per_expert)
+        total_entries = recv_topk.numel()
+        count_block_size = 256
+        _count_tokens_per_expert_kernel[
+            (triton.cdiv(total_entries, count_block_size),)
+        ](
+            recv_topk,
+            recv_topk.stride(0),
+            recv_topk.stride(1),
+            layout_num_tokens_per_expert,
+            total_entries,
+            topk_num=recv_topk.shape[1],
+            num_experts=num_experts,
+            BLOCK_SIZE=count_block_size,
+        )
     _fwd_kernel_ep_scatter_1[(grid,)](
-        num_recv_tokens_per_expert,
+        layout_num_tokens_per_expert,
         expert_start_loc,
         m_indices,
+        m_indices.shape[0],
         num_experts=num_experts,
         num_warps=num_warps,
         BLOCK_E=BLOCK_E,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+        ALIGN_M=align_m,
     )
     grid = min(recv_topk.shape[0], 1024 * 8)
     _fwd_kernel_ep_scatter_2[(grid,)](
@@ -171,6 +231,7 @@ def ep_scatter(
         output_index,
         output_index.stride(0),
         output_index.stride(1),
+        output_tensor.shape[0],
         topk_num=recv_topk.shape[1],
         num_experts=num_experts,
         num_warps=num_warps,

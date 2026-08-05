@@ -22,6 +22,7 @@ import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     _fwd_kernel_ep_scatter_1,
+    ep_scatter,
 )
 
 
@@ -95,10 +96,12 @@ class TestEpScatter1Correctness(unittest.TestCase):
             num_recv_tokens_per_expert,
             expert_start_loc,
             m_indices,
+            m_indices.numel(),
             num_experts=num_experts,
             num_warps=8,
             BLOCK_E=BLOCK_E,
             BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+            ALIGN_M=1,
         )
         torch.cuda.synchronize()
         return expert_start_loc, m_indices
@@ -167,6 +170,172 @@ class TestEpScatter1Correctness(unittest.TestCase):
                 self.fail(f"expert_start_loc mismatch at iteration {iteration}")
             if not torch.equal(got_m.cpu(), ref_m):
                 self.fail(f"m_indices mismatch at iteration {iteration}")
+
+    def test_aligned_expert_layout(self) -> None:
+        """Each expert starts at ALIGN_M while padding remains sentinel-filled."""
+        counts_gpu = torch.tensor([3, 5, 2], dtype=torch.int32, device=self.device)
+        alignment = 4
+        all_tokens = 16
+        expert_start_loc = torch.empty(3, dtype=torch.int32, device=self.device)
+        m_indices = torch.full((all_tokens,), -1, dtype=torch.int32, device=self.device)
+
+        _fwd_kernel_ep_scatter_1[(3,)](
+            counts_gpu,
+            expert_start_loc,
+            m_indices,
+            m_indices.numel(),
+            num_experts=3,
+            num_warps=4,
+            BLOCK_E=128,
+            BLOCK_EXPERT_NUM=4,
+            ALIGN_M=alignment,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(expert_start_loc.cpu().tolist(), [0, 4, 12])
+        self.assertEqual(
+            m_indices.cpu().tolist(),
+            [0, 0, 0, -1, 1, 1, 1, 1, 1, -1, -1, -1, 2, 2, -1, -1],
+        )
+
+    def test_metadata_counts_cannot_write_past_workspace(self) -> None:
+        """Layout follows valid top-k assignments, not inconsistent metadata."""
+        alignment = 4
+        capacity = 12
+        guard_rows = 8
+        hidden_size = 128
+        sentinel = 37.0
+        recv_x = (
+            torch.arange(3 * hidden_size, device=self.device, dtype=torch.float32)
+            .reshape(3, hidden_size)
+            .to(torch.float8_e4m3fn)
+        )
+        recv_x_scale = torch.ones((3, 1), device=self.device, dtype=torch.float32)
+        recv_topk = torch.full((3, 1), 2, device=self.device, dtype=torch.int32)
+        inconsistent_counts = torch.tensor(
+            [5, 5, 5], device=self.device, dtype=torch.int32
+        )
+        expert_start_loc = torch.empty(3, device=self.device, dtype=torch.int32)
+        output_storage = torch.full(
+            (capacity + guard_rows, hidden_size),
+            sentinel,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        scale_storage = torch.full(
+            (capacity + guard_rows, 1),
+            sentinel,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        m_indices = torch.full((capacity,), -1, device=self.device, dtype=torch.int32)
+        output_index = torch.full_like(recv_topk, -1)
+
+        ep_scatter(
+            recv_x,
+            recv_x_scale,
+            recv_topk,
+            inconsistent_counts,
+            expert_start_loc,
+            output_storage[:capacity],
+            scale_storage[:capacity],
+            m_indices,
+            output_index,
+            align_m=alignment,
+            derive_counts_from_topk=True,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(output_index.cpu().flatten().sort().values.tolist(), [0, 1, 2])
+        self.assertTrue(torch.all(output_storage[capacity:] == sentinel).item())
+        self.assertTrue(torch.all(scale_storage[capacity:] == sentinel).item())
+
+    def test_topk_multi_expert_invalid_ids_and_metadata(self) -> None:
+        """Top-k layout ignores invalid ids and does not trust metadata counts."""
+        alignment = 4
+        capacity = 12
+        guard_rows = 4
+        hidden_size = 128
+        sentinel = 37.0
+        recv_x = torch.stack(
+            [
+                torch.full(
+                    (hidden_size,),
+                    token_id + 1,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                for token_id in range(4)
+            ]
+        ).to(torch.float8_e4m3fn)
+        recv_x_scale = torch.arange(
+            1, 5, device=self.device, dtype=torch.float32
+        ).reshape(4, 1)
+        recv_topk = torch.tensor(
+            [[0, 1], [1, -1], [2, 9], [0, 2]],
+            device=self.device,
+            dtype=torch.int32,
+        )
+        inconsistent_counts = torch.tensor(
+            [100, 100, 100], device=self.device, dtype=torch.int32
+        )
+        expert_start_loc = torch.empty(3, device=self.device, dtype=torch.int32)
+        output_storage = torch.full(
+            (capacity + guard_rows, hidden_size),
+            sentinel,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        scale_storage = torch.full(
+            (capacity + guard_rows, 1),
+            sentinel,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        m_indices = torch.full((capacity,), -1, device=self.device, dtype=torch.int32)
+        output_index = torch.full_like(recv_topk, -1)
+
+        ep_scatter(
+            recv_x,
+            recv_x_scale,
+            recv_topk,
+            inconsistent_counts,
+            expert_start_loc,
+            output_storage[:capacity],
+            scale_storage[:capacity],
+            m_indices,
+            output_index,
+            align_m=alignment,
+            derive_counts_from_topk=True,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(expert_start_loc.cpu().tolist(), [2, 6, 10])
+        self.assertEqual(
+            m_indices.cpu().tolist(),
+            [0, 0, -1, -1, 1, 1, -1, -1, 2, 2, -1, -1],
+        )
+        output_index_cpu = output_index.cpu()
+        self.assertEqual(output_index_cpu[1, 1].item(), -1)
+        self.assertEqual(output_index_cpu[2, 1].item(), -1)
+        expected_destinations = {0: {0, 1}, 1: {4, 5}, 2: {8, 9}}
+        observed_destinations = {0: set(), 1: set(), 2: set()}
+        for token_id in range(recv_topk.shape[0]):
+            for topk_id in range(recv_topk.shape[1]):
+                expert_id = recv_topk[token_id, topk_id].item()
+                if expert_id not in expected_destinations:
+                    continue
+                destination = output_index_cpu[token_id, topk_id].item()
+                observed_destinations[expert_id].add(destination)
+                self.assertTrue(
+                    torch.equal(output_storage[destination], recv_x[token_id].float())
+                )
+                self.assertEqual(
+                    scale_storage[destination].item(), recv_x_scale[token_id].item()
+                )
+        self.assertEqual(observed_destinations, expected_destinations)
+        self.assertTrue(torch.all(output_storage[capacity:] == sentinel).item())
+        self.assertTrue(torch.all(scale_storage[capacity:] == sentinel).item())
 
 
 class TestEpScatter1PoisonRegression(unittest.TestCase):
@@ -245,10 +414,12 @@ class TestEpScatter1PoisonRegression(unittest.TestCase):
                 counts_gpu,
                 expert_start_loc,
                 m_indices,
+                m_indices.numel(),
                 num_experts=num_experts,
                 num_warps=8,
                 BLOCK_E=128,
                 BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+                ALIGN_M=1,
             )
             torch.cuda.synchronize()
             self.assertTrue(
