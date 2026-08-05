@@ -251,7 +251,10 @@ class FlexlbBatchSchedulerTest {
         status.setFinishedTaskInfo(Map.of("85", finished));
         scheduler.onWorkerStatusUpdate(status);
 
-        assertFalse(scheduleFuture.isDone());
+        // Decode completion is not gated on the enqueue ACK (the batchId gate applies
+        // to prefill only, see onWorkerStatusUpdate) — the future completes immediately.
+        assertTrue(scheduleFuture.isDone());
+        // Late ACK must be a no-op: the entry is already finished and removed.
         ackFuture.complete(ackFor(sentBatches.getFirst()));
 
         Response response = scheduleFuture.get(2, TimeUnit.SECONDS);
