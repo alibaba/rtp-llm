@@ -1,5 +1,4 @@
 #pragma once
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <cstddef>
 #include <cstdint>
@@ -8,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
 
@@ -52,12 +52,10 @@ struct CacheBlockTableCapacity {
             kernel_tokens_per_block);
         RTP_LLM_CHECK_WITH_INFO(
             physical_tokens_per_block % kernel_tokens_per_block == 0,
-            "CUDA graph cache capacity context=%s physical tokens per block=%ld must be divisible by kernel tokens "
-            "per block=%ld",
+            "CUDA graph cache capacity context=%s physical tokens per block=%ld must be divisible by kernel tokens per block=%ld",
             context_text.c_str(),
             physical_tokens_per_block,
             kernel_tokens_per_block);
-
         const int64_t sequence_blocks = max_seq_len / physical_tokens_per_block
                                         + static_cast<int64_t>(max_seq_len % physical_tokens_per_block != 0);
         RTP_LLM_CHECK_WITH_INFO(sequence_blocks <= std::numeric_limits<int64_t>::max() - sp_steps,
@@ -90,8 +88,8 @@ struct GraphParams {
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int64_t          hc_mult = 1;
-    // Cache-group identity used by the tagged attention-input path.
-    std::vector<std::string> kv_cache_group_tags;
+    // Golden cache-group identity and metadata for CUDA graph capture/replay.
+    std::map<std::string, CacheGroupType> kv_cache_groups;
     // Per-group block-table capacities used to allocate fixed capture buffers.
     std::map<std::string, CacheBlockTableCapacity> kv_cache_block_table_capacities;
     // Per-token position-id factor for combo_position_ids capture buffer.

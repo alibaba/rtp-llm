@@ -95,20 +95,11 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         spec->type, model_config.attn_config, model_config.linear_attention_config, parallelism_config);
     group.uses_sparse_indexer_scale_layout = config.is_sparse && spec->type == KVCacheSpecType::MultiHeadAttention;
 
-    std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
-    for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
-        auto& layer      = layers[static_cast<size_t>(layer_id)];
-        layer.layer_id   = static_cast<int>(layer_id);
-        layer.group_tags = {spec->tag};
-    }
-    config.setTopology({group}, std::move(layers));
-    RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");
-
     // Using spec interface for block size and scale
     config.kv_block_stride_bytes = spec->block_size_bytes();
     config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
 
-    // Scale handling - no need to check dtype as scale_block_size_bytes() returns 0 if no scale support
+    // scale_block_size_bytes() returns 0 when scales are not used.
     config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
 
@@ -121,15 +112,21 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     config.group_layer_num  = layer_num;  // only 1 group for SingleConfig
 
-    // Per-layer block stride (kv + scale).
     const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));
 
-    auto groups                     = config.topology().groups();
-    groups[0].kv_block_stride_bytes = config.kv_block_stride_bytes;
-    groups[0].kv_scale_stride_bytes = config.kv_scale_stride_bytes;
-    config.setTopology(std::move(groups), config.topology().layers());
+    group.kv_block_stride_bytes = config.kv_block_stride_bytes;
+    group.kv_scale_stride_bytes = config.kv_scale_stride_bytes;
+
+    std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
+    for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+        auto& layer      = layers[static_cast<size_t>(layer_id)];
+        layer.layer_id   = static_cast<int>(layer_id);
+        layer.group_tags = {spec->tag};
+    }
+    config.setTopology({group}, std::move(layers));
+    RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");
 
     return config;
 }

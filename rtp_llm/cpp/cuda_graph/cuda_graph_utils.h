@@ -14,7 +14,7 @@ namespace rtp_llm {
 void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
 void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs);
 // Copy common attention metadata to every tag while retaining each tag's block tables.
-void refreshTaggedAttentionInputs(torch_ext::PyModelInputs& inputs);
+void refreshGroupedAttentionInputs(torch_ext::PyModelInputs& inputs);
 
 }  // namespace rtp_llm
 

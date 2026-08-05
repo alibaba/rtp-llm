@@ -27,14 +27,6 @@ public:
                                                                   int              cp_rank         = 0,
                                                                   int              cp_size         = 1);
 
-    /// @brief 将 KVCacheResource 的指定层转换为单个 LayerCacheBuffer
-    static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource& resource,
-                                                          int              batch_id,
-                                                          int              layer_id,
-                                                          int              start_block_idx,
-                                                          int              block_count,
-                                                          int              cp_rank = 0,
-                                                          int              cp_size = 1);
     static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource&   resource,
                                                           int                batch_id,
                                                           int                layer_id,

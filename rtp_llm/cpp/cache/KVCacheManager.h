@@ -63,11 +63,7 @@ public:
                                int                            target_batch_size) const;
 
     // 块操作相关
-    void blockCopy(int src_block_index, int dest_block_index);
-    void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
-    void blockBatchCopy(const torch::Tensor& copy_mapping);
-    void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
-    void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_mapping);
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
@@ -75,27 +71,17 @@ public:
                        std::vector<TaggedBlockIdPair>& block_update_mapping);
 
     // 地址转换和缓冲区访问
-    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id) const;
-    std::vector<BlockInfo>
-                  convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const;
-    BlockAddrInfo convertIndexToAddr(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, int group_id) const;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int block_index, int layer_id, int group_id, int partition_count, int partition_id) const;
-    BlockAddrInfo          convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBufferByTag(
+    BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBuffer(
         int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
 
     // for main model; grouped layout preserves layers that own multiple cache groups
     GroupedCacheLayerLayout getMainModelGroupedCacheLayerLayout() const;
-    GroupedCacheLayerLayout getMainModelCacheLayerLayout() const;
     // for mtp module
     GroupedCacheLayerLayout getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const;
-    GroupedCacheLayerLayout getMTPModuleCacheLayerLayout(int mtp_module_id) const;
 
     // 资源统计和信息查询
     size_t                  freeBlocksNum() const;
@@ -154,16 +140,29 @@ public:
     }
 
     // Write one KV block (optionally per-layer) from host/device tensors for test
-    virtual bool
-    writeKVBlockForTest(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
-    virtual bool writeKVBlockForTest(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer);
+    virtual bool writeKVBlockForTest(int                  block_index,
+                                     int                  layer_id,
+                                     const std::string&   tag,
+                                     const torch::Tensor& k_buffer,
+                                     const torch::Tensor& v_buffer);
+    virtual bool writeKVBlockForTest(int                  block_index,
+                                     const std::string&   tag,
+                                     const torch::Tensor& k_buffer,
+                                     const torch::Tensor& v_buffer);
 
-    bool setKVBlockValue(int block_index, int layer_id, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-        return writeKVBlockForTest(block_index, layer_id, k_buffer, v_buffer);
+    bool setKVBlockValue(int                  block_index,
+                         int                  layer_id,
+                         const std::string&   tag,
+                         const torch::Tensor& k_buffer,
+                         const torch::Tensor& v_buffer) {
+        return writeKVBlockForTest(block_index, layer_id, tag, k_buffer, v_buffer);
     }
 
-    bool setKVBlockValue(int block_index, const torch::Tensor& k_buffer, const torch::Tensor& v_buffer) {
-        return writeKVBlockForTest(block_index, k_buffer, v_buffer);
+    bool setKVBlockValue(int                  block_index,
+                         const std::string&   tag,
+                         const torch::Tensor& k_buffer,
+                         const torch::Tensor& v_buffer) {
+        return writeKVBlockForTest(block_index, tag, k_buffer, v_buffer);
     }
 
 private:

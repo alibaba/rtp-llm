@@ -25,6 +25,12 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
                                                 int                    block_count,
                                                 int                    cp_rank,
                                                 int                    cp_size) {
+    if (!resource.groupsInitialized()) {
+        RTP_LLM_LOG_WARNING("tagged cache conversion called on uninitialized KVCacheResource for layer=%d tag=%s",
+                            layer_id,
+                            cache_tag.c_str());
+        return std::nullopt;
+    }
     if (start_block_idx < 0 || block_count == 0 || block_count < -1 || cp_size < 1 || cp_rank < 0
         || cp_rank >= cp_size) {
         RTP_LLM_LOG_WARNING(
@@ -60,6 +66,15 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
 std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
     KVCacheResource& resource, int batch_id, int start_block_idx, int block_count, int cp_rank, int cp_size) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    if (!resource.groupsInitialized()) {
+        RTP_LLM_LOG_WARNING(
+            "tagged cache conversion called on uninitialized KVCacheResource for batch_id=%d start_block_idx=%d "
+            "block_count=%d",
+            batch_id,
+            start_block_idx,
+            block_count);
+        return layer_cache_buffers;
+    }
 
     for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
         for (const auto& tag : resource.groupTagsForLayer(layer_id)) {
@@ -71,23 +86,6 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
         }
     }
     return layer_cache_buffers;
-}
-
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource& resource,
-                                                                     int              batch_id,
-                                                                     int              layer_id,
-                                                                     int              start_block_idx,
-                                                                     int              block_count,
-                                                                     int              cp_rank,
-                                                                     int              cp_size) {
-    return convertLayer(resource,
-                        batch_id,
-                        layer_id,
-                        resource.soleGroupTagForLayer(layer_id),
-                        start_block_idx,
-                        block_count,
-                        cp_rank,
-                        cp_size);
 }
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource&   resource,

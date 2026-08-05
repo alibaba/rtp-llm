@@ -205,7 +205,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     // blocks use the allocation-wide stride, while each tag transfers only its group-local bytes.
     const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
-    const size_t seq_size_per_block = cache_config.seqSizePerBlockForGroup(cache_config.groupIdForTag(layer_kv.tag));
+    const size_t seq_size_per_block = cache_config.seqSizePerBlockForGroup(layer_kv.tag);
     const size_t kv_block_stride_bytes =
         use_group_local_storage_layout ? group.kv_block_stride_bytes : cache_config.kv_block_stride_bytes;
     const size_t kv_scale_stride_bytes =

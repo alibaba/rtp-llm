@@ -59,4 +59,15 @@ TEST_F(ModelDataTest, testConstruct) {
     EXPECT_EQ(std::vector<int>(sl.data_ptr<int>(), sl.data_ptr<int>() + sl.numel()), std::vector<int>({1, 2, 3, 4}));
 }
 
+TEST_F(ModelDataTest, CacheGroupHintsScaleWithActualGroupCount) {
+    EXPECT_EQ(CacheGroupHintWireFormat::wordsForGroups(0), 0);
+    EXPECT_EQ(CacheGroupHintWireFormat::wordsForGroups(1), CacheGroupHintWireFormat::kWordsPerGroup);
+    EXPECT_EQ(CacheGroupHintWireFormat::wordsForGroups(2), 2 * CacheGroupHintWireFormat::kWordsPerGroup);
+    EXPECT_EQ(CacheGroupHintWireFormat::wordsForGroups(CacheGroupHintWireFormat::kMaxGroups),
+              CacheGroupHintWireFormat::kMaxGroups * CacheGroupHintWireFormat::kWordsPerGroup);
+    EXPECT_LT(GptModelInputIndex::gptModelInputLength + CacheGroupHintWireFormat::wordsForGroups(2),
+              GptModelInputIndex::gptModelInputLength
+                  + CacheGroupHintWireFormat::wordsForGroups(CacheGroupHintWireFormat::kMaxGroups));
+}
+
 }  // namespace rtp_llm

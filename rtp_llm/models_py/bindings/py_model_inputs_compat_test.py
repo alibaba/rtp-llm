@@ -23,8 +23,8 @@ class _RoutingCache:
 
     def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
         return [
-            LayerKVCache(torch.ones(1), 1, layer_id, group_id, tag)
-            for group_id, tag in enumerate(self._layer_tags[layer_id])
+            LayerKVCache(torch.ones(1), 1, layer_id, tag)
+            for tag in self._layer_tags[layer_id]
         ]
 
 
@@ -139,7 +139,6 @@ class PyModelInputsCompatTest(unittest.TestCase):
             self.assertFalse(hasattr(KVCache, old_name), old_name)
 
         for new_name in (
-            "group_tags",
             "layer_count",
             "get_layer_cache",
             "get_layer_cache_groups",
@@ -156,7 +155,6 @@ class PyModelInputsCompatTest(unittest.TestCase):
             base,
             16,
             layer_id=3,
-            group_id=2,
             tag="full",
             kv_scale_base=scale,
         )
@@ -165,7 +163,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(scale.data_ptr(), layer.kv_scale_base.data_ptr())
         self.assertEqual(16, layer.seq_size_per_block)
         self.assertEqual(3, layer.layer_id)
-        self.assertEqual(2, layer.group_id)
+        self.assertFalse(hasattr(layer, "group_id"))
         self.assertEqual("full", layer.tag)
 
     def test_attention_inputs_mapping_is_selected_by_layer_tag(self) -> None:
@@ -188,10 +186,9 @@ class PyModelInputsCompatTest(unittest.TestCase):
         tensors = [torch.zeros((2, 2, 1, 8, 4), dtype=torch.float16)]
         cache = SingleGroupKVCacheAdapter(tensors, 8)
 
-        layer = cache.get_layer_cache(0)
+        layer = cache.get_layer_cache(0, "default")
         self.assertIsInstance(layer, LayerKVCache)
         self.assertEqual(tensors[0].data_ptr(), layer.kv_cache_base.data_ptr())
-        self.assertEqual(["default"], cache.group_tags)
         self.assertEqual(1, cache.layer_count)
         self.assertEqual(8, cache.get_seq_size_per_block("default"))
         self.assertEqual(

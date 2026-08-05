@@ -7,6 +7,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
     get_group_tags_for_layers,
+    get_single_layer_cache,
     select_attention_inputs_for_layer,
     select_fmha_impl_for_layer,
 )
@@ -125,7 +126,7 @@ class Qwen3NextMTPModel(GptModelBase):
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=get_single_layer_cache(self.kv_cache, i),
                 attention_inputs=layer_attention_inputs,
                 attn_meta=Qwen3NextMetadata(),
             )

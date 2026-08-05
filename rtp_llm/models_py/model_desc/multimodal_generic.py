@@ -2,7 +2,10 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_single_layer_cache,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.modules import MultimodalEmbeddingInjector
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
@@ -39,7 +42,7 @@ class MultimodalGenericModel(GenericMoeModel):
                 hidden_states,
                 residual,
                 layer_fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=get_single_layer_cache(self.kv_cache, i),
             )
             hidden_states = output.hidden_states
             residual = output.residual
