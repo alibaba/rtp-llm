@@ -125,6 +125,8 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
                                  torch::Tensor(),
                                  torch::Tensor(),
                                  torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
                                  false};
 
     fake_stream->update(update_info);
@@ -763,7 +765,7 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         }
 
         // set base properties
-        stream->setReturnAllProbs(true);
+        stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
         if (stream->getSPOutputBuffer() == nullptr) {
             auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
             sp_output_buffer->tokens = torch::zeros({1, 2}, torch::kInt32);

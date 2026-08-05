@@ -103,8 +103,8 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
     (void)model_inputs;
     RTP_LLM_CHECK(!stream_groups.empty());
-    auto all_streams      = stream_groups.allStreams();
-    bool return_all_probs = stream_groups.needReturnAllProbs();
+    auto               all_streams      = stream_groups.allStreams();
+    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
 
     for (auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");

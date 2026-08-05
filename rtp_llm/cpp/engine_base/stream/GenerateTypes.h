@@ -120,6 +120,8 @@ struct AuxInfo {
     int32_t                      decode_memory_reuse_len  = 0;
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
+    std::optional<torch::Tensor> top_logprobs;
+    std::optional<torch::Tensor> top_token_ids;
     std::optional<torch::Tensor> softmax_probs;
     std::map<int, int>           multimodal_lengths = {};
 };

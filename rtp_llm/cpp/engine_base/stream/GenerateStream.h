@@ -32,6 +32,8 @@ struct StreamUpdateInfo {
     const torch::Tensor softmax_probs;
     const torch::Tensor cum_log_probs;
     const torch::Tensor all_probs;
+    const torch::Tensor top_logprobs;
+    const torch::Tensor top_token_ids;
     const torch::Tensor loss;
     const torch::Tensor src_batch_indices;
     // for mtp
@@ -327,7 +329,7 @@ public:
 
     void CopyOnWrite(const GenerateStream& other_stream, bool copy_loss = true, bool share = false);
 
-    void setReturnAllProbs(bool return_all_probs) {
+    void setReturnAllProbs(ReturnAllProbsMode return_all_probs) {
         return_all_probs_ = return_all_probs;
     }
 
@@ -610,10 +612,10 @@ protected:
     int64_t prefill_remote_reuse_len_ = 0;
     int64_t prefill_memory_reuse_len_ = 0;
     // TOOD(xinfei.sxf) fix state
-    bool done_                  = false;
-    bool released_              = false;
-    bool need_release_resource_ = true;
-    bool return_all_probs_      = false;
+    bool               done_                  = false;
+    bool               released_              = false;
+    bool               need_release_resource_ = true;
+    ReturnAllProbsMode return_all_probs_      = ReturnAllProbsMode::NONE;
 
     bool last_block_aligned_ = false;
 
@@ -642,6 +644,8 @@ protected:
 
     torch::Tensor                            cum_log_probs_;
     torch::Tensor                            all_probs_;
+    torch::Tensor                            top_logprobs_;
+    torch::Tensor                            top_token_ids_;
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;

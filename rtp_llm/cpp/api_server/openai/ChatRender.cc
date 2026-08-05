@@ -32,8 +32,9 @@ getArgs(const GenerateOutputs& outputs) {
         input_len_list.push_back(aux_info.input_len);
         output_len_list.push_back(aux_info.output_len);
         reuse_len_list.push_back(aux_info.reuse_len);
-        if (aux_info.all_probs.has_value()) {
-            all_probs_list.push_back(aux_info.all_probs.value());
+        if (aux_info.top_logprobs.has_value()) {
+            top_logprobs_list.push_back(aux_info.top_logprobs.value());
+            top_token_ids_list.push_back(aux_info.top_token_ids.value());
         } else {
             top_logprobs_list.push_back(th::empty({0}));
             top_token_ids_list.push_back(th::empty({0}));

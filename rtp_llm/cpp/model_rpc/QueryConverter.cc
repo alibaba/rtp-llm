@@ -48,6 +48,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
+    generate_config->top_logprobs_num         = config_proto->top_logprobs_num();
     if (config_proto->return_all_probs_mode() != 0) {
         // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
         // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
@@ -440,6 +441,16 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(
         flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+
+    stackBuffersToTensorPB(
+        flatten_output->mutable_all_probs(), source_outputs, [](const auto& r) { return r.aux_info.all_probs; });
+
+    stackBuffersToTensorPB(
+        flatten_output->mutable_top_logprobs(), source_outputs, [](const auto& r) { return r.aux_info.top_logprobs; });
+
+    stackBuffersToTensorPB(flatten_output->mutable_top_token_ids(), source_outputs, [](const auto& r) {
+        return r.aux_info.top_token_ids;
+    });
 
     if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {
         auto*       pb = flatten_output->mutable_prompt_logits();

@@ -20,7 +20,7 @@ namespace rtp_llm {
 //       For the second part, different samplers should be created for different params.
 //       So they can not be batched together for now.
 
-enum class ReturnLogProbsMode {
+enum class ReturnAllProbsMode {
     NONE     = 0,
     DEFAULT  = 1,
     ORIGINAL = 2
@@ -79,6 +79,7 @@ public:
     bool                          force_disable_sp_run     = false;
     bool                          force_sp_accept          = false;
     ReturnAllProbsMode            return_all_probs         = ReturnAllProbsMode::NONE;
+    int                           top_logprobs_num         = 0;
     bool                          return_softmax_probs     = false;
     bool                          aux_info                 = true;
     std::vector<std::vector<int>> stop_words_list;
@@ -243,6 +244,7 @@ public:
         JSONIZE(select_tokens_str);
         JSONIZE(calculate_loss);
         JSONIZE(return_logits);
+        JSONIZE(top_logprobs_num);
         JSONIZE(return_prompt_logits);
         JSONIZE(prompt_logits_top_k);
         JSONIZE(prompt_logits_start);

@@ -202,6 +202,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto frequency_penalty    = mayOptNarrow(inputs.frequency_penalty, from_batch_idx_in, batch_size_in);
             auto no_repeat_ngram_size = mayOptNarrow(inputs.no_repeat_ngram_size, from_batch_idx_in, batch_size_in);
             auto all_probs            = mayOptNarrow(inputs.all_probs, from_batch_idx_in, batch_size_in);
+            auto top_logprobs         = mayOptNarrow(inputs.top_logprobs, from_batch_idx_in, batch_size_in);
+            auto top_token_ids        = mayOptNarrow(inputs.top_token_ids, from_batch_idx_in, batch_size_in);
             auto do_sample            = mayOptNarrow(inputs.do_sample, from_batch_idx_in, batch_size_in);
             auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
                                                                    inputs.generator.begin() + from_batch_idx_in + batch_size_in};
@@ -233,7 +235,9 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  frequency_penalty,
                  do_sample,
                  generator,
-                 greedy_sampling_buffer_ptr});
+                 greedy_sampling_buffer_ptr,
+                 top_logprobs,
+                 top_token_ids});
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
                 // TODO(zhangjianning.zjn): would be better to eliminate the copy

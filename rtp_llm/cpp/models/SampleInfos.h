@@ -59,10 +59,12 @@ public:
 
     bool return_original_all_probs = false;
 
-    mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
-    mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size]
-
+    mutable torch::Tensor      cum_log_probs;  // shape: [batch_size]
+    mutable torch::Tensor      all_probs;      // shape: [batch_size, vocab_size]
     std::vector<at::Generator> generator;
+    mutable torch::Tensor      top_logprobs;   // shape: [batch_size, top_logprobs_num]
+    mutable torch::Tensor      top_token_ids;  // shape: [batch_size, top_logprobs_num]
+    int                        top_logprobs_num = 0;
 };
 
 struct SamplerOutput {
@@ -70,6 +72,8 @@ public:
     torch::Tensor token_ids;
     torch::Tensor cum_log_probs;
     torch::Tensor all_probs;
+    torch::Tensor top_logprobs;
+    torch::Tensor top_token_ids;
     torch::Tensor beam_index;
     torch::Tensor success;
 };

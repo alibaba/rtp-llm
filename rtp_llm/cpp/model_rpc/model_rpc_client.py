@@ -191,6 +191,7 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.return_cum_log_probs = (
         input_py.generate_config.return_cum_log_probs
     )
+    generate_config_pb.top_logprobs_num = input_py.generate_config.top_logprobs
     # dual-write: legacy bool (true if any probs requested) + new int32 mode (offset 1)
     _rapm = input_py.generate_config.return_all_probs
     generate_config_pb.return_all_probs = _rapm != ReturnAllProbsMode.NONE

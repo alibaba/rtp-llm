@@ -382,6 +382,12 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
         top_k_renorm_probs(probs_t, output_all_probs_t, std::nullopt, 1 << 30, (int64_t)cur_stream);
     }
 
+    if (params.output_top_logprobs.has_value()) {
+        auto [topk_vals, topk_ids] = torch::topk(probs_t, params.output_top_logprobs.value().size(1), -1, true, true);
+        params.output_top_logprobs.value().copy_(topk_vals.log());
+        params.output_top_token_ids.value().copy_(topk_ids.to(torch::kInt32));
+    }
+
     if (params.cum_log_probs.has_value()) {
 
         // [batch_size]
@@ -431,6 +437,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // fast path for topk = 1
     auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
+        && !params.output_top_logprobs.has_value() && !params.cum_log_probs.has_value()
         && !params.output_all_probs.has_value()) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
@@ -588,6 +595,7 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     // 3. Fast path for topk = 1
     auto top_k_ptr = reinterpret_cast<uint32_t*>(params.top_k.data_ptr<int32_t>());
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
+        && !params.output_top_logprobs.has_value() && !params.cum_log_probs.has_value()
         && !params.output_all_probs.has_value()) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);

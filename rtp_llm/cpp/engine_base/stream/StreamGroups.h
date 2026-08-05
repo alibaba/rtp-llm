@@ -125,6 +125,17 @@ public:
         return decode_streams_;
     }
 
+    int maxTopLogprobsNum() const {
+        int max_val = 0;
+        for (const auto& stream : context_streams_) {
+            max_val = std::max(max_val, stream->generateConfig()->top_logprobs_num);
+        }
+        for (const auto& stream : decode_streams_) {
+            max_val = std::max(max_val, stream->generateConfig()->top_logprobs_num);
+        }
+        return max_val;
+    }
+
     bool hasMMExtraInput() const {
         for (auto& stream : context_streams_) {
             if (stream->hasMultimodalExtraInput()) {

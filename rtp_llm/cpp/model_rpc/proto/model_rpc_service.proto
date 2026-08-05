@@ -137,6 +137,7 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 71;
     google.protobuf.StringValue structural_tag = 72;
     google.protobuf.StringValue response_format = 73;
+    int32 top_logprobs_num = 74;
 }
 
 message MMPreprocessConfigPB {
@@ -236,6 +237,8 @@ message FlattenOutputPB {
     TensorPB all_probs = 7;
     TensorPB all_hidden_states = 8;
     PromptLogitsOutputPB prompt_logits = 9;
+    TensorPB top_logprobs = 10;
+    TensorPB top_token_ids = 11;
 }
 
 message GenerateOutputsPB {

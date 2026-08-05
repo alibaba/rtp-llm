@@ -105,6 +105,13 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         all_probs = sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size);
     };
 
+    torch::Tensor top_logprobs;
+    torch::Tensor top_token_ids;
+    if (sampler_output.top_logprobs.defined()) {
+        top_logprobs  = sampler_output.top_logprobs.narrow(0, batch_idx_out, next_batch_size);
+        top_token_ids = sampler_output.top_token_ids.narrow(0, batch_idx_out, next_batch_size);
+    }
+
     torch::Tensor batch_cum_log_probs;
     if (sampler_output.cum_log_probs.defined()) {
         batch_cum_log_probs = sampler_output.cum_log_probs.narrow(0, batch_idx_out, next_batch_size);
@@ -216,6 +223,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     current_softmax_result,
                     batch_cum_log_probs,
                     all_probs,
+                    top_logprobs,
+                    top_token_ids,
                     loss,
                     src_batch_indices,
                     all_hidden_states,

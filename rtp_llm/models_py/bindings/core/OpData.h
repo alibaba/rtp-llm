@@ -321,8 +321,10 @@ struct GreedyParams {
     std::optional<torch::Tensor> frequency_penalty;
     std::optional<torch::Tensor> do_sample;
 
-    std::vector<at::Generator> generator;
-    GreedySamplingBuffers*     sampling_buffers = nullptr;
+    std::vector<at::Generator>   generator;
+    GreedySamplingBuffers*       sampling_buffers = nullptr;
+    std::optional<torch::Tensor> output_top_logprobs;
+    std::optional<torch::Tensor> output_top_token_ids;
 };
 
 struct GreedyOutput {

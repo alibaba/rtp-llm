@@ -166,6 +166,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
+            if (generate_input_->generate_config->top_logprobs_num > 0) {
+                if (!update_info.top_logprobs.defined()) {
+                    throw std::runtime_error("top_logprobs is undefined while top_logprobs_num > 0");
+                }
+                generate_output.aux_info.top_logprobs  = top_logprobs_.narrow(0, i, 1).clone();
+                generate_output.aux_info.top_token_ids = top_token_ids_.narrow(0, i, 1).clone();
+            }
             if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
                 if (!update_info.all_probs.defined()) {
                     throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
@@ -236,6 +243,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
     if (update_info.all_probs.defined()) {
         all_probs_ = update_info.all_probs.cpu();
+    }
+    if (update_info.top_logprobs.defined()) {
+        top_logprobs_  = update_info.top_logprobs.cpu();
+        top_token_ids_ = update_info.top_token_ids.cpu();
     }
 
     // TODO: move it to better position

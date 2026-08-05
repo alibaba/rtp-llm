@@ -239,17 +239,7 @@ class OpenaiEndpoint(object):
         if request.seed != None:
             config.random_seed = request.seed
         if request.logprobs != None:
-            if not request.logprobs:
-                config.return_all_probs = ReturnAllProbsMode.NONE
-            # Priority: if extra_configs.return_all_probs is already set to
-            # something non-NONE (typically ORIGINAL), honor that — caller has
-            # explicitly opted into a specific mode. Only fall through to
-            # logprobs_mode when no extra_configs override is present.
-            elif config.return_all_probs == ReturnAllProbsMode.NONE:
-                if request.logprobs_mode == "original":
-                    config.return_all_probs = ReturnAllProbsMode.ORIGINAL
-                else:
-                    config.return_all_probs = ReturnAllProbsMode.DEFAULT
+            config.top_logprobs = (request.top_logprobs or 1) if request.logprobs else 0
         if request.logprobs or request.functions:
             config.is_streaming = True
         if request.prompt_logprobs is not None:
