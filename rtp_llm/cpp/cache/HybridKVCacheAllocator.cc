@@ -382,7 +382,6 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
     const int   batch_size = kv_cache_resource->batchSize();
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        kv_cache_resource->cacheResource(batch_id).ensureLinearBlockDependencies();
         const auto& full_keys = kv_cache_resource->cacheKeys(batch_id);
         if (full_keys.empty()) {
             continue;
@@ -551,8 +550,7 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
         return nullptr;
     }
 
-    selected_resource->cacheKeys() = std::move(selected_keys);
-    selected_resource->setBlockDependencies(std::move(selected_dependencies));
+    selected_resource->setCacheKeysAndBlockDependencies(std::move(selected_keys), std::move(selected_dependencies));
     for (int gid = 0; gid < kvcache_resource.groupNums(); ++gid) {
         BlockIndicesType valid;
         for (auto b : selected_blocks[static_cast<size_t>(gid)]) {

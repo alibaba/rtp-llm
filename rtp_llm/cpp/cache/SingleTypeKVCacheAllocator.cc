@@ -321,7 +321,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         block_pool_->requestReference(real_blocks);
     }
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
-    selected_resource->cacheKeys() = std::move(selected_cache_keys);
+    selected_resource->setCacheKeys(std::move(selected_cache_keys));
 
     return selected_resource;
 }

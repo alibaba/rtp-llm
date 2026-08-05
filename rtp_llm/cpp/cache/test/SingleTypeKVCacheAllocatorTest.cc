@@ -1037,7 +1037,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
 
-    resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
+    resource.setCacheKeys(CacheKeysType{100, 101, 102, 103});
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
     resource.setDeviceReuseBlockNum(3);
 
@@ -1069,8 +1069,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{101, 103, 999};
-    resource.rebuildLinearBlockDependencies();
+    resource.setCacheKeys(CacheKeysType{101, 103, 999});
     resource.setLastBlockAligned(false);
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
 
@@ -1102,7 +1101,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{100, 101};
+    resource.setCacheKeys(CacheKeysType{100, 101});
     resource.mutableBlockIds(0).assign(BlockIndicesType{blocks[0], blocks[1]});
 
     auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});

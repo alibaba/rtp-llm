@@ -330,21 +330,21 @@ int KVCacheResource::groupId(int layer_id, int group_id) const {
     return group_id;
 }
 
-CacheKeysType& KVCacheResource::cacheKeys() {
-    return cache_keys;
-}
-
 const CacheKeysType& KVCacheResource::cacheKeys() const {
     return cache_keys;
 }
 
-void KVCacheResource::setCacheKeys(const CacheKeysType& keys) {
-    cache_keys                   = keys;
+void KVCacheResource::setCacheKeysAndBlockDependencies(CacheKeysType keys, BlockDependenciesType dependencies) {
+    RTP_LLM_CHECK_WITH_INFO(keys.size() == dependencies.size(),
+                            "cache timeline size mismatch: keys=%zu dependencies=%zu",
+                            keys.size(),
+                            dependencies.size());
+    cache_keys                   = std::move(keys);
+    block_dependencies           = std::move(dependencies);
     cache_keys_are_cp_canonical_ = false;
-    rebuildLinearBlockDependencies();
 }
 
-void KVCacheResource::setCacheKeys(CacheKeysType&& keys) {
+void KVCacheResource::setCacheKeys(CacheKeysType keys) {
     cache_keys                   = std::move(keys);
     cache_keys_are_cp_canonical_ = false;
     rebuildLinearBlockDependencies();
@@ -356,22 +356,6 @@ bool KVCacheResource::cacheKeysAreCpCanonical() const {
 
 void KVCacheResource::setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical) {
     cache_keys_are_cp_canonical_ = cache_keys_are_cp_canonical;
-}
-
-BlockDependenciesType& KVCacheResource::blockDependencies() {
-    return block_dependencies;
-}
-
-const BlockDependenciesType& KVCacheResource::blockDependencies() const {
-    return block_dependencies;
-}
-
-void KVCacheResource::setBlockDependencies(const BlockDependenciesType& dependencies) {
-    block_dependencies = dependencies;
-}
-
-void KVCacheResource::setBlockDependencies(BlockDependenciesType&& dependencies) {
-    block_dependencies = std::move(dependencies);
 }
 
 void KVCacheResource::rebuildLinearBlockDependencies() {
@@ -388,8 +372,36 @@ void KVCacheResource::rebuildLinearBlockDependencies() {
     }
 }
 
-void KVCacheResource::ensureLinearBlockDependencies() {
-    rebuildLinearBlockDependencies();
+void KVCacheResource::appendCacheKey(CacheKeyType key) {
+    BlockDependency dependency;
+    dependency.ordinal = static_cast<uint32_t>(cache_keys.size());
+    if (!cache_keys.empty()) {
+        dependency.has_parent = true;
+        dependency.parent_key = cache_keys.back();
+    }
+    cache_keys.push_back(key);
+    block_dependencies.push_back(dependency);
+}
+
+void KVCacheResource::popBackCacheKey() {
+    if (cache_keys.empty()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(block_dependencies.size() == cache_keys.size(),
+                            "cache key/dependency timeline diverged before pop: keys=%zu dependencies=%zu",
+                            cache_keys.size(),
+                            block_dependencies.size());
+    cache_keys.pop_back();
+    block_dependencies.pop_back();
+}
+
+void KVCacheResource::clearCacheKeys() {
+    cache_keys.clear();
+    block_dependencies.clear();
+}
+
+const BlockDependenciesType& KVCacheResource::blockDependencies() const {
+    return block_dependencies;
 }
 
 size_t KVCacheResource::reuseBlockNum() const {
