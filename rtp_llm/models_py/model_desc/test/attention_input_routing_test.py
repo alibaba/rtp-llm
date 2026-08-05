@@ -125,12 +125,12 @@ class AttentionInputRoutingTest(unittest.TestCase):
         self.assertEqual(get_group_tags_for_layers(kv_cache, [0, 3]), ["full", "aux"])
 
     def test_prepare_fmha_impl_only_for_model_selected_tags(self):
-        inputs_by_tag = {
+        group_inputs = {
             "full": object(),
             "linear0": object(),
             "linear1": object(),
         }
-        inputs = SimpleNamespace(attention_inputs=inputs_by_tag)
+        inputs = SimpleNamespace(attention_inputs=group_inputs)
         model = RoutingModel(["full"])
 
         with patch(
@@ -141,12 +141,12 @@ class AttentionInputRoutingTest(unittest.TestCase):
         ) as factory:
             fmha_impl = model.prepare_fmha_impl(inputs, is_cuda_graph=True)
 
-        self.assertEqual(fmha_impl, {"full": inputs_by_tag["full"]})
+        self.assertEqual(fmha_impl, {"full": group_inputs["full"]})
         factory.assert_called_once()
 
     def test_default_model_prepares_every_tag(self):
-        inputs_by_tag = {"group0": object(), "group1": object()}
-        inputs = SimpleNamespace(attention_inputs=inputs_by_tag)
+        group_inputs = {"group0": object(), "group1": object()}
+        inputs = SimpleNamespace(attention_inputs=group_inputs)
         model = RoutingModel(None)
 
         with patch(
@@ -157,7 +157,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         ) as factory:
             fmha_impl = model.prepare_fmha_impl(inputs)
 
-        self.assertEqual(fmha_impl, inputs_by_tag)
+        self.assertEqual(fmha_impl, group_inputs)
         self.assertEqual(factory.call_count, 2)
 
 

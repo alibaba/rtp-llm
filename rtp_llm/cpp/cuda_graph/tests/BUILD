@@ -106,8 +106,8 @@ py_test(
 )
 
 py_test(
-    name = "cuda_graph_tagged_cache_test",
-    srcs = ["cuda_graph_tagged_cache_test.py"],
+    name = "cuda_graph_grouped_cache_test",
+    srcs = ["cuda_graph_grouped_cache_test.py"],
     data = [
         ":test_cuda_graph_runner",
         "//:th_transformer",

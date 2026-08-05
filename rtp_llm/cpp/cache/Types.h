@@ -36,7 +36,7 @@ struct BlockIdPair {
     BlockIdxType dst;
 };
 
-struct TaggedBlockIdPair {
+struct GroupBlockIdPair {
     std::string  tag;
     BlockIdxType src;
     BlockIdxType dst;

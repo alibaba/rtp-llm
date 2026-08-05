@@ -330,7 +330,7 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> mm_extra_input;
 };
 
-using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
+using GroupAttentionInputs = std::map<std::string, PyAttentionInputs>;
 
 struct PyModelInputs {
     torch::Tensor      input_ids;
@@ -339,13 +339,13 @@ struct PyModelInputs {
     PyEmbeddingInputs  embedding_inputs;
     PyMultimodalInputs multimodal_inputs;
     // C++ common/single-group fast path. Python sees this field through a
-    // property which returns either this object or attention_inputs_by_tag.
+    // property which returns either this object or group_attention_inputs.
     PyAttentionInputs    attention_inputs;
-    AttentionInputsByTag attention_inputs_by_tag;
+    GroupAttentionInputs group_attention_inputs;
     BertEmbeddingInputs  bert_embedding_inputs;
 
     bool hasGroupedAttentionInputs() const {
-        return !attention_inputs_by_tag.empty();
+        return !group_attention_inputs.empty();
     }
 };
 

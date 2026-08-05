@@ -56,7 +56,7 @@ private:
     torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
+    torch_ext::GroupAttentionInputs setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
                                                           const GptModelInputs& inputs,
@@ -113,7 +113,7 @@ private:
 
     std::atomic<bool>               prepared_attention_inputs_{false};
     torch_ext::PyAttentionInputs    attention_inputs_;
-    torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
+    torch_ext::GroupAttentionInputs group_attention_inputs_;
     CudaGraphState                  graph_state_;
 };
 

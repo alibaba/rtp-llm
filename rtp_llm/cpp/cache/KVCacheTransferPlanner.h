@@ -17,6 +17,4 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t block_num,
                                                    size_t tail_block_count,
                                                    bool   hybrid_full_from_begin);
 
-std::string layerTagCacheTransferKey(size_t request_id, size_t layer_id, const std::string& tag);
-
 }  // namespace rtp_llm

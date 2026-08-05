@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 
 #if USING_ROCM
@@ -108,6 +109,7 @@ void execBroadcast(const BroadcastParams& params);
 // All ranks must call with identical tensor counts and byte sizes.
 void            execBroadcastCpu(const BroadcastParams& params);
 bool            isCpuTpBroadcasterInitialized();
+uint64_t        cpuTpBroadcasterGeneration();
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);

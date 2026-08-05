@@ -81,7 +81,7 @@ public:
         return cacheResource(batch_id).mutableBlockIdsForLayer(layer_id, tag);
     }
 
-    const BlockIdsByTag& groupBlocks(int batch_id = 0) const {
+    const GroupBlockIds& groupBlocks(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
         return batch_resource[batch_id].groupBlocks();
     }

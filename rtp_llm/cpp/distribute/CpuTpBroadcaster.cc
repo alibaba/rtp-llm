@@ -234,6 +234,7 @@ void CpuTpBroadcaster::reset() {
     tp_rank_ = 0;
     tp_size_ = 1;
     initialized_.store(false, std::memory_order_release);
+    generation_.fetch_add(1, std::memory_order_release);
 }
 
 void CpuTpBroadcaster::initialize(int tp_rank, int tp_size, const std::string& base_path) {

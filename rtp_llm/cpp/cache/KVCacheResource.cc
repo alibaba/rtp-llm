@@ -209,7 +209,7 @@ bool KVCacheResource::groupsInitialized() const {
     return topology_ != nullptr;
 }
 
-const BlockIdsByTag& KVCacheResource::groupBlocks() const {
+const GroupBlockIds& KVCacheResource::groupBlocks() const {
     return group_block_ids_;
 }
 

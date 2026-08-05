@@ -29,7 +29,7 @@ public:
                            const std::string&               request_key,
                            const std::vector<std::string>&  peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
-                           BlockIdsByTag                    group_block_ids,
+                           GroupBlockIds                    group_block_ids,
                            int64_t                          reuse_block_size,
                            int64_t                          timeout_ms,
                            int                              partition_count,
@@ -51,7 +51,7 @@ public:
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
-        BlockIdsByTag                    group_block_ids;
+        GroupBlockIds                    group_block_ids;
         int64_t                          reuse_block_size;
         int64_t                          timeout_ms;
         int                              partition_count;
@@ -86,8 +86,8 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static BlockIdsByTag   decodeBlockIdsByTag(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
-    static std::shared_ptr<BlockIds> mtpBlockIdsByTagForTag(const BlockIdsByTag& main_group_block_ids,
+    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static std::shared_ptr<BlockIds> mtpGroupBlockIdsForTag(const GroupBlockIds& main_group_block_ids,
                                                             std::string_view     tag);
     static bool                      isPageLevelRouting(int32_t prefill_cp_size, size_t peer_addr_count);
     static ErrorInfo                 validatePrefillCpPeerCount(int32_t prefill_cp_size, size_t peer_addr_count);

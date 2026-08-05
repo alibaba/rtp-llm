@@ -40,12 +40,4 @@ std::vector<size_t> blockPositionsForCacheTransfer(size_t block_num,
     return block_pos_list;
 }
 
-std::string layerTagCacheTransferKey(size_t request_id, size_t layer_id, const std::string& tag) {
-    auto key = std::to_string(request_id) + "-" + std::to_string(layer_id);
-    if (!tag.empty() && tag != "default") {
-        key += "-tag-" + tag;
-    }
-    return key;
-}
-
 }  // namespace rtp_llm

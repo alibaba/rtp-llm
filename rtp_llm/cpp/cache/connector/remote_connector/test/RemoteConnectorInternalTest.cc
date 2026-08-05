@@ -158,10 +158,10 @@ public:
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {
         return;
     }
-    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                       const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
-                       std::vector<TaggedBlockIdPair>& block_update_mapping) override {
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<GroupBlockIdPair>& block_update_mapping) override {
         return false;
     }
     int seqSizePerBlock() const override {
@@ -204,11 +204,11 @@ public:
         return tagged_buffer_requests_;
     }
 
-    void clearTaggedBufferRequests() const {
+    void clearGroupBufferRequests() const {
         tagged_buffer_requests_.clear();
     }
 
-    void setTaggedBufferSizeOverride(size_t size_bytes) {
+    void setGroupBufferSizeOverride(size_t size_bytes) {
         tagged_buffer_size_override_ = size_bytes;
     }
 
@@ -444,15 +444,15 @@ TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
         reversed_allocator, std::vector<std::string>{"full"}, std::vector<std::string>{"linear"}, 1);
     ASSERT_TRUE(reversed_policy->init());
 
-    auto names_by_tag = [](const GroupPolicy& policy) {
+    auto group_names = [](const GroupPolicy& policy) {
         std::map<std::string, std::string> result;
         for (const auto& [tag, group] : policy.groups()) {
             result.emplace(tag, group.group_name);
         }
         return result;
     };
-    EXPECT_EQ(names_by_tag(*first_policy), names_by_tag(*reversed_policy));
-    EXPECT_EQ(names_by_tag(*first_policy),
+    EXPECT_EQ(group_names(*first_policy), group_names(*reversed_policy));
+    EXPECT_EQ(group_names(*first_policy),
               (std::map<std::string, std::string>{{"full", "Ffull"}, {"linear", "Llinear"}}));
 }
 
@@ -518,7 +518,7 @@ TEST(RemoteConnectorBlockBufferValidationTest, RejectsAllocatorBufferSizeThatDoe
     auto policy =
         std::make_shared<FullLayerGroupPolicy>(allocator, std::vector<std::string>{"full"}, std::vector<std::string>{});
     ASSERT_TRUE(policy->init());
-    allocator->setTaggedBufferSizeOverride(config.kvBlockStrideBytesForGroup("full") + 1);
+    allocator->setGroupBufferSizeOverride(config.kvBlockStrideBytesForGroup("full") + 1);
 
     kv_cache_manager::BlockBuffers buffers;
     EXPECT_FALSE(policy->genBlockBuffers({"full"}, {7}, buffers));

@@ -367,10 +367,10 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
 // - block_src_batch: new batch i forks from old batch block_src_batch[i]
 // - copy_last_block: whether to copy the last block for each forked batch (instead of sharing)
 // - block_update_mapping: out, mapping from old block to new block for batch copy
-bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  kv_cache_resource,
-                                               const std::vector<int>&         block_src_batch,
-                                               bool                            copy_last_block,
-                                               std::vector<TaggedBlockIdPair>& block_update_mapping) {
+bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& kv_cache_resource,
+                                               const std::vector<int>&        block_src_batch,
+                                               bool                           copy_last_block,
+                                               std::vector<GroupBlockIdPair>& block_update_mapping) {
     block_update_mapping.clear();
     if (block_src_batch.empty()) {
         return true;
@@ -441,7 +441,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
                 bool ok = full_kv_cache_group_->malloc(block_ids, seq_len_target);
                 RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during kv cache update");
                 const int new_block = block_ids.blocks().back();
-                block_update_mapping.push_back(TaggedBlockIdPair{group_tag_, old_block, new_block});
+                block_update_mapping.push_back(GroupBlockIdPair{group_tag_, old_block, new_block});
             }
         }
         --fork_count;

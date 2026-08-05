@@ -86,13 +86,13 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
 
     EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_group_types.empty());
-    EXPECT_TRUE(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block_by_tag.empty());
+    EXPECT_TRUE(processor.model_input_gatherer_config_.group_kernel_blocks_per_kv_block.empty());
     ASSERT_EQ(stream->kvCache().groupNums(), 1);
     EXPECT_EQ(stream->kvCache().cacheResource().groupTagsForLayer(0), std::vector<std::string>{"__warmup__"});
     TensorHolder holder;
     auto         model_input = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input.ok());
-    EXPECT_TRUE(model_input->block_tables_by_tag.empty());
+    EXPECT_TRUE(model_input->group_block_tables.empty());
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testWarmUpUsesConfiguredTagsWithSyntheticResource) {
@@ -124,7 +124,7 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpUsesConfiguredTagsWithSynthetic
     TensorHolder holder;
     auto         model_input_status = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input_status.ok());
-    const auto& tables = model_input_status->block_tables_by_tag;
+    const auto& tables = model_input_status->group_block_tables;
     ASSERT_EQ(tables.size(), 2u);
     for (const auto& [tag, table] : tables) {
         EXPECT_TRUE(tag == "full" || tag == "linear");
@@ -244,7 +244,7 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelGeometryUsesKernelAddressedFull
     EXPECT_EQ(processor.model_input_gatherer_config_.kernel_seq_size_per_block, 2u);
     ASSERT_EQ(processor.model_input_gatherer_config_.kv_cache_group_types.count("default"), 1u);
     EXPECT_EQ(processor.model_input_gatherer_config_.kv_cache_group_types.at("default"), CacheGroupType::FULL);
-    EXPECT_EQ(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block_by_tag.at("default"), 4u);
+    EXPECT_EQ(processor.model_input_gatherer_config_.group_kernel_blocks_per_kv_block.at("default"), 4u);
 
     auto query             = make_shared<GenerateInput>();
     query->input_ids       = hostIntBuffer({1, 2});
@@ -266,9 +266,9 @@ TEST_F(NormalBatchStreamProcessorTest, testKernelGeometryUsesKernelAddressedFull
     ASSERT_TRUE(model_input.ok());
     EXPECT_EQ(model_input->seq_size_per_block, 8u);
     EXPECT_EQ(model_input->kernel_seq_size_per_block, 2u);
-    ASSERT_EQ(model_input->block_tables_by_tag.count("default"), 1u);
-    EXPECT_EQ(toVec<int32_t>(model_input->block_tables_by_tag.at("default").block_ids), (std::vector<int32_t>{5, 7}));
-    EXPECT_EQ(toVec<int32_t>(model_input->block_tables_by_tag.at("default").kernel_block_ids),
+    ASSERT_EQ(model_input->group_block_tables.count("default"), 1u);
+    EXPECT_EQ(toVec<int32_t>(model_input->group_block_tables.at("default").block_ids), (std::vector<int32_t>{5, 7}));
+    EXPECT_EQ(toVec<int32_t>(model_input->group_block_tables.at("default").kernel_block_ids),
               (std::vector<int32_t>{20, 21, 22, 23, 28, 29, 30, 31}));
 }
 
@@ -366,7 +366,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
-        const auto& default_table = model_input.block_tables_by_tag.at("default");
+        const auto& default_table = model_input.group_block_tables.at("default");
         EXPECT_EQ(kv_cache_block_id, toVec<int>(default_table.block_ids));
         EXPECT_EQ(default_table.tag, "default");
         EXPECT_EQ(default_table.type, CacheGroupType::FULL);

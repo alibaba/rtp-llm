@@ -33,11 +33,11 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
 
         if (insert_kv_cache) {
             auto&                                   kv_cache = stream->kvCacheMutable();
-            std::map<std::string, std::vector<int>> blocks_by_tag;
+            std::map<std::string, std::vector<int>> group_blocks;
             for (const auto& [tag, block_ids] : kv_cache.groupBlocks(0)) {
                 RTP_LLM_CHECK(block_ids != nullptr);
                 RTP_LLM_CHECK(!block_ids->blocks().empty());
-                blocks_by_tag.emplace(tag, block_ids->blocks());
+                group_blocks.emplace(tag, block_ids->blocks());
             }
             rtp_llm::InsertInfo insert_info{
                 stream->kvCachePtr(),
@@ -45,7 +45,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
                 true  // is_resident for system prompt
             };
             cache_manager->insertIntoCache(insert_info);
-            multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, std::move(blocks_by_tag));
+            multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, std::move(group_blocks));
         }
     }
     return multi_task_prompt_args;

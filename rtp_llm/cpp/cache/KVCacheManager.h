@@ -63,12 +63,12 @@ public:
                                int                            target_batch_size) const;
 
     // 块操作相关
-    void blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_mapping);
+    void blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping);
 
-    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                       const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
-                       std::vector<TaggedBlockIdPair>& block_update_mapping);
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<GroupBlockIdPair>& block_update_mapping);
 
     // 地址转换和缓冲区访问
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, const std::string& tag) const;
