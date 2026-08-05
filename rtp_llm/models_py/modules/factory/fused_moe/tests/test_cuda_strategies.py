@@ -220,9 +220,15 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    def test_can_handle_false_cuda_graph(self, mock_has_deep_gemm: Any) -> None:
-        """Test case when CUDA graph is enabled (should fail)"""
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.get_sm"
+    )
+    def test_can_handle_cuda_graph(
+        self, mock_get_sm: Any, mock_has_deep_gemm: Any
+    ) -> None:
+        """Only SM120 enables the continuous DeepGEMM CUDA Graph path."""
         mock_has_deep_gemm.return_value = True
+        mock_get_sm.return_value = (9, 0)
 
         config = create_moe_config_adapter(
             model_config=create_model_config_with_fp8_block_quant(),
@@ -236,7 +242,13 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
         strategy = CudaFp8PerBlockNoDPStrategy()
         self.assertTrue(strategy.can_handle(config))
         config.enable_cuda_graph = True
+
+        mock_get_sm.return_value = (9, 0)
         self.assertFalse(strategy.can_handle(config))
+        mock_get_sm.return_value = (10, 0)
+        self.assertFalse(strategy.can_handle(config))
+        mock_get_sm.return_value = (12, 0)
+        self.assertTrue(strategy.can_handle(config))
 
     def test_priority(self) -> None:
         """Test priority"""
@@ -353,15 +365,25 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    @patch("rtp_llm.models_py.utils.arch.get_sm")
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor.get_sm"
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal_router.get_sm"
+    )
     @patch("rtp_llm.models_py.distributed.deepep_wrapper.DeepEPWrapper.supported")
-    def test_can_handle_false_cuda_graph(
-        self, mock_supported: Any, mock_get_sm: Any, mock_has_deep_gemm: Any
+    def test_can_handle_cuda_graph(
+        self,
+        mock_supported: Any,
+        mock_router_get_sm: Any,
+        mock_executor_get_sm: Any,
+        mock_has_deep_gemm: Any,
     ) -> None:
-        """Test case when CUDA graph is enabled (should fail)"""
+        """Only SM120 enables the continuous DeepGEMM CUDA Graph path."""
         mock_has_deep_gemm.return_value = True
-        mock_get_sm.return_value = (9, 0)
         mock_supported.return_value = True
+        mock_router_get_sm.return_value = (9, 0)
+        mock_executor_get_sm.return_value = (9, 0)
 
         config = create_moe_config_adapter(
             model_config=create_model_config_with_fp8_block_quant(),
@@ -375,9 +397,19 @@ class TestCudaFp8PerBlockEpNormalStrategy(unittest.TestCase):
         strategy = CudaFp8PerBlockEpNormalStrategy()
         self.assertTrue(strategy.can_handle(config))
 
-        # Now enable CUDA graph - should fail
+        # Preserve the pre-upgrade SM9x behavior.
         config.enable_cuda_graph = True
         self.assertFalse(strategy.can_handle(config))
+
+        # Preserve the SM100 behavior as well as SM9x.
+        mock_router_get_sm.return_value = (10, 0)
+        mock_executor_get_sm.return_value = (10, 0)
+        self.assertFalse(strategy.can_handle(config))
+
+        # SM120 selects the graph-safe continuous executor path.
+        mock_router_get_sm.return_value = (12, 0)
+        mock_executor_get_sm.return_value = (12, 0)
+        self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
     @patch("rtp_llm.models_py.utils.arch.get_sm")
@@ -566,7 +598,9 @@ class TestCudaFp8PerBlockPureCPStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    def test_can_handle_false_auto_falls_back_to_deepep(self, mock_has_deep_gemm: Any) -> None:
+    def test_can_handle_false_auto_falls_back_to_deepep(
+        self, mock_has_deep_gemm: Any
+    ) -> None:
         """moe_strategy=auto + pure CP+EP topology should NOT auto-select PureCP (falls back to DeepEP)."""
         mock_has_deep_gemm.return_value = True
 
@@ -685,7 +719,9 @@ class TestCudaFp8PerBlockPureDPStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    def test_can_handle_false_auto_falls_back_to_deepep(self, mock_has_deep_gemm: Any) -> None:
+    def test_can_handle_false_auto_falls_back_to_deepep(
+        self, mock_has_deep_gemm: Any
+    ) -> None:
         """moe_strategy=auto + pure DP+EP topology should NOT auto-select PureDP (falls back to DeepEP)."""
         mock_has_deep_gemm.return_value = True
 

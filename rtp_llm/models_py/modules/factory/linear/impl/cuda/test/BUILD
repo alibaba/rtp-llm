@@ -44,6 +44,17 @@ py_test(
 )
 
 py_test(
+    name = "fp8_deepgemm_linear_sm120_test",
+    srcs = [
+        "fp8_deepgemm_linear_sm120_test.py",
+        "fp8_linear_test.py",
+    ],
+    deps = py_test_deps,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {'gpu':'RTX_5000_PRO'},
+)
+
+py_test(
     name = "fp4_gemm_linear_test",
     srcs = ["fp4_gemm_linear_test.py"],
     deps = py_test_deps,
