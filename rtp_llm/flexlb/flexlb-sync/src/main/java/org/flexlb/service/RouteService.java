@@ -44,9 +44,7 @@ public class RouteService {
             resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
         }
 
-        return resultMono.doOnSuccess(result -> {
-            balanceContext.setResponse(result);
-        });
+        return resultMono.doOnSuccess(balanceContext::setResponse);
     }
 
     /**

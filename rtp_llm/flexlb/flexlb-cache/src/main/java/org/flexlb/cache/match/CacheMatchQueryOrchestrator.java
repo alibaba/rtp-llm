@@ -18,6 +18,7 @@ import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
 import org.springframework.stereotype.Component;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -74,7 +75,7 @@ public class CacheMatchQueryOrchestrator {
             return queryLocalStandby(query, startTimeNs);
         }
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
-            return CacheMatchResult.empty(CacheMatchSource.KVCM);
+            return emptyResult(CacheMatchSource.KVCM, startTimeNs);
         }
 
         try {
@@ -132,7 +133,7 @@ public class CacheMatchQueryOrchestrator {
 
     private CacheMatchResult queryLocalSync(CacheMatchQuery query, long startTimeNs) {
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
-            return CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC);
+            return emptyResult(CacheMatchSource.LOCAL_SYNC, startTimeNs);
         }
         Map<String, Integer> matches = localSyncProvider.findMatchingEngines(
                 query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group());
@@ -142,12 +143,12 @@ public class CacheMatchQueryOrchestrator {
     private CacheMatchResult queryLocalStandby(CacheMatchQuery query, long startTimeNs) {
         List<Long> blockCacheKeys = query.localStandbyBlockCacheKeys();
         if (blockCacheKeys != null && blockCacheKeys.isEmpty()) {
-            return CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY);
+            return emptyResult(CacheMatchSource.LOCAL_STANDBY, startTimeNs);
         }
         LocalStandbyHashResult hashResult = localStandbyHashService.getHashResult(
                 query.requestId(), query.localStandbyBlockCacheKeys(), query.localStandbyBlockSize()).join();
         if (hashResult.blockCacheKeys().isEmpty()) {
-            return CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY);
+            return emptyResult(CacheMatchSource.LOCAL_STANDBY, startTimeNs);
         }
         Map<String, Integer> matches = localStandbyProvider.findMatchingEngines(
                 query.requestId(), hashResult.blockCacheKeys(), hashResult.blockSize(), query.roleType(), query.group());
@@ -156,5 +157,10 @@ public class CacheMatchQueryOrchestrator {
 
     private CacheMatchResult result(Map<String, Integer> matches, CacheMatchSource source, long startTimeNs, long blockSize) {
         return new CacheMatchResult(matches, source, (System.nanoTime() - startTimeNs) / 1_000, blockSize);
+    }
+
+    private CacheMatchResult emptyResult(CacheMatchSource source, long startTimeNs) {
+        return new CacheMatchResult(
+                Collections.emptyMap(), source, (System.nanoTime() - startTimeNs) / 1_000, 0);
     }
 }

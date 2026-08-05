@@ -10,6 +10,7 @@ import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.core.GrpcTarget;
+import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.monitor.KvcmMetricsReporter;
 import org.flexlb.exception.KvcmQueryException;
 import org.flexlb.kvcm.grpc.ErrorCode;
@@ -51,6 +52,7 @@ public class KvcmGrpcClient {
     private final KvcmLeaderResolver leaderResolver;
     private final KvcmWorkerMetadataResolver workerMetadataResolver;
     private final ApplicationWarmupState applicationWarmupState;
+    private final GrpcReporter grpcReporter;
     private final KvcmMetricsReporter metricsReporter;
     private final ScheduledExecutorService refreshExecutor;
     private final int heartbeatFailureThreshold;
@@ -73,11 +75,13 @@ public class KvcmGrpcClient {
                           KvcmLeaderResolver leaderResolver,
                           KvcmWorkerMetadataResolver workerMetadataResolver,
                           ApplicationWarmupState applicationWarmupState,
+                          GrpcReporter grpcReporter,
                           KvcmMetricsReporter metricsReporter) {
         this.metaServiceClient = metaServiceClient;
         this.leaderResolver = leaderResolver;
         this.workerMetadataResolver = workerMetadataResolver;
         this.applicationWarmupState = applicationWarmupState;
+        this.grpcReporter = grpcReporter;
         this.metricsReporter = metricsReporter;
         this.config = configuration.getKvcmConfig();
         this.enabled = configuration.isKvcmEnabled();
@@ -159,7 +163,8 @@ public class KvcmGrpcClient {
                                                 QueryType queryType, RoleType roleType, String group) {
         for (int attemptIndex = 0; attemptIndex <= maxQueryRetryCount; attemptIndex++) {
             try {
-                Map<String, Integer> matches = queryOnce(requestId, blockCacheKeys, namespace, queryType, roleType, group);
+                Map<String, Integer> matches = queryOnce(
+                        requestId, blockCacheKeys, namespace, queryType, roleType, group, attemptIndex > 0);
                 recordQuerySuccess();
                 return matches;
             } catch (RuntimeException failure) {
@@ -175,7 +180,13 @@ public class KvcmGrpcClient {
         throw new IllegalStateException("KVCM query retry loop completed without a result");
     }
 
-    private Map<String, Integer> queryOnce(String requestId, List<Long> blockCacheKeys, String namespace, QueryType queryType, RoleType roleType, String group) {
+    private Map<String, Integer> queryOnce(String requestId,
+                                           List<Long> blockCacheKeys,
+                                           String namespace,
+                                           QueryType queryType,
+                                           RoleType roleType,
+                                           String group,
+                                           boolean retry) {
         GrpcTarget currentLeader = leaderResolver.resolve();
         if (currentLeader == null) {
             throw new KvcmQueryException("KVCM leader is unavailable");
@@ -197,8 +208,12 @@ public class KvcmGrpcClient {
                         requestId, traceId, namespace, currentLeader, roleType, group, queryType,
                         blockCacheKeys.size(), blockCacheKeys);
             }
+            long startTime = System.nanoTime() / 1000;
             GetHostCacheStateResponse response = metaServiceClient.getHostCacheState(
                     currentLeader, request, config.getRequestTimeoutMs());
+            long duration = System.nanoTime() / 1000 - startTime;
+            grpcReporter.reportCallMetrics(
+                    currentLeader.host(), "GetHostCacheState", duration, response.getSerializedSize(), retry);
             ErrorCode code = response.getHeader().getStatus().getCode();
             if (code != ErrorCode.OK) {
                 throw new KvcmQueryException(

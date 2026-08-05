@@ -52,6 +52,8 @@ public class BalanceContext {
 
     private long dequeueTime;
 
+    private long routeEndTime;
+
     private long sequenceId;
 
     private long requestArrivalDelayMs;

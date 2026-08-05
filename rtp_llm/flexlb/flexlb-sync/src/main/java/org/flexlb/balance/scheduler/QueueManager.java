@@ -83,8 +83,8 @@ public class QueueManager {
                 .timeout(Duration.ofMillis(ctx.getRequest().getGenerateTimeout()))
                 .onErrorResume(e -> handleQueueException(ctx, e))
                 .doFinally(signalType -> {
-                    if (ctx.getDequeueTime() > 0) {
-                        long routeExecutionTimeMs = System.currentTimeMillis() - ctx.getDequeueTime();
+                    if (ctx.getDequeueTime() > 0 && ctx.getRouteEndTime() > 0) {
+                        long routeExecutionTimeMs = ctx.getRouteEndTime() - ctx.getDequeueTime();
                         metrics.reportRouteExecutionMetric(routeExecutionTimeMs);
                     }
                 });

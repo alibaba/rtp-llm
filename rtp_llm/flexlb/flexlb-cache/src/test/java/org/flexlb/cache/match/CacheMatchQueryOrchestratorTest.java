@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
@@ -207,6 +208,34 @@ class CacheMatchQueryOrchestratorTest {
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
         assertEquals(4096, result.blockSize());
         assertEquals(1, result.matches().get("10.0.0.2:8080"));
+    }
+
+    @Test
+    void recordsWaitTimeWhenInFlightLocalStandbyHashCompletesEmpty() throws Exception {
+        CacheMatchQuery pendingQuery = new CacheMatchQuery(
+                "request-3",
+                List.of(11L),
+                2192,
+                null,
+                4096,
+                RoleType.PREFILL,
+                "default");
+        CompletableFuture<LocalStandbyHashResult> pendingHash = new CompletableFuture<>();
+        when(failoverManager.activeSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
+        when(localStandbyHashService.getHashResult("request-3", null, 4096)).thenReturn(pendingHash);
+
+        CompletableFuture<CacheMatchResult> routingResult =
+                CompletableFuture.supplyAsync(() -> orchestrator().findMatchingEngines(pendingQuery));
+
+        verify(localStandbyHashService, timeout(1_000)).getHashResult("request-3", null, 4096);
+        TimeUnit.MILLISECONDS.sleep(10);
+        pendingHash.complete(LocalStandbyHashResult.empty());
+
+        CacheMatchResult result = routingResult.get(1, TimeUnit.SECONDS);
+
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
+        assertEquals(Map.of(), result.matches());
+        assertTrue(result.queryTimeUs() > 0);
     }
 
     @Test

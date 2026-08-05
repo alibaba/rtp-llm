@@ -132,9 +132,11 @@ public class RequestScheduler {
         } catch (InterruptedException e) {
             Logger.warn("Routing retry interrupted for request id:{}, retry count: {}", ctx.getRequestId(), ctx.getRetryCount());
             Thread.currentThread().interrupt();
+            ctx.setRouteEndTime(System.currentTimeMillis());
             ctx.getFuture().completeExceptionally(e);
         } catch (Exception e) {
             Logger.error("Worker thread failed to route ctx id:{}", ctx.getRequestId(), e);
+            ctx.setRouteEndTime(System.currentTimeMillis());
             ctx.getFuture().completeExceptionally(e);
         }
     }
@@ -171,6 +173,7 @@ public class RequestScheduler {
      * Completes the request with the final routing response.
      */
     private void completeRouting(BalanceContext ctx, Response response) {
+        ctx.setRouteEndTime(System.currentTimeMillis());
         ctx.getFuture().complete(response);
         metrics.reportRoutingSuccessQps(ctx.getRetryCount());
     }

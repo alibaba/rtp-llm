@@ -32,6 +32,9 @@ public class MetricConstant {
      */
     public static final String ENGINE_STATUS_AVAILABLE_CONCURRENCY = "app.engine.health.check.available.concurrency";
 
+    /**
+     * Successful engine-status gRPC round-trip time, reported in microseconds.
+     */
     public static final String ENGINE_STATUS_VISITOR_RT = "app.engine.health.check.visitor.rt";
 
     public static final String ENGINE_STATUS_VISITOR_SUCCESS_QPS = "app.engine.health.check.visitor.qps";
@@ -221,17 +224,17 @@ public class MetricConstant {
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";
 
     /**
-     * Find matching engines response time
+     * Cache-match lookup time, reported in microseconds.
      */
     public static final String CACHE_FIND_MATCHING_ENGINES_RT = "app.cache.find.matching.engines.rt";
 
     /**
-     * Update cache response time
+     * Local cache metadata update time, reported in microseconds.
      */
     public static final String CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT = "app.cache.update.engine.block.cache.rt";
 
     /**
-     * Cache status check response time
+     * Successful cache-status gRPC round-trip time, reported in microseconds.
      */
     public static final String CACHE_STATUS_CHECK_VISITOR_RT = "app.cache.status.check.visitor.rt";
 

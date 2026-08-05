@@ -291,7 +291,7 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report response time for finding matching engines
+     * Report cache-match lookup time in microseconds.
      *
      * @param roleType  Role type
      * @param startTime Start time in microseconds
@@ -304,7 +304,7 @@ public class CacheMetricsReporter {
     }
 
     /**
-     * Report response time for updating engine cache
+     * Report local cache metadata update time in microseconds.
      *
      * @param engineIpPort Engine IP:Port
      * @param role         Engine role

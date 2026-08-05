@@ -223,6 +223,7 @@ public class EngineHealthReporter {
                 "model", modelName,
                 "engineIp", engineIp,
                 "role", role);
+        // startTime and the reported value are both in microseconds.
         monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
         monitor.report(ENGINE_STATUS_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
@@ -232,6 +233,7 @@ public class EngineHealthReporter {
                 "model", modelName,
                 "engineIp", engineIp,
                 "role", role);
+        // startTime and the reported value are both in microseconds.
         monitor.report(CACHE_STATUS_CHECK_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
         monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }

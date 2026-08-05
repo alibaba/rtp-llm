@@ -18,6 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -95,6 +97,37 @@ class QueueManagerTest {
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
         assertEquals("request-2", taken.getRequestId());
+    }
+
+    @Test
+    void tryRouteAsync_shouldReportRouteExecutionWhenRoutingFinished() {
+        BalanceContext ctx = createContext("request-1");
+        var mono = queueManager.tryRouteAsync(ctx);
+        BalanceContext taken = queueManager.takeRequest(false, 0);
+        assertNotNull(taken);
+
+        long dequeueTime = taken.getDequeueTime();
+        taken.setRouteEndTime(dequeueTime + 20);
+        taken.getFuture().complete(new Response());
+
+        Response response = mono.block();
+        assertNotNull(response);
+        verify(metrics).reportRouteExecutionMetric(20L);
+    }
+
+    @Test
+    void tryRouteAsync_shouldNotReportRouteExecutionWhenTerminatedBeforeRouting() {
+        BalanceContext ctx = createContext("request-1");
+        var mono = queueManager.tryRouteAsync(ctx);
+        BalanceContext taken = queueManager.takeRequest(false, 0);
+        assertNotNull(taken);
+        assertTrue(taken.getDequeueTime() > 0);
+
+        taken.getFuture().completeExceptionally(new java.util.concurrent.CancellationException("cancelled"));
+
+        Response response = mono.block();
+        assertNotNull(response);
+        verify(metrics, never()).reportRouteExecutionMetric(anyLong());
     }
 
     private BalanceContext createContext(String requestId) {
