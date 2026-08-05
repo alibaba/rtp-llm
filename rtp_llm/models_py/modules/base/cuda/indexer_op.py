@@ -385,8 +385,12 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
+        # DeepGEMM paged MQA represents the number of queries decoded together
+        # as the second dimension. RTP-LLM currently decodes one query per
+        # sequence, so expand [batch] to [batch, 1].
+        context_lens = fmha_params.kvlen_d.view(-1, 1)
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
+            context_lens,
             self.blocksize,
             deep_gemm.get_num_sms(),
         )
@@ -395,7 +399,7 @@ class IndexerOp(nn.Module):
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            fmha_params.kvlen_d,
+            context_lens,
             attention_inputs.kv_cache_kernel_block_id_device,
             schedule_metadata,
             max_seq_len,
@@ -468,7 +472,7 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8 = (k_fp8, k_scale.view(torch.float32).view(-1))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -575,7 +579,7 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device,
             cu_kv_seqlens_global,
         )
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).view(-1))
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -603,9 +607,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None
