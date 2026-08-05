@@ -196,7 +196,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
-            graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
+            for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
+                graph_params.kv_cache_groups.emplace(group.tag, group.policy.group_type);
+                graph_params.kv_cache_block_table_capacities.emplace(
+                    group.tag,
+                    CacheBlockTableCapacity::fromBlockSizes(static_cast<int64_t>(params.max_seq_len),
+                                                            static_cast<int64_t>(group.spec->seq_size_per_block),
+                                                            static_cast<int64_t>(group.spec->kernel_seq_size_per_block),
+                                                            static_cast<int64_t>(graph_params.sp_steps),
+                                                            group.tag));
+            }
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
@@ -240,19 +249,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
-        }
-        if (params.kv_cache_layer_layout.has_value()) {
-            for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
-                const auto physical_tokens_per_block = group.spec->seq_size_per_block;
-                const auto kernel_tokens_per_block   = group.spec->kernel_seq_size_per_block;
-                graph_params.kv_cache_block_table_capacities.emplace(
-                    group.tag,
-                    CacheBlockTableCapacity::fromBlockSizes(static_cast<int64_t>(params.max_seq_len),
-                                                            static_cast<int64_t>(physical_tokens_per_block),
-                                                            static_cast<int64_t>(kernel_tokens_per_block),
-                                                            static_cast<int64_t>(graph_params.sp_steps),
-                                                            group.tag));
-            }
         }
 
         graph_runner_ = new CudaGraphRunner(graph_params, py_instance);

@@ -654,9 +654,8 @@ message FunctionRequestPB {
 }
 
 message RemoteOperationRequestPB {
-    // group_tags is the only valid group identity. Remote/memory connector
-    // peers must follow the same-build KV-cache protocol contract documented
-    // above; the legacy numeric identity remains reserved without a fallback.
+    // group_tags is the only valid group identity. Fields at the same index
+    // form one transfer record and must have identical lengths.
     RemoteOpType op = 1;
     string trace_id = 2;
     reserved 3;
@@ -668,6 +667,8 @@ message RemoteOperationRequestPB {
 
 message RemoteOperationResponsePB {
     RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
+    // Empty means every requested URI was used. Otherwise entries correspond
+    // one-to-one, in request order, to the request transfer records.
     repeated string actual_uris = 2; // only for write
 }
 

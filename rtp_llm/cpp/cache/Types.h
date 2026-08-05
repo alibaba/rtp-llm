@@ -1,10 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
-#include <cstdint>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -16,7 +16,6 @@ namespace rtp_llm {
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 
-typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;
 
 struct BlockAddrInfo {
@@ -42,17 +41,6 @@ struct TaggedBlockIdPair {
     BlockIdxType src;
     BlockIdxType dst;
 };
-
-// Process-local tensor representation. group_id is resolved from a stable tag
-// immediately before execution and is never used as an external identity.
-struct GroupBlockIdPair {
-    GroupIdType  group_id;
-    BlockIdxType src;
-    BlockIdxType dst;
-};
-
-static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
-              "GroupBlockIdPair must match the three-column int32 tensor layout");
 
 struct MatchResult {
     size_t           reuse_length = 0;

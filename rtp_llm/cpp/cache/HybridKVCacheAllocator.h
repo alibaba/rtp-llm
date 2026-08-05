@@ -1,6 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
@@ -29,11 +32,11 @@ public:
                        bool                            copy_last_block,
                        std::vector<TaggedBlockIdPair>& block_update_mapping) override;
 
-    int              seqSizePerBlock() const override;
-    int              singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                           int                            seq_len,
-                                           int                            reserve_step) const override;
-    std::vector<int> independentEvictionGroupIds() const override;
+    int                      seqSizePerBlock() const override;
+    int                      singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                                   int                            seq_len,
+                                                   int                            reserve_step) const override;
+    std::vector<std::string> independentEvictionTags() const override;
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
@@ -57,25 +60,27 @@ protected:
                    BatchKVCacheResource&                kv_resource,
                    const std::shared_ptr<CPSlotMapper>& cp_mapper);
 
-    virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
-    virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;
+    virtual void
+    referenceBlocksInGroup(std::string_view tag, const BlockIndicesType& blocks, bool is_connector = false) const   = 0;
+    virtual void freeBlocksInGroup(std::string_view tag, const BlockIndicesType& blocks, bool is_connector = false) = 0;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
-    bool         skipReuseCacheGroup(int gid) const;
-    bool         cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const;
-    void         rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size);
-    void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
-                                    const std::vector<BlockIndicesType>& referenced_blocks,
-                                    const std::vector<size_t>&           original_sizes);
-    void         rollbackIncrMalloc(BatchKVCacheResource&                   kv_resource,
-                                    const std::vector<std::vector<size_t>>& original_sizes,
-                                    int                                     failed_batch);
-    virtual void copyBlockMappingForGroup(int gid, const std::vector<BlockIdPair>& block_update_mapping) const;
-    virtual MemoryType memoryTypeForGroup(int gid) const;
+    bool         skipReuseCacheGroup(std::string_view tag) const;
+    bool         cpCompactSwaGroup(std::string_view tag, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    void         rollbackBlockIdsToSize(std::string_view tag, BlockIds& block_ids, size_t original_size);
+    void         rollbackInitMalloc(BatchKVCacheResource&                                    kv_resource,
+                                    const std::unordered_map<std::string, BlockIndicesType>& referenced_blocks,
+                                    const std::unordered_map<std::string, size_t>&           original_sizes);
+    void         rollbackIncrMalloc(BatchKVCacheResource&                                       kv_resource,
+                                    const std::vector<std::unordered_map<std::string, size_t>>& original_sizes,
+                                    int                                                         failed_batch);
+    virtual void copyBlockMappingForGroup(std::string_view                tag,
+                                          const std::vector<BlockIdPair>& block_update_mapping) const;
+    virtual MemoryType memoryTypeForGroup(std::string_view tag) const;
 
-    std::vector<KVCacheGroupPtr> kv_cache_groups_;
-    std::vector<int>             full_group_ids_;
-    std::vector<int>             linear_group_ids_;
-    std::vector<int>             swa_group_ids_;
+    std::unordered_map<std::string, KVCacheGroupPtr> kv_cache_groups_;
+    std::vector<std::string>                         full_group_tags_;
+    std::vector<std::string>                         linear_group_tags_;
+    std::vector<std::string>                         swa_group_tags_;
 };
 
 using HybridKVCacheAllocatorPtr = std::shared_ptr<HybridKVCacheAllocator>;

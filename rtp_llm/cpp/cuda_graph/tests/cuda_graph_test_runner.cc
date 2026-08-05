@@ -1,9 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include <map>
-#include <utility>
-
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
@@ -80,9 +77,9 @@ public:
     }
 
     void clearTaggedPhysicalBlockTable(torch_ext::PyModelInputs& inputs, const std::string& tag, bool device) {
-        const auto it = inputs.group_attention_inputs.find(tag);
+        const auto it = inputs.attention_inputs_by_tag.find(tag);
         RTP_LLM_CHECK_WITH_INFO(
-            it != inputs.group_attention_inputs.end(), "missing grouped attention inputs for tag=%s", tag.c_str());
+            it != inputs.attention_inputs_by_tag.end(), "missing tagged attention inputs for tag=%s", tag.c_str());
         if (device) {
             it->second.kv_cache_block_id_device = torch::Tensor();
         } else {
@@ -104,10 +101,6 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
 
-    uint64_t groupedCacheFallbackCount() const {
-        return runner_ != nullptr ? runner_->groupedCacheFallbackCount() : 0;
-    }
-
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -122,13 +115,14 @@ private:
         const auto default_capacity = CacheBlockTableCapacity::fromBlockSizes(
             max_seq_len, physical_tokens_per_block, kernel_tokens_per_block, params.sp_steps, "test runner");
         for (const auto& tag : group_tags) {
+            const auto [it, inserted] = params.kv_cache_groups.emplace(tag, CacheGroupType::FULL);
+            (void)it;
+            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate CUDA graph KV cache tag=%s", tag.c_str());
             const auto capacity_it = group_capacities.find(tag);
-            if (capacity_it == group_capacities.end()) {
-                params.kv_cache_block_table_capacities[tag] = default_capacity;
-            } else {
-                params.kv_cache_block_table_capacities[tag] =
+            params.kv_cache_block_table_capacities[tag] =
+                capacity_it == group_capacities.end() ?
+                    default_capacity :
                     CacheBlockTableCapacity{capacity_it->second.first, capacity_it->second.second};
-            }
         }
     }
 
@@ -181,6 +175,5 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tag"),
              py::arg("device"))
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
-        .def("groupedCacheFallbackCount", &CudaGraphTestRunner::groupedCacheFallbackCount);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }

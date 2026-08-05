@@ -10,6 +10,20 @@
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
+namespace {
+
+std::string requireSingleGroupTag(const CacheConfig& config) {
+    RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1,
+                            "SingleTypeKVCacheAllocator requires exactly one cache group, got %d",
+                            config.groupNums());
+    for (const auto& group : config.topology().groups()) {
+        return group.tag;
+    }
+    RTP_LLM_CHECK_WITH_INFO(false, "SingleTypeKVCacheAllocator has no cache group");
+    return {};
+}
+
+}  // namespace
 
 int SingleTypeKVCacheAllocator::getNeedBlocks(const MallocInfo& malloc_info) const {
     if (!malloc_info.batch_kv_cache_resource || !malloc_info.complete_token_ids) {
@@ -31,16 +45,17 @@ SingleTypeKVCacheAllocator::SingleTypeKVCacheAllocator(const CacheConfig&       
                                                        AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
                                                        int64_t                            reserve_block_ratio):
-    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
+    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio),
+    group_tag_(requireSingleGroupTag(config)) {}
 
 bool SingleTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() == 1,
                             "SingleTypeKVCacheAllocator requires exactly one cache group, got %d",
                             config_.groupNums());
-    const auto& cache_group = config_.topology().groupById(0);
+    const auto& cache_group = config_.group(group_tag_);
     const auto& spec        = cache_group.spec;
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec[0] is null");
-    const bool is_full_attention = config_.typeForGroup(0) == CacheGroupType::FULL
+    const bool is_full_attention = cache_group.policy.group_type == CacheGroupType::FULL
                                    && (spec->type == rtp_llm::KVCacheSpecType::MultiHeadAttention
                                        || spec->type == rtp_llm::KVCacheSpecType::MultiHeadLatentAttention);
     RTP_LLM_CHECK_WITH_INFO(is_full_attention, "SingleTypeKVCacheAllocator requires one FULL MHA/MLA cache group");
@@ -56,10 +71,10 @@ bool SingleTypeKVCacheAllocator::doInit() {
 
     SharedBlockCache* shared_cache_raw = shared_block_cache_ ? shared_block_cache_.get() : nullptr;
     if (shared_block_cache_) {
-        shared_block_cache_->init(1, std::vector<BlockPoolPtr>{block_pool_});
+        shared_block_cache_->init({{group_tag_, block_pool_}});
     }
 
-    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, 0, shared_cache_raw, nullptr);
+    full_kv_cache_group_ = std::make_shared<FullKVCacheGroup>(cache_group, block_pool_, shared_cache_raw, nullptr);
 
     if (!full_kv_cache_group_->init()) {
         RTP_LLM_LOG_ERROR("Failed to initialize FullKVCacheGroup");
@@ -77,7 +92,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
 
     const auto& cache_keys         = kv_resource->cacheKeys(0);
-    auto&       block_ids_0        = kv_resource->mutableBlockIds(0, 0);
+    auto&       block_ids_0        = kv_resource->mutableBlockIds(0, group_tag_);
     int64_t     match_cost_time_us = 0;
 
     const size_t reserve_blocks   = reserveBlocksNum();
@@ -126,7 +141,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
     // other batches reference batch 0's blocks
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
-        full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id, 0), block_ids_0.blocks());
+        full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id, group_tag_), block_ids_0.blocks());
     }
 
     return {true, reuse_len, match_cost_time_us};
@@ -147,13 +162,13 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     // Record original sizes for rollback in case any subsequent allocation fails
     std::vector<size_t> original_blocks_num;
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        original_blocks_num.push_back(kv_resource->blocksNum(batch_id, 0));
+        original_blocks_num.push_back(kv_resource->blocksNum(batch_id, group_tag_));
     }
 
     bool all_success   = true;
     int  current_batch = 0;
     for (; current_batch < batch_size; ++current_batch) {
-        auto& block_ids = kv_resource->mutableBlockIds(current_batch, 0);
+        auto& block_ids = kv_resource->mutableBlockIds(current_batch, group_tag_);
         if (!full_kv_cache_group_->malloc(block_ids, seq_len, false, reserve_step)) {
             all_success = false;
             break;
@@ -167,7 +182,7 @@ MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_inf
     // rollback kvcache blocks
     BlockIndicesType blocks_to_free;
     for (int batch_id = 0; batch_id <= current_batch; ++batch_id) {
-        auto& block_ids    = kv_resource->mutableBlockIds(batch_id, 0);
+        auto& block_ids    = kv_resource->mutableBlockIds(batch_id, group_tag_);
         auto  original_num = original_blocks_num[batch_id];
         if (block_ids.blocksNum() > original_num) {
             const auto& blk = block_ids.blocks();
@@ -188,7 +203,7 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
         return;
     }
 
-    auto all_blocks = kv_cache_resource->getAllBatchBlocks(0);
+    auto all_blocks = kv_cache_resource->getAllBatchBlocks(group_tag_);
     for (const auto& blocks : all_blocks) {
         full_kv_cache_group_->free(blocks);
     }
@@ -208,7 +223,7 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
         const auto& cache_keys = kv_resource->cacheKeys(batch_id);
-        const auto& blocks     = kv_resource->blocks(batch_id, 0);
+        const auto& blocks     = kv_resource->blocks(batch_id, group_tag_);
 
         size_t block_num = std::min(size_t(cache_keys.size()), size_t(blocks.size()));
         if (block_num == 0) {
@@ -246,18 +261,20 @@ GroupedCacheLayerLayout SingleTypeKVCacheAllocator::allLayerCacheBase() const {
     return GroupedCacheLayerLayout(topology, std::move(groups));
 }
 
-BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, int block_id) const {
+BlockAddrInfo SingleTypeKVCacheAllocator::convertIndexToAddr(int layer_id, const std::string& tag, int block_id) const {
+    RTP_LLM_CHECK_WITH_INFO(tag == group_tag_, "SingleTypeKVCacheAllocator unknown tag=%s", tag.c_str());
     return full_kv_cache_group_->convertIndexToAddr(layer_id, block_id);
 }
 
-std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, int block_id) const {
+std::vector<BlockInfo>
+SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const {
+    RTP_LLM_CHECK_WITH_INFO(tag == group_tag_, "SingleTypeKVCacheAllocator unknown tag=%s", tag.c_str());
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id);
 }
 
-std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(int layer_id,
-                                                                        int block_id,
-                                                                        int partition_count,
-                                                                        int partition_id) const {
+std::vector<BlockInfo> SingleTypeKVCacheAllocator::convertIndexToBuffer(
+    int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const {
+    RTP_LLM_CHECK_WITH_INFO(tag == group_tag_, "SingleTypeKVCacheAllocator unknown tag=%s", tag.c_str());
     return full_kv_cache_group_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
@@ -289,7 +306,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     CacheKeysType    selected_cache_keys;
     BlockIndicesType selected_blocks;
 
-    const auto& src_blocks = kvcache_resource.blocks(0);
+    const auto& src_blocks = kvcache_resource.blocks(group_tag_);
 
     BlockIndicesType real_blocks;
     for (auto key : cache_keys) {
@@ -320,7 +337,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     } else {
         block_pool_->requestReference(real_blocks);
     }
-    selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
+    selected_resource->mutableBlockIds(group_tag_).assign(std::move(selected_blocks));
     selected_resource->setCacheKeys(std::move(selected_cache_keys));
 
     return selected_resource;
@@ -331,7 +348,7 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
         kvcache_resource.groupNums() == 1, "decrKVCacheRef expects groupNums==1, got %d", kvcache_resource.groupNums());
 
     BlockIndicesType blocks_to_free;
-    for (const auto block : kvcache_resource.blocks(0)) {
+    for (const auto block : kvcache_resource.blocks(group_tag_)) {
         if (block > 0 && !isNullBlockIdx(block)) {
             blocks_to_free.push_back(block);
         }
@@ -375,7 +392,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
         if (fork_count == 0) {
-            const auto& blocks = kv_cache_resource->blocks(old_batch_idx, 0);
+            const auto& blocks = kv_cache_resource->blocks(old_batch_idx, group_tag_);
             disused_kv_blocks.insert(disused_kv_blocks.end(), blocks.begin(), blocks.end());
         } else if (fork_count > 1 && copy_last_block) {
             new_blocks_num += static_cast<uint32_t>(fork_count - 1);
@@ -410,9 +427,9 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
         if (fork_count == 1) {
             kv_cache_resource->moveBatchResource(new_batch_idx, std::move(old_resources[old_batch_idx]));
         } else {
-            auto& block_ids = kv_cache_resource->mutableBlockIds(new_batch_idx, 0);
+            auto& block_ids = kv_cache_resource->mutableBlockIds(new_batch_idx, group_tag_);
             kv_cache_resource->setBatchCacheKeys(new_batch_idx, old_resources[old_batch_idx].cacheKeys());
-            full_kv_cache_group_->reference(block_ids, old_resources[old_batch_idx].blocks(0));
+            full_kv_cache_group_->reference(block_ids, old_resources[old_batch_idx].blocks(group_tag_));
 
             if (copy_last_block && !block_ids.blocks().empty()) {
                 const int old_block = block_ids.popBack();
@@ -424,8 +441,7 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
                 bool ok = full_kv_cache_group_->malloc(block_ids, seq_len_target);
                 RTP_LLM_CHECK_WITH_INFO(ok, "malloc one block via kvCacheGroup failed during kv cache update");
                 const int new_block = block_ids.blocks().back();
-                block_update_mapping.push_back(
-                    TaggedBlockIdPair{config_.topology().soleGroupForLayer(0).tag, old_block, new_block});
+                block_update_mapping.push_back(TaggedBlockIdPair{group_tag_, old_block, new_block});
             }
         }
         --fork_count;
@@ -440,8 +456,8 @@ int SingleTypeKVCacheAllocator::seqSizePerBlock() const {
 int SingleTypeKVCacheAllocator::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                       int                            seq_len,
                                                       int                            reserve_step) const {
-    const int current_blocks    = batch_kv_cache_resource ? batch_kv_cache_resource->blocksNum(0, 0) : 0;
-    const int effective_seq_len = cpEffectiveSeqLenForAlloc(/*gid=*/0, seq_len);
+    const int current_blocks    = batch_kv_cache_resource ? batch_kv_cache_resource->blocksNum(0, group_tag_) : 0;
+    const int effective_seq_len = cpEffectiveSeqLenForAlloc(group_tag_, seq_len);
     return full_kv_cache_group_->needBlocksNum(effective_seq_len, current_blocks, reserve_step);
 }
 
@@ -451,7 +467,7 @@ int SingleTypeKVCacheAllocator::estimatePeakNeedBlocks(const KVCacheResource& kv
                                                        int                    reserve_step,
                                                        bool                   enable_reuse_cache) const {
     return full_kv_cache_group_->estimatePeakNeedBlocks(
-        seq_len, kv_cache_resource.blocks(0), remaining_tokens, reserve_step, enable_reuse_cache);
+        seq_len, kv_cache_resource.blocks(group_tag_), remaining_tokens, reserve_step, enable_reuse_cache);
 }
 
 int SingleTypeKVCacheAllocator::estimateInitialBatchPeakNeedBlocks(int  seq_len,
