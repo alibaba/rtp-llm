@@ -426,7 +426,11 @@ public final class JavaLoadClient {
                 if (!config.fetchResponseEnabled) {
                     result.status = "scheduled";
                     result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
-                    successCount.incrementAndGet();
+                    // Route through tallyResult so the result lands in
+                    // completedResults (drives flexlb_client_completed_total and
+                    // the schedule-latency pushgateway series) instead of
+                    // bumping counters by hand and skipping the record.
+                    tallyResult(result);
                     responseCount.incrementAndGet();
                     return result;
                 }
@@ -596,26 +600,45 @@ public final class JavaLoadClient {
             }
         }
 
-        long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
         result.scheduleMs = 0.0;
-        result.ttftMs = firstFrameNanos != null ? (firstFrameNanos - startedNanos) / 1_000_000.0 : 0.0;
-        result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
-        result.status = "ok";
         result.prefill = prefillAddr;
         result.decode = decodeAddr;
         result.routePath = "fallback";
         result.wallClockTs = System.currentTimeMillis() / 1000.0;
+        if (firstFrameNanos == null) {
+            // Parity with the main stream path: a stream that completes with
+            // zero outputs is an error, not a 0-ms TTFT success.
+            result.status = "empty_response";
+            result.error = "stream completed with zero outputs";
+            result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+            return;
+        }
+        long endNanos = terminalNanos != null ? terminalNanos.longValue() : System.nanoTime();
+        result.ttftMs = (firstFrameNanos - startedNanos) / 1_000_000.0;
+        result.totalMs = (endNanos - startedNanos) / 1_000_000.0;
+        result.status = "ok";
     }
 
     private static EngineRpcService.RoleAddrPB toRoleAddrPb(
             String role, EngineRpcService.RoleTypePB roleType, String addr) {
         int colon = addr.lastIndexOf(':');
+        if (colon <= 0 || colon == addr.length() - 1) {
+            throw new IllegalArgumentException(
+                    "invalid engine address '" + addr + "' (expected host:port)");
+        }
+        int grpcPort;
+        try {
+            grpcPort = Integer.parseInt(addr.substring(colon + 1));
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "invalid engine address '" + addr + "' (non-numeric port)");
+        }
         return EngineRpcService.RoleAddrPB.newBuilder()
                 .setRole(role)
                 .setRoleType(roleType)
                 .setIp(addr.substring(0, colon))
                 .setHttpPort(0)
-                .setGrpcPort(Integer.parseInt(addr.substring(colon + 1)))
+                .setGrpcPort(grpcPort)
                 .build();
     }
 
@@ -679,9 +702,19 @@ public final class JavaLoadClient {
             if (addr.isEmpty()) {
                 continue;
             }
-            int colon = addr.lastIndexOf(':');
-            // DOMAIN_ADDRESS holds the HTTP port; gRPC port = HTTP port + 1.
-            out.add(addr.substring(0, colon) + ":" + (Integer.parseInt(addr.substring(colon + 1)) + 1));
+            try {
+                int colon = addr.lastIndexOf(':');
+                if (colon <= 0 || colon == addr.length() - 1) {
+                    throw new IllegalArgumentException("expected host:port");
+                }
+                // DOMAIN_ADDRESS holds the HTTP port; gRPC port = HTTP port + 1.
+                out.add(addr.substring(0, colon) + ":"
+                        + (Integer.parseInt(addr.substring(colon + 1)) + 1));
+            } catch (RuntimeException e) {
+                // One malformed entry must not abort the whole replay.
+                System.err.println("WARNING: skipping malformed DOMAIN_ADDRESS entry '"
+                        + addr + "' for " + key + ": " + e);
+            }
         }
     }
 

@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Lightweight HTTP control server for the Java mock engine cluster.
@@ -214,6 +215,15 @@ final class MockControlServer {
             sendJson(exchange, 200, response);
         } catch (ApiException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            // Guarantee a response for any failure (e.g. malformed/empty JSON
+            // body raising MismatchedInputException) instead of leaving the
+            // caller hanging.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
         }
     }
 
@@ -233,6 +243,15 @@ final class MockControlServer {
             sendJson(exchange, 200, response);
         } catch (ApiException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            // Guarantee a response for any failure (e.g. malformed/empty JSON
+            // body raising MismatchedInputException) instead of leaving the
+            // caller hanging.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
         }
     }
 
@@ -302,6 +321,15 @@ final class MockControlServer {
             sendJson(exchange, 200, response);
         } catch (ApiException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            // Guarantee a response for any failure (e.g. malformed/empty JSON
+            // body raising MismatchedInputException) instead of leaving the
+            // caller hanging.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
         }
     }
 
@@ -331,6 +359,15 @@ final class MockControlServer {
             sendJson(exchange, 200, response);
         } catch (ApiException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            // Guarantee a response for any failure (e.g. malformed/empty JSON
+            // body raising MismatchedInputException) instead of leaving the
+            // caller hanging.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
         }
     }
 
@@ -358,6 +395,15 @@ final class MockControlServer {
             sendJson(exchange, 200, response);
         } catch (ApiException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            // Guarantee a response for any failure (e.g. malformed/empty JSON
+            // body raising MismatchedInputException) instead of leaving the
+            // caller hanging.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
         }
     }
 
@@ -383,6 +429,15 @@ final class MockControlServer {
             sendJson(exchange, 200, response);
         } catch (ApiException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            // Guarantee a response for any failure (e.g. malformed/empty JSON
+            // body raising MismatchedInputException) instead of leaving the
+            // caller hanging.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
         }
     }
 
@@ -397,20 +452,42 @@ final class MockControlServer {
             int port = service.getGrpcPort();
             service.clearFaultConfig();
             service.resetEnqueueCount();
-            service.setStopped(false);
+            // Release the port fully before rebinding: shut the old server down
+            // and await termination, then build+bind the new one. Only after the
+            // new server is actually serving do we flip the stopped flag and
+            // swap serversByPort — a bind failure leaves a consistent state
+            // (stopped=true, no phantom server) instead of stopped=false with
+            // nothing listening.
             Server existing = serversByPort.get(port);
             if (existing != null && !existing.isShutdown()) {
-                existing.shutdownNow();
+                existing.shutdown();
+                try {
+                    if (!existing.awaitTermination(5, TimeUnit.SECONDS)) {
+                        existing.shutdownNow();
+                        existing.awaitTermination(5, TimeUnit.SECONDS);
+                    }
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    existing.shutdownNow();
+                }
             }
-            Server server = NettyServerBuilder.forPort(port)
-                    .bossEventLoopGroup(bossGroup)
-                    .workerEventLoopGroup(workerGroup)
-                    .channelType(NioServerSocketChannel.class)
-                    .directExecutor()
-                    .maxInboundMessageSize(16 * 1024 * 1024)
-                    .addService(service)
-                    .build()
-                    .start();
+            Server server;
+            try {
+                server = NettyServerBuilder.forPort(port)
+                        .bossEventLoopGroup(bossGroup)
+                        .workerEventLoopGroup(workerGroup)
+                        .channelType(NioServerSocketChannel.class)
+                        .directExecutor()
+                        .maxInboundMessageSize(16 * 1024 * 1024)
+                        .addService(service)
+                        .build()
+                        .start();
+            } catch (Exception e) {
+                service.setStopped(true);
+                throw new ApiException(500,
+                        "failed to start engine on port " + port + ": " + e);
+            }
+            service.setStopped(false);
             serversByPort.put(port, server);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("status", "ok");
@@ -420,6 +497,15 @@ final class MockControlServer {
             sendJson(exchange, 200, response);
         } catch (ApiException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+        } catch (Exception e) {
+            // Guarantee a response for any failure (e.g. malformed/empty JSON
+            // body raising MismatchedInputException) instead of leaving the
+            // caller hanging.
+            try {
+                sendJson(exchange, 500, Map.of("error", String.valueOf(e)));
+            } catch (IOException ignored) {
+                // Response already committed; nothing more to do.
+            }
         }
     }
 
@@ -626,8 +712,10 @@ final class MockControlServer {
         Runtime runtime = Runtime.getRuntime();
         long heapUsed = runtime.totalMemory() - runtime.freeMemory();
         for (JavaMockEngineCluster.FastRpcService service : engineServices) {
+            // Lowercase role keeps the legacy series label-consistent with the
+            // Python-compat aggregated series (role="prefill"/"decode").
             String labels = String.format("port=\"%d\",role=\"%s\"",
-                    service.getGrpcPort(), service.getRoleName());
+                    service.getGrpcPort(), service.getRoleName().toLowerCase());
             sb.append(String.format("mock_engine_running_tasks{%s} %d%n", labels, service.getRunningCount()));
             sb.append(String.format("mock_engine_accepted_total{%s} %d%n", labels, service.getAcceptedCount()));
             sb.append(String.format("mock_engine_completed_total{%s} %d%n", labels, service.getCompletedCount()));

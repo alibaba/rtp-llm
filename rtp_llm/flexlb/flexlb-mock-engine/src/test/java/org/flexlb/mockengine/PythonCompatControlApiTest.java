@@ -483,9 +483,11 @@ class PythonCompatControlApiTest {
         assertTrue(body.contains("mock_engine_completed_total{role=\"decode\"} 2"),
                 "aggregated decode completed should be 2");
         assertTrue(body.contains("mock_engine_rpc_total{role=\"prefill\",rpc_method=\"enqueue_batch\"} 1"));
-        // Legacy series retained with port/role labels.
+        // Legacy series retained with port/role labels. Role label is
+        // lowercase to stay consistent with the Python-compat aggregated
+        // series (avoids case-split double counting in role-less queries).
         assertTrue(body.contains("mock_engine_inflight_count{port=\""
-                + prefill.getGrpcPort() + "\",role=\"PREFILL\"}"));
+                + prefill.getGrpcPort() + "\",role=\"prefill\"}"));
         assertTrue(body.contains("mock_engine_heap_used_bytes"));
     }
 

@@ -331,7 +331,11 @@ public final class JavaMockEngineCluster {
         private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks = new ConcurrentHashMap<>();
         private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues = new ConcurrentHashMap<>();
         private final Map<Long, String> requestStates = new ConcurrentHashMap<>();
-        private final Set<Long> cancelledRequests = ConcurrentHashMap.newKeySet();
+        /** Safety-net TTL for cancelled markers never consumed by a completion callback. */
+        private static final long CANCELLED_MARKER_TTL_SECONDS = 600;
+
+        /** rid -> insertion time (System.nanoTime); consumed by completion callbacks. */
+        private final Map<Long, Long> cancelledRequests = new ConcurrentHashMap<>();
 
         private volatile FaultInjectionConfig faultConfig = FaultInjectionConfig.builder().build();
         private final AtomicInteger enqueueCount = new AtomicInteger();
@@ -607,7 +611,7 @@ public final class JavaMockEngineCluster {
         void cancel(long requestId) {
             stats.cancelRpcs.increment();
             rpcCancel.incrementAndGet();
-            cancelledRequests.add(requestId);
+            cancelledRequests.put(requestId, System.nanoTime());
             addCancelledRid(requestId);
             recordLifecycleEnd(requestId, true);
             EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
@@ -700,7 +704,7 @@ public final class JavaMockEngineCluster {
                         activeCount++;
                     }
                     recordCompletion(shape, batchId, executionMs, dpRank);
-                    boolean alreadyCancelled = cancelledRequests.contains(requestId);
+                    boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                     // Python marks the prefill-side lifecycle entry finished when the
                     // prefill phase ends, even though decode may continue elsewhere.
                     recordLifecycleEnd(requestId, alreadyCancelled);
@@ -789,7 +793,7 @@ public final class JavaMockEngineCluster {
                     pendingRequests.decrementAndGet();
                 }
                 recordCompletion(shape, batchId, executionMs, 0);
-                boolean alreadyCancelled = cancelledRequests.contains(requestId);
+                boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                 recordLifecycleEnd(requestId, alreadyCancelled);
                 if (!alreadyCancelled) {
                     completedCount.incrementAndGet();
@@ -919,7 +923,15 @@ public final class JavaMockEngineCluster {
                 responseQueues.keySet().retainAll(activeIds);
             }
             requestStates.keySet().retainAll(activeIds);
-            cancelledRequests.retainAll(activeIds);
+            // NOTE: cancelledRequests must NOT be pruned against runningTasks —
+            // cancel() removes the runningTasks entry first, so retainAll would
+            // drop the marker before the completion callback observes it and a
+            // cancelled request could still be forwarded to decode / counted as
+            // completed. Completion callbacks remove their own entries; TTL is
+            // only a safety net for orphaned markers.
+            long ttlDeadline = System.nanoTime()
+                    - TimeUnit.SECONDS.toNanos(CANCELLED_MARKER_TTL_SECONDS);
+            cancelledRequests.entrySet().removeIf(e -> e.getValue() < ttlDeadline);
         }
 
         /**
