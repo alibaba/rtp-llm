@@ -258,14 +258,14 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     }
 
     if (is_dspark_draft_) {
-        RTP_LLM_CHECK_WITH_INFO(py_model_inputs_.dspark_ctx_lengths.defined()
-                                    && py_model_inputs_.dspark_ctx_starts.defined(),
+        RTP_LLM_CHECK_WITH_INFO(py_model_inputs_.dspark_ctx_lengths.defined(),
                                 "DSpARK graph inputs must own persistent context metadata");
         // A smaller live batch may reuse a larger captured graph. Clear the
         // padded metadata first so those rows cannot inject stale target
-        // features into blocks that have since been reassigned.
+        // features into blocks that have since been reassigned. Feature rows
+        // are front-packed by request, so zero lengths for padded slots keep
+        // the derived (prefix-sum) row windows monotonic and empty.
         py_model_inputs_.dspark_ctx_lengths.zero_();
-        py_model_inputs_.dspark_ctx_starts.fill_(input_hidden_rows_per_bs_ * state.current_real_graph_bs);
         if (inputs.dspark_ctx_lengths.defined() && inputs.dspark_ctx_lengths.numel() > 0) {
             RTP_LLM_CHECK_WITH_INFO(inputs.dspark_ctx_lengths.numel() <= py_model_inputs_.dspark_ctx_lengths.numel(),
                                     "dspark_ctx_lengths numel mismatch: %zu > %zu",
@@ -274,15 +274,6 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
             optimizedCopyAsync(inputs.dspark_ctx_lengths,
                                py_model_inputs_.dspark_ctx_lengths,
                                inputs.dspark_ctx_lengths.numel() * sizeof(int32_t));
-        }
-        if (inputs.dspark_ctx_starts.defined() && inputs.dspark_ctx_starts.numel() > 0) {
-            RTP_LLM_CHECK_WITH_INFO(inputs.dspark_ctx_starts.numel() <= py_model_inputs_.dspark_ctx_starts.numel(),
-                                    "dspark_ctx_starts numel mismatch: %zu > %zu",
-                                    inputs.dspark_ctx_starts.numel(),
-                                    py_model_inputs_.dspark_ctx_starts.numel());
-            optimizedCopyAsync(inputs.dspark_ctx_starts,
-                               py_model_inputs_.dspark_ctx_starts,
-                               inputs.dspark_ctx_starts.numel() * sizeof(int32_t));
         }
     }
 }
@@ -711,8 +702,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         const int64_t live_batch = inputs.attention_inputs.input_lengths.size(0);
         const int64_t max_live_aux_numel =
             live_batch * input_hidden_rows_per_bs_ * static_cast<int64_t>(input_hidden_size_);
-        if (!enable_cuda_graph_ || !inputs.dspark_ctx_lengths.defined() || !inputs.dspark_ctx_starts.defined()
-            || inputs.dspark_ctx_lengths.numel() == 0 || inputs.dspark_ctx_starts.numel() == 0
+        if (!enable_cuda_graph_ || !inputs.dspark_ctx_lengths.defined() || inputs.dspark_ctx_lengths.numel() == 0
             || !inputs.input_hiddens.defined() || inputs.input_hiddens.numel() > max_live_aux_numel) {
             // Prompt seeding can carry an arbitrarily long target-feature
             // suffix. Keep that ragged case eager; the decode tail is bounded
@@ -936,11 +926,6 @@ void CudaGraphRunner::initCapture() {
             options_cuda_float_);
         if (is_dspark_draft_) {
             inputs.dspark_ctx_lengths = torch::zeros({static_cast<int64_t>(max_bs_)}, options_cuda_int32_);
-            inputs.dspark_ctx_starts =
-                torch::arange(0,
-                              static_cast<int64_t>(max_bs_) * input_hidden_rows_per_bs_,
-                              input_hidden_rows_per_bs_,
-                              options_cuda_int32_);
         }
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
@@ -1125,7 +1110,6 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     if (is_dspark_draft_) {
         inputs.dspark_ctx_lengths =
             capture_mem_hold_.py_model_inputs_.dspark_ctx_lengths.slice(0, 0, batch_size);
-        inputs.dspark_ctx_starts = capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.slice(0, 0, batch_size);
     }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);

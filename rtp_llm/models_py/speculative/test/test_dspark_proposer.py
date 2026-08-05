@@ -213,7 +213,6 @@ class ParseCommittedContextTest(unittest.TestCase):
         inputs = SimpleNamespace(
             input_hiddens=hidden,
             dspark_ctx_lengths=torch.tensor([3, 1], dtype=torch.int32),
-            dspark_ctx_starts=torch.tensor([0, 3], dtype=torch.int32),
         )
         prefix = torch.tensor([3, 1], dtype=torch.int32)
 

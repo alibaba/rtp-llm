@@ -90,7 +90,6 @@ enum GptModelInputIndex : size_t {
     // DSpARK prefill seeding, so transmit its leading dimension explicitly.
     mtpHiddenStatesRows,
     dsparkCtxLengths,
-    dsparkCtxStarts,
     cacheStoreInputLengths,
     cacheStorePrefixLengths,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
@@ -110,9 +109,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitPrefixLengths    = 1u << 3,
     kDeviceBitLmOutputIndexes  = 1u << 4,
     kDeviceBitDsparkCtxLengths = 1u << 5,
-    kDeviceBitDsparkCtxStarts  = 1u << 6,
-    kDeviceBitCacheStoreInputLengths  = 1u << 7,
-    kDeviceBitCacheStorePrefixLengths = 1u << 8,
+    kDeviceBitCacheStoreInputLengths  = 1u << 6,
+    kDeviceBitCacheStorePrefixLengths = 1u << 7,
 };
 
 struct CacheStoreTensorSyncMetadata {

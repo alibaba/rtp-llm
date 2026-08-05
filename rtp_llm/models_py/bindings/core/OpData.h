@@ -53,12 +53,11 @@ struct GptModelInputs {
     torch::Tensor last_hidden_states;
 
     // DSpARK feature-injection window. Each int32 [batch] entry selects the
-    // rows of last_hidden_states used by one request. Undefined means the
+    // rows of last_hidden_states used by one request. Rows are front-packed
+    // by request (row offsets are the exclusive prefix sum of the lengths);
+    // trailing rows beyond the packed span are padding. Undefined means the
     // whole available prefix (initial seeding).
     torch::Tensor dspark_ctx_lengths;
-    // Optional int32 [batch] absolute start for each feature window. When it
-    // is undefined, the window ends at the request prefix length.
-    torch::Tensor dspark_ctx_starts;
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 

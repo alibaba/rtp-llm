@@ -1061,11 +1061,13 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
 
     GptModelInputs draft_input;
-    draft_input.combo_tokens       = torch::tensor({1, 0, 0}, torch::kInt32);
-    draft_input.input_lengths      = torch::tensor({gamma}, torch::kInt32);
-    draft_input.prefix_lengths     = torch::tensor({3}, torch::kInt32);
-    draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
-    draft_input.last_hidden_states = target_aux_features;
+    draft_input.combo_tokens      = torch::tensor({1, 0, 0}, torch::kInt32);
+    draft_input.input_lengths     = torch::tensor({gamma}, torch::kInt32);
+    draft_input.prefix_lengths    = torch::tensor({3}, torch::kInt32);
+    draft_input.lm_output_indexes = torch::tensor({0}, torch::kInt32);
+    // accept_len=1 front-packs row 0; padding slots repeat the final row.
+    draft_input.last_hidden_states =
+        target_aux_features.index_select(0, torch::tensor({0, 3, 3, 3}, torch::kLong).to(torch::kCUDA));
 
     GptModelOutputs draft_output;
     draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);

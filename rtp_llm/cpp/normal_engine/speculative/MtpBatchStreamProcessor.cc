@@ -765,7 +765,6 @@ void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInp
     model_input.combo_tokens       = dsparkComboTokens(batch_size, anchors);
     model_input.last_hidden_states = target_features;
     model_input.dspark_ctx_lengths = suffix_lengths;
-    model_input.dspark_ctx_starts  = suffix_lengths.cumsum(0, torch::kInt32) - suffix_lengths;
     // CacheStore keys are derived from the committed prompt received by both
     // PD peers. The gamma rows written by this draft seeding forward are
     // speculative state outside that prompt's hash namespace. Counting them
@@ -886,15 +885,28 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
                             "dspark decode tail: aux rows %ld != batch*verify_width %ld",
                             target_features.size(0),
                             static_cast<int64_t>(batch_size) * verify_width);
-    model_input.combo_tokens       = dsparkComboTokens(batch_size, anchors);
-    model_input.last_hidden_states = target_features;
-    hidden_states_d_t              = model_input.last_hidden_states;
+    model_input.combo_tokens = dsparkComboTokens(batch_size, anchors);
 
-    auto old_prefix = toCudaInt32(model_input.prefix_lengths, host_holder).clone();
-    model_input.dspark_ctx_starts = torch::arange(0,
-                                                  static_cast<int64_t>(batch_size) * verify_width,
-                                                  verify_width,
-                                                  cudaInt32Options());
+    // Front-pack the accepted rows of the dense [B*(gamma+1)] verify buffer so
+    // the draft-side row windows are the plain prefix sum of the lengths —
+    // the same packed layout as prefill seeding. All device-side arithmetic
+    // with data-independent shapes (no host sync): slot j gathers the
+    // (j+1)-th accepted row; slots past the packed span deterministically
+    // repeat the final source row and are skipped by the draft's window
+    // mapping.
+    {
+        const auto rows_total = static_cast<int64_t>(batch_size) * verify_width;
+        const auto long_cuda  = torch::TensorOptions().dtype(torch::kLong).device(torch::kCUDA);
+        auto       accepted =
+            (torch::arange(verify_width, long_cuda).unsqueeze(0) < accept_len.to(torch::kLong).unsqueeze(1))
+                .reshape({rows_total});
+        auto src = torch::searchsorted(accepted.cumsum(0), torch::arange(1, rows_total + 1, long_cuda))
+                       .clamp_max(rows_total - 1);
+        model_input.last_hidden_states = target_features.index_select(0, src);
+    }
+    hidden_states_d_t = model_input.last_hidden_states;
+
+    auto old_prefix                = toCudaInt32(model_input.prefix_lengths, host_holder).clone();
     model_input.dspark_ctx_lengths = accept_len;
     model_input.prefix_lengths     = old_prefix + accept_len;
     model_input.input_lengths      = dsparkDraftInputLengths(batch_size);

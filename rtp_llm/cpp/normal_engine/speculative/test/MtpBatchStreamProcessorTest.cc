@@ -820,7 +820,6 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, 202, mask_id, mask_id}),
               toVec<int32_t>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.dspark_ctx_lengths));
-    EXPECT_EQ((std::vector<int32_t>{0, 3}), toVec<int32_t>(model_input.dspark_ctx_starts));
     EXPECT_EQ((std::vector<int32_t>{7, 4}), toVec<int32_t>(model_input.cache_store_prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.cache_store_input_lengths));
     EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));

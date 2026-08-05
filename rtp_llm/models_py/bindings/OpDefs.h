@@ -351,7 +351,6 @@ struct PyModelInputs {
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
     torch::Tensor       dspark_ctx_lengths;
-    torch::Tensor       dspark_ctx_starts;
 };
 
 struct PyModelOutputs {

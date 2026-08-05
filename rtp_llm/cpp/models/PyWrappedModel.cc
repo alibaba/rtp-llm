@@ -525,7 +525,6 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
         PyModelInputs py_model_inputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs};
         py_model_inputs.dspark_ctx_lengths = micro_inputs.dspark_ctx_lengths;
-        py_model_inputs.dspark_ctx_starts  = micro_inputs.dspark_ctx_starts;
         input_list.emplace_back(std::move(py_model_inputs));
     }
 
@@ -762,7 +761,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
         py_model_inputs.dspark_ctx_lengths = inputs.dspark_ctx_lengths;
-        py_model_inputs.dspark_ctx_starts  = inputs.dspark_ctx_starts;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -1225,10 +1223,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.dspark_ctx_lengths.defined() ?
                         inputs.dspark_ctx_lengths.narrow(0, sliced_batch_idx, total_batch_size) :
                         torch::Tensor();
-                micro_model_inputs.dspark_ctx_starts =
-                    inputs.dspark_ctx_starts.defined() ?
-                        inputs.dspark_ctx_starts.narrow(0, sliced_batch_idx, total_batch_size) :
-                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -1268,10 +1262,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.dspark_ctx_lengths =
                     inputs.dspark_ctx_lengths.defined() ?
                         inputs.dspark_ctx_lengths.narrow(0, sliced_batch_idx, d_micro_batch_size) :
-                        torch::Tensor();
-                micro_model_inputs.dspark_ctx_starts =
-                    inputs.dspark_ctx_starts.defined() ?
-                        inputs.dspark_ctx_starts.narrow(0, sliced_batch_idx, d_micro_batch_size) :
                         torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
@@ -1322,10 +1312,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     inputs.dspark_ctx_lengths.defined() ?
                         inputs.dspark_ctx_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size) :
                         torch::Tensor();
-                micro_model_inputs.dspark_ctx_starts =
-                    inputs.dspark_ctx_starts.defined() ?
-                        inputs.dspark_ctx_starts.narrow(0, sliced_batch_idx, p_micro_batch_size) :
-                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -1356,7 +1342,6 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.last_hidden_states);
     buffer_holder_.hold_host(inputs.dspark_ctx_lengths);
-    buffer_holder_.hold_host(inputs.dspark_ctx_starts);
 
     buffer_holder_.hold_host(inputs.attention_mask);
     buffer_holder_.hold_host(inputs.kv_cache_block_id);

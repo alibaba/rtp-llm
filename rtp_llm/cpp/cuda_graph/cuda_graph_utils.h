@@ -49,7 +49,6 @@ public:
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
         py_model_inputs_.dspark_ctx_lengths                       = inputs.dspark_ctx_lengths;
-        py_model_inputs_.dspark_ctx_starts                        = inputs.dspark_ctx_starts;
         py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;
         py_model_inputs_.attention_inputs.cu_seqlens_host         = inputs.attention_inputs.cu_seqlens_host;
         py_model_inputs_.attention_inputs.cu_kv_seqlens           = inputs.attention_inputs.cu_kv_seqlens;

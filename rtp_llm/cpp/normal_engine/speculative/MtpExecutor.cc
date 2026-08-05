@@ -270,7 +270,6 @@ void MtpExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const cha
     to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
     to_cuda(model_input.dspark_ctx_lengths, "dspark_ctx_lengths");
-    to_cuda(model_input.dspark_ctx_starts, "dspark_ctx_starts");
     to_cuda(model_input.cache_store_input_lengths, "cache_store_input_lengths");
     to_cuda(model_input.cache_store_prefix_lengths, "cache_store_prefix_lengths");
     checkModelInputsOnCuda(model_input, tag);
@@ -298,7 +297,6 @@ void MtpExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, cons
     check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     check(model_input.lm_output_indexes, "lm_output_indexes");
     check(model_input.dspark_ctx_lengths, "dspark_ctx_lengths");
-    check(model_input.dspark_ctx_starts, "dspark_ctx_starts");
     check(model_input.cache_store_input_lengths, "cache_store_input_lengths");
     check(model_input.cache_store_prefix_lengths, "cache_store_prefix_lengths");
     RTP_LLM_LOG_DEBUG("[mtp-device-input] %s metadata tensors are CUDA", tag);
@@ -1435,7 +1433,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             model_input.last_hidden_states = torch::empty_like(target_features);
             model_input.input_lengths      = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input.prefix_lengths     = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
-            model_input.dspark_ctx_starts  = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input.dspark_ctx_lengths = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input.sequence_lengths   = torch::empty({0}, cuda_i32);
         } else {
@@ -1817,7 +1814,6 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         if (is_dspark_) {
             execBroadcast({{model_input.input_lengths}, 0});
             execBroadcast({{model_input.prefix_lengths}, 0});
-            execBroadcast({{model_input.dspark_ctx_starts}, 0});
             execBroadcast({{model_input.dspark_ctx_lengths}, 0});
         }
     }

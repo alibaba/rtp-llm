@@ -73,13 +73,13 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertEqual(tuple(outputs.draft_tokens.shape), (2, 3))
         self.assertEqual(tuple(outputs.draft_probs.shape), (2, 3, 17))
 
-    def test_padded_context_start_is_monotonic_sentinel(self) -> None:
-        # A graph bucket of two requests replays a one-request batch. The
-        # padded start must be the row-capacity sentinel (12), not zero: a
-        # repeated zero would make searchsorted(right=True) assign row zero to
-        # the padded request.
-        starts = torch.tensor([0, 12], dtype=torch.int32)
+    def test_padded_graph_slot_maps_no_rows_with_prefix_sum_starts(self) -> None:
+        # A graph bucket of two requests replays a one-request batch. Rows
+        # are front-packed, so the padded slot's derived start equals the
+        # packed span end and its zero length maps no rows; the buffer's
+        # padding tail rows must all stay invalid.
         lengths = torch.tensor([3, 0], dtype=torch.int32)
+        starts = (lengths.cumsum(0) - lengths).to(torch.int32)
         prefix = torch.tensor([10, 0], dtype=torch.int32)
 
         req, positions = map_context_rows(
@@ -91,9 +91,11 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertTrue(torch.all(req[3:] == -1))
         self.assertTrue(torch.all(positions[3:] == -1))
 
-    def test_dense_verify_context_rows_keep_only_accepted_prefixes(self) -> None:
-        starts = torch.tensor([0, 6], dtype=torch.int32)
+    def test_packed_verify_rows_map_accepted_prefixes(self) -> None:
+        # Decode-tail rows arrive front-packed (accepted rows only); rows
+        # past the packed span are scatter padding and must stay invalid.
         lengths = torch.tensor([3, 1], dtype=torch.int32)
+        starts = (lengths.cumsum(0) - lengths).to(torch.int32)
         committed_ends = torch.tensor([123, 367], dtype=torch.int32)
 
         req, positions = map_context_rows(
@@ -102,10 +104,10 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
 
         expected_req = torch.full((12,), -1, dtype=torch.int32)
         expected_req[:3] = 0
-        expected_req[6] = 1
+        expected_req[3] = 1
         expected_positions = torch.full((12,), -1, dtype=torch.int32)
         expected_positions[:3] = torch.tensor([120, 121, 122], dtype=torch.int32)
-        expected_positions[6] = 366
+        expected_positions[3] = 366
         self.assertTrue(torch.equal(req, expected_req))
         self.assertTrue(torch.equal(positions, expected_positions))
 

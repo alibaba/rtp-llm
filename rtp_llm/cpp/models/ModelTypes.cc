@@ -83,8 +83,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
     shape_hints[GptModelInputIndex::dsparkCtxLengths] =
         inputs.dspark_ctx_lengths.defined() ? inputs.dspark_ctx_lengths.numel() : 0;
-    shape_hints[GptModelInputIndex::dsparkCtxStarts] =
-        inputs.dspark_ctx_starts.defined() ? inputs.dspark_ctx_starts.numel() : 0;
     const auto cache_store_sync_metadata = getCacheStoreTensorSyncMetadata(inputs);
     shape_hints[GptModelInputIndex::cacheStoreInputLengths] = cache_store_sync_metadata.input_lengths_count;
     shape_hints[GptModelInputIndex::cacheStorePrefixLengths] = cache_store_sync_metadata.prefix_lengths_count;
@@ -107,9 +105,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     }
     if (inputs.dspark_ctx_lengths.defined() && inputs.dspark_ctx_lengths.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkCtxLengths;
-    }
-    if (inputs.dspark_ctx_starts.defined() && inputs.dspark_ctx_starts.is_cuda()) {
-        device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts;
     }
     device_bits |= cache_store_sync_metadata.device_bits;
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
@@ -320,12 +315,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                          {checkedHint(GptModelInputIndex::dsparkCtxLengths, "dsparkCtxLengths")},
                          pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkCtxLengths));
         }
-        if (shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]) {
-            inputs.dspark_ctx_starts =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {checkedHint(GptModelInputIndex::dsparkCtxStarts, "dsparkCtxStarts")},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts));
-        }
         if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
             inputs.cache_store_input_lengths =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
@@ -408,9 +397,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     if (shape_hints_ptr[GptModelInputIndex::dsparkCtxLengths]) {
         collect(inputs.dspark_ctx_lengths);
-    }
-    if (shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]) {
-        collect(inputs.dspark_ctx_starts);
     }
     if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
         collect(inputs.cache_store_input_lengths);

@@ -20,8 +20,9 @@ Engine input contract (all token rows are request-major):
 * ``input_hiddens``: target auxiliary features, flattenable to
   ``[rows, aux_feature_dim]`` (a zero-copy view of the shared MTP hidden
   buffer, whose DSpARK row width equals the aux payload).
-* ``dspark_ctx_lengths`` / ``dspark_ctx_starts``: number and source-row
-  start of newly committed feature rows for each request.
+* ``dspark_ctx_lengths``: number of newly committed feature rows for each
+  request. Rows arrive front-packed by request, so each request's window
+  starts at the exclusive prefix sum of the lengths.
 * ``attention_inputs.prefix_lengths``: committed sequence length *after*
   those context rows and immediately before the query block.
 
@@ -322,11 +323,10 @@ class DSparkProposerMixin:
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return ``main_x, req_ids, positions`` for received target rows.
 
-        Explicit ``starts`` may describe a dense target-verify buffer with
-        holes after each request's accepted prefix.  ``searchsorted`` maps all
-        source rows to requests without a device-to-host length read; hole
-        rows retain a ``-1`` request/position and are skipped by the cache
-        writer.
+        Rows are front-packed by request; ``searchsorted`` over the derived
+        prefix-sum starts maps all source rows to requests without a
+        device-to-host length read. Padding rows past the packed span retain
+        a ``-1`` request/position and are skipped by the cache writer.
         """
         aux_dim = self._dspark_aux_feature_dim
         hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
@@ -353,15 +353,12 @@ class DSparkProposerMixin:
             )
 
         lengths = lengths[:batch_size].to(device=device, dtype=torch.long)
-        starts_in = optional_tensor(getattr(inputs, "dspark_ctx_starts", None))
-        if starts_in is None:
-            starts = lengths.cumsum(0) - lengths
-        else:
-            if int(starts_in.numel()) < batch_size:
-                raise RuntimeError(
-                    "DSpark dspark_ctx_starts has fewer values than the batch"
-                )
-            starts = starts_in[:batch_size].to(device=device, dtype=torch.long)
+        # Feature rows are front-packed by request in both arms (prefill
+        # seeding is packed by construction; the decode tail front-packs the
+        # accepted verify rows in C++), so the row windows are always the
+        # exclusive prefix sum of the lengths. Rows past the packed span are
+        # padding and fail the interval check in map_context_rows.
+        starts = lengths.cumsum(0) - lengths
 
         if hidden.numel() % aux_dim != 0:
             raise RuntimeError(
