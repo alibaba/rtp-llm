@@ -441,6 +441,14 @@ std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(Transf
             node->group_set_resources[group_set_id].transfer_detached = true;
         }
         plan.full_prune_nodes_bottom_up = std::move(closure.nodes_bottom_up);
+        RTP_LLM_LOG_WARNING("event=block_tree_full_prune root_key=%ld trigger_group_set_id=%zu source_tier=%s "
+                            "closure_nodes=%zu dependent_resources=%zu detached_resources=%zu",
+                            full_prune_desc.node->cache_key,
+                            full_prune_desc.group_set_id,
+                            tierName(full_prune_desc.source_tier),
+                            plan.full_prune_nodes_bottom_up.size(),
+                            plan.dependent_prune_descs.size(),
+                            closure.detached_resources.size());
     };
     attach_full_prune(plan.primary_desc);
 

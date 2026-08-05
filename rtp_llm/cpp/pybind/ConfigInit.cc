@@ -425,6 +425,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
                        &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
+        .def_readwrite("enable_reverse_eviction", &KVCacheConfig::enable_reverse_eviction)
+        .def_readwrite("device_eviction_policy", &KVCacheConfig::device_eviction_policy)
+        .def_readwrite("host_eviction_policy", &KVCacheConfig::host_eviction_policy)
+        .def_readwrite("disk_eviction_policy", &KVCacheConfig::disk_eviction_policy)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         // Remote connector configuration fields
@@ -507,10 +511,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_independent_group_eviction,
                                       self.load_cache_retry_times,
                                       self.memory_cache_disk_staging_block_count,
-                                      self.enable_disk_cache);
+                                      self.enable_disk_cache,
+                                      self.enable_reverse_eviction,
+                                      self.device_eviction_policy,
+                                      self.host_eviction_policy,
+                                      self.disk_eviction_policy);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 55 && t.size() != 56)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 55 && t.size() != 56 && t.size() != 60)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -575,6 +583,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 56) {
                         c.enable_disk_cache = t[55].cast<bool>();
+                    }
+                    if (t.size() >= 60) {
+                        c.enable_reverse_eviction = t[56].cast<bool>();
+                        c.device_eviction_policy  = t[57].cast<std::string>();
+                        c.host_eviction_policy    = t[58].cast<std::string>();
+                        c.disk_eviction_policy    = t[59].cast<std::string>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

@@ -145,6 +145,10 @@ std::string KVCacheConfig::to_string() const {
         << "enable_legacy_memory_connector_fallback: " << enable_legacy_memory_connector_fallback << "\n"
         << "prefix_tree_memory_state_swa_pool_ratio: " << prefix_tree_memory_state_swa_pool_ratio << "\n"
         << "enable_independent_group_eviction: " << enable_independent_group_eviction << "\n"
+        << "enable_reverse_eviction: " << enable_reverse_eviction << "\n"
+        << "device_eviction_policy: " << device_eviction_policy << "\n"
+        << "host_eviction_policy: " << host_eviction_policy << "\n"
+        << "disk_eviction_policy: " << disk_eviction_policy << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
         << "load_cache_retry_times: " << load_cache_retry_times << "\n";
     return oss.str();

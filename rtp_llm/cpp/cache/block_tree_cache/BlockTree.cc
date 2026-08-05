@@ -183,6 +183,14 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(
                     const bool can_reuse = existing.isValidSteadyState() && existing.hasCompleteDeviceValue();
                     const bool can_adopt = existing.is_removable();
                     if (!can_reuse && !can_adopt) {
+                        RTP_LLM_LOG_WARNING("event=block_tree_insert_hard_stop key_index=%zu key=%ld "
+                                            "group_set_id=%zu existing_tier=%s transfer_state=%d serving_tiers=%zu",
+                                            i,
+                                            key,
+                                            group_set_id,
+                                            tierName(existing.getTopTier()),
+                                            static_cast<int>(existing.transfer_state),
+                                            existing.servingTierCount());
                         full_path_ready = false;
                         break;
                     }

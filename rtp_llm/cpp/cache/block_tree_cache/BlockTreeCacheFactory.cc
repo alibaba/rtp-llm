@@ -2,8 +2,10 @@
 
 #include <cstdlib>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <limits>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -31,6 +33,23 @@ constexpr size_t kPoolAlignment = 4096;
 constexpr double kDefaultDeviceWatermarkRatio = 0.9;
 constexpr double kDefaultHostWatermarkRatio   = 0.9;
 constexpr double kDefaultDiskWatermarkRatio   = 0.9;
+
+std::optional<EvictionPolicy> parseEvictionPolicy(const std::string& value) {
+    std::string normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    if (normalized == "lru") {
+        return EvictionPolicy::LRU;
+    }
+    if (normalized == "lfu") {
+        return EvictionPolicy::LFU;
+    }
+    if (normalized == "fifo") {
+        return EvictionPolicy::FIFO;
+    }
+    return std::nullopt;
+}
 
 size_t alignUp(size_t value, size_t alignment) {
     RTP_LLM_CHECK_WITH_INFO(alignment > 0 && value <= std::numeric_limits<size_t>::max() - (alignment - 1),
@@ -295,6 +314,18 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                        const ParallelismConfig&          parallelism_config,
                                        std::shared_ptr<StorageBackend>   storage_backend,
                                        std::shared_ptr<BroadcastManager> broadcast_manager) {
+    const auto device_eviction_policy = parseEvictionPolicy(kv_cache_config.device_eviction_policy);
+    const auto host_eviction_policy   = parseEvictionPolicy(kv_cache_config.host_eviction_policy);
+    const auto disk_eviction_policy   = parseEvictionPolicy(kv_cache_config.disk_eviction_policy);
+    if (!device_eviction_policy.has_value() || !host_eviction_policy.has_value()
+        || !disk_eviction_policy.has_value()) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: unsupported eviction policy, device=%s host=%s disk=%s",
+                          kv_cache_config.device_eviction_policy.c_str(),
+                          kv_cache_config.host_eviction_policy.c_str(),
+                          kv_cache_config.disk_eviction_policy.c_str());
+        return nullptr;
+    }
+
     const int group_count = cache_config.groupNums();
     if (group_count <= 0) {
         RTP_LLM_LOG_ERROR("createBlockTreeCache: topology must contain at least one group");
@@ -432,13 +463,17 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     }
 
     BlockTreeCacheConfig config;
-    config.enable_device_cache    = kv_cache_config.enable_device_cache;
-    config.enable_memory_cache    = host_enabled;
-    config.enable_disk_cache      = disk_enabled;
-    config.enable_remote_cache    = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
-    config.device_min_free_blocks = kv_cache_config.device_cache_min_free_blocks > 0 ?
-                                        static_cast<size_t>(kv_cache_config.device_cache_min_free_blocks) :
-                                        0;
+    config.enable_device_cache     = kv_cache_config.enable_device_cache;
+    config.enable_memory_cache     = host_enabled;
+    config.enable_disk_cache       = disk_enabled;
+    config.enable_remote_cache     = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
+    config.enable_reverse_eviction = kv_cache_config.enable_reverse_eviction;
+    config.device_eviction_policy  = *device_eviction_policy;
+    config.host_eviction_policy    = *host_eviction_policy;
+    config.disk_eviction_policy    = *disk_eviction_policy;
+    config.device_min_free_blocks  = kv_cache_config.device_cache_min_free_blocks > 0 ?
+                                         static_cast<size_t>(kv_cache_config.device_cache_min_free_blocks) :
+                                         0;
     if (config.enable_device_cache) {
         config.watermark_device = {kDefaultDeviceWatermarkRatio, 0};
     }

@@ -180,9 +180,13 @@ struct KVCacheConfig {
     bool    enable_legacy_memory_connector_fallback = true;
     int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
     // Deprecated/no-op retained for configuration compatibility.
-    bool    enable_independent_group_eviction = false;
-    int64_t device_cache_min_free_blocks      = 0;
-    int     load_cache_retry_times            = 1;  // Maximum retry attempts for load cache transfer failures
+    bool        enable_independent_group_eviction = false;
+    bool        enable_reverse_eviction           = false;
+    std::string device_eviction_policy            = "lru";
+    std::string host_eviction_policy              = "lru";
+    std::string disk_eviction_policy              = "fifo";
+    int64_t     device_cache_min_free_blocks       = 0;
+    int         load_cache_retry_times             = 1;  // Maximum retry attempts for load cache transfer failures
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;

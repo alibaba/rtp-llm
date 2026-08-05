@@ -681,6 +681,45 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleGroupsAggregate) {
     ASSERT_EQ(cache->groupSets()[0]->devicePools().size(), 2u);
 }
 
+TEST_F(BlockTreeCacheFactoryTest, ProductionEvictionConfigurationPropagatesToBlockTreeCache) {
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_reverse_eviction = true;
+    kv_cache_config.device_eviction_policy  = "FIFO";
+    kv_cache_config.host_eviction_policy    = "lfu";
+    kv_cache_config.disk_eviction_policy    = "LrU";
+
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+    ASSERT_NE(cache, nullptr);
+    EXPECT_TRUE(cache->config().enable_reverse_eviction);
+    EXPECT_EQ(cache->config().device_eviction_policy, EvictionPolicy::FIFO);
+    EXPECT_EQ(cache->config().host_eviction_policy, EvictionPolicy::LFU);
+    EXPECT_EQ(cache->config().disk_eviction_policy, EvictionPolicy::LRU);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, UnsupportedProductionEvictionPolicyFailsClosed) {
+    using PolicyField = std::string KVCacheConfig::*;
+    const std::vector<std::pair<const char*, PolicyField>> policy_fields = {
+        {"device", &KVCacheConfig::device_eviction_policy},
+        {"host", &KVCacheConfig::host_eviction_policy},
+        {"disk", &KVCacheConfig::disk_eviction_policy},
+    };
+
+    const auto config = makeSingleConfig();
+    for (const auto& [tier, policy_field] : policy_fields) {
+        SCOPED_TRACE(tier);
+        auto              allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig     kv_cache_config;
+        BlockTreeCachePtr cache;
+        kv_cache_config.*policy_field = "clock";
+        EXPECT_NO_THROW(cache = createBlockTreeCache(config, kv_cache_config, allocator));
+        EXPECT_EQ(cache, nullptr);
+        EXPECT_EQ(allocator->blockTreeCache(), nullptr);
+    }
+}
+
 TEST_F(BlockTreeCacheFactoryTest, CompatibleSwaGroupsAggregateOnlyWhenPolicyWindowsMatch) {
     for (const int second_window : {128, 64}) {
         SCOPED_TRACE(second_window);
