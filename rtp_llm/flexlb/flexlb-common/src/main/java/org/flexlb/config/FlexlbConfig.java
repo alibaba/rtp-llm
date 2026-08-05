@@ -62,30 +62,6 @@ public class FlexlbConfig {
      */
     private long cacheHitMaxCacheKeys = 10_000_000L;
 
-    /**
-     * Whether Master writes successful requests into the recent cache-key window.
-     * Environment override: CACHE_HIT_WINDOW_WRITE_ENABLED.
-     */
-    private boolean cacheHitWindowWriteEnabled = true;
-
-    /**
-     * Whether Master reports recent cache-key hit/total metrics.
-     * Environment override: CACHE_HIT_METRIC_REPORT_ENABLED.
-     */
-    private boolean cacheHitMetricReportEnabled = true;
-
-    /**
-     * Whether Master logs per-request recent cache-key hit trace.
-     * Environment override: CACHE_HIT_TRACE_LOG_ENABLED.
-     */
-    private boolean cacheHitTraceLogEnabled = false;
-
-    /**
-     * Whether Master writes aggregated theory hit counters to master_theory_hit.log.
-     * Environment override: CACHE_HIT_THEORY_LOG_ENABLED.
-     */
-    private boolean cacheHitTheoryLogEnabled = true;
-
     // ========== Queue Configuration ==========
 
     /**
@@ -380,14 +356,6 @@ public class FlexlbConfig {
     private int flexlbBatchDispatchQueueSize = 256;
 
     // ========== CostBasedPrefill Strategy Configuration ==========
-
-    /**
-     * Whether to enable SLO time-budget hard filter during prefill worker selection.
-     * When enabled, workers whose (waitMs + predictedPrefillMs) exceeds
-     * (SLO - riskMargin) are excluded. Default false because the filter is
-     * too aggressive in practice.
-     */
-    private boolean costSloFilterEnabled = false;
 
     private long costSloMs = 500;
 

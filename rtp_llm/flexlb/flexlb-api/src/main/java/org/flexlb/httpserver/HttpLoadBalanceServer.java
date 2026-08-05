@@ -207,8 +207,6 @@ public class HttpLoadBalanceServer {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("scheduler_inflight", routeService.globalInflightSize());
-            // Diagnostic view: total store entries including terminal tombstones within TTL
-            result.put("scheduler_inflight_total", routeService.globalInflightTotalSize());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
             for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {

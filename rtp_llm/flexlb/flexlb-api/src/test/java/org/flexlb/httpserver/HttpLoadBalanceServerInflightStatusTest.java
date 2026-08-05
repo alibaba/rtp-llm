@@ -45,7 +45,6 @@ class HttpLoadBalanceServerInflightStatusTest {
     @Test
     void inflightStatus_exposesBothLayersAndKvReservations() {
         when(routeService.globalInflightSize()).thenReturn(4);
-        when(routeService.globalInflightTotalSize()).thenReturn(6);
 
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         when(prefill.prefillInflightCount()).thenReturn(2);
@@ -73,7 +72,6 @@ class HttpLoadBalanceServerInflightStatusTest {
                 .expectBody()
                 // Scheduler-level fields (legacy, unchanged)
                 .jsonPath("$.scheduler_inflight").isEqualTo(4)
-                .jsonPath("$.scheduler_inflight_total").isEqualTo(6)
                 // Prefill: legacy sum + per-layer breakdown
                 .jsonPath("$.prefill_endpoints[0].ip_port").isEqualTo("10.0.0.1:8080")
                 .jsonPath("$.prefill_endpoints[0].inflight_batches").isEqualTo(5)
@@ -93,7 +91,6 @@ class HttpLoadBalanceServerInflightStatusTest {
     @Test
     void inflightStatus_emptyRegistry_keepsLegacyTopLevelFields() {
         when(routeService.globalInflightSize()).thenReturn(0);
-        when(routeService.globalInflightTotalSize()).thenReturn(0);
         when(endpointRegistry.getPrefillEndpoints()).thenReturn(new ConcurrentHashMap<>());
         when(endpointRegistry.getDecodeEndpoints()).thenReturn(new ConcurrentHashMap<>());
 
@@ -103,7 +100,6 @@ class HttpLoadBalanceServerInflightStatusTest {
                 .expectStatus().isOk()
                 .expectBody()
                 .jsonPath("$.scheduler_inflight").isEqualTo(0)
-                .jsonPath("$.scheduler_inflight_total").isEqualTo(0)
                 .jsonPath("$.prefill_endpoints").isEmpty()
                 .jsonPath("$.decode_endpoints").isEmpty();
     }

@@ -465,8 +465,6 @@ class BatchSchedulerTest {
         request.setRequestId(requestId);
         request.setSeqLen(128);
         request.setMaxNewTokens(8);
-        request.setNumBeams(1);
-        request.setModel("test-model");
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
@@ -480,8 +478,6 @@ class BatchSchedulerTest {
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
         request.setMaxNewTokens(8);
-        request.setNumBeams(1);
-        request.setModel("test-model");
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);

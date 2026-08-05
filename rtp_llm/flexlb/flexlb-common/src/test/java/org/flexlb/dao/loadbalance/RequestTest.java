@@ -35,8 +35,6 @@ class RequestTest {
         assertEquals(3, request.getBlockCacheKeys().size());
         assertEquals(5000L, request.getGenerateTimeout());
         assertEquals(64, request.getMaxNewTokens());
-        assertEquals(1, request.getNumBeams());
-        assertEquals("engine_service", request.getModel());
     }
 
     @Test

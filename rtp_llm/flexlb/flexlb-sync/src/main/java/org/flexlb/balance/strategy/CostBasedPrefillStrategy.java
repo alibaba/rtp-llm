@@ -199,9 +199,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     private FilterResult applyHardFilters(CandidateSet eligible, long seqLen,
                                           FlexlbConfig config, Map<String, Integer> cacheMatchResults) {
-        long sloMs = config.resolveSloMs(seqLen);
-        long sloRiskMarginMs = config.getCostSloRiskMarginMs();
-        boolean sloFilterEnabled = config.isCostSloFilterEnabled();
         double hotspotMultiplier = config.getCostHotspotMultiplier();
         double imbalanceMultiplier = config.getCostImbalanceMultiplier();
 
@@ -212,7 +209,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long sumWaitMs = 0;
         long sumPendingCount = 0;
 
-        // Round 1: SLO filter + cache wait time / pending count for feasible endpoints
+        // Round 1: cache wait time / pending count for feasible endpoints
         int feasibleCount = 0;
         for (int i = 0; i < eligibleSize; i++) {
             PrefillEndpoint ep = eligible.endpoint(i);
@@ -226,11 +223,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             long singlePrefillMs = formulaEstimateMemo.estimate(predictor, cacheHit);
 
             long endpointWaitMs = ep.prefillEstimatedWaitTimeMs();
-
-            if (sloFilterEnabled && endpointWaitMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
-                rejections.merge("SLO_VIOLATION", 1, Integer::sum);
-                continue;
-            }
 
             long pendingCount = ep.prefillPendingRequestCount();
             long batcherWaitMs = ep.batcherWaitMs();

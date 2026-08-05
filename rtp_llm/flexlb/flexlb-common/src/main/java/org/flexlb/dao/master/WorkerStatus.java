@@ -47,7 +47,6 @@ public class WorkerStatus {
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1);
     private AtomicLong statusUpdateIntervalUs = new AtomicLong(0);
     private AtomicLong cacheLastUpdateTime = new AtomicLong(-1);
-    private AtomicLong lastSelectedTime = new AtomicLong(-1);
     private AtomicBoolean resourceAvailable = new AtomicBoolean(true);
     private AtomicBoolean statusCheckInProgress = new AtomicBoolean(false);
     private AtomicBoolean cacheCheckInProgress = new AtomicBoolean(false);

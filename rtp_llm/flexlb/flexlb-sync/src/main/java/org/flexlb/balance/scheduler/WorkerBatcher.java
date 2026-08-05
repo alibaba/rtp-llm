@@ -157,7 +157,7 @@ public class WorkerBatcher {
                 d.queueSizeBefore(), ctx.key(), d.items().get(0).requestId());
 
         ctx.dispatch(d.items(),
-                new DispatchMeta(d.reason(), ctx.size() - d.items().size()));
+                new DispatchMeta(d.reason()));
     }
 
     /**

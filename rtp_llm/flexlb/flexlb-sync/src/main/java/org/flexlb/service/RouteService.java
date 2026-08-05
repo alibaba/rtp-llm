@@ -165,16 +165,6 @@ public class RouteService {
     }
 
     /**
-     * Return the total number of entries in the global store, including
-     * terminal tombstones within TTL. Diagnostic view only.
-     *
-     * @return inflight store size (active + tombstones)
-     */
-    public int globalInflightTotalSize() {
-        return globalInflightStore.size();
-    }
-
-    /**
      * Current routing queue length (QUEUE path). Exposed for the HTTP
      * master-info endpoint.
      */

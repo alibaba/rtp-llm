@@ -198,9 +198,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setGenerateTimeout(pb.getGenerateTimeout());
         request.setRequestTimeMs(pb.getRequestTimeMs());
         request.setMaxNewTokens(pb.getMaxNewTokens());
-        request.setNumBeams(pb.getNumBeams());
-        request.setForceDisableSpRun(pb.getForceDisableSpRun());
-        request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
         ctx.setRequest(request);

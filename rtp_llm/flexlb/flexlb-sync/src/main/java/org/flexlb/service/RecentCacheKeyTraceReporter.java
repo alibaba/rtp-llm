@@ -5,11 +5,8 @@ import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -52,15 +49,8 @@ public class RecentCacheKeyTraceReporter {
     private static volatile BufferedWriter theoryLogWriter;
     private static volatile boolean theoryLogOpenFailed;
 
-    private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
-    private static final long FNV_PRIME = 0x100000001b3L;
-
     public void report(BalanceContext balanceContext) {
         if (balanceContext == null) {
-            return;
-        }
-        FlexlbConfig config = balanceContext.getConfig();
-        if (config != null && !config.isCacheHitWindowWriteEnabled()) {
             return;
         }
 
@@ -80,10 +70,9 @@ public class RecentCacheKeyTraceReporter {
         CacheHitTheoryStats.Snapshot theorySnapshot = theoryStats.record(
                 hitTokens,
                 inputTokens);
-        logTraceIfEnabled(balanceContext, request, snapshot, hitTokens, inputTokens, config);
-        logTheoryIfEnabled(balanceContext, request, theorySnapshot, config);
+        logTheoryIfEnabled(balanceContext, request, theorySnapshot);
 
-        if (cacheMetricsReporter == null || (config != null && !config.isCacheHitMetricReportEnabled())) {
+        if (cacheMetricsReporter == null) {
             return;
         }
 
@@ -106,8 +95,7 @@ public class RecentCacheKeyTraceReporter {
 
     @PostConstruct
     public void initializeTheoryLog() {
-        FlexlbConfig config = configService == null ? null : configService.loadBalanceConfig();
-        if (config == null || !config.isCacheHitTheoryLogEnabled()) {
+        if (configService == null) {
             return;
         }
         synchronized (THEORY_LOG_LOCK) {
@@ -115,49 +103,9 @@ public class RecentCacheKeyTraceReporter {
         }
     }
 
-    private void logTraceIfEnabled(BalanceContext balanceContext,
-                                   Request request,
-                                   RecentCacheKeyWindow.Snapshot snapshot,
-                                   long hitTokens,
-                                   long inputTokens,
-                                   FlexlbConfig config) {
-        if (config == null || !config.isCacheHitTraceLogEnabled()) {
-            return;
-        }
-        List<Long> cacheKeys = request.getBlockCacheKeys();
-        Logger.info("Master cache-key trace: masterRequestId={}, requestId={}, retryCount={}, "
-                        + "seqLen={}, requestTimeMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
-                        + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
-                balanceContext.getRequestId(),
-                request.getRequestId(),
-                balanceContext.getRetryCount(),
-                request.getSeqLen(),
-                request.getRequestTimeMs(),
-                snapshot.getRequestOccurrences(),
-                snapshot.getRequestHitOccurrences(),
-                hitRatio(snapshot.getRequestHitOccurrences(), snapshot.getRequestOccurrences()),
-                hitTokens,
-                inputTokens,
-                hitRatio(hitTokens, inputTokens),
-                cacheKeyDigest(cacheKeys),
-                formatServerStatusList(balanceContext.getResponse()),
-                formatCacheKeys(cacheKeys));
-    }
-
-    private static double hitRatio(long hitCount, long totalCount) {
-        if (totalCount <= 0L) {
-            return 0.0D;
-        }
-        return (double) hitCount / totalCount;
-    }
-
     private void logTheoryIfEnabled(BalanceContext balanceContext,
                                     Request request,
-                                    CacheHitTheoryStats.Snapshot snapshot,
-                                    FlexlbConfig config) {
-        if (config == null || !config.isCacheHitTheoryLogEnabled()) {
-            return;
-        }
+                                    CacheHitTheoryStats.Snapshot snapshot) {
         if (snapshot == null || snapshot.getRequestTotalCount() <= 0L) {
             return;
         }
@@ -263,61 +211,5 @@ public class RecentCacheKeyTraceReporter {
                 theoryLogWriter = null;
             }
         }
-    }
-
-    private static String cacheKeyDigest(List<Long> cacheKeys) {
-        long digest = FNV_OFFSET_BASIS;
-        if (cacheKeys == null || cacheKeys.isEmpty()) {
-            return Long.toUnsignedString(digest);
-        }
-        for (Long cacheKey : cacheKeys) {
-            if (cacheKey == null) {
-                continue;
-            }
-            long value = cacheKey;
-            digest ^= value;
-            digest *= FNV_PRIME;
-            digest ^= value >>> 32;
-            digest *= FNV_PRIME;
-        }
-        return Long.toUnsignedString(digest);
-    }
-
-    private static String formatCacheKeys(List<Long> cacheKeys) {
-        return cacheKeys == null ? "[]" : cacheKeys.toString();
-    }
-
-    private static String formatServerStatusList(Response response) {
-        if (response == null || response.getServerStatus() == null || response.getServerStatus().isEmpty()) {
-            return "[]";
-        }
-        StringBuilder builder = new StringBuilder("[");
-        List<ServerStatus> serverStatusList = response.getServerStatus();
-        for (int i = 0; i < serverStatusList.size(); i++) {
-            if (i > 0) {
-                builder.append(", ");
-            }
-            ServerStatus status = serverStatusList.get(i);
-            if (status == null) {
-                builder.append("null");
-                continue;
-            }
-            builder.append(status.getRole())
-                    .append("@")
-                    .append(status.getServerIp())
-                    .append(":")
-                    .append(status.getGrpcPort())
-                    .append("/http:")
-                    .append(status.getHttpPort())
-                    .append(",group=")
-                    .append(status.getGroup())
-                    .append(",success=")
-                    .append(status.isSuccess())
-                    .append(",code=")
-                    .append(status.getCode())
-                    .append(",message=")
-                    .append(status.getMessage());
-        }
-        return builder.append("]").toString();
     }
 }

@@ -551,7 +551,6 @@ class PrefillEndpointTest {
 
         // not yet accepted — no elapsed-time discount
         assertEquals(5000, endpoint.prefillEstimatedWaitTimeMs());
-        assertEquals(5000, endpoint.prefillTotalLoadMs());
     }
 
     @Test
@@ -590,8 +589,6 @@ class PrefillEndpointTest {
         long estimated = endpoint.prefillEstimatedWaitTimeMs();
         assertTrue(estimated < 5000, "RUNNING task should be discounted by elapsed time, got " + estimated);
         assertTrue(estimated >= 4000, "Discount should only cover elapsed time, got " + estimated);
-        // total load keeps the full predicted value (no discount)
-        assertEquals(5000, endpoint.prefillTotalLoadMs());
     }
 
     @Test

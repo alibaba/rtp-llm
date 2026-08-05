@@ -433,8 +433,6 @@ public abstract class FlexLBMockTestBase {
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
         request.setMaxNewTokens(8);
-        request.setNumBeams(1);
-        request.setModel("mock-model");
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);

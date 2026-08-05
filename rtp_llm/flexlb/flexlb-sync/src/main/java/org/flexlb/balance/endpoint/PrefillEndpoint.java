@@ -193,19 +193,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    /**
-     * Terminate a single bound {@link InflightItem} by requestId. Used by
-     * STALE eviction to drive items terminal immediately instead of waiting
-     * for the TTL safety net (review A3).
-     */
-    private void terminateBoundItem(long requestId, String reason) {
-        if (inflightStore == null) return;
-        InflightItem item = inflightStore.get(String.valueOf(requestId));
-        if (item != null && !item.isTerminated()) {
-            item.terminate(TerminalReason.FAILED, new RuntimeException(reason));
-        }
-    }
-
     public long batcherWaitMs() {
         return batcher.queueWaitMs();
     }
@@ -951,21 +938,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
             } else {
                 totalMs += predictMs;
             }
-        }
-        return totalMs;
-    }
-
-    /**
-     * Full predicted load in milliseconds across both layers — RUNNING tasks
-     * count at full predicted value (no elapsed-time discount).
-     */
-    public long prefillTotalLoadMs() {
-        long totalMs = 0;
-        for (PrefillInflightEntry entry : inflightEntries.values()) {
-            totalMs += Math.max(0, entry.predictMs());
-        }
-        for (EngineTask<PrefillInflightEntry> task : engineTasks.values()) {
-            totalMs += Math.max(0, task.entry().predictMs());
         }
         return totalMs;
     }

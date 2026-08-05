@@ -12,7 +12,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiConsumer;
 
 /**
  * Thread-safe store for inflight {@link InflightItem}s, keyed by string-form
@@ -76,10 +75,6 @@ public class InflightStore {
                 EVICT_INTERVAL_MS, EVICT_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
-    public void put(String requestId, InflightItem item) {
-        store.put(requestId, item);
-    }
-
     /**
      * Atomically register an item. Returns {@code null} if inserted, or the
      * existing item if the key is already present (including terminal
@@ -127,14 +122,6 @@ public class InflightStore {
         return store.get(requestId);
     }
 
-    public InflightItem remove(String requestId) {
-        return store.remove(requestId);
-    }
-
-    public int size() {
-        return store.size();
-    }
-
     /** Number of non-terminal items registered via {@link #putIfAbsent}. */
     public int activeCount() {
         return activeCount.get();
@@ -148,11 +135,6 @@ public class InflightStore {
     public int activeCount(AbstractScheduler scheduler) {
         AtomicInteger count = schedulerActiveCounts.get(scheduler);
         return count == null ? 0 : count.get();
-    }
-
-    /** Iterate over all items (active and tombstones) in the store. */
-    public void forEach(BiConsumer<String, InflightItem> action) {
-        store.forEach(action);
     }
 
     /**

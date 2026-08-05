@@ -32,6 +32,7 @@ enum CancelReasonPB {
     CANCEL_REASON_DEADLINE_EXCEEDED = 2;
 }
 
+// DEPRECATED: Java/frontend 不读写此消息，仅 C++ 侧可能消费。保留以维持 wire compat。
 message RequestLifecyclePB {
     int64 request_id = 1;
     RequestStatePB state = 2;
@@ -79,7 +80,8 @@ message FlexlbScheduleResponsePB {
 
 message FlexlbCancelRequestPB {
     int64 request_id = 1;
-    int64 batch_id = 2;
+    // DEPRECATED: Java cancel 只用 request_id，batch_id 不再消费。保留以维持 wire compat。
+    int64 batch_id = 2 [deprecated = true];
     CancelReasonPB reason = 3;
 }
 

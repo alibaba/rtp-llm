@@ -40,13 +40,4 @@ public class Request {
 
     @JsonProperty("max_new_tokens")
     private int maxNewTokens = 1;
-
-    @JsonProperty("num_beams")
-    private int numBeams = 1;
-
-    @JsonProperty("force_disable_sp_run")
-    private boolean forceDisableSpRun = false;
-
-    @JsonProperty("model")
-    private String model = "";
 }

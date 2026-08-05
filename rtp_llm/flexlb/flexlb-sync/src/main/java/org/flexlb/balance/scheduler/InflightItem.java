@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * awaiting ACK or response).
  *
  * <p>Core v2 design: <b>binding-as-state</b> — the presence/absence of
- * {@link #prefillEp}, {@link #decodeEp}, and {@link #batch} references
+ * {@link #prefillEp} and {@link #decodeEp} references
  * implicitly expresses the progress phase, eliminating the need for a
  * separate state machine. A single {@link #state} AtomicReference
  * provides CAS-guarded idempotent terminal transition.
@@ -23,10 +23,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>Thread-safety: the {@code state} AtomicReference ensures
  * {@link #terminate(TerminalReason)} succeeds at most once. All binding
  * fields are {@code volatile} so that other threads (e.g. the cancel path
- * via {@link InflightStore}) observe the latest endpoint/batch references
+ * via {@link InflightStore}) observe the latest endpoint references
  * when performing cleanup.
  */
-public final class InflightItem implements InflightEntry {
+public final class InflightItem {
 
     private final BalanceContext ctx;
     private final CompletableFuture<Response> future;
@@ -43,9 +43,6 @@ public final class InflightItem implements InflightEntry {
 
     /** null = not routed, non-null = EP reserved. */
     volatile DecodeEndpoint decodeEp;
-
-    /** null = not in a batch, non-null = in a batch awaiting dispatch. */
-    volatile Batch batch;
 
     // ---- single atomic state ----
 
@@ -135,10 +132,6 @@ public final class InflightItem implements InflightEntry {
         return decodeEp;
     }
 
-    public Batch batch() {
-        return batch;
-    }
-
     /** String-form request identifier used as the {@link InflightStore} key. */
     public String requestId() {
         return requestId;
@@ -162,10 +155,6 @@ public final class InflightItem implements InflightEntry {
 
     public void setDecodeEp(DecodeEndpoint ep) {
         this.decodeEp = ep;
-    }
-
-    void setBatch(Batch batch) {
-        this.batch = batch;
     }
 
     /**
@@ -228,9 +217,6 @@ public final class InflightItem implements InflightEntry {
         if (!transitionTo(toInflightState(reason))) return false;
         if (prefillEp != null) prefillEp.release(ctx.getRequestId());
         if (decodeEp != null) decodeEp.release(ctx.getRequestId());
-        if (batch != null) {
-            batch.removeItem(this);
-        }
         reportTerminalMetric(reason);
         future.completeExceptionally(cause != null ? cause : reason.toException());
         return true;
@@ -241,8 +227,8 @@ public final class InflightItem implements InflightEntry {
      *
      * <p>Shares the same {@code state} CAS as {@link #terminate(TerminalReason)},
      * so only one terminal transition (success or failure) can take effect.
-     * On success, releases EP-level resources (Phase 2), removes the item from
-     * its batch, and completes the future normally.
+     * On success, releases EP-level resources (Phase 2) and completes the
+     * future normally.
      */
     public void complete(Response response) {
         boolean success = response.isSuccess();
@@ -254,8 +240,8 @@ public final class InflightItem implements InflightEntry {
     /**
      * Shared CAS-guarded settle path delivering a {@link Response} through the
      * future: transition to the target terminal state, release EP-level
-     * resources, remove the item from its batch, report the terminal metric,
-     * and complete the future with the response.
+     * resources, report the terminal metric, and complete the future with
+     * the response.
      *
      * @return {@code true} if this call won the CAS (first terminal transition)
      */
@@ -263,9 +249,6 @@ public final class InflightItem implements InflightEntry {
         if (!transitionTo(targetState)) return false;
         if (prefillEp != null) prefillEp.release(ctx.getRequestId());
         if (decodeEp != null) decodeEp.release(ctx.getRequestId());
-        if (batch != null) {
-            batch.removeItem(this);
-        }
         reportTerminalMetric(reason);
         future.complete(response);
         return true;

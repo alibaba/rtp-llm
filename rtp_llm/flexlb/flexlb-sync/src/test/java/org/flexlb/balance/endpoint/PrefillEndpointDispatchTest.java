@@ -294,7 +294,7 @@ class PrefillEndpointDispatchTest {
     }
 
     private static DispatchMeta meta() {
-        return new DispatchMeta("batch_full", 0);
+        return new DispatchMeta("batch_full");
     }
 
     private static EngineRpcService.EnqueueBatchResponsePB ackFor(
@@ -316,8 +316,6 @@ class PrefillEndpointDispatchTest {
         request.setRequestId(requestId);
         request.setSeqLen(128);
         request.setMaxNewTokens(8);
-        request.setNumBeams(1);
-        request.setModel("test-model");
 
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);

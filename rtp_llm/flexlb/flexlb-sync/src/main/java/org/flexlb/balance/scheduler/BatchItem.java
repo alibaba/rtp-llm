@@ -92,7 +92,6 @@ public final class BatchItem {
 
     public BalanceContext ctx() { return ctx; }
     public CompletableFuture<Response> future() { return future; }
-    public Response routeResponse() { return routeResponse; }
     public ServerStatus prefill() { return prefill; }
     public ServerStatus decode() { return decode; }
     public PrefillEndpoint prefillEp() { return prefillEp; }
