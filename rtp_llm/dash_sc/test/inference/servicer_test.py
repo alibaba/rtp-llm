@@ -2078,9 +2078,9 @@ class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
             echo_prefix_ids=[99, 100],
             upstream_ids=[[], [3, 4], [5]],
         )
-        self.assertEqual(self._gen_ids(chunks[0]), [])
-        self.assertEqual(self._gen_ids(chunks[1]), [99, 100, 3, 4])
-        self.assertEqual(self._gen_ids(chunks[2]), [5])
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(self._gen_ids(chunks[0]), [99, 100, 3, 4])
+        self.assertEqual(self._gen_ids(chunks[1]), [5])
 
 
 class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
