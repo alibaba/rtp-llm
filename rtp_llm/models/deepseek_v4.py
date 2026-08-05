@@ -928,6 +928,37 @@ class DeepSeekV4DSpark(DeepSeekV4):
     """Runtime-fixed-width DeepSeek-V4 DSpARK proposal model."""
 
     @classmethod
+    def speculative_weight_alias_names(cls, target_model, draft_model_config):
+        """Borrow the two full-vocabulary matrices from the target owner."""
+        if not isinstance(target_model, DeepSeekV4) or isinstance(
+            target_model, DeepSeekV4DSpark
+        ):
+            raise TypeError("DeepSeek-V4 DSpark requires a DeepSeek-V4 target owner")
+        target_config = target_model.model_config
+        compatible_fields = (
+            "vocab_size",
+            "hidden_size",
+            "data_type",
+            "enable_fp32_lm_head",
+        )
+        mismatches = [
+            name
+            for name in compatible_fields
+            if getattr(target_config, name) != getattr(draft_model_config, name)
+        ]
+        if mismatches:
+            details = ", ".join(
+                f"{name}={getattr(target_config, name)!r}/"
+                f"{getattr(draft_model_config, name)!r}"
+                for name in mismatches
+            )
+            raise ValueError(
+                "DeepSeek-V4 DSpark cannot alias semantically incompatible "
+                f"target weights: {details}"
+            )
+        return (W.embedding, W.lm_head)
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
         config_path = os.path.join(ckpt_path, "config.json")

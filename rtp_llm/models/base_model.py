@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Protocol, Type, Union, cast, runtime_checkable
+from typing import Any, Optional, Protocol, Sequence, Type, Union, cast, runtime_checkable
 
 import torch
 
@@ -102,6 +102,11 @@ class BaseModel(object):
         self.force_cpu_load_weights = force_cpu_load_weights
         self.weight = None
         self.weight_manager = None
+        # Keep the owner alive for the complete lifetime of any non-owning
+        # tensor aliases. The alias names are immutable construction metadata;
+        # a draft must never silently become an owner during reload/update.
+        self._weight_alias_owner: Optional["BaseModel"] = None
+        self._weight_alias_names: tuple[str, ...] = ()
 
         self.linear_bias_slopes: Optional[torch.Tensor] = None
         self.prefix_tokens: Optional[torch.Tensor] = None
@@ -163,7 +168,10 @@ class BaseModel(object):
         from rtp_llm.model_loader.weight_manager import WeightManager
 
         self.weight_manager = WeightManager(
-            self.device, self.weight, self.model_weights_loader
+            self.device,
+            self.weight,
+            self.model_weights_loader,
+            non_owned_global_weights=self._weight_alias_names,
         )
         if skip_python_model:
             return
@@ -182,16 +190,29 @@ class BaseModel(object):
         # set empty weights for attention service
         # record device string for later use (e.g., WeightManager, python model init)
         self.device = device
+        aliases = self._resolve_global_weight_aliases()
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=device
+            device=device, global_weight_aliases=aliases
         )
         self._load_custom_module()
         self._load_multimodal()
 
-        # 清理checkpoint加载过程中使用的临时资源，释放host内存
+        # Release checkpoint-only host resources after every model load. Alias
+        # descriptors have already been resolved and do not depend on the
+        # draft loader retaining its database metadata.
         self._cleanup_loader_resources()
-
         self.model_weights_loader.force_clean_all_memory()
+
+    def _resolve_global_weight_aliases(self):
+        aliases = {}
+        if self._weight_alias_owner is not None:
+            if self._weight_alias_owner.weight is None:
+                raise RuntimeError("global weight alias owner must be loaded first")
+            aliases = {
+                name: self._weight_alias_owner.weight.get_global_weight(name)
+                for name in self._weight_alias_names
+            }
+        return aliases
 
     def _cleanup_loader_resources(self):
         """清理模型加载过程中使用的临时资源，释放host内存
@@ -210,6 +231,19 @@ class BaseModel(object):
         raise NotImplementedError()
 
     @classmethod
+    def speculative_weight_alias_names(
+        cls, target_model: "BaseModel", draft_model_config: ModelConfig
+    ) -> tuple[str, ...]:
+        """Declare global weights that this speculative model may borrow.
+
+        The default is deliberately empty.  A draft model must opt in and
+        validate semantic compatibility with the concrete target owner before
+        the loader skips any checkpoint tensors.  ``from_config`` retains a
+        strong reference to ``target_model`` for the complete alias lifetime.
+        """
+        return ()
+
+    @classmethod
     def from_config(
         cls,
         model_config: ModelConfig,
@@ -225,6 +259,8 @@ class BaseModel(object):
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
         skip_python_model: bool = False,
+        weight_alias_owner: Optional["BaseModel"] = None,
+        weight_alias_names: Sequence[str] = (),
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -255,6 +291,10 @@ class BaseModel(object):
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
         )
+        if weight_alias_names and weight_alias_owner is None:
+            raise ValueError("weight_alias_names require an explicit weight_alias_owner")
+        model._weight_alias_owner = weight_alias_owner
+        model._weight_alias_names = tuple(weight_alias_names)
 
         import os
 
@@ -322,7 +362,8 @@ class BaseModel(object):
 
     def _load_model_weights(self):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=self._get_device_str()
+            device=self._get_device_str(),
+            global_weight_aliases=self._resolve_global_weight_aliases(),
         )
 
     @timer_wrapper(description="load custom module")

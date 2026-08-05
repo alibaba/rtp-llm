@@ -118,6 +118,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
         self._dspark_target_layer_ids = tuple(int(v) for v in target_layer_ids)
         self._dspark_markov_rank = int(markov_rank)
+        self.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
 
         if self._gen_num_per_cycle <= 0:
             raise ValueError(
@@ -644,6 +645,22 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         base_logits = torch.mm(
             normalized.to(self.v4.head_weight.dtype), self.v4.head_weight.t()
         ).float()
+        # The lm_head is aliased from the target owner, whose weight is
+        # vocab-sharded across TP ranks; the sequential Markov tail needs the
+        # full vocabulary on every rank. Only k rows per request cross this
+        # gather, so it stays tiny relative to the aliased ~1.8 GiB matrix.
+        if self.tp_size > 1:
+            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+            rows = int(base_logits.size(0))
+            gathered = all_gather(base_logits.contiguous(), group=Group.TP)
+            shard_vocab = int(base_logits.size(-1))
+            base_logits = (
+                gathered.reshape(self.tp_size, rows, shard_vocab)
+                .permute(1, 0, 2)
+                .reshape(rows, self.tp_size * shard_vocab)
+            )
+            base_logits = base_logits[..., : self._dspark_vocab_size].contiguous()
         return normalized, base_logits.view(batch_size, gamma, -1)
 
     @torch.inference_mode()
