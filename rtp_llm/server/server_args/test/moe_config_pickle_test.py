@@ -1,7 +1,10 @@
+import ast
 import copyreg
 import pickle
 import unittest
+from pathlib import Path
 
+from rtp_llm.config.moe_config import B12X_ZEROED_ENERGY_LIMIT_DEFAULT
 from rtp_llm.ops import MoeConfig
 
 
@@ -16,7 +19,43 @@ def _bound_fields():
     )
 
 
+def _stub_fields():
+    lines = Path("rtp_llm/ops/libth_transformer_config.pyi").read_text().splitlines()
+    start = next(
+        index for index, line in enumerate(lines) if line == "class MoeConfig:"
+    )
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index] and not lines[index].startswith((" ", "\t"))
+        ),
+        len(lines),
+    )
+    stub = ast.parse("\n".join(lines[start:end]), filename="MoeConfig.pyi")
+    moe_config = next(
+        node
+        for node in stub.body
+        if isinstance(node, ast.ClassDef) and node.name == "MoeConfig"
+    )
+    return sorted(
+        statement.target.id
+        for statement in moe_config.body
+        if isinstance(statement, ast.AnnAssign)
+        and isinstance(statement.target, ast.Name)
+    )
+
+
 class MoeConfigPickleTest(unittest.TestCase):
+    def test_type_stub_covers_all_bound_fields(self):
+        self.assertEqual(_stub_fields(), _bound_fields())
+
+    def test_python_and_cpp_defaults_match(self):
+        self.assertEqual(
+            MoeConfig().b12x_zeroed_energy_limit,
+            B12X_ZEROED_ENERGY_LIMIT_DEFAULT,
+        )
+
     def test_roundtrip_preserves_all_bound_fields(self):
         fields = _bound_fields()
         self.assertTrue(fields, "MoeConfig exposes no bound fields")
@@ -38,6 +77,8 @@ class MoeConfigPickleTest(unittest.TestCase):
                         value = field == active_bool
                     elif isinstance(current, int):
                         value = 1000 + index
+                    elif isinstance(current, float):
+                        value = 0.125 + index
                     elif isinstance(current, str):
                         value = f"pickle-test-{field}"
                     else:

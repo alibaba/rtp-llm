@@ -282,19 +282,21 @@ struct DeviceResourceConfig {
 };
 
 struct MoeConfig {
-    bool        use_deepep_moe             = false;
-    bool        use_deepep_internode       = false;
-    bool        use_deepep_low_latency     = true;
-    bool        use_deepep_p2p_low_latency = false;
-    bool        use_mori_ep                = false;
-    bool        fake_balance_expert        = false;
-    bool        hack_moe_expert            = false;
-    int         deep_ep_num_sm             = 0;
-    int         masked_max_token_num       = 256;
-    bool        use_all_gather             = false;
-    int         ll_num_max_token           = 0;
-    std::string moe_strategy               = "auto";
-    std::string fp4_moe_op                 = "auto";
+    bool        use_deepep_moe               = false;
+    bool        use_deepep_internode         = false;
+    bool        use_deepep_low_latency       = true;
+    bool        use_deepep_p2p_low_latency   = false;
+    bool        use_mori_ep                  = false;
+    bool        fake_balance_expert          = false;
+    bool        hack_moe_expert              = false;
+    int         deep_ep_num_sm               = 0;
+    int         masked_max_token_num         = 256;
+    bool        use_all_gather               = false;
+    int         ll_num_max_token             = 0;
+    std::string moe_strategy                 = "auto";
+    std::string fp4_moe_op                   = "auto";
+    double      b12x_zeroed_energy_limit     = 0.001;
+    bool        b12x_disable_cuda12_9_compat = false;
     std::string to_string() const;
 };
 

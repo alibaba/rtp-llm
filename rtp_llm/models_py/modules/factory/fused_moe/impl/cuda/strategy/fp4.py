@@ -62,6 +62,7 @@ class CudaFp4NoDPStrategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         from rtp_llm.models_py.utils.arch import is_sm12x
 
+        # TRT-LLM's bundled FP4 MoE cubins do not include sm_120/sm_121.
         checker.check(not is_sm12x())
         checker.check(
             resolve_fp4_moe_op(config.moe_config, is_sm12x=is_sm12x())

@@ -68,14 +68,26 @@ The `fp4_b12x` strategy and `b12x` FP4 operator require BF16 ModelOpt NVFP4
 weights, an SM120/SM121 GPU, and `ep_size=1`. The kernel uses global expert
 IDs and therefore does not support expert-sharded weights or DeepEP routing.
 When CUDA Graph is enabled, the executor uses the configured decode capacity
-for captured calls and falls back to eager execution for larger prefill calls.
-SM120/SM121 has no alternative single-GPU FP4 MoE backend. By default, model
-loading rejects a checkpoint when folding `weight_scale_2` into e4m3 block
-scales loses more than 0.1% of scale energy. Operators may temporarily override
-that limit with `RTP_LLM_B12X_ZEROED_ENERGY_LIMIT` in the range `[0, 1]` while
-preparing replacement non-FP4 weights. Set
+`ll_num_max_token` for captured calls and falls back to eager execution for
+larger prefill calls. The server derives this capacity from
+`--concurrency_limit`. The persistent MMA blockscale footprint per layer is
+`3 * expert_num * hidden_size * moe_intermediate_size / 16` bytes; construction
+replaces the source swizzled scales rather than retaining both layouts.
+
+The backend fixes activation global scales to 1 and does not consume the
+checkpoint `input_scale`, so compatible checkpoints must have activation
+dynamic ranges around O(1). SM120/SM121 has no alternative single-GPU FP4 MoE
+backend because the TRT-LLM FP4 cubins do not include these architectures. If
+the B12X path fails, rollback requires non-FP4 MoE weights; explicitly selecting
+`trtllm` fails during startup. By default, model loading rejects a checkpoint
+when folding `weight_scale_2` into e4m3 block scales loses more than 0.1% of
+scale energy. Operators may temporarily override that limit with
+`RTP_LLM_B12X_ZEROED_ENERGY_LIMIT` in the range `[0, 1]` while preparing
+replacement non-FP4 weights. Set
 `RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT=1` to disable the construction-time CUDA
 12.9 compatibility path and restore FlashInfer's native CUDA-version failure.
+Both variables are low-level emergency controls, accept only the documented
+numeric values, and are logged once with their effective settings at startup.
 
 Explicit `fp4_moe_op` values now survive backend-process serialization. After
 upgrading, a stale explicit value can therefore produce a startup strategy
@@ -143,7 +155,7 @@ Quantization configuration dataclass (`defs/quant_config.py`), provides:
 
 Type enums (`defs/type.py`) for priority calculation:
 - **RouterType**: `BATCHED_DATA` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPEP_NORMAL` (2), `DEEPEP_LOW_LATENCY` (4), `PURE_TP` (5)
-- **ExecutorType**: `BATCHED_TRITON` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPGEMM_MASKED` (2), `FUSED_MOE` (2), `CUTLASS_FP8` (3), `CUTLASS_BATCHED_FP8` (4)
+- **ExecutorType**: See the canonical ordered list in [Priority System](#priority-system).
 
 ### DeepEpInitializer
 

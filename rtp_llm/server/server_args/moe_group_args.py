@@ -1,6 +1,22 @@
-from rtp_llm.config.moe_config import Fp4MoeOp, MoeStrategyName
+import argparse
+
+from rtp_llm.config.moe_config import (
+    B12X_DISABLE_CUDA12_9_COMPAT_ENV,
+    B12X_ZEROED_ENERGY_LIMIT_DEFAULT,
+    B12X_ZEROED_ENERGY_LIMIT_ENV,
+    Fp4MoeOp,
+    MoeStrategyName,
+    validate_b12x_zeroed_energy_limit,
+)
 from rtp_llm.server.server_args.util import str2bool
 from rtp_llm.utils.backend_registry import run_backend_registrations
+
+
+def _parse_b12x_zeroed_energy_limit(value: str) -> float:
+    try:
+        return validate_b12x_zeroed_energy_limit(float(value))
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
@@ -181,11 +197,27 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 "
             "TensorRT-LLM), cutedsl (使用 CuTe DSL), b12x (仅支持 "
             "sm_120/121 且 ep_size=1 的 flashinfer b12x；该架构没有其他"
-            "单卡 FP4 fallback)。折叠 scale 的临时容差可通过 "
-            "RTP_LLM_B12X_ZEROED_ENERGY_LIMIT 调整；设置 "
-            "RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT=1 可关闭 CUDA 12.9 "
-            "兼容路径并恢复 FlashInfer 原生门禁。"
+            "单卡 FP4 fallback)。B12X 紧急运维开关见 fused_moe README。"
         ),
+    )
+    moe_group.add_argument(
+        "--b12x_zeroed_energy_limit",
+        env_name=B12X_ZEROED_ENERGY_LIMIT_ENV,
+        bind_to=(moe_config, "b12x_zeroed_energy_limit"),
+        type=_parse_b12x_zeroed_energy_limit,
+        default=B12X_ZEROED_ENERGY_LIMIT_DEFAULT,
+        help=(
+            "B12X 折叠 weight_scale_2 时允许因 e4m3 下溢丢失的最大 scale "
+            "energy 比例，取值范围 [0, 1]。"
+        ),
+    )
+    moe_group.add_argument(
+        "--b12x_disable_cuda12_9_compat",
+        env_name=B12X_DISABLE_CUDA12_9_COMPAT_ENV,
+        bind_to=(moe_config, "b12x_disable_cuda12_9_compat"),
+        type=str2bool,
+        default=False,
+        help="关闭 B12X wrapper 构造期的 CUDA 12.9 兼容处理。",
     )
 
     # Out-of-tree backends ship MoE strategies the public parser must not

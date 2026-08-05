@@ -18,6 +18,8 @@ load(
     _if_rocm = "if_rocm",
 )
 
+exports_files(["ops/libth_transformer_config.pyi"])
+
 if_rocm = _if_rocm
 
 
@@ -241,6 +243,7 @@ py_library(
         "device/**/*.py",
     ]),
     deps = [
+        ":config",
         ":torch",
         ":psutil",
         ":utils",

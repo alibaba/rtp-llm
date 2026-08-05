@@ -241,7 +241,9 @@ std::string MoeConfig::to_string() const {
         << "use_all_gather: " << use_all_gather << "\n"
         << "ll_num_max_token: " << ll_num_max_token << "\n"
         << "moe_strategy: " << moe_strategy << "\n"
-        << "fp4_moe_op: " << fp4_moe_op;
+        << "fp4_moe_op: " << fp4_moe_op << "\n"
+        << "b12x_zeroed_energy_limit: " << b12x_zeroed_energy_limit << "\n"
+        << "b12x_disable_cuda12_9_compat: " << b12x_disable_cuda12_9_compat;
     return oss.str();
 }
 

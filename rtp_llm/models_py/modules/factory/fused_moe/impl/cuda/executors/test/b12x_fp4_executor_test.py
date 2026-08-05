@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 import random
 import unittest
-from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import torch
+
+from rtp_llm.utils.model_weight import W
 
 
 def _skip_reason() -> str:
@@ -105,8 +106,7 @@ class B12xFp4ExecutorTestBase:
         self, fp4_quantize, w2_expert_scales: Optional[List[float]] = None
     ):
         from rtp_llm.config.moe_config import Fp4MoeOp
-        from rtp_llm.device.device_impl import CudaImpl
-        from rtp_llm.utils.model_weight import W
+        from rtp_llm.device.device_impl import prepare_static_weights_for_fp4_moe
 
         E = self.NUM_EXPERTS
         H = self.HIDDEN_SIZE
@@ -152,15 +152,11 @@ class B12xFp4ExecutorTestBase:
         # Exercise the production boundary that owns the B12X weight ordering
         # and blockscale layout. Keep ref_pack from the preprocessed tensors so
         # an accidental gate/up swap here cannot also mutate the reference.
-        device_impl = CudaImpl.__new__(CudaImpl)
-        device_impl.py_env_configs = SimpleNamespace(
-            moe_config=SimpleNamespace(fp4_moe_op=Fp4MoeOp.B12X.value)
+        w13_fp4, w13_sf_sw = prepare_static_weights_for_fp4_moe(
+            Fp4MoeOp.B12X.value, W.moe_w1, W.moe_s1, w13_fp4, w13_sf_linear
         )
-        w13_fp4, w13_sf_sw = device_impl.maybe_prepare_static_weights_for_fp4_moe(
-            W.moe_w1, W.moe_s1, w13_fp4, w13_sf_linear
-        )
-        w2_fp4, w2_sf_sw = device_impl.maybe_prepare_static_weights_for_fp4_moe(
-            W.moe_w2, W.moe_s2, w2_fp4, w2_sf_linear
+        w2_fp4, w2_sf_sw = prepare_static_weights_for_fp4_moe(
+            Fp4MoeOp.B12X.value, W.moe_w2, W.moe_s2, w2_fp4, w2_sf_linear
         )
 
         weights: Dict[str, torch.Tensor] = {
@@ -336,6 +332,10 @@ class B12xFp4ExecutorTestBase:
             ),
             weights,
         )
+        self.assertIs(weights[W.moe_s1], executor.w1_sf_mma)
+        self.assertIs(weights[W.moe_s2], executor.w2_sf_mma)
+        self.assertNotIn(W.moe_w1_s2, weights)
+        self.assertNotIn(W.moe_w2_s2, weights)
         topk_ids = topk_ids.to(executor.topk_ids_dtype)
         payload = ExpertForwardPayload(
             expert_x=hidden_states,
@@ -540,7 +540,10 @@ class B12xFp4ExecutorCudaGraphTest(B12xFp4ExecutorTestBase, unittest.TestCase):
             quant_dtype=torch.uint8,
             block_shape=[self.BLOCK_SIZE, self.BLOCK_SIZE],
         )
-        executor = B12xFp4Executor(config, quant_config, weights)
+        # Production constructs FusedMoe under torch.inference_mode(); mutable
+        # FlashInfer workspaces still need to be normal tensors for replay.
+        with torch.inference_mode():
+            executor = B12xFp4Executor(config, quant_config, weights)
         topk_ids = topk_ids.to(executor.topk_ids_dtype)
         payload = ExpertForwardPayload(
             expert_x=expert_x,

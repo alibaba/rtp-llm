@@ -6,17 +6,98 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from rtp_llm.config.moe_config import Fp4MoeOp
+from rtp_llm.device.device_impl import CudaImpl, prepare_static_weights_for_fp4_moe
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_fp4_executor import (
     _DISABLE_CUDA12_9_COMPAT_ENV,
     _E4M3_MIN_NORMAL,
     _ZEROED_ENERGY_LIMIT,
     _ZEROED_ENERGY_LIMIT_ENV,
+    B12xFp4Executor,
+    _get_disable_cuda12_9_compat,
     _get_zeroed_energy_limit,
     _relaxed_b12x_cuda_version_gate,
     _validate_b12x_weight_shapes,
     _validate_execute_inputs,
     _validate_folded_blockscale,
 )
+from rtp_llm.utils.model_weight import W
+
+
+class B12xWeightPreparationTest(unittest.TestCase):
+    @staticmethod
+    def _reference_swizzle(scale: torch.Tensor) -> torch.Tensor:
+        scale_ndim = scale.ndim
+        raw = scale.view(torch.uint8)
+        if scale_ndim == 2:
+            raw = raw.unsqueeze(0)
+        batches, rows, cols = raw.shape
+        padded_rows = (rows + 127) // 128 * 128
+        padded_cols = (cols + 3) // 4 * 4
+        output = torch.zeros((batches, padded_rows * padded_cols), dtype=torch.uint8)
+        for batch in range(batches):
+            for row in range(rows):
+                row_block, row_in_block = divmod(row, 128)
+                row_group, row_in_group = divmod(row_in_block, 32)
+                for col in range(cols):
+                    col_block, col_in_block = divmod(col, 4)
+                    flat_index = (
+                        (
+                            (row_block * (padded_cols // 4) + col_block) * 32
+                            + row_in_group
+                        )
+                        * 4
+                        + row_group
+                    ) * 4 + col_in_block
+                    output[batch, flat_index] = raw[batch, row, col]
+        output = output.reshape(batches, padded_rows, padded_cols).view(scale.dtype)
+        return output[0] if scale_ndim == 2 else output
+
+    def test_swizzle_matches_reference_on_cpu_with_padding(self):
+        for dtype in (torch.uint8, torch.float8_e4m3fn):
+            for shape in ((3, 5), (2, 3, 5)):
+                values = torch.arange(math.prod(shape), dtype=torch.uint8).reshape(
+                    shape
+                )
+                scale = values if dtype is torch.uint8 else values.view(dtype)
+                with self.subTest(dtype=dtype, shape=shape):
+                    actual = CudaImpl.swizzle_blockscale(scale)
+                    expected = self._reference_swizzle(scale)
+                    self.assertEqual(actual.device.type, "cpu")
+                    self.assertTrue(
+                        torch.equal(
+                            actual.view(torch.uint8), expected.view(torch.uint8)
+                        )
+                    )
+
+    def test_b12x_preparation_uses_explicit_operator(self):
+        kernel = torch.arange(16, dtype=torch.uint8).reshape(1, 4, 4)
+        scale = torch.arange(8, dtype=torch.uint8).reshape(1, 4, 2)
+        prepared_kernel, prepared_scale = prepare_static_weights_for_fp4_moe(
+            Fp4MoeOp.B12X.value, W.moe_w1, W.moe_s1, kernel, scale
+        )
+        self.assertIs(prepared_kernel, kernel)
+        self.assertTrue(
+            torch.equal(
+                prepared_scale.view(torch.uint8),
+                self._reference_swizzle(scale).view(torch.uint8),
+            )
+        )
+
+    def test_rejects_zero_graph_capacity_before_weight_preparation(self):
+        config = Mock(enable_cuda_graph=True, ll_num_max_token=0)
+        with self.assertRaisesRegex(ValueError, "ll_num_max_token > 0"):
+            B12xFp4Executor(config, Mock(), {})
+
+    def test_rejects_unresolved_auto_operator(self):
+        with self.assertRaisesRegex(ValueError, "must be resolved"):
+            prepare_static_weights_for_fp4_moe(
+                Fp4MoeOp.AUTO.value,
+                W.moe_w1,
+                W.moe_s1,
+                torch.empty((1, 4, 4), dtype=torch.uint8),
+                torch.empty((1, 4, 2), dtype=torch.uint8),
+            )
 
 
 class B12xWeightValidationTest(unittest.TestCase):
@@ -60,6 +141,14 @@ class B12xWeightValidationTest(unittest.TestCase):
                 *self._weights(intermediate=64),
                 num_experts=2,
                 kernel_tile_n=128,
+            )
+
+    def test_rejects_w13_rows_not_aligned_to_swizzle_tile(self):
+        with self.assertRaisesRegex(ValueError, "2\*intermediate_size"):
+            _validate_b12x_weight_shapes(
+                *self._weights(intermediate=96),
+                num_experts=2,
+                kernel_tile_n=96,
             )
 
     def test_rejects_non_aligned_hidden_size(self):
@@ -118,6 +207,18 @@ class B12xFoldValidationTest(unittest.TestCase):
                 "w1", torch.tensor([1.0, 0.1]), torch.tensor([1.0, 0.0]), limit
             )
             self.assertLess(lost_energy, limit)
+
+    def test_parses_cuda12_9_compat_switch_strictly(self):
+        for value, expected in (("0", False), ("1", True)):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {_DISABLE_CUDA12_9_COMPAT_ENV: value}
+            ):
+                self.assertEqual(_get_disable_cuda12_9_compat(), expected)
+        for value in ("true", "yes", "2", ""):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {_DISABLE_CUDA12_9_COMPAT_ENV: value}
+            ), self.assertRaisesRegex(ValueError, "must be 0 or 1"):
+                _get_disable_cuda12_9_compat()
 
     def test_rejects_invalid_zeroed_energy_limit_override(self):
         for value in ("invalid", "nan", "-0.1", "1.1"):
@@ -204,6 +305,12 @@ class B12xExecuteValidationTest(unittest.TestCase):
     def test_rejects_non_int32_topk_ids(self):
         with self.assertRaisesRegex(ValueError, "top-k ids with dtype torch.int32"):
             self._validate(topk_ids=self.topk_ids.to(torch.int64))
+
+    def test_rejects_non_float32_topk_weights(self):
+        with self.assertRaisesRegex(
+            ValueError, "top-k weights with dtype torch.float32"
+        ):
+            self._validate(topk_weights=self.topk_weights.to(torch.bfloat16))
 
     def test_rejects_mismatched_hidden_size(self):
         with self.assertRaisesRegex(ValueError, "hidden_size=64"):
