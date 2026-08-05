@@ -4,13 +4,14 @@ set -euo pipefail
 # ===========================================================================
 # run_matrix_smoke.sh — Matrix orchestration for FlexLB smoke tests.
 #
-# Runs three test suites (cancel, scheduling, anomaly) across three
-# path/algorithm configurations (batch+fixed_window, direct, queue)
-# against a single mock engine cluster (2P + 4D).
+# Runs test suites (cancel, scheduling, anomaly, priority) across four
+# path/algorithm configurations (batch+fixed_window, direct, queue,
+# auto_tpm = batch + priority_deadline algorithm) against a single mock
+# engine cluster (2P + 4D).
 #
 # Flow:
 #   1. Start mock_engine_cluster once (reused across all groups)
-#   2. For each group: set env → start master → run 3 suites → stop master
+#   2. For each group: set env → start master → run group's suites → stop master
 #   3. Summarise pass/fail per group
 #   4. cleanup (stop mock cluster)
 #
@@ -68,6 +69,9 @@ STRATEGY_CONFIGS='{}'
 OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
 HIPPO_ROLE="${HIPPO_ROLE:-flexlb_matrix_smoke_master}"
+# Group-specific overrides (space-separated KEY=VAL pairs); set per-group
+# in set_group_config(). Empty by default — only auto_tpm populates it.
+EXTRA_ENV="${EXTRA_ENV:-}"
 
 # -- Internal state --------------------------------------------------------
 
@@ -232,23 +236,41 @@ fi
 # -- Group configuration ----------------------------------------------------
 
 # Sets group-specific variables: LOAD_BALANCE_STRATEGY,
-# DEFAULT_SCHEDULE_MODE.
+# DEFAULT_SCHEDULE_MODE, and per-group test lists (TEST_NAMES,
+# TEST_SCRIPTS, TEST_RID_BASES) so each group can run a different set
+# of suites. EXTRA_ENV carries group-specific env overrides.
 set_group_config() {
+  EXTRA_ENV=""
   case "$1" in
     batch)
       LOAD_BALANCE_STRATEGY="COST_BASED_PREFILL"
       DEFAULT_SCHEDULE_MODE="BATCH"
+      TEST_NAMES=(cancel_smoke scheduling_smoke anomaly_smoke)
+      TEST_SCRIPTS=(cancel_smoke.py scheduling_smoke.py anomaly_smoke.py)
       TEST_RID_BASES=(10000 20000 30000)
       ;;
     direct)
       LOAD_BALANCE_STRATEGY="SHORTEST_TTFT"
       DEFAULT_SCHEDULE_MODE="DIRECT"
+      TEST_NAMES=(cancel_smoke scheduling_smoke anomaly_smoke)
+      TEST_SCRIPTS=(cancel_smoke.py scheduling_smoke.py anomaly_smoke.py)
       TEST_RID_BASES=(40000 50000 60000)
       ;;
     queue)
       LOAD_BALANCE_STRATEGY="SHORTEST_TTFT"
       DEFAULT_SCHEDULE_MODE="QUEUE"
+      TEST_NAMES=(cancel_smoke scheduling_smoke anomaly_smoke)
+      TEST_SCRIPTS=(cancel_smoke.py scheduling_smoke.py anomaly_smoke.py)
       TEST_RID_BASES=(70000 80000 90000)
+      ;;
+    auto_tpm)
+      LOAD_BALANCE_STRATEGY="COST_BASED_PREFILL"
+      DECODE_LOAD_BALANCE_STRATEGY="COST_BASED_DECODE"
+      DEFAULT_SCHEDULE_MODE="BATCH"
+      EXTRA_ENV="FLEXLB_BATCH_ALGORITHM=priority_deadline FLEXLB_PRIORITY_EVICT_ENABLED=true FLEXLB_PRIORITY_LEVELS=30,40,50,60,70 FLEXLB_PRIORITY_DEFAULT=50 FLEXLB_PRIORITY_EVICT_MAX_VICTIMS=8 FLEXLB_BATCH_QUEUE_MAX_SIZE=8 AUTO_TPM_DANGER_THRESHOLD_MS=100 AUTO_TPM_RESCUE_SCAN_INTERVAL_MS=100 AUTO_TPM_CANCEL_RUNNING_ENABLED=false"
+      TEST_NAMES=(priority_smoke cancel_smoke scheduling_smoke)
+      TEST_SCRIPTS=(priority_smoke.py cancel_smoke.py scheduling_smoke.py)
+      TEST_RID_BASES=(100000 110000 120000)
       ;;
     *)
       echo "Unknown group: $1" >&2
@@ -262,6 +284,16 @@ start_master() {
   local group_dir="${RUN_DIR}/${group}"
   mkdir -p "${group_dir}"
   echo "  starting master (group=${group}, mode=${DEFAULT_SCHEDULE_MODE}) ..."
+  # Group-specific overrides from EXTRA_ENV (space-separated KEY=VAL pairs).
+  # Appended after the common assignments so they take precedence — env uses
+  # last-wins semantics for duplicate keys (e.g. FLEXLB_BATCH_ALGORITHM is
+  # overridden to priority_deadline for the auto_tpm group).
+  local extra_env_args=()
+  if [[ -n "${EXTRA_ENV}" ]]; then
+    for kv in ${EXTRA_ENV}; do
+      extra_env_args+=("${kv}")
+    done
+  fi
   env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
     "LOAD_BALANCE_STRATEGY=${LOAD_BALANCE_STRATEGY}" \
     "DECODE_LOAD_BALANCE_STRATEGY=${DECODE_LOAD_BALANCE_STRATEGY}" \
@@ -285,6 +317,7 @@ start_master() {
     "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
+    ${extra_env_args[@]+"${extra_env_args[@]}"} \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \
     --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
@@ -335,11 +368,11 @@ run_test_suite() {
   return "${exit_code}"
 }
 
-# -- Main loop: 3 groups x 3 test suites ------------------------------------
+# -- Main loop: 4 groups x per-group test suites ----------------------------
 
-GROUP_NAMES=("batch" "direct" "queue")
-TEST_NAMES=("cancel_smoke" "scheduling_smoke" "anomaly_smoke")
-TEST_SCRIPTS=("cancel_smoke.py" "scheduling_smoke.py" "anomaly_smoke.py")
+GROUP_NAMES=("batch" "direct" "queue" "auto_tpm")
+# TEST_NAMES / TEST_SCRIPTS / TEST_RID_BASES are now set per-group inside
+# set_group_config(), so each group can run a different set of suites.
 TOTAL_PASS=0
 TOTAL_FAIL=0
 GROUP_RESULTS=()
@@ -368,7 +401,7 @@ for group in "${GROUP_NAMES[@]}"; do
 
   TOTAL_PASS=$((TOTAL_PASS + group_pass))
   TOTAL_FAIL=$((TOTAL_FAIL + group_fail))
-  GROUP_RESULTS+=("${group}: ${group_pass}/3 passed")
+  GROUP_RESULTS+=("${group}: ${group_pass}/${#TEST_NAMES[@]} passed")
 
   stop_master
 done

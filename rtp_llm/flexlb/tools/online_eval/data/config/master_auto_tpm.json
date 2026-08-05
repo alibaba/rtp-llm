@@ -25,7 +25,7 @@
         ],
         [
           "FLEXLB_BATCH_ALGORITHM",
-          "priority_deadline"
+          "fixed_window"
         ],
         [
           "FLEXLB_BATCH_QUEUE_MAX_SIZE",
@@ -41,27 +41,51 @@
         ],
         [
           "FLEXLB_BATCH_SIZE_MAX",
-          "8"
+          "1"
         ],
         [
           "FLEXLB_BATCH_MAX_INFLIGHT",
           "100000"
         ],
         [
-          "FLEXLB_PRIORITY_EVICT_ENABLED",
+          "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES",
+          "1"
+        ],
+        [
+          "AUTO_TPM_ENABLED",
           "true"
         ],
         [
-          "FLEXLB_PRIORITY_LEVELS",
+          "AUTO_TPM_PRIORITY_LEVELS",
           "30,40,50,60,70"
         ],
         [
-          "FLEXLB_PRIORITY_DEFAULT",
+          "AUTO_TPM_DEFAULT_PRIORITY",
           "50"
         ],
         [
-          "FLEXLB_PRIORITY_EVICT_MAX_VICTIMS",
+          "AUTO_TPM_MAX_VICTIMS_PER_PLAN",
           "8"
+        ],
+        [
+          "AUTO_TPM_PREFILL_QUEUE_EVICT_ENABLED",
+          "true"
+        ],
+        [
+          "AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED",
+          "false"
+        ],
+        [
+          "AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED",
+          "false"
+        ],
+        [
+          "AUTO_TPM_DECODE_RUNNING_PREEMPT_ENABLED",
+          "false"
+        ],
+        [
+          "AUTO_TPM_DEADLINE_RESCUE_ENABLED",
+          "true"
         ],
         [
           "AUTO_TPM_DANGER_THRESHOLD_MS",
@@ -70,14 +94,6 @@
         [
           "AUTO_TPM_RESCUE_SCAN_INTERVAL_MS",
           "100"
-        ],
-        [
-          "AUTO_TPM_CANCEL_RUNNING_ENABLED",
-          "false"
-        ],
-        [
-          "AUTO_TPM_CANCEL_CONFIRM_LATENCY_MS",
-          "2000"
         ],
         [
           "DECODE_CONCURRENCY_LIMIT",
@@ -98,6 +114,10 @@
         [
           "SYNC_STATUS_INTERVAL",
           "50"
+        ],
+        [
+          "FLEXLB_BATCH_ENQUEUE_DEADLINE_MS",
+          "60000"
         ]
       ]
     }

@@ -180,11 +180,16 @@ class FlexLBSmokeBase:
 
     async def _schedule(self, request_id: int, **kwargs):
         """Call ``FlexlbService.Schedule`` and return the response."""
+        priority = kwargs.get('priority', 0)
         stub = self.schedule_pb2_grpc.FlexlbServiceStub(
             await self._channel(self._master_target())
         )
         req = self._build_schedule_request(request_id, **kwargs)
-        return await stub.Schedule(req, timeout=30.0)
+        # Priority is passed via gRPC metadata header (x-dashscope-inner-qos-level)
+        # because the master PriorityServerInterceptor reads it from metadata,
+        # not from the proto message body.
+        metadata = [('x-dashscope-inner-qos-level', str(priority))] if priority > 0 else None
+        return await stub.Schedule(req, timeout=30.0, metadata=metadata)
 
     def _role_addr(self, response, role: str) -> str:
         for status in response.server_status:

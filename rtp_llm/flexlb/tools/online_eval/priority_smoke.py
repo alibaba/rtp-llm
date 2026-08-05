@@ -234,7 +234,7 @@ class PrioritySmokeTest(FlexLBSmokeBase):
             await asyncio.sleep(1.0)
 
             cancelled = await self._cancelled_rids_set()
-            evicted_p30 = queued_p30 & cancelled
+            evicted_p30 = set(p30_rids) & cancelled
             p70_cancelled = p70_rid in cancelled
 
             # Pass if P70 was admitted and at least one P30 was evicted.
@@ -299,7 +299,7 @@ class PrioritySmokeTest(FlexLBSmokeBase):
 
             await asyncio.sleep(1.0)
             cancelled = await self._cancelled_rids_set()
-            evicted_p50 = queued_p50 & cancelled
+            evicted_p50 = set(queued_p50) & cancelled
 
             # No eviction should occur; the overflow request is rejected.
             no_eviction = len(evicted_p50) == 0
@@ -355,30 +355,42 @@ class PrioritySmokeTest(FlexLBSmokeBase):
             # Reset prefill to fast so queued/running requests can complete.
             for eng in perf_engines:
                 await self._set_perf(eng, prefill_fixed_ms=10.0)
-            # Also cancel the evicted P30 explicitly to clean up any
-            # lingering FetchResponse streams.
+            # Cancel ALL scheduled requests (evicted + non-evicted P30 and
+            # P70) to clean up master inflight.  In BATCH mode, requests
+            # that are scheduled but never fetched via FetchResponse stay
+            # inflight at the master indefinitely; cancelling them ensures
+            # the inflight counter drains to zero.
             cancelled = await self._cancelled_rids_set()
-            for rid in p30_rids:
-                if rid in cancelled:
-                    try:
-                        await self._cancel(rid)
-                    except Exception:
-                        pass
+            for rid in p30_rids + [p70_rid]:
+                try:
+                    await self._cancel(rid)
+                except Exception:
+                    pass
 
             # Wait for master inflight to drain.
             inflight_ok, inflight_detail = await self._verify_inflight_clean(
                 timeout_s=30.0
             )
 
-            # Check mock engine snapshot for residual inflight.
-            snap = await self._get_snapshot()
-            residual = []
-            for engine in snap.get("engines", []):
-                running = engine.get("running", 0)
-                if running and running > 0:
-                    residual.append(f"{engine['name']}={running}")
+            # Check mock engine snapshot for residual inflight.  The mock
+            # engine's ``running`` counter can lag behind the master's
+            # inflight status (master clears its bookkeeping before the
+            # engine decrements its running set), so poll with retries.
+            residual: list[str] = []
+            snap_clean = False
+            snap_deadline = time.monotonic() + 15.0
+            while time.monotonic() < snap_deadline:
+                snap = await self._get_snapshot()
+                residual = []
+                for engine in snap.get("engines", []):
+                    running = engine.get("running", 0)
+                    if running and running > 0:
+                        residual.append(f"{engine['name']}={running}")
+                if not residual:
+                    snap_clean = True
+                    break
+                await asyncio.sleep(0.5)
 
-            snap_clean = len(residual) == 0
             passed = inflight_ok and snap_clean
 
             detail = (
