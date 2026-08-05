@@ -136,3 +136,15 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "spec_logits_verify_runner_perf_test",
+    srcs = [
+        "SpecLogitsVerifyRunnerPerfTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+)
