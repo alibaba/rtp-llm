@@ -346,6 +346,16 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 try:
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
+                                except argparse.ArgumentTypeError as error:
+                                    option = next(
+                                        (
+                                            value
+                                            for value in action.option_strings
+                                            if value.startswith("--")
+                                        ),
+                                        action.dest,
+                                    )
+                                    self.error(f"argument {option}: {error}")
                                 except (ValueError, TypeError):
                                     # If conversion fails, skip this value
                                     pass

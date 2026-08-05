@@ -19,7 +19,7 @@ namespace py = pybind11;
 using namespace rtp_llm;
 
 namespace {
-constexpr size_t kMoeConfigPickleFieldCount = 13;
+constexpr size_t kMoeConfigPickleFieldCount = 15;
 }
 
 PYBIND11_MODULE(libth_transformer_config, m) {
@@ -617,6 +617,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ll_num_max_token", &MoeConfig::ll_num_max_token)
         .def_readwrite("moe_strategy", &MoeConfig::moe_strategy)
         .def_readwrite("fp4_moe_op", &MoeConfig::fp4_moe_op)
+        .def_readwrite("b12x_zeroed_energy_limit", &MoeConfig::b12x_zeroed_energy_limit)
+        .def_readwrite("b12x_disable_cuda12_9_compat", &MoeConfig::b12x_disable_cuda12_9_compat)
         .def("to_string", &MoeConfig::to_string)
         .def(py::pickle(
             [](const MoeConfig& self) {
@@ -632,7 +634,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_all_gather,
                                       self.ll_num_max_token,
                                       self.moe_strategy,
-                                      self.fp4_moe_op);
+                                      self.fp4_moe_op,
+                                      self.b12x_zeroed_energy_limit,
+                                      self.b12x_disable_cuda12_9_compat);
             },
             [](py::tuple t) {
                 if (t.size() != kMoeConfigPickleFieldCount) {
@@ -642,19 +646,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 MoeConfig c;
                 try {
-                    c.use_deepep_moe             = t[0].cast<bool>();
-                    c.use_deepep_internode       = t[1].cast<bool>();
-                    c.use_deepep_low_latency     = t[2].cast<bool>();
-                    c.use_deepep_p2p_low_latency = t[3].cast<bool>();
-                    c.use_mori_ep                = t[4].cast<bool>();
-                    c.fake_balance_expert        = t[5].cast<bool>();
-                    c.hack_moe_expert            = t[6].cast<bool>();
-                    c.deep_ep_num_sm             = t[7].cast<int>();
-                    c.masked_max_token_num       = t[8].cast<int>();
-                    c.use_all_gather             = t[9].cast<bool>();
-                    c.ll_num_max_token           = t[10].cast<int>();
-                    c.moe_strategy               = t[11].cast<std::string>();
-                    c.fp4_moe_op                 = t[12].cast<std::string>();
+                    c.use_deepep_moe               = t[0].cast<bool>();
+                    c.use_deepep_internode         = t[1].cast<bool>();
+                    c.use_deepep_low_latency       = t[2].cast<bool>();
+                    c.use_deepep_p2p_low_latency   = t[3].cast<bool>();
+                    c.use_mori_ep                  = t[4].cast<bool>();
+                    c.fake_balance_expert          = t[5].cast<bool>();
+                    c.hack_moe_expert              = t[6].cast<bool>();
+                    c.deep_ep_num_sm               = t[7].cast<int>();
+                    c.masked_max_token_num         = t[8].cast<int>();
+                    c.use_all_gather               = t[9].cast<bool>();
+                    c.ll_num_max_token             = t[10].cast<int>();
+                    c.moe_strategy                 = t[11].cast<std::string>();
+                    c.fp4_moe_op                   = t[12].cast<std::string>();
+                    c.b12x_zeroed_energy_limit     = t[13].cast<double>();
+                    c.b12x_disable_cuda12_9_compat = t[14].cast<bool>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }

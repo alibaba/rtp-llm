@@ -1,4 +1,5 @@
 package(default_visibility = ["//visibility:public"])
+
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
 load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
@@ -12,6 +13,8 @@ load(
     "rocm_default_copts",
     _if_rocm = "if_rocm",
 )
+
+exports_files(["ops/libth_transformer_config.pyi"])
 
 if_rocm = _if_rocm
 
@@ -201,6 +204,7 @@ py_library(
         "device/**/*.py",
     ]),
     deps = [
+        ":config",
         ":torch",
         ":psutil",
         ":utils",

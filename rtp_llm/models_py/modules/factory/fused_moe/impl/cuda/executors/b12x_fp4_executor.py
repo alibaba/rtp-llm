@@ -25,16 +25,19 @@ logger = logging.getLogger(__name__)
 
 _version_gate_warned = False
 _version_gate_lock = threading.Lock()
+_runtime_config_logged = False
+_runtime_config_lock = threading.Lock()
 _ZEROED_ENERGY_LIMIT = 0.001
 _ZEROED_ENERGY_LIMIT_ENV = "RTP_LLM_B12X_ZEROED_ENERGY_LIMIT"
 _DISABLE_CUDA12_9_COMPAT_ENV = "RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT"
 _E4M3_MIN_NORMAL = 2.0**-6
 _B12X_TOPK_IDS_DTYPE = torch.int32
+_B12X_TOPK_WEIGHTS_DTYPE = torch.float32
 
 
 def _get_zeroed_energy_limit() -> float:
     raw_limit = os.getenv(_ZEROED_ENERGY_LIMIT_ENV)
-    if raw_limit is None:
+    if not raw_limit:
         return _ZEROED_ENERGY_LIMIT
     try:
         limit = float(raw_limit)
@@ -49,6 +52,35 @@ def _get_zeroed_energy_limit() -> float:
             f"got {raw_limit!r}"
         )
     return limit
+
+
+def _get_disable_cuda12_9_compat() -> bool:
+    raw_value = os.getenv(_DISABLE_CUDA12_9_COMPAT_ENV)
+    if raw_value is None:
+        return False
+    if raw_value not in ("0", "1"):
+        raise ValueError(
+            f"{_DISABLE_CUDA12_9_COMPAT_ENV} must be 0 or 1, got {raw_value!r}"
+        )
+    return raw_value == "1"
+
+
+def _log_runtime_config_once(
+    zeroed_energy_limit: float, disable_cuda12_9_compat: bool
+) -> None:
+    global _runtime_config_logged
+    with _runtime_config_lock:
+        if _runtime_config_logged:
+            return
+        logger.info(
+            "b12x FP4 runtime config: %s=%s, %s=%s; checkpoint input_scale "
+            "is not used and activation global scales are fixed to 1",
+            _ZEROED_ENERGY_LIMIT_ENV,
+            zeroed_energy_limit,
+            _DISABLE_CUDA12_9_COMPAT_ENV,
+            disable_cuda12_9_compat,
+        )
+        _runtime_config_logged = True
 
 
 def _get_kernel_tile_n() -> int:
@@ -156,6 +188,12 @@ def _validate_b12x_weight_shapes(
             f"FlashInfer's gate/up tile width {kernel_tile_n}, got "
             f"{intermediate_size} (moe_inter_size split over tp_size)"
         )
+    if two_i % 128 != 0:
+        raise ValueError(
+            "b12x FP4 needs 2*intermediate_size to be a multiple of 128 "
+            "because the swizzled blockscale pads weight rows to 128, got "
+            f"{two_i}"
+        )
     if hidden_size % 128 != 0:
         raise ValueError(
             "b12x FP4 needs hidden_size to be a multiple of 128 so both w1 K "
@@ -197,7 +235,7 @@ def _validate_folded_blockscale(
     name: str,
     product: torch.Tensor,
     folded: torch.Tensor,
-    zeroed_energy_limit: float = _ZEROED_ENERGY_LIMIT,
+    zeroed_energy_limit: float,
 ) -> tuple[torch.Tensor, float, float]:
     """Validate the e4m3 fold and return statistics used for diagnostics."""
     folded_f32 = folded.to(torch.float32)
@@ -267,6 +305,11 @@ def _validate_execute_inputs(
             "b12x requires top-k ids with dtype "
             f"{_B12X_TOPK_IDS_DTYPE}, got {topk_ids.dtype}"
         )
+    if topk_weights.dtype is not _B12X_TOPK_WEIGHTS_DTYPE:
+        raise ValueError(
+            "b12x requires top-k weights with dtype "
+            f"{_B12X_TOPK_WEIGHTS_DTYPE}, got {topk_weights.dtype}"
+        )
     expected_router_shape = (expert_x.size(0), expected_top_k)
     if tuple(topk_ids.shape) != expected_router_shape:
         raise ValueError(
@@ -333,7 +376,7 @@ def _relaxed_b12x_cuda_version_gate():
                 real_version.minor,
             )
             < (12, 9)
-            or os.getenv(_DISABLE_CUDA12_9_COMPAT_ENV) == "1"
+            or _get_disable_cuda12_9_compat()
         ):
             # Native gate already passes, or version is too low:
             # let flashinfer raise its own error.
@@ -400,6 +443,12 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
     ):
         super().__init__(config, quant_config, weights)
 
+        if config.enable_cuda_graph and config.ll_num_max_token <= 0:
+            raise ValueError(
+                "b12x FP4 CUDA Graph support requires ll_num_max_token > 0, got "
+                f"{config.ll_num_max_token}"
+            )
+
         from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
         from flashinfer.fused_moe.cute_dsl import B12xMoEWrapper
 
@@ -442,15 +491,9 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
         # quantized, not just rescale the FC1 output. Then convert to the 6D MMA
         # layout the kernel consumes; m = weight rows (2*I for w13, H for w2),
         # k = contraction dim.
-        w1_sf_product = w1_sf.to(torch.float32) * w1_scale_2.reshape(E, 1, 1).to(
-            torch.float32
-        )
-        w2_sf_product = w2_sf.to(torch.float32) * w2_scale_2.reshape(E, 1, 1).to(
-            torch.float32
-        )
-        w1_sf_folded = w1_sf_product.to(torch.float8_e4m3fn)
-        w2_sf_folded = w2_sf_product.to(torch.float8_e4m3fn)
         zeroed_energy_limit = _get_zeroed_energy_limit()
+        _log_runtime_config_once(zeroed_energy_limit, _get_disable_cuda12_9_compat())
+
         # Folding requantizes to e4m3. Measured behavior on sm_120:
         # - Overflow becomes NaN (torch e4m3 cast does not saturate): fatal.
         # - Exact underflow to zero (below ~2^-10) drops the whole 16-element
@@ -467,10 +510,13 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
         #   observed with tiny weights AND tiny activations comes from the
         #   intermediate-activation dynamic quantization, a runtime property
         #   that cannot be checked against weights at load time.
-        for name, product, folded in (
-            ("w1", w1_sf_product, w1_sf_folded),
-            ("w2", w2_sf_product, w2_sf_folded),
-        ):
+        def fold_blockscale(
+            name: str, blockscale: torch.Tensor, scale_2: torch.Tensor
+        ) -> torch.Tensor:
+            product = blockscale.to(torch.float32) * scale_2.reshape(E, 1, 1).to(
+                torch.float32
+            )
+            folded = product.to(torch.float8_e4m3fn)
             zeroed, lost_energy, subnormal_frac = _validate_folded_blockscale(
                 name, product, folded, zeroed_energy_limit
             )
@@ -492,6 +538,9 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
                     subnormal_frac * 100,
                     name,
                 )
+            return folded
+
+        w1_sf_folded = fold_blockscale("w1", w1_sf, w1_scale_2)
         self.w1_sf_mma = convert_sf_to_mma_layout(
             w1_sf_folded.reshape(-1).contiguous(),
             m=two_i,
@@ -499,6 +548,13 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
             num_groups=E,
             sf_vec_size=16,
         )
+        # ModelWeights owns this dictionary for the model lifetime. Replacing
+        # the source scale here releases the old swizzled tensor after layer
+        # construction instead of retaining both layouts for every layer.
+        weights[W.moe_s1] = self.w1_sf_mma
+        del w1_sf_folded, w1_sf, w1_scale_2
+
+        w2_sf_folded = fold_blockscale("w2", w2_sf, w2_scale_2)
         self.w2_sf_mma = convert_sf_to_mma_layout(
             w2_sf_folded.reshape(-1).contiguous(),
             m=self.hidden_size,
@@ -506,6 +562,10 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
             num_groups=E,
             sf_vec_size=16,
         )
+        weights[W.moe_s2] = self.w2_sf_mma
+        weights.pop(W.moe_w1_s2, None)
+        weights.pop(W.moe_w2_s2, None)
+        del w2_sf_folded, w2_sf, w2_scale_2
 
         # Global scales are 1: weight scale is folded into the block factors, and
         # activation/intermediate quantization relies on per-block e4m3 scales.
@@ -513,12 +573,6 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
         self.w1_alpha = torch.ones(E, dtype=torch.float32, device=device)
         self.w2_alpha = torch.ones(E, dtype=torch.float32, device=device)
         self.fc2_input_scale = torch.ones(1, dtype=torch.float32, device=device)
-
-        if config.enable_cuda_graph and config.ll_num_max_token <= 0:
-            raise ValueError(
-                "b12x FP4 CUDA Graph support requires ll_num_max_token > 0, got "
-                f"{config.ll_num_max_token}"
-            )
 
         # flashinfer-python 0.6.12rc1+rtp.260523 checks CUDA>=13 directly in
         # B12xMoEWrapper.__init__. Keeping the compatibility patch around the
@@ -536,7 +590,11 @@ class B12xFp4Executor(FusedMoeExpertExecutor):
             quant_mode="nvfp4",
             source_format="modelopt",
         )
-        with _relaxed_b12x_cuda_version_gate():
+        # FusedMoeFactory constructs executors under torch.inference_mode().
+        # FlashInfer mutates its routing workspace on every run, so allocate
+        # wrapper-owned buffers as normal tensors while keeping model weights
+        # as inference tensors.
+        with torch.inference_mode(False), _relaxed_b12x_cuda_version_gate():
             self._b12x_moe = B12xMoEWrapper(
                 **wrapper_args,
                 use_cuda_graph=config.enable_cuda_graph,

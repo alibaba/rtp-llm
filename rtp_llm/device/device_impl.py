@@ -16,6 +16,72 @@ from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 
+def prepare_static_weights_for_fp4_moe(
+    fp4_moe_op: str,
+    kernel_name: str,
+    _scale_name: str,
+    kernel: torch.Tensor,
+    scale: torch.Tensor,
+    cache_permute_indices: Optional[dict[torch.Size, torch.Tensor]] = None,
+):
+    """Prepare an FP4 MoE weight pair for a concrete executor layout."""
+    if kernel_name not in (W.moe_w1, W.moe_w2):
+        return kernel, scale
+
+    try:
+        op = Fp4MoeOp(fp4_moe_op)
+    except ValueError as error:
+        raise ValueError(f"invalid fp4_moe_op {fp4_moe_op!r}") from error
+    if op is Fp4MoeOp.AUTO:
+        raise ValueError(
+            "fp4_moe_op='auto' must be resolved before FP4 MoE weight preparation"
+        )
+
+    if op is Fp4MoeOp.CUTEDSL:
+        # cutedsl moe needs gate+up format for w13.
+        if kernel_name == W.moe_w1:
+            kernel = torch.cat(
+                [
+                    kernel[:, kernel.shape[1] // 2 :, :],
+                    kernel[:, : kernel.shape[1] // 2, :],
+                ],
+                dim=1,
+            )
+            scale = torch.cat(
+                [
+                    scale[:, scale.shape[1] // 2 :, :],
+                    scale[:, : scale.shape[1] // 2, :],
+                ],
+                dim=1,
+            )
+        return kernel, CudaImpl.swizzle_blockscale(scale)
+
+    if op is Fp4MoeOp.B12X:
+        # The SM120 kernel is up-first: SwiGLU applies silu to the second
+        # (gate) half and multiplies the first (up) half. The loader already
+        # produces [up; gate], so only the blockscale is swizzled here.
+        return kernel, CudaImpl.swizzle_blockscale(scale)
+
+    if cache_permute_indices is None:
+        raise ValueError("trtllm FP4 MoE weight preparation requires a cache")
+    from flashinfer.fused_moe.core import (
+        _maybe_get_cached_w3_w1_permute_indices,
+        get_w2_permute_indices_with_cache,
+    )
+
+    return CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+        kernel,
+        scale,
+        [*kernel.shape[:-1], kernel.shape[-1] * 2],
+        (
+            _maybe_get_cached_w3_w1_permute_indices
+            if kernel_name == W.moe_w1
+            else get_w2_permute_indices_with_cache
+        ),
+        cache_permute_indices,
+    )
+
+
 def is_gfx950(arch_fallback: Optional[str] = None) -> bool:
     """Detect whether the current ROCm device is gfx950 (MI355X).
 
@@ -500,14 +566,16 @@ class CudaImpl(GpuImpl):
         round_up_multiple = lambda x, m: (x + m - 1) // m * m
         M_padded = round_up_multiple(M, 128)
         K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
+        padded_scale = torch.zeros(
+            (B, M_padded, K_padded), dtype=scale.dtype, device=scale.device
+        )
         padded_scale[:B, :M, :K] = scale
         batches, rows, cols = padded_scale.shape
         assert rows % 128 == 0
         assert cols % 4 == 0
         padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32, cols // 4, 4)
         swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
+        swizzled_scale = swizzled_scale.contiguous()
         return (
             swizzled_scale.reshape(M_padded, K_padded)
             if scale_ndim == 2
@@ -596,55 +664,12 @@ class CudaImpl(GpuImpl):
         kernel: torch.Tensor,
         scale: torch.Tensor,
     ):
-        if kernel_name not in [W.moe_w2, W.moe_w1]:
-            return kernel, scale
-
-        if self.py_env_configs.moe_config.fp4_moe_op == Fp4MoeOp.CUTEDSL.value:
-            # cutedsl moe needs gate+up format for w13
-            if kernel_name == W.moe_w1:
-                kernel = torch.cat(
-                    [
-                        kernel[:, kernel.shape[1] // 2 :, :],
-                        kernel[:, : kernel.shape[1] // 2, :],
-                    ],
-                    dim=1,
-                )
-                scale = torch.cat(
-                    [
-                        scale[:, scale.shape[1] // 2 :, :],
-                        scale[:, : scale.shape[1] // 2, :],
-                    ],
-                    dim=1,
-                )
-            swizzled_scale = self.swizzle_blockscale(scale)
-            return kernel, swizzled_scale
-
-        if self.py_env_configs.moe_config.fp4_moe_op == Fp4MoeOp.B12X.value:
-            # The SM120 b12x kernel is up-first: its SwiGLU applies silu to the
-            # SECOND half (gate) and multiplies the first half (up). w13 is
-            # already loaded as [up; gate], so NO half-swap is applied here
-            # (swapping would produce silu(up)*gate). Only swizzle the block
-            # scales into the Blackwell blockscale storage.
-            swizzled_scale = self.swizzle_blockscale(scale)
-            return kernel, swizzled_scale
-
-        if self.py_env_configs.moe_config.fp4_moe_op != Fp4MoeOp.TRTLLM.value:
-            return kernel, scale
-
-        from flashinfer.fused_moe.core import (
-            _maybe_get_cached_w3_w1_permute_indices,
-            get_w2_permute_indices_with_cache,
-        )
-
-        return CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+        return prepare_static_weights_for_fp4_moe(
+            self.py_env_configs.moe_config.fp4_moe_op,
+            kernel_name,
+            scale_name,
             kernel,
             scale,
-            [*kernel.shape[:-1], kernel.shape[-1] * 2],
-            (
-                _maybe_get_cached_w3_w1_permute_indices
-                if kernel_name == W.moe_w1
-                else get_w2_permute_indices_with_cache
-            ),
             self._cache_permute_indices,
         )
 

@@ -1,8 +1,14 @@
+import math
 from enum import Enum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from rtp_llm.ops import MoeConfig
+
+B12X_ZEROED_ENERGY_LIMIT_DEFAULT = 0.001
+B12X_ZEROED_ENERGY_LIMIT_ENV = "RTP_LLM_B12X_ZEROED_ENERGY_LIMIT"
+B12X_DISABLE_CUDA12_9_COMPAT_ENV = "RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT"
+
 
 class MoeStrategyName(str, Enum):
     AUTO = "auto"
@@ -33,6 +39,15 @@ class Fp4MoeOp(str, Enum):
     TRTLLM = "trtllm"
     CUTEDSL = "cutedsl"
     B12X = "b12x"
+
+
+def validate_b12x_zeroed_energy_limit(limit: float) -> float:
+    if not math.isfinite(limit) or not 0 <= limit <= 1:
+        raise ValueError(
+            "b12x_zeroed_energy_limit must be a finite float in [0, 1], "
+            f"got {limit!r}"
+        )
+    return limit
 
 
 def resolve_fp4_moe_op(moe_config: "MoeConfig", *, is_sm12x: bool) -> str:
