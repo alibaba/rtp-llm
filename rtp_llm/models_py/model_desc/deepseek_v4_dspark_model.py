@@ -358,7 +358,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     @contextmanager
     def _swa_cache_bound(self, layer_idx: int, block_table: torch.Tensor):
         """Temporarily point one draft layer's attention at this model's
-        paged SWA cache and yield ``(attn, entries_per_block, pool)``."""
+        paged SWA cache and yield ``(attn, entries_per_block, pool)``.
+
+        The draft's SWA pool is window-bounded, so it is exempt from CP
+        byte-slicing (CacheConfigCreator keeps window-bounded draft modules
+        full-width) — the packed 3-D view exists in every deployment."""
         attn = self.v4.layers[layer_idx].attn
         if int(attn.compress_ratio) != 0:
             raise RuntimeError(

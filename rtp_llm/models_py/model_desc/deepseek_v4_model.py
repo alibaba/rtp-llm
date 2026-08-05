@@ -1190,7 +1190,9 @@ class DeepSeekV4Model(GptModelBase):
             not update Python attributes.
         num_tokens < 0: return the last non-graph-written row count. This is only
             for CP prefill, where the C++ global token count has been restored
-            but the buffer intentionally stores rank-local rows.
+            but the buffer intentionally stores rank-local rows. -1 asserts the
+            buffer is non-empty; -2 tolerates an empty buffer (init-time warmup
+            probes run without a KV cache and write no rows) and returns None.
         """
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4Model: v4 transformer not initialized")
@@ -1203,6 +1205,8 @@ class DeepSeekV4Model(GptModelBase):
                 not self._is_decode_role
             ), "decode MTP hidden reads must pass row count"
             requested = int(self.v4._mtp_hidden_valid_tokens)
+            if num_tokens == -2 and requested == 0:
+                return None
             assert requested > 0, "MTP hidden buffer has no written rows"
         assert requested <= buf.size(0), (
             "DeepSeekV4Model: requested MTP hidden states exceed buffer capacity: "

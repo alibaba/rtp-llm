@@ -159,6 +159,15 @@ public:
     //
     // The producer writes the buffer in verify (req-major) layout
     // ``[r0_v0, r0_v1, …, r0_v_ps, r1_v0, …]``: each request occupies
+    // DSpARK sharded-CP prefill: the target restores its rank-local aux rows
+    // to global order during the prefill forward. The draft evaluates the
+    // full block on every CP rank (CP-bypassing) and each rank commits its
+    // own byte slice of the feature KV, so every rank needs the full
+    // feature values.
+    virtual torch::Tensor getDsparkGatheredPrefillFeatures() {
+        return torch::Tensor();
+    }
+
     virtual torch::Tensor getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
     }

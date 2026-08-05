@@ -71,6 +71,7 @@ public:
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor   getDsparkGatheredPrefillFeatures() override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
@@ -116,6 +117,10 @@ private:
     const rtp_llm::ExecProperties device_props_;
     const bool                    enable_prefill_cp_;
     const bool                    is_dspark_draft_;
+    const bool                    is_dspark_target_;
+    // DSpARK sharded-CP prefill: global-order aux rows restored from the
+    // rank-local shared MTP hidden buffer during the last CP prefill forward.
+    torch::Tensor                 dspark_gathered_features_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
@@ -161,6 +166,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     enable_prefill_cp_(shouldEnablePrefillContextParallel(device_props_.enable_prefill_cp, is_dspark_draft)),
     is_dspark_draft_(is_dspark_draft),
+    is_dspark_target_(params.sp_config.type == SP_TYPE_DSPARK && !is_dspark_draft),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),

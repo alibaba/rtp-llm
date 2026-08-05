@@ -104,6 +104,10 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     return result.cast<torch::Tensor>();
 }
 
+torch::Tensor PyWrappedModel::getDsparkGatheredPrefillFeatures() {
+    return dspark_gathered_features_;
+}
+
 torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
     if (!py_model_) {
         return torch::Tensor();
@@ -834,6 +838,22 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
             } else {
                 num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+            }
+            if (is_dspark_target_) {
+                // Sharded-CP feature supply: restore the rank-local aux rows
+                // of the shared MTP hidden buffer to global order. Every CP
+                // rank participates in the all-gather here, so each holds the
+                // full bf16 feature values and can commit its own byte slice
+                // of the feature KV. -2 = rank-local rows, empty tolerated:
+                // init-time warmup probes run without a KV cache and write no
+                // rows.
+                auto aux = getMtpTargetHiddenStates(-2);
+                if (aux.defined() && aux.numel() > 0) {
+                    auto aux_global = aux.clone();
+                    const auto aux_valid_tokens =
+                        context_parallel_processor_->handleOutputs(aux_global, inputs, cp_params);
+                    dspark_gathered_features_ = aux_global.narrow(0, 0, static_cast<int64_t>(aux_valid_tokens));
+                }
             }
             if (!need_full_hidden) {
                 return attach_dspark_outputs(forwardPostLayersLastHidden(hidden_states, inputs));

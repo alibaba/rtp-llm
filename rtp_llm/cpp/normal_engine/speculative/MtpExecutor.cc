@@ -524,8 +524,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (is_dspark_) {
         RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark fixed proposal width must be positive");
-        RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.prefill_cp_config.kv_cache_sharded,
-                                "dspark prefill CP requires replicated KV cache; set prefill_cp_kv_cache_sharded=0");
+        // DSpARK context parallelism is sharded-only: the sharded feature
+        // injection writes each rank's byte slice of the committed feature
+        // KV. Replicated-pool CP has no supported injection path (vLLM's
+        // DSpark likewise rejects context parallelism outright).
+        RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.prefill_cp_config.is_enabled()
+                                    || params.parallelism_config.prefill_cp_config.kv_cache_sharded,
+                                "dspark prefill CP requires prefill_cp_kv_cache_sharded=1");
         RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,
                                 "dspark fixed-gamma v1 does not support layer micro-batching");
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
@@ -880,14 +885,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.input_lengths = saved_input_lengths;
             }
             if (is_dspark_) {
-                // DSpARK CP is sharded-only by design (matching production
-                // topologies; vLLM's DSpark likewise rejects context
-                // parallelism outright): the draft evaluates the full block
-                // on every rank, and only slice-owned rank-local commits are
-                // supported — the sharded feature injection provides them.
-                RTP_LLM_CHECK_WITH_INFO(
-                    !cp_enabled, "DSpARK prefill under context parallelism requires sharded feature injection");
-                maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+                // Under (sharded-only) CP the target restored a global-order
+                // feature copy on every rank during its forward; each rank
+                // commits its own byte slice from the full values. Non-CP
+                // loads the buffer view via the shared MTP override.
+                if (cp_enabled) {
+                    model_input.last_hidden_states = model_->getDsparkGatheredPrefillFeatures();
+                } else {
+                    maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+                }
                 batch_stream_processor_->updatePrefillPostDSparkCommitInput(
                     model_input, sampler_output, dspark_seed_anchors, dspark_seed_committed_ends, buffer_holder_);
             } else {
@@ -900,15 +906,22 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
-        // Under prefill CP the post-reduce hidden just copied by
-        // updatePrefillPostDraftModelInput is not the tensor consumed by
-        // DSV4 MTP.  Avoid broadcasting it; after sync each rank reloads the
-        // full pre-hc residual from the Python MTP buffer, and the CP input
-        // processor slices it with the same zigzag plan as combo_tokens.
-        if (cp_enabled && !is_dspark_) {
+        // Under prefill CP the hidden rows are re-derivable on every rank —
+        // MTP reloads the rank-local pre-hc residual from the Python MTP
+        // buffer (the CP input processor slices it with the same zigzag plan
+        // as combo_tokens), and the DSpARK commit reloads the CP-gathered
+        // feature copy each rank restored during the target forward. Avoid
+        // broadcasting the large tensor in both cases.
+        if (cp_enabled) {
             model_input.last_hidden_states = torch::Tensor();
         }
         tpSyncModelInputs(model_input, parallelism_config_);
+        if (cp_enabled && is_dspark_) {
+            model_input.last_hidden_states = model_->getDsparkGatheredPrefillFeatures();
+            RTP_LLM_CHECK_WITH_INFO(model_input.last_hidden_states.defined()
+                                        && model_input.last_hidden_states.numel() > 0,
+                                    "DSpARK CP prefill commit requires gathered target features");
+        }
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
