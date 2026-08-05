@@ -209,7 +209,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        int resolvedPriority = configService.loadBalanceConfig().resolvePriority(pb.getPriority());
+        request.setPriority(resolvedPriority);
         ctx.setRequest(request);
+        ctx.setPriority(resolvedPriority);
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());

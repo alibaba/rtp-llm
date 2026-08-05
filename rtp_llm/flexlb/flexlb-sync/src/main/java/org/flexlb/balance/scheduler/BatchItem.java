@@ -35,6 +35,12 @@ public final class BatchItem {
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
 
+    /**
+     * Request priority (30/40/50/60/70, default 50). Copied from the
+     * BalanceContext at construction time; mutable for tests.
+     */
+    private volatile int priority = 50;
+
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -51,6 +57,9 @@ public final class BatchItem {
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
         this.enqueuedAtMs = enqueuedAtMs;
+        if (ctx != null && ctx.getRequest() != null) {
+            this.priority = ctx.getRequest().getPriority();
+        }
     }
 
     // -- accessors --
@@ -69,6 +78,11 @@ public final class BatchItem {
 
     /** Set by {@link WorkerBatcher#offer} after {@link BatcherAlgorithm#computeSortKey}. */
     public void setSortKey(long sortKey) { this.sortKey = sortKey; }
+
+    /** Request priority (higher value = higher priority). */
+    public int priority() { return priority; }
+
+    public void setPriority(int priority) { this.priority = priority; }
 
     // -- derived accessors --
 

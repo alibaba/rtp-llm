@@ -49,4 +49,11 @@ public class Request {
 
     @JsonProperty("model")
     private String model = "";
+
+    /**
+     * Request priority (30/40/50/60/70, default 50).
+     * Higher value = higher priority.
+     */
+    @JsonProperty("priority")
+    private int priority = 50;
 }

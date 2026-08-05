@@ -81,6 +81,13 @@ public class BalanceContext {
 
     private boolean success = true;
 
+    /**
+     * Request priority (30/40/50/60/70, default 50).
+     * Resolved from proto via FlexlbConfig.resolvePriority at the Schedule RPC entry.
+     * Used by BatchItem and downstream eviction logic.
+     */
+    private int priority = 50;
+
     private String errorMessage;
 
     //===================== Method ===================//
