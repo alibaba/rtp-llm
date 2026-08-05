@@ -100,6 +100,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["MOE_STRATEGY"] = "fp4_b12x"
+        os.environ["FP4_MOE_OP"] = "b12x"
 
         sys.argv = ["prog"]
 
@@ -176,6 +178,8 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.load_config.loader_recycle_handles)
         # MOE_PURE_TP_PRESHARD=true explicitly enables the opt-in path.
         self.assertTrue(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertEqual(py_env_configs.moe_config.moe_strategy, "fp4_b12x")
+        self.assertEqual(py_env_configs.moe_config.fp4_moe_op, "b12x")
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
@@ -233,6 +237,10 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--moe_strategy",
+            "fp4_b12x",
+            "--fp4_moe_op",
+            "b12x",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -289,6 +297,8 @@ class ServerArgsSetTest(TestCase):
         # Pins the shipped defaults: neither env nor argv sets the flags here.
         self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
         self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertEqual(py_env_configs.moe_config.moe_strategy, "fp4_b12x")
+        self.assertEqual(py_env_configs.moe_config.fp4_moe_op, "b12x")
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 

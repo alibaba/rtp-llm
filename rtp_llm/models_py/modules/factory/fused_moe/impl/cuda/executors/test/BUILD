@@ -100,3 +100,28 @@ py_test (
     tags = ["open_skip", "SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
 )
+
+py_test (
+    name = "b12x_fp4_executor_test",
+    srcs = ["b12x_fp4_executor_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+        "//rtp_llm:nvidia-cutlass-dsl",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["open_skip", "RTX_5000_PRO"],
+    exec_properties = {'gpu':'RTX_5000_PRO', 'gpu_count':'1'},
+)
+
+py_test(
+    name = "b12x_fp4_executor_validation_test",
+    srcs = ["b12x_fp4_executor_validation_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+)

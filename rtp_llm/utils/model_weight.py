@@ -424,22 +424,22 @@ def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:
 
 
 def stack_moe_w1(ts: List[torch.Tensor]):
-    gate = ts[: len(ts) // 2]
-    up = ts[len(ts) // 2 :]
-    # Stack all gate and up weights first (2 big ops), then concat along dim=1 (1 op)
-    # Instead of 512x concat_0 + 1x stack_0
-    gate_stacked = stack_0(gate)  # [experts, intermediate, hidden]
+    up = ts[: len(ts) // 2]
+    gate = ts[len(ts) // 2 :]
+    # Model definitions pass up_proj weights first and gate_proj weights second.
+    # Stack each projection before concatenating into the [up; gate] layout.
     up_stacked = stack_0(up)  # [experts, intermediate, hidden]
-    x = concat_1([gate_stacked, up_stacked])  # [experts, 2*intermediate, hidden]
+    gate_stacked = stack_0(gate)  # [experts, intermediate, hidden]
+    x = concat_1([up_stacked, gate_stacked])  # [experts, 2*intermediate, hidden]
     return x
 
 
 def stack_moe_w1_s2(ts: List[torch.Tensor]):
-    gate = ts[: len(ts) // 2]
-    up = ts[len(ts) // 2 :]
+    up = ts[: len(ts) // 2]
+    gate = ts[len(ts) // 2 :]
     ws = []
-    for w1, w3 in zip(gate, up):
-        ws.append(max_scalar([w1, w3]))
+    for up_scale, gate_scale in zip(up, gate):
+        ws.append(max_scalar([up_scale, gate_scale]))
     x = stack_0(ws)
     return x
 

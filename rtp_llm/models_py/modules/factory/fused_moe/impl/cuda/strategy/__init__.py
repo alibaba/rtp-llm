@@ -23,9 +23,12 @@ from .no_quant import (
     CudaNoQuantDpNormalStrategy,
     CudaNoQuantEpLowLatencyStrategy,
 )
-from .fp4 import (CudaFp4EpLowLatencyStrategy,
-                  CudaFp4EpNormalStrategy,
-                  CudaFp4NoDPStrategy)
+from .fp4 import (
+    CudaFp4B12xNoDPStrategy,
+    CudaFp4EpLowLatencyStrategy,
+    CudaFp4EpNormalStrategy,
+    CudaFp4NoDPStrategy,
+)
 
 
 __all__ = [
@@ -48,7 +51,8 @@ __all__ = [
     "CudaW4a8Int4PerChannelEpLowLatencyStrategy",
     "CudaW4a8Int4PerChannelEpNormalStrategy",
     "CudaW4a8Int4PerChannelNoDPStrategy",
+    "CudaFp4B12xNoDPStrategy",
     "CudaFp4EpLowLatencyStrategy",
     "CudaFp4EpNormalStrategy",
-    "CudaFp4NoDPStrategy"
+    "CudaFp4NoDPStrategy",
 ]

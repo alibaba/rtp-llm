@@ -9,3 +9,14 @@ py_test(
     ],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "moe_config_pickle_test",
+    srcs = ["moe_config_pickle_test.py"],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        "//rtp_llm:config_ops",
+    ],
+)
