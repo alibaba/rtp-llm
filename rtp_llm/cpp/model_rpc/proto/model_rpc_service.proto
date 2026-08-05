@@ -727,6 +727,7 @@ service RpcService {
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
+    rpc Cancel(CancelRequestPB) returns (EmptyPB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
 }

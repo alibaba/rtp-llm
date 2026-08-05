@@ -401,6 +401,57 @@ public class FlexlbConfig {
         this.parsedSloBuckets = null;
     }
 
+    // ========== Priority Configuration ==========
+
+    /**
+     * Master switch for the priority eviction mechanism. When enabled, the
+     * scheduler may cancel lower-priority inflight/queued requests to make
+     * room for higher-priority incoming requests. Default false.
+     * Environment variable: FLEXLB_PRIORITY_EVICT_ENABLED.
+     */
+    private boolean flexlbPriorityEvictEnabled = false;
+
+    /**
+     * Comma-separated list of valid priority levels (e.g. "30,40,50,60,70").
+     * Incoming priority values not in this set fall back to
+     * {@link #flexlbPriorityDefault}.
+     * Environment variable: FLEXLB_PRIORITY_LEVELS.
+     */
+    private String flexlbPriorityLevels = "30,40,50,60,70";
+
+    /**
+     * Default priority used when the incoming priority is missing (0 in
+     * proto3) or not in {@link #flexlbPriorityLevels}.
+     * Environment variable: FLEXLB_PRIORITY_DEFAULT.
+     */
+    private int flexlbPriorityDefault = 50;
+
+    /**
+     * Resolve and validate the request priority. If the raw priority is 0
+     * (unset in proto3) or not in the configured valid levels, return the
+     * default priority.
+     *
+     * @param rawPriority Raw priority from the proto request
+     * @return Validated priority value
+     */
+    public int resolvePriority(int rawPriority) {
+        if (rawPriority == 0) {
+            return flexlbPriorityDefault;
+        }
+        if (flexlbPriorityLevels == null || flexlbPriorityLevels.isBlank()) {
+            return rawPriority > 0 ? rawPriority : flexlbPriorityDefault;
+        }
+        for (String level : flexlbPriorityLevels.split(",")) {
+            try {
+                if (Integer.parseInt(level.trim()) == rawPriority) {
+                    return rawPriority;
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return flexlbPriorityDefault;
+    }
+
     private double costHotspotMultiplier = 3.0;
 
     private double costImbalanceMultiplier = 3.0;
