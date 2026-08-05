@@ -75,3 +75,13 @@ py_test(
         "//rtp_llm:frontend",
     ],
 )
+
+py_test(
+    name = "frontend_worker_aux_hidden_states_test",
+    srcs = ["frontend_worker_aux_hidden_states_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+    ],
+)

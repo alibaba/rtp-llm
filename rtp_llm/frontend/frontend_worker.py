@@ -39,7 +39,9 @@ class PipelineResponse(BaseModel):
     response: str = ""
     finished: bool = True
     aux_info: Dict[str, Any] = {}
+    request_id: Optional[int] = None
     aux_hidden_states_dumped: Optional[bool] = None
+    aux_hidden_states_dump_path: Optional[str] = None
     aux_hidden_states_prefill_only: Optional[bool] = None
     hidden_states: Optional[Union[List[float], List[List[float]]]] = None
     aux_hidden_states: Optional[Union[List[float], List[List[float]]]] = None
@@ -217,16 +219,16 @@ class FrontendWorker:
         aux_hidden_states_layers: Any,
         input_ids: Any,
         output_ids: Any,
-    ) -> bool:
+    ) -> Optional[str]:
         ready_dir = os.environ.get("AUX_HIDDEN_STATES_READY_DIR", "").strip()
         if not ready_dir:
-            return False
+            return None
         if (
             not finished
             or not generate_config.return_aux_hidden_states
             or aux_hidden_states is None
         ):
-            return False
+            return None
 
         try:
             import torch
@@ -254,7 +256,11 @@ class FrontendWorker:
                 "request_id": request_id,
                 "created_at_ms": int(time.time() * 1000),
                 "response": generate_text,
-                "aux_info": asdict(aux_info) if generate_config.aux_info else {},
+                "aux_info": (
+                    asdict(aux_info)
+                    if generate_config.aux_info and aux_info is not None
+                    else {}
+                ),
                 "aux_hidden_states": to_cpu(aux_hidden_states),
                 "aux_hidden_states_layers": to_cpu(aux_hidden_states_layers),
                 "input_ids": to_cpu(input_ids),
@@ -268,12 +274,12 @@ class FrontendWorker:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, ready_path)
-            return True
+            return str(ready_path.resolve())
         except Exception:
             logging.exception(
                 "failed to dump aux hidden states for request %s", request_id
             )
-            return False
+            return None
 
     def _format_response(
         self,
@@ -302,7 +308,7 @@ class FrontendWorker:
         response_text = (
             "" if generate_config.aux_hidden_states_prefill_only else generate_texts[0]
         )
-        dumped = self._dump_aux_hidden_states_if_enabled(
+        dump_path = self._dump_aux_hidden_states_if_enabled(
             request_id=request_id,
             generate_text=response_text,
             finished=finished or generate_config.aux_hidden_states_prefill_only,
@@ -319,7 +325,9 @@ class FrontendWorker:
                 response="",
                 finished=True,
                 aux_info=asdict(aux_info) if generate_config.aux_info else {},
-                aux_hidden_states_dumped=dumped,
+                request_id=request_id,
+                aux_hidden_states_dumped=dump_path is not None,
+                aux_hidden_states_dump_path=dump_path,
                 aux_hidden_states_prefill_only=True,
             )
 
@@ -327,6 +335,15 @@ class FrontendWorker:
             response=response_text,
             finished=finished,
             aux_info=asdict(aux_info) if generate_config.aux_info else {},
+            request_id=(
+                request_id if generate_config.return_aux_hidden_states else None
+            ),
+            aux_hidden_states_dumped=(
+                dump_path is not None
+                if generate_config.return_aux_hidden_states
+                else None
+            ),
+            aux_hidden_states_dump_path=dump_path,
             hidden_states=(
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
