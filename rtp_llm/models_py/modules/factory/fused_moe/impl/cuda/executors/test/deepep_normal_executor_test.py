@@ -38,6 +38,7 @@ class DeepGemmHybridExecutorTestBase:
     MAX_GENERATE_BATCH_SIZE = 128
     HIDDEN_SIZE = 2048
     MOE_INTERMEDIATE_SIZE = 768
+    DIFF_THRESHOLD = 0.003
 
     M = (MAX_GENERATE_BATCH_SIZE + TP_SIZE - 1) // TP_SIZE * EP_SIZE
     K = HIDDEN_SIZE
@@ -48,7 +49,9 @@ class DeepGemmHybridExecutorTestBase:
         torch.cuda.manual_seed(42)
         random.seed(42)
 
-    def _generate_config(self) -> MoEConfigAdapter:
+    def _generate_config(
+        self, enable_cuda_graph: bool = False, force_contiguous: bool = False
+    ) -> MoEConfigAdapter:
         model_config = ModelConfig()
         model_config.attn_config.head_num = 2
         model_config.attn_config.size_per_head = 128
@@ -56,6 +59,7 @@ class DeepGemmHybridExecutorTestBase:
         model_config.max_seq_len = 2048
         model_config.vocab_size = 500000
         model_config.expert_num = self.NUM_EXPERTS
+        model_config.moe_k = 8
         model_config.hidden_size = self.HIDDEN_SIZE
         model_config.moe_inter_size = self.MOE_INTERMEDIATE_SIZE
 
@@ -72,15 +76,26 @@ class DeepGemmHybridExecutorTestBase:
 
         moe_config = MoeConfig()
         moe_config.ll_num_max_token = self.MAX_GENERATE_BATCH_SIZE
+        if force_contiguous:
+            moe_config.masked_max_token_num = 0
         return MoEConfigAdapter(
             model_config=model_config,
             parallelism_config=parallelism_config,
             moe_config=moe_config,
+            enable_cuda_graph=enable_cuda_graph,
         )
 
-    def test_deepep_normal_executor(self, use_fp8: bool = True):
+    def _run_deepep_normal_executor(
+        self,
+        use_fp8: bool = True,
+        empty_local_experts: bool = False,
+        enable_cuda_graph: bool = False,
+    ):
         # generate data
-        config = self._generate_config()
+        config = self._generate_config(
+            enable_cuda_graph=enable_cuda_graph,
+            force_contiguous=empty_local_experts,
+        )
         payload, weights = generate_payload_and_weights(config)
         # generate ref output
         ref_output = generate_ref_output(config, payload, weights)
@@ -163,6 +178,30 @@ class DeepGemmHybridExecutorTestBase:
             weights,
         )
         expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
+        if empty_local_experts:
+            assert expert_num_tokens is not None
+            expert_num_tokens.zero_()
+            payload.expert_tokens_meta.expert_num_tokens_cpu = [
+                0
+            ] * expert_num_tokens.numel()
+            payload.expert_x = payload.expert_x.flatten(0, 1)
+            payload.expert_x_scale = payload.expert_x_scale.flatten(0, 1)
+            payload.expert_topk_ids = payload.expert_topk_ids.flatten(0, 1)
+            payload.expert_topk_weights = payload.expert_topk_weights.flatten(0, 1)
+            payload.expert_topk_ids.fill_(-1)
+            payload.expert_topk_weights.zero_()
+
+            combine_payload = self._execute(
+                executor, payload, enable_cuda_graph=enable_cuda_graph
+            )
+            self.assertEqual(
+                combine_payload.fused_expert_output.shape, payload.expert_x.shape
+            )
+            self.assertEqual(
+                torch.count_nonzero(combine_payload.fused_expert_output).item(), 0
+            )
+            return
+
         payload.expert_x = torch.cat(
             [
                 payload.expert_x[i, :num_token]
@@ -192,8 +231,9 @@ class DeepGemmHybridExecutorTestBase:
             ],
             dim=0,
         )
-        # execute
-        combine_payload = executor.execute(payload, "silu", None, None, False, None)
+        combine_payload = self._execute(
+            executor, payload, enable_cuda_graph=enable_cuda_graph
+        )
         token_idx = 0
         for i, num_token in enumerate(expert_num_tokens):
             diff = calc_diff(
@@ -202,10 +242,56 @@ class DeepGemmHybridExecutorTestBase:
             )
             # print('diff:', diff, combine_payload.fused_expert_output[token_idx : token_idx + num_token], ref_output[i, :num_token])
             token_idx += num_token
-            assert diff < 0.003
+            assert diff < self.DIFF_THRESHOLD
+
+    def _execute(
+        self,
+        executor: DeepGemmHybridExecutor,
+        payload,
+        enable_cuda_graph: bool,
+    ):
+        if not enable_cuda_graph:
+            return executor.execute(payload, "silu", None, None, False, None)
+
+        # Warm every JIT path before capture, then validate the exact executor
+        # path used by CUDA Graph serving can be captured and replayed.
+        executor.execute(payload, "silu", None, None, False, None)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            combine_payload = executor.execute(payload, "silu", None, None, False, None)
+        graph.replay()
+        torch.cuda.synchronize()
+        return combine_payload
+
+    def test_deepep_normal_executor(self):
+        self._run_deepep_normal_executor()
+
+    def test_empty_local_experts_eager(self):
+        self._run_deepep_normal_executor(empty_local_experts=True)
 
 
-class DeepGemmHybridExecutorTestBase(DeepGemmHybridExecutorTestBase, unittest.TestCase):
+class DeepGemmHybridExecutorQwen35ShapeTestBase(DeepGemmHybridExecutorTestBase):
+    TP_SIZE = 1
+    EP_SIZE = 4
+    NUM_EXPERTS = 256
+    MAX_GENERATE_BATCH_SIZE = 1
+    HIDDEN_SIZE = 3072
+    MOE_INTERMEDIATE_SIZE = 1024
+    DIFF_THRESHOLD = 0.005
+
+    M = (MAX_GENERATE_BATCH_SIZE + TP_SIZE - 1) // TP_SIZE * EP_SIZE
+    K = HIDDEN_SIZE
+    N = MOE_INTERMEDIATE_SIZE * 2
+
+
+class DeepGemmHybridExecutorTest(DeepGemmHybridExecutorTestBase, unittest.TestCase):
+    pass
+
+
+class DeepGemmHybridExecutorQwen35ShapeTest(
+    DeepGemmHybridExecutorQwen35ShapeTestBase, unittest.TestCase
+):
     pass
 
 
