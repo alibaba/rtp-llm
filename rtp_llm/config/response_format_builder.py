@@ -181,6 +181,12 @@ class ResponseFormatBuilder:
         if raw_response_format is None:
             return
 
+        # Keep legacy plain-text values permissive, but parse JSON-shaped
+        # response formats strictly as envelopes.
+        is_json_shaped = isinstance(raw_response_format, str) and (
+            raw_response_format.lstrip().startswith(("{", "["))
+        )
+
         try:
             rf = parse_response_format(raw_response_format)
         except RecursionError as e:
@@ -189,14 +195,11 @@ class ResponseFormatBuilder:
                 "response_format exceeds the supported JSON nesting depth",
             ) from e
         except JSONDecodeError as e:
-            if isinstance(raw_response_format, str) and raw_response_format.lstrip().startswith(
-                ("{", "[")
-            ):
+            if is_json_shaped:
                 raise FtRuntimeException(
                     ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                     f"response_format invalid: {str(e)}",
                 ) from e
-            # Legacy GenerateConfig accepts arbitrary strings as plain text.
             rf = parse_response_format("text")
         except (ValidationError, TypeError) as e:
             raise FtRuntimeException(
