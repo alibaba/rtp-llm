@@ -454,6 +454,7 @@ class LoadClient:
             prod_decode=req.prod_decode,
             prod_ttfb_ms=req.prod_ttfb_ms,
             prod_total_ms=req.prod_total_ms,
+            priority=req.priority,
         )
 
     async def _handle_with_semaphore(
@@ -571,6 +572,7 @@ class LoadClient:
             model=self.args.model,
             api_key=self.args.api_key,
             cache_key_block_size=1024,
+            priority=req.priority,
         )
 
         result = {
@@ -595,6 +597,7 @@ class LoadClient:
             ),
             "send_start_epoch_ms": 0.0,
             "pacing_lag_ms": 0.0,
+            "priority": req.priority,
         }
 
         try:

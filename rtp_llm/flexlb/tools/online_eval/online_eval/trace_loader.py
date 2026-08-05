@@ -30,6 +30,7 @@ class ReplayRequest:
     prod_decode: str = ""
     prod_ttfb_ms: float = 0.0
     prod_total_ms: float = 0.0
+    priority: int = 50
 
 
 def load_replay_requests(
@@ -114,6 +115,13 @@ def parse_record(
     else:
         block_keys = []
 
+    # Priority: read from trace or assign based on hash for deterministic distribution
+    priority = int(raw.get("priority", 0))
+    if priority <= 0:
+        # Deterministic priority based on request_id hash: 30/40/50/60/70
+        priority_levels = [30, 40, 50, 60, 70]
+        priority = priority_levels[stable_request_id(source_rid) % len(priority_levels)]
+
     return ReplayRequest(
         request_id=request_id,
         source_rid=source_rid,
@@ -127,6 +135,7 @@ def parse_record(
         prod_decode=str(raw.get("dep", "")),
         prod_ttfb_ms=float(raw.get("ttfb", raw.get("latency_ttfb_ms", 0.0)) or 0.0),
         prod_total_ms=float(raw.get("total", raw.get("latency_total_ms", 0.0)) or 0.0),
+        priority=priority,
     )
 
 

@@ -34,6 +34,8 @@ JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
 ENDPOINT_READY_TIMEOUT_S="${ENDPOINT_READY_TIMEOUT_S:-120}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
+DECODE_TOTAL_KV_TOKENS="${DECODE_TOTAL_KV_TOKENS:-50000}"
+PREFILL_TOTAL_KV_TOKENS="${PREFILL_TOTAL_KV_TOKENS:-6291456}"
 N_SHARDS="${N_SHARDS:-64}"  # mock engine 分片数，默认 64（多进程模式）
 # HTTP proxy port for the shard launcher.
 # Placed above the gRPC engine range to avoid ephemeral port collisions.
@@ -422,6 +424,8 @@ if [[ "${START_MOCK}" == "1" ]]; then
       --master-config "${PROCESS_CONFIG_FILE}" \
       --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
       --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+      --decode-total-kv-tokens "${DECODE_TOTAL_KV_TOKENS}" \
+      --prefill-total-kv-tokens "${PREFILL_TOTAL_KV_TOKENS}" \
       --endpoint-file "${ENDPOINT_FILE}" \
       --env-file "${FLEXLB_ENV_FILE}" \
       "${MOCK_ENGINE_EXTRA_ARGS[@]}" \

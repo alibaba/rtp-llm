@@ -317,7 +317,24 @@ class FlexLBSmokeBase:
             )
             stream = await self._start_stream(response, rid, input_pb=input_pb)
             snap = StreamSnapshot()
-            await self._consume_stream(stream, snap)
+            task = asyncio.create_task(self._consume_stream(stream, snap))
+            # Bounded wait: in QUEUE mode the stream can stay open past
+            # the final output, so poll for completion instead of
+            # awaiting the consume task unbounded.
+            deadline = time.monotonic() + self.RECOVERY_TIMEOUT_S
+            while (
+                not snap.completed
+                and snap.error is None
+                and not task.done()
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(0.05)
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (Exception, asyncio.CancelledError):
+                    pass
             if snap.error:
                 return False, f"stream error: {snap.error}"
             if not snap.completed:

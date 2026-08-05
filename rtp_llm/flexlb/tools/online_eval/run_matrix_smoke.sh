@@ -53,6 +53,13 @@ FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES="${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCH
 # Hysteresis bias disabled for scheduling tests — ensures deterministic
 # routing so distribution assertions are reliable.
 HYSTERESIS_BIAS_PERCENT="${HYSTERESIS_BIAS_PERCENT:-0}"
+# Score-tie randomization disabled for the same reason: near-equal scores
+# would otherwise be broken randomly (S2/S6 determinism assertions).
+SCORE_TIE_RANDOM_ENABLED="${SCORE_TIE_RANDOM_ENABLED:-false}"
+# Cache-status sync interval is dynamic (50ms..3000ms); under light test
+# traffic it drifts to the 3s ceiling, exceeding the 2s cache-sync waits
+# in S2/S5/S6.  Bound it so cache-affinity assertions are reliable.
+CACHE_STATUS_MAX_INTERVAL_MS="${CACHE_STATUS_MAX_INTERVAL_MS:-500}"
 MAX_QUEUE_SIZE="${MAX_QUEUE_SIZE:-5000}"
 PREFILL_QUEUE_SIZE_THRESHOLD="${PREFILL_QUEUE_SIZE_THRESHOLD:-100000}"
 COST_SLO_MS="${COST_SLO_MS:-30000}"
@@ -266,6 +273,8 @@ start_master() {
     "FLEXLB_BATCH_MIN_SIZE=${FLEXLB_BATCH_MIN_SIZE}" \
     "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES=${FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES}" \
     "HYSTERESIS_BIAS_PERCENT=${HYSTERESIS_BIAS_PERCENT}" \
+    "SCORE_TIE_RANDOM_ENABLED=${SCORE_TIE_RANDOM_ENABLED}" \
+    "CACHE_STATUS_MAX_INTERVAL_MS=${CACHE_STATUS_MAX_INTERVAL_MS}" \
     "MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE}" \
     "PREFILL_QUEUE_SIZE_THRESHOLD=${PREFILL_QUEUE_SIZE_THRESHOLD}" \
     "DEFAULT_SCHEDULE_MODE=${DEFAULT_SCHEDULE_MODE}" \
@@ -314,7 +323,7 @@ run_test_suite() {
     cmd_args+=(--mock-http-port "${MOCK_HTTP_PORT}")
   fi
   set +e
-  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/${script}" \
+  PYTHONDONTWRITEBYTECODE=1 DEFAULT_SCHEDULE_MODE="${DEFAULT_SCHEDULE_MODE}" python3 "${SCRIPT_DIR}/${script}" \
     "${cmd_args[@]}" 2>&1 | tee "${group_dir}/${name}.stdout"
   exit_code=${PIPESTATUS[0]}
   set -e
