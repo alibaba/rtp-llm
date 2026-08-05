@@ -431,6 +431,10 @@ class ServerArgsGrammarConfigTest(TestCase):
             g.constrained_json_disable_any_whitespace,
             expected.constrained_json_disable_any_whitespace,
         )
+        self.assertEqual(
+            g.terminate_without_stop_token,
+            expected.terminate_without_stop_token,
+        )
         self.assertEqual(g.num_workers, expected.num_workers)
         self.assertEqual(g.compiler_cache_bytes, expected.compiler_cache_bytes)
 
@@ -439,6 +443,8 @@ class ServerArgsGrammarConfigTest(TestCase):
         sys.argv = [
             "prog",
             "--constrained_json_disable_any_whitespace",
+            "1",
+            "--grammar_terminate_without_stop_token",
             "1",
             "--grammar_num_workers",
             "7",
@@ -449,6 +455,7 @@ class ServerArgsGrammarConfigTest(TestCase):
         cfgs = self._setup()
         g = cfgs.grammar_config
         self.assertEqual(g.constrained_json_disable_any_whitespace, True)
+        self.assertEqual(g.terminate_without_stop_token, True)
         self.assertEqual(g.num_workers, 7)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
 

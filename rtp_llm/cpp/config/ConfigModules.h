@@ -372,13 +372,15 @@ struct FIFOSchedulerConfig {
 };
 
 struct GrammarConfig {
-    bool                 constrained_json_disable_any_whitespace = false;
-    int                  num_workers                             = 8;
+    bool constrained_json_disable_any_whitespace = false;
+    // Service-level xgrammar matcher policy. Requests cannot override it.
+    bool                 terminate_without_stop_token = false;
+    int                  num_workers                  = 8;
     std::string          tokenizer_info_json;
     std::vector<int32_t> override_stop_tokens;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
-    std::string          to_string() const;
+    std::string to_string() const;
 };
 
 struct RuntimeConfig {

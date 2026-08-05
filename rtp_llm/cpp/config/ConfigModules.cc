@@ -387,6 +387,7 @@ std::string FIFOSchedulerConfig::to_string() const {
 std::string GrammarConfig::to_string() const {
     std::ostringstream oss;
     oss << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
+        << "terminate_without_stop_token: " << terminate_without_stop_token << "\n"
         << "num_workers: " << num_workers << "\n"
         << "compiler_cache_bytes: " << compiler_cache_bytes << "\n"
         << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"

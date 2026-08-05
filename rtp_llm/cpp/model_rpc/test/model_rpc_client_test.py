@@ -199,7 +199,14 @@ class ModelRpcClientTest(TestCase):
                 self.assertEqual(config.model_dump(), config_before_rpc)
                 self.assertTrue(input_pb.generate_config.HasField(field))
                 self.assertEqual(field_value(input_pb.generate_config).value, expected)
-                self.assertFalse(input_pb.generate_config.HasField("response_format"))
+                for removed_field in (
+                    "response_format",
+                    "grammar_terminate_without_stop_token",
+                ):
+                    self.assertNotIn(
+                        removed_field,
+                        input_pb.generate_config.DESCRIPTOR.fields_by_name,
+                    )
                 for other_field in grammar_fields:
                     if other_field != field:
                         self.assertFalse(input_pb.generate_config.HasField(other_field))

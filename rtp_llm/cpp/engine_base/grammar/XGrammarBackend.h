@@ -30,10 +30,10 @@ class XGrammarBackend {
 public:
     ~XGrammarBackend();
 
-    XGrammarBackend(const XGrammarBackend&) = delete;
+    XGrammarBackend(const XGrammarBackend&)            = delete;
     XGrammarBackend& operator=(const XGrammarBackend&) = delete;
-    XGrammarBackend(XGrammarBackend&&) = delete;
-    XGrammarBackend& operator=(XGrammarBackend&&) = delete;
+    XGrammarBackend(XGrammarBackend&&)                 = delete;
+    XGrammarBackend& operator=(XGrammarBackend&&)      = delete;
 
     // Returns nullptr (not throw) when tokenizer info is empty / invalid / build fails.
     static std::shared_ptr<XGrammarBackend> create(const std::string&   tokenizer_info_json,
@@ -41,15 +41,15 @@ public:
 
     // Creates a fresh per-stream matcher from a grammar key. The compiled grammar is
     // cached by compile(); matcher state itself is never shared across streams.
-    absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> createMatcherFromKey(const GrammarKeyCpp& key,
-                                                                            bool terminate_without_stop_token = false);
+    absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> createMatcherFromKey(const GrammarKeyCpp& key);
 
 private:
     struct Options {
-        bool                                any_whitespace       = true;
-        bool                                strict_mode          = true;
-        int                                 max_compiler_threads = 8;
-        int64_t                             compiler_cache_bytes = -1;  // unlimited
+        bool    any_whitespace               = true;
+        bool    strict_mode                  = true;
+        bool    terminate_without_stop_token = false;
+        int     max_compiler_threads         = 8;
+        int64_t compiler_cache_bytes         = -1;  // unlimited
     };
 
     XGrammarBackend(const xgrammar::TokenizerInfo& tokenizer_info, const Options& options);
@@ -61,9 +61,9 @@ private:
     absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> compile(const GrammarKeyCpp& key);
 
     absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
-    createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled, bool terminate_without_stop_token = false);
+    createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled);
 
-    Options                    options_;
+    Options                   options_;
     xgrammar::TokenizerInfo   tokenizer_info_;
     xgrammar::GrammarCompiler compiler_;
 };

@@ -110,21 +110,16 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                              "(check engine startup logs: tokenizer info empty or backend init failed).");
         }
 
-        const bool terminate_without_stop_token =
-            config.grammar_terminate_without_stop_token || grammar_key.key_type == "json";
-        RTP_LLM_LOG_DEBUG("grammar matcher install: type=%s, len=%zu, in_think_mode=%d, "
-                          "terminate_without_stop_token=%d",
+        RTP_LLM_LOG_DEBUG("grammar matcher install: type=%s, len=%zu, in_think_mode=%d",
                           grammar_key.key_type.c_str(),
                           grammar_key.key_string.size(),
-                          static_cast<int>(config.in_think_mode),
-                          static_cast<int>(terminate_without_stop_token));
+                          static_cast<int>(config.in_think_mode));
 
-        auto matcher_or = backend->createMatcherFromKey(grammar_key, terminate_without_stop_token);
+        auto matcher_or = backend->createMatcherFromKey(grammar_key);
         if (!matcher_or.ok()) {
             return ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(matcher_or.status().message()));
         }
-        auto grammar_processor =
-            std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id);
+        auto grammar_processor = std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id);
         result.push_back(std::move(grammar_processor));
     }
 

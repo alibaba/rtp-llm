@@ -86,7 +86,6 @@ class ResponseFormatBuilder:
                 "num_return_sequences > 1 because it uses grammar-constrained decoding",
             )
 
-        self.config._reasoning_grammar_terminate_without_stop_token = False
         self.config._reasoning_final_constraint = None
         constraint = self._resolve_grammar_constraint()
 
@@ -148,7 +147,6 @@ class ResponseFormatBuilder:
         config.regex = None
         config.ebnf = None
         config.structural_tag = None
-        config._reasoning_grammar_terminate_without_stop_token = False
         config._reasoning_envelope_applied = False
         config._reasoning_final_constraint = None
 
@@ -171,12 +169,6 @@ class ResponseFormatBuilder:
                 f"unsupported grammar field {normalized.name}",
             )
         cls.validate_finalized(config)
-
-    @classmethod
-    def grammar_terminate_without_stop_token(cls, config: Any) -> bool:
-        if config.json_schema is not None:
-            return True
-        return bool(config._reasoning_grammar_terminate_without_stop_token)
 
     def _project_response_format_to_grammar_fields(self) -> None:
         """Project response_format onto typed fields and clear it; rf wins over stale extra_configs grammar."""
@@ -309,9 +301,6 @@ class ResponseFormatBuilder:
                 "elements": elements,
             },
         }
-        self.config._reasoning_grammar_terminate_without_stop_token = (
-            final_format.get("type") == "json_schema"
-        )
         self.config.structural_tag = dump_compact_json(envelope)
         self.config.json_schema = None
         self.config.regex = None

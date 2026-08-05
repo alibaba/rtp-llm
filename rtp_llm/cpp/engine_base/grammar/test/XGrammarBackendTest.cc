@@ -40,15 +40,16 @@ static_assert(!std::is_move_assignable_v<RtpGrammarMatcher>);
 static_assert(!std::is_move_constructible_v<XGrammarBackend>);
 static_assert(!std::is_move_assignable_v<XGrammarBackend>);
 
-GrammarConfig defaultGrammarConfig() {
+GrammarConfig grammarConfig(bool terminate_without_stop_token = false) {
     GrammarConfig cfg;
-    cfg.num_workers          = 2;
-    cfg.compiler_cache_bytes = -1;
+    cfg.num_workers                  = 2;
+    cfg.compiler_cache_bytes         = -1;
+    cfg.terminate_without_stop_token = terminate_without_stop_token;
     return cfg;
 }
 
-std::shared_ptr<XGrammarBackend> makeBackend() {
-    return XGrammarBackend::create(makeTokenizerInfo().SerializeJSON(), defaultGrammarConfig());
+std::shared_ptr<XGrammarBackend> makeBackend(bool terminate_without_stop_token = false) {
+    return XGrammarBackend::create(makeTokenizerInfo().SerializeJSON(), grammarConfig(terminate_without_stop_token));
 }
 
 TEST(XGrammarBackendTest, CreateFromSerializedTokenizerInfo) {
@@ -65,7 +66,7 @@ TEST(XGrammarTokenizerInfoTest, SerializesTokenizerInfoFromPreparedHFData) {
     const std::string              tokenizer_metadata_json =
         R"({"vocab_size":5,"stop_token_ids":[2],"hf_tokenizer_json":"{\"decoder\":{\"type\":\"Sequence\",\"decoders\":[{\"type\":\"ByteFallback\"}]},\"normalizer\":{\"type\":\"Prepend\",\"prepend\":\"\\u2581\"}}"})";
     const std::string opaque = xgrammar_impl::serializeTokenizerInfo(encoded_vocab, tokenizer_metadata_json);
-    auto result = xgrammar::TokenizerInfo::DeserializeJSON(opaque);
+    auto              result = xgrammar::TokenizerInfo::DeserializeJSON(opaque);
     ASSERT_TRUE(std::holds_alternative<xgrammar::TokenizerInfo>(result));
 
     const auto& tokenizer_info = std::get<xgrammar::TokenizerInfo>(result);
@@ -84,9 +85,8 @@ TEST(XGrammarTokenizerInfoTest, SerializesTokenizerInfoFromExplicitParams) {
     const std::vector<std::string> encoded_vocab{"A", "B", ""};
     const std::string              tokenizer_metadata_json =
         R"({"vocab_size":3,"stop_token_ids":[1],"vocab_type":"RAW","add_prefix_space":false})";
-    const std::string              opaque =
-        xgrammar_impl::serializeTokenizerInfo(encoded_vocab, tokenizer_metadata_json);
-    auto result = xgrammar::TokenizerInfo::DeserializeJSON(opaque);
+    const std::string opaque = xgrammar_impl::serializeTokenizerInfo(encoded_vocab, tokenizer_metadata_json);
+    auto              result = xgrammar::TokenizerInfo::DeserializeJSON(opaque);
     ASSERT_TRUE(std::holds_alternative<xgrammar::TokenizerInfo>(result));
 
     const auto& tokenizer_info = std::get<xgrammar::TokenizerInfo>(result);
@@ -99,7 +99,7 @@ TEST(XGrammarTokenizerInfoTest, SerializesTokenizerInfoFromExplicitParams) {
 TEST(XGrammarBackendTest, CreateMatcherFromSimpleJsonSchema) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    GrammarKeyCpp   key{"json", R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})"};
+    GrammarKeyCpp key{"json", R"({"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]})"};
 
     auto result = backend->createMatcherFromKey(key);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
@@ -120,10 +120,10 @@ TEST(XGrammarBackendTest, CompileMalformedJsonSchemaIsInvalid) {
 TEST(XGrammarBackendTest, CreateMatcherFromStructuralTagWithBoundedAnyText) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    GrammarKeyCpp   key{"structural_tag",
+    GrammarKeyCpp key{"structural_tag",
                       R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
-                        R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},"end":"z"},)"
-                        R"({"type":"regex","pattern":"a"}]}})"};
+                      R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},"end":"z"},)"
+                      R"({"type":"regex","pattern":"a"}]}})"};
 
     auto result = backend->createMatcherFromKey(key);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
@@ -132,11 +132,11 @@ TEST(XGrammarBackendTest, CreateMatcherFromStructuralTagWithBoundedAnyText) {
 TEST(XGrammarBackendTest, CreateMatcherFromStructuralTagWithBoundedAnyTextTokenEnd) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    GrammarKeyCpp   key{"structural_tag",
+    GrammarKeyCpp key{"structural_tag",
                       R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
-                        R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},)"
-                        R"("end":{"type":"token","token":122}},)"
-                        R"({"type":"regex","pattern":"a"}]}})"};
+                      R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},)"
+                      R"("end":{"type":"token","token":122}},)"
+                      R"({"type":"regex","pattern":"a"}]}})"};
 
     auto result = backend->createMatcherFromKey(key);
     ASSERT_TRUE(result.ok()) << result.status().ToString();
@@ -145,10 +145,10 @@ TEST(XGrammarBackendTest, CreateMatcherFromStructuralTagWithBoundedAnyTextTokenE
 TEST(XGrammarBackendTest, CompileStructuralTagRejectsMultipleBoundedRegions) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    GrammarKeyCpp   key{"structural_tag",
+    GrammarKeyCpp key{"structural_tag",
                       R"({"type":"structural_tag","format":{"type":"sequence","elements":[)"
-                        R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},"end":"z"},)"
-                        R"({"type":"any_text","max_tokens":1}]}})"};
+                      R"({"type":"tag","begin":"","content":{"type":"any_text","max_tokens":1},"end":"z"},)"
+                      R"({"type":"any_text","max_tokens":1}]}})"};
 
     auto result = backend->createMatcherFromKey(key);
     EXPECT_FALSE(result.ok());
@@ -165,6 +165,34 @@ TEST(XGrammarBackendTest, CreateMatcherProducesUsableObject) {
     auto matcher = matcher_or.value();
     EXPECT_EQ(matcher->numAcceptedTokens(), 0);
     auto terminated = matcher->isTerminated();
+    ASSERT_TRUE(terminated.ok());
+    EXPECT_FALSE(terminated.value());
+}
+
+TEST(XGrammarBackendTest, TerminationBehaviorComesFromServiceGrammarConfig) {
+    auto auto_terminate_backend = makeBackend(/*terminate_without_stop_token=*/true);
+    ASSERT_TRUE(auto_terminate_backend);
+
+    auto matcher_or = auto_terminate_backend->createMatcherFromKey({"regex", "a"});
+    ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+    auto matcher = matcher_or.value();
+
+    auto accepted = matcher->acceptToken('a');
+    ASSERT_TRUE(accepted.ok());
+    EXPECT_TRUE(accepted.value());
+    auto terminated = matcher->isTerminated();
+    ASSERT_TRUE(terminated.ok());
+    EXPECT_TRUE(terminated.value());
+
+    auto require_stop_backend = makeBackend(/*terminate_without_stop_token=*/false);
+    ASSERT_TRUE(require_stop_backend);
+    matcher_or = require_stop_backend->createMatcherFromKey({"regex", "a"});
+    ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
+    matcher  = matcher_or.value();
+    accepted = matcher->acceptToken('a');
+    ASSERT_TRUE(accepted.ok());
+    EXPECT_TRUE(accepted.value());
+    terminated = matcher->isTerminated();
     ASSERT_TRUE(terminated.ok());
     EXPECT_FALSE(terminated.value());
 }

@@ -101,10 +101,11 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&   to
 
 XGrammarBackend::Options XGrammarBackend::optionsFromConfig(const GrammarConfig& cfg) {
     Options opts;
-    opts.any_whitespace       = !cfg.constrained_json_disable_any_whitespace;
-    opts.strict_mode          = true;
-    opts.max_compiler_threads = std::max(1, cfg.num_workers);
-    opts.compiler_cache_bytes = cfg.compiler_cache_bytes > 0 ? cfg.compiler_cache_bytes : -1;
+    opts.any_whitespace               = !cfg.constrained_json_disable_any_whitespace;
+    opts.strict_mode                  = true;
+    opts.terminate_without_stop_token = cfg.terminate_without_stop_token;
+    opts.max_compiler_threads         = std::max(1, cfg.num_workers);
+    opts.compiler_cache_bytes         = cfg.compiler_cache_bytes > 0 ? cfg.compiler_cache_bytes : -1;
     return opts;
 }
 
@@ -117,10 +118,11 @@ XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo&  tokenizer_info,
               /*enable_cache=*/true,
               options.compiler_cache_bytes) {
     RTP_LLM_LOG_INFO("XGrammarBackend init: vocab_size=%d, any_whitespace=%d, strict_mode=%d, "
-                     "compiler_threads=%d, compiler_cache_bytes=%lld",
+                     "terminate_without_stop_token=%d, compiler_threads=%d, compiler_cache_bytes=%lld",
                      tokenizer_info_.GetVocabSize(),
                      static_cast<int>(options_.any_whitespace),
                      static_cast<int>(options_.strict_mode),
+                     static_cast<int>(options_.terminate_without_stop_token),
                      std::max(1, options_.max_compiler_threads),
                      static_cast<long long>(options_.compiler_cache_bytes));
 }
@@ -151,8 +153,7 @@ absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> XGrammarBackend::comp
     return result;
 }
 
-absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
-XGrammarBackend::createMatcherFromKey(const GrammarKeyCpp& key, bool terminate_without_stop_token) {
+absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>> XGrammarBackend::createMatcherFromKey(const GrammarKeyCpp& key) {
     auto compiled_or = compile(key);
     if (!compiled_or.ok()) {
         const std::string err = compiled_or.status().message().empty() ? "unknown compile error" :
@@ -160,7 +161,7 @@ XGrammarBackend::createMatcherFromKey(const GrammarKeyCpp& key, bool terminate_w
         return absl::Status(compiled_or.status().code(), "Failed to compile " + key.key_type + " grammar: " + err);
     }
 
-    auto matcher_or = createMatcher(std::move(compiled_or.value()), terminate_without_stop_token);
+    auto matcher_or = createMatcher(std::move(compiled_or.value()));
     if (!matcher_or.ok()) {
         return matcher_or.status();
     }
@@ -168,12 +169,12 @@ XGrammarBackend::createMatcherFromKey(const GrammarKeyCpp& key, bool terminate_w
 }
 
 absl::StatusOr<std::shared_ptr<RtpGrammarMatcher>>
-XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled, bool terminate_without_stop_token) {
+XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled) {
     if (!compiled) {
         return absl::InvalidArgumentError("createMatcher requires a non-null CompiledGrammar");
     }
     try {
-        return std::make_shared<RtpGrammarMatcher>(std::move(compiled), terminate_without_stop_token);
+        return std::make_shared<RtpGrammarMatcher>(std::move(compiled), options_.terminate_without_stop_token);
     } catch (const std::exception& e) {
         return absl::InvalidArgumentError(std::string("grammar matcher install failed: ") + e.what());
     } catch (...) {

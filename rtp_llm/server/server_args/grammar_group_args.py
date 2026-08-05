@@ -12,6 +12,18 @@ def init_grammar_group_args(parser, grammar_config):
         help="Disable xgrammar any-whitespace mode for JSON schema constraints",
     )
     grammar_group.add_argument(
+        "--grammar_terminate_without_stop_token",
+        env_name="GRAMMAR_TERMINATE_WITHOUT_STOP_TOKEN",
+        bind_to=(grammar_config, "terminate_without_stop_token"),
+        type=str2bool,
+        default=grammar_config.terminate_without_stop_token,
+        help=(
+            "Terminate xgrammar matchers as soon as the root grammar is complete, "
+            "without waiting for a model-generated stop token. This is a service-level "
+            "policy applied to every grammar request."
+        ),
+    )
+    grammar_group.add_argument(
         "--grammar_num_workers",
         env_name="GRAMMAR_NUM_WORKERS",
         bind_to=(grammar_config, "num_workers"),
@@ -32,7 +44,6 @@ def init_grammar_group_args(parser, grammar_config):
         type=int,
         default=grammar_config.compiler_cache_bytes,
         help=(
-            "Byte cap on the internal compiled-grammar cache. Set <=0 "
-            "for unlimited."
+            "Byte cap on the internal compiled-grammar cache. Set <=0 " "for unlimited."
         ),
     )

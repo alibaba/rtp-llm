@@ -53,9 +53,10 @@ public:
     std::optional<std::string> regex;
     std::optional<std::string> ebnf;
     std::optional<std::string> structural_tag;
-    bool                       grammar_terminate_without_stop_token = false;
-    std::string                adapter_name                         = "";
-    std::vector<std::string>   adapter_names;
+    // Legacy raw-request compatibility only. Matcher behavior is controlled by GrammarConfig.
+    bool                     grammar_terminate_without_stop_token = false;
+    std::string              adapter_name                         = "";
+    std::vector<std::string> adapter_names;
 
     std::vector<int>              select_tokens_id;
     std::vector<std::string>      select_tokens_str;

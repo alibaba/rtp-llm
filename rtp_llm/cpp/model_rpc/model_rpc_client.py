@@ -147,9 +147,6 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
     _trans_jsonable_options(generate_config_pb, input_py.generate_config)
-    generate_config_pb.grammar_terminate_without_stop_token = (
-        input_py.generate_config.grammar_terminate_without_stop_token()
-    )
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)

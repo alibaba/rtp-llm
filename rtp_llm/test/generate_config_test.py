@@ -626,9 +626,6 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertEqual(response_format.model_dump(exclude_none=True), payload)
         self.assertEqual(response_format.json_schema.schema_, {"type": "object"})
 
-    def _terminate_without_stop_token(self, cfg: GenerateConfig) -> bool:
-        return ResponseFormatBuilder.grammar_terminate_without_stop_token(cfg)
-
     def _validate(
         self,
         cfg: GenerateConfig,
@@ -664,36 +661,28 @@ class ResponseFormatProjectionTest(TestCase):
                 ),
                 "json_schema",
                 '{"type":"string"}',
-                True,
             ),
             (
                 GenerateConfig(response_format={"type": "json_object"}),
                 "json_schema",
                 '{"type":"object"}',
-                True,
             ),
             (
                 GenerateConfig(response_format={"type": "regex", "pattern": r"\d+"}),
                 "regex",
                 r"\d+",
-                False,
             ),
             (
                 GenerateConfig(response_format='{"type":"json_object"}'),
                 "json_schema",
                 '{"type":"object"}',
-                True,
             ),
         ]
-        for cfg, field, expected, terminate_without_stop_token in cases:
+        for cfg, field, expected in cases:
             with self.subTest(field=field, expected=expected):
                 self._validate(cfg)
                 self.assertIsNone(cfg.response_format)
                 self.assertEqual(cfg.model_dump()[field], expected)
-                self.assertEqual(
-                    self._terminate_without_stop_token(cfg),
-                    terminate_without_stop_token,
-                )
 
     def test_openai_response_format_model_is_canonicalized(self):
         cfg = GenerateConfig()
@@ -729,7 +718,6 @@ class ResponseFormatProjectionTest(TestCase):
         self._validate(cfg)
         self.assertIsNone(cfg.response_format)
         self.assertIsNone(cfg.json_schema)
-        self.assertFalse(self._terminate_without_stop_token(cfg))
 
         cfg = GenerateConfig(
             response_format={"type": "regex", "pattern": r"[a-z]+"},
@@ -739,7 +727,6 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertIsNone(cfg.response_format)
         self.assertIsNone(cfg.json_schema)
         self.assertEqual(cfg.regex, r"[a-z]+")
-        self.assertFalse(self._terminate_without_stop_token(cfg))
 
     def test_response_format_recursion_error_is_reported_as_input_error(self):
         cfg = GenerateConfig(
@@ -805,7 +792,6 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertIsNone(cfg.json_schema)
         self.assertIsNone(cfg.regex)
         self.assertIsNone(cfg.ebnf)
-        self.assertTrue(self._terminate_without_stop_token(cfg))
 
         structural_tag = json.loads(cfg.structural_tag)
         self.assertEqual(structural_tag["type"], "structural_tag")
@@ -891,7 +877,6 @@ class ResponseFormatProjectionTest(TestCase):
         reasoning_tag = structural_tag["format"]["elements"][0]
         self.assertEqual(reasoning_tag["begin"], "<think>\n")
         self.assertEqual(reasoning_tag["end"], "</think>\n\n")
-        self.assertTrue(self._terminate_without_stop_token(cfg))
 
     def test_reasoning_uses_token_end_when_think_end_token_id_is_configured(self):
         cfg = GenerateConfig(
@@ -909,7 +894,6 @@ class ResponseFormatProjectionTest(TestCase):
         structural_tag = json.loads(cfg.structural_tag)
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["end"], {"type": "token", "token": 123})
-        self.assertTrue(self._terminate_without_stop_token(cfg))
 
     def test_reasoning_without_grammar_wraps_any_text_structural_tag(self):
         cfg = GenerateConfig(response_format={"type": "text"})
@@ -921,7 +905,6 @@ class ResponseFormatProjectionTest(TestCase):
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["type"], "tag")
         self.assertEqual(elements[1], {"type": "any_text"})
-        self.assertFalse(self._terminate_without_stop_token(cfg))
 
     def test_reasoning_final_structural_tag_with_existing_budget_rejected(self):
         cfg = GenerateConfig(
@@ -985,9 +968,6 @@ class ResponseFormatProjectionTest(TestCase):
 class RawUpdateAndGrammarConflictTest(TestCase):
     """Raw request updates still coerce response_format and reject grammar conflicts."""
 
-    def _terminate_without_stop_token(self, cfg: GenerateConfig) -> bool:
-        return ResponseFormatBuilder.grammar_terminate_without_stop_token(cfg)
-
     def test_update_and_pop_coerces_string_envelope(self):
         cfg = GenerateConfig()
         remain = cfg.update_and_pop(
@@ -998,17 +978,16 @@ class RawUpdateAndGrammarConflictTest(TestCase):
         ResponseFormatBuilder(cfg).apply()
         self.assertEqual(cfg.regex, r"\d+")
 
-    def test_internal_terminate_flag_is_not_dumped_as_user_config(self):
+    def test_service_terminate_flag_is_not_dumped_as_user_config(self):
         cfg = GenerateConfig(
             grammar_terminate_without_stop_token=True,
         )
-        self.assertFalse(self._terminate_without_stop_token(cfg))
         self.assertNotIn(
             "grammar_terminate_without_stop_token", GenerateConfig.model_fields
         )
         self.assertNotIn("grammar_terminate_without_stop_token", cfg.model_dump())
 
-    def test_update_ignores_method_name(self):
+    def test_update_ignores_service_only_terminate_flag(self):
         cfg = GenerateConfig()
         cfg.update(
             {
@@ -1018,9 +997,8 @@ class RawUpdateAndGrammarConflictTest(TestCase):
         )
         self.assertEqual(cfg.max_new_tokens, 42)
         self.assertIn("max_new_tokens", cfg.model_fields_set)
-        self.assertFalse(cfg.grammar_terminate_without_stop_token())
 
-    def test_update_and_pop_preserves_method_name(self):
+    def test_update_and_pop_preserves_service_only_terminate_flag(self):
         cfg = GenerateConfig()
         remain = cfg.update_and_pop(
             {
@@ -1031,7 +1009,6 @@ class RawUpdateAndGrammarConflictTest(TestCase):
         self.assertEqual(remain, {"grammar_terminate_without_stop_token": True})
         self.assertEqual(cfg.max_new_tokens, 42)
         self.assertIn("max_new_tokens", cfg.model_fields_set)
-        self.assertFalse(cfg.grammar_terminate_without_stop_token())
 
     def test_update_rejects_malformed_envelope(self):
         cfg = GenerateConfig()

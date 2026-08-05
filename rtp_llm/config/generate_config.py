@@ -115,7 +115,6 @@ class GenerateConfig(BaseModel):
     # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
     _diverge_depth_warned: bool = PrivateAttr(default=False)
     _ban_auto_downgraded: bool = PrivateAttr(default=False)
-    _reasoning_grammar_terminate_without_stop_token: bool = PrivateAttr(default=False)
     _reasoning_envelope_applied: bool = PrivateAttr(default=False)
     _reasoning_final_constraint: Any = PrivateAttr(default=None)
 
@@ -559,11 +558,6 @@ class GenerateConfig(BaseModel):
                 generate_env_config
             )
         return ResponseFormatBuilder(self, reasoning_format=reasoning_format).apply()
-
-    def grammar_terminate_without_stop_token(self) -> bool:
-        from rtp_llm.config.response_format_builder import ResponseFormatBuilder
-
-        return ResponseFormatBuilder.grammar_terminate_without_stop_token(self)
 
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []

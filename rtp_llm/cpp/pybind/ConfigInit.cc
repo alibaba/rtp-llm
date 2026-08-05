@@ -1322,6 +1322,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("constrained_json_disable_any_whitespace",
                        &GrammarConfig::constrained_json_disable_any_whitespace)
+        .def_readwrite("terminate_without_stop_token", &GrammarConfig::terminate_without_stop_token)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
@@ -1331,8 +1332,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
              [](const GrammarConfig& c) {
                  std::ostringstream oss;
                  oss << "GrammarConfig(constrained_json_disable_any_whitespace="
-                     << c.constrained_json_disable_any_whitespace << ", num_workers=" << c.num_workers
-                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
+                     << c.constrained_json_disable_any_whitespace
+                     << ", terminate_without_stop_token=" << c.terminate_without_stop_token
+                     << ", num_workers=" << c.num_workers << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
                  return oss.str();
              })
         .def(py::pickle(
@@ -1341,10 +1343,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.num_workers,
                                       self.tokenizer_info_json,
                                       self.override_stop_tokens,
-                                      self.compiler_cache_bytes);
+                                      self.compiler_cache_bytes,
+                                      self.terminate_without_stop_token);
             },
             [](py::tuple t) {
-                if (t.size() != 5)
+                if (t.size() != 5 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
@@ -1358,14 +1361,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.tokenizer_info_json                     = t[3].cast<std::string>();
                         c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
                     } else {
-                        // Current layout:
+                        // Previous/current layouts:
                         // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
-                        //  compiler_cache_bytes).
+                        //  compiler_cache_bytes[, terminate_without_stop_token]).
                         c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
                         c.num_workers                             = t[1].cast<int>();
                         c.tokenizer_info_json                     = t[2].cast<std::string>();
                         c.override_stop_tokens                    = t[3].cast<std::vector<int32_t>>();
                         c.compiler_cache_bytes                    = t[4].cast<int64_t>();
+                        if (t.size() == 6) {
+                            c.terminate_without_stop_token = t[5].cast<bool>();
+                        }
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());

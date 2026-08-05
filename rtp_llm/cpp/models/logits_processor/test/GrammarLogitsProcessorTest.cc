@@ -33,15 +33,17 @@ xgrammar::TokenizerInfo makeAsciiTokenizerInfo() {
                                    /*stop_token_ids=*/std::vector<int32_t>{0});
 }
 
-GrammarConfig defaultGrammarConfig() {
+GrammarConfig grammarConfig(bool terminate_without_stop_token = true) {
     GrammarConfig cfg;
-    cfg.num_workers          = 2;
-    cfg.compiler_cache_bytes = -1;
+    cfg.num_workers                  = 2;
+    cfg.compiler_cache_bytes         = -1;
+    cfg.terminate_without_stop_token = terminate_without_stop_token;
     return cfg;
 }
 
-std::shared_ptr<XGrammarBackend> makeBackend() {
-    return XGrammarBackend::create(makeAsciiTokenizerInfo().SerializeJSON(), defaultGrammarConfig());
+std::shared_ptr<XGrammarBackend> makeBackend(bool terminate_without_stop_token = true) {
+    return XGrammarBackend::create(makeAsciiTokenizerInfo().SerializeJSON(),
+                                   grammarConfig(terminate_without_stop_token));
 }
 
 struct ProcessorBundle {
@@ -55,13 +57,12 @@ struct ProcessorBundle {
 
 ProcessorBundle makeProcessorFromKey(const std::shared_ptr<XGrammarBackend>& backend,
                                      const GrammarKeyCpp&                    key,
-                                     bool                                    terminate_without_stop_token = true,
-                                     int64_t                                 eos_token_id                 = 0) {
+                                     int64_t                                 eos_token_id = 0) {
     EXPECT_TRUE(backend);
     if (!backend) {
         return {};
     }
-    auto matcher_or = backend->createMatcherFromKey(key, terminate_without_stop_token);
+    auto matcher_or = backend->createMatcherFromKey(key);
     EXPECT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
     if (!matcher_or.ok()) {
         return {};
@@ -71,7 +72,8 @@ ProcessorBundle makeProcessorFromKey(const std::shared_ptr<XGrammarBackend>& bac
     return {std::move(proc), std::move(matcher)};
 }
 
-// terminate_without_stop_token=true so the matcher flips IsTerminated() the moment the regex completes.
+// The test backend enables terminate_without_stop_token, so the matcher flips IsTerminated()
+// the moment the regex completes.
 ProcessorBundle makeProcessor(const std::shared_ptr<XGrammarBackend>& backend, const std::string& regex) {
     return makeProcessorFromKey(backend, {"regex", regex});
 }
@@ -217,11 +219,9 @@ TEST(GrammarLogitsProcessorTest, ProcessKeepsReasoningFreeUntilBudgetThenApplies
 }
 
 TEST(GrammarLogitsProcessorTest, AllTrueXGrammarMaskIsANoopRatherThanFailure) {
-    auto backend = makeBackend();
+    auto backend = makeBackend(/*terminate_without_stop_token=*/false);
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(backend,
-                                     {"structural_tag", makeUnboundedAnyTextStructuralTag()},
-                                     /*terminate_without_stop_token=*/false);
+    auto proc = makeProcessorFromKey(backend, {"structural_tag", makeUnboundedAnyTextStructuralTag()});
 
     const size_t         words = SpecLogitsProcessorRequest::bitmaskWordCount(128);
     std::vector<int32_t> bitmask(words, SpecLogitsProcessorRequest::kBitmaskAllowAll);
@@ -309,8 +309,7 @@ TEST(GrammarLogitsProcessorTest, ProcessForcesEosAfterGrammarTerminates) {
 TEST(GrammarLogitsProcessorTest, ProcessRejectsOutOfVocabEosAfterGrammarTerminates) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto proc =
-        makeProcessorFromKey(backend, {"regex", "ab"}, /*terminate_without_stop_token=*/true, /*eos_token_id=*/128);
+    auto proc = makeProcessorFromKey(backend, {"regex", "ab"}, /*eos_token_id=*/128);
 
     ASSERT_FALSE(proc->updateStatus(torch::tensor({kA, kB}, torch::kInt32).reshape({1, 2}), 2).has_value());
     ASSERT_TRUE(matcherTerminated(*proc.matcher));
@@ -390,11 +389,9 @@ TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
 }
 
 TEST(GrammarLogitsProcessorTest, SpecVerifyKeepsAllTrueXGrammarRowsUnconstrained) {
-    auto backend = makeBackend();
+    auto backend = makeBackend(/*terminate_without_stop_token=*/false);
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(backend,
-                                     {"structural_tag", makeUnboundedAnyTextStructuralTag()},
-                                     /*terminate_without_stop_token=*/false);
+    auto proc = makeProcessorFromKey(backend, {"structural_tag", makeUnboundedAnyTextStructuralTag()});
 
     const int            propose_step = 2;
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
