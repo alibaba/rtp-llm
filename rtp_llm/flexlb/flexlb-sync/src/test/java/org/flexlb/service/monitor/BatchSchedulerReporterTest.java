@@ -12,6 +12,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_HARD_TOKENS;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_QUEUE_WAIT_TIME_MS;
@@ -77,6 +79,25 @@ class BatchSchedulerReporterTest {
                     "reason", reason);
             verify(monitor).prepare(ENGINE_BALANCING_MASTER_DISPATCH_REASON, reasonTags);
         }
+    }
+
+    @Test
+    void should_register_both_kv_reserved_gauges_on_init() {
+        reporter.init();
+
+        verify(monitor).register(DECODE_INFLIGHT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(DECODE_INFLIGHT_KV_RESERVED_HARD_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void should_report_hard_kv_reserved_with_decode_tags() {
+        reporter.reportDecodeInflightKvReservedHard("10.0.0.2", 700L);
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", "DECODE",
+                "engineIp", "10.0.0.2");
+        verify(monitor).report(DECODE_INFLIGHT_KV_RESERVED_HARD_TOKENS, tags, 700L);
+        verify(monitor, never()).report(eq(DECODE_INFLIGHT_KV_RESERVED_TOKENS), any(), anyDouble());
     }
 
     @Test

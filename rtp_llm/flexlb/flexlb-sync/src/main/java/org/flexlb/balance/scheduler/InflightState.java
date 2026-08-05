@@ -12,6 +12,7 @@ public enum InflightState {
     RUNNING,
     COMPLETED,
     FAILED,
+    CANCELLED,
     TIMED_OUT;
 
     public boolean isTerminal() {

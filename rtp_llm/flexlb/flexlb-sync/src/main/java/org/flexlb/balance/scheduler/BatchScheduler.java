@@ -121,6 +121,25 @@ public class BatchScheduler extends AbstractScheduler {
                 decodeEp = endpointRegistry.getDecode(decodeIpPort);
             }
 
+            // Backfill EP references on the InflightItem so that TTL/cancel
+            // terminal transitions can directly release EP-level resources
+            // (review A1). Without this, InflightItem.terminate() always sees
+            // null prefillEp/decodeEp and EP release relies solely on the
+            // whenComplete safety net below.
+            //
+            // decodeEp.release(requestId) works immediately (always keyed by
+            // requestId). prefillEp.release(requestId) is a no-op for batch
+            // entries (keyed by batchId) but works for non-batch entries; the
+            // whenComplete safety net covers the batch prefill case via
+            // BatchItem.removeFromPrefillBatch(). Both paths are idempotent.
+            InflightItem inflightItem = globalStore.get(String.valueOf(ctx.getRequestId()));
+            if (inflightItem != null) {
+                inflightItem.setPrefillEp(prefillEp);
+                if (decodeEp != null) {
+                    inflightItem.setDecodeEp(decodeEp);
+                }
+            }
+
             BatchItem item = new BatchItem(ctx, future, routeResponse,
                     BatchItem.copyOf(prefill), BatchItem.copyOf(decode),
                     prefillEp, decodeEp, System.currentTimeMillis());

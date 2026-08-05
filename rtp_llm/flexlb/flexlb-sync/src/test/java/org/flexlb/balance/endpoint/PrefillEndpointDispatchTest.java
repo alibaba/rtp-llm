@@ -80,7 +80,7 @@ class PrefillEndpointDispatchTest {
 
         endpoint = new PrefillEndpoint(status, config, grpcClient, dispatchExecutor,
                 new BatchIdGenerator("127.0.0.1", 7001), () -> 3,
-                mock(BatchSchedulerReporter.class));
+                mock(BatchSchedulerReporter.class), null);
     }
 
     @AfterEach

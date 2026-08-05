@@ -232,12 +232,12 @@ public class EndpointRegistry {
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
         return new PrefillEndpoint(status, config, grpcClient, dispatchExecutor,
-                batchIdGenerator, inflightStore::activeCount, reporter);
+                batchIdGenerator, inflightStore::activeCount, reporter, inflightStore);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {
         prepareEndpointMetrics(RoleType.DECODE, status);
-        return new DecodeEndpoint(status);
+        return new DecodeEndpoint(status, inflightStore);
     }
 
     private SimpleWorkerEndpoint createSimpleEndpoint(WorkerStatus status, RoleType roleType) {

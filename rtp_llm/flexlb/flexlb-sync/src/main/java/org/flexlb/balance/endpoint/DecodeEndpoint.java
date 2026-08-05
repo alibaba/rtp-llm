@@ -1,6 +1,9 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.InflightEvictor;
+import org.flexlb.balance.scheduler.InflightItem;
+import org.flexlb.balance.scheduler.InflightStore;
+import org.flexlb.balance.scheduler.TerminalReason;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -10,6 +13,8 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -45,6 +50,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private final InflightEvictor<Long, RequestInflight> requestEvictor;
     private final InflightEvictor<Long, EngineTask<RequestInflight>> engineTaskEvictor;
+    private final InflightStore inflightStore;
 
     /** Monotonic calibrate round counter driving stale engine-task eviction. */
     private final AtomicLong calibrateRound = new AtomicLong(0);
@@ -57,8 +63,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     private static final int STALE_EVICT_ROUNDS = 3;
 
-    public DecodeEndpoint(WorkerStatus status) {
+    public DecodeEndpoint(WorkerStatus status, InflightStore inflightStore) {
         super(status);
+        this.inflightStore = inflightStore;
         this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {
             inflightKvReservedTotal.addAndGet(-req.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
@@ -68,18 +75,81 @@ public class DecodeEndpoint extends WorkerEndpoint {
         this.engineTaskEvictor = new InflightEvictor<>(engineTasks, null);
     }
 
+    @Override
+    public void close() {
+        try {
+            drainInflight("EP closed");
+        } finally {
+            super.close();
+        }
+    }
+
+    /**
+     * Drain all tracked inflight entries from both layers, terminating their
+     * bound {@link InflightItem}s so clients are notified immediately instead
+     * of waiting for the 300s TTL safety net (review A4).
+     */
+    private void drainInflight(String reason) {
+        List<InflightItem> toTerminate = new ArrayList<>();
+        for (Long requestId : engineTasks.keySet()) {
+            collectItem(requestId, toTerminate);
+        }
+        for (Long requestId : inflightRequests.keySet()) {
+            collectItem(requestId, toTerminate);
+        }
+        engineTasks.clear();
+        inflightRequests.clear();
+        inflightKvReservedTotal.set(0);
+        inflightExpectedKvReservedTotal.set(0);
+        for (InflightItem item : toTerminate) {
+            if (!item.isTerminated()) {
+                item.terminate(TerminalReason.FAILED, new RuntimeException(reason));
+            }
+        }
+    }
+
+    /**
+     * Look up an {@link InflightItem} by requestId and add it to the sink if
+     * found and not already terminal. Null-safe on {@code inflightStore}.
+     */
+    private void collectItem(long requestId, List<InflightItem> sink) {
+        if (inflightStore == null) return;
+        InflightItem item = inflightStore.get(String.valueOf(requestId));
+        if (item != null && !item.isTerminated()) {
+            sink.add(item);
+        }
+    }
+
+    /**
+     * Terminate a single bound {@link InflightItem} by requestId. Used by
+     * STALE eviction to drive items terminal immediately (review A3).
+     */
+    private void terminateBoundItem(long requestId, String reason) {
+        if (inflightStore == null) return;
+        InflightItem item = inflightStore.get(String.valueOf(requestId));
+        if (item != null && !item.isTerminated()) {
+            item.terminate(TerminalReason.FAILED, new RuntimeException(reason));
+        }
+    }
+
     public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
         RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens);
-        RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
-        if (prev != null) {
-            // requestId already exists — subtract the old kvTokens before overwriting,
-            // otherwise the old value is silently lost and the counter stays inflated.
-            inflightKvReservedTotal.addAndGet(-prev.kvTokens());
-            inflightExpectedKvReservedTotal.addAndGet(-prev.expectedKvTokens());
-            inflightRequests.put(requestId, newRi);
-        }
-        inflightKvReservedTotal.addAndGet(kvTokens);
-        inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
+        // Atomic compute eliminates the TOCTOU window between putIfAbsent and put:
+        // if calibrate's removeInflight ran between the two steps, the old value
+        // was already subtracted, and the subsequent addAndGet(-prev) would
+        // double-decrement → inflightKvReservedTotal goes negative → over-admission.
+        // compute holds the bin lock, so no concurrent remove can interleave.
+        inflightRequests.compute(requestId, (key, prev) -> {
+            if (prev != null) {
+                // requestId already exists — subtract the old kvTokens before replacing,
+                // otherwise the old value is silently lost and the counter stays inflated.
+                inflightKvReservedTotal.addAndGet(-prev.kvTokens());
+                inflightExpectedKvReservedTotal.addAndGet(-prev.expectedKvTokens());
+            }
+            inflightKvReservedTotal.addAndGet(kvTokens);
+            inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
+            return newRi;
+        });
     }
 
     /**
@@ -197,6 +267,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (engineTasks.remove(entry.getKey(), task)) {
                 logger.warn("Decode calibrate: engine task reqId={} phase={} unseen for {} rounds, evicting as stale",
                         entry.getKey(), task.phase(), round - task.lastSeenRound());
+                // A3: STALE eviction now drives the bound InflightItem to a
+                // terminal state so the client future is settled in seconds,
+                // not the 300s TTL safety net.
+                terminateBoundItem(entry.getKey(), "engine evicted as stale");
             }
         }
     }
@@ -294,6 +368,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), decodeInflightCount());
         reporter.reportDecodeTotalLoad(getIp(), decodeTotalLoad());
         reporter.reportDecodeInflightKvReserved(getIp(), decodeInflightExpectedKvReserved());
+        reporter.reportDecodeInflightKvReservedHard(getIp(), decodeInflightHardKvReserved());
     }
 
     // ==================== Eviction ====================

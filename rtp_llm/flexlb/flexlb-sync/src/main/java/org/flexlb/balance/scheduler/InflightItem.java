@@ -52,8 +52,8 @@ public final class InflightItem implements InflightEntry {
     /**
      * CAS-guarded lifecycle state. Transitions from {@link InflightState#RUNNING}
      * to a terminal state ({@link InflightState#COMPLETED},
-     * {@link InflightState#FAILED}, {@link InflightState#TIMED_OUT})
-     * exactly once — the first caller wins.
+     * {@link InflightState#FAILED}, {@link InflightState#CANCELLED},
+     * {@link InflightState#TIMED_OUT}) exactly once — the first caller wins.
      */
     private final AtomicReference<InflightState> state = new AtomicReference<>(InflightState.RUNNING);
 
@@ -282,7 +282,8 @@ public final class InflightItem implements InflightEntry {
         return switch (reason) {
             case COMPLETED -> InflightState.COMPLETED;
             case TIMED_OUT -> InflightState.TIMED_OUT;
-            case FAILED, CANCELLED -> InflightState.FAILED;
+            case FAILED -> InflightState.FAILED;
+            case CANCELLED -> InflightState.CANCELLED;
         };
     }
 

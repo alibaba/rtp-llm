@@ -6,6 +6,9 @@ import org.flexlb.balance.scheduler.BatchIdGenerator;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DispatchMeta;
 import org.flexlb.balance.scheduler.InflightEvictor;
+import org.flexlb.balance.scheduler.InflightItem;
+import org.flexlb.balance.scheduler.InflightStore;
+import org.flexlb.balance.scheduler.TerminalReason;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.balance.strategy.FormulaPredictor;
 import org.flexlb.balance.strategy.LearningPredictor;
@@ -56,6 +59,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final BatchIdGenerator batchIdGenerator;
     private final IntSupplier globalActiveCount;
     private final PrefillTimePredictor predictor;
+    private final InflightStore inflightStore;
 
     /** Layer 1: dispatched, not yet acknowledged by the engine (strict inflight). */
     private final ConcurrentHashMap<Long, PrefillInflightEntry> inflightEntries = new ConcurrentHashMap<>();
@@ -99,7 +103,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                            BatchDispatchExecutor dispatchExecutor,
                            BatchIdGenerator batchIdGenerator,
                            IntSupplier globalActiveCount,
-                           BatchSchedulerReporter reporter) {
+                           BatchSchedulerReporter reporter,
+                           InflightStore inflightStore) {
         super(status);
         this.config = config;
         this.grpcClient = grpcClient;
@@ -107,6 +112,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.batchIdGenerator = batchIdGenerator;
         this.globalActiveCount = globalActiveCount;
         this.reporter = reporter;
+        this.inflightStore = inflightStore;
         this.predictor = createPredictor(config);
         this.batcher = new WorkerBatcher(status.getIpPort(), this, config, reporter);
         this.inflightEvictor = new InflightEvictor<>(inflightEntries,
@@ -125,7 +131,78 @@ public class PrefillEndpoint extends WorkerEndpoint {
         try {
             batcher.shutdown();
         } finally {
+            drainInflight("EP closed");
             super.close();
+        }
+    }
+
+    /**
+     * Drain all tracked inflight entries from both layers, terminating their
+     * bound {@link InflightItem}s so clients are notified immediately instead
+     * of waiting for the 300s TTL safety net (review A4).
+     *
+     * <p>Collects all items first, clears the maps, then terminates — this
+     * avoids concurrent modification when terminate() triggers whenComplete
+     * callbacks that call back into the EP's maps (all idempotent no-ops
+     * once the maps are cleared).
+     */
+    private void drainInflight(String reason) {
+        List<InflightItem> toTerminate = new ArrayList<>();
+        for (PrefillInflightEntry entry : inflightEntries.values()) {
+            collectEntryItems(entry, toTerminate);
+        }
+        for (EngineTask<PrefillInflightEntry> task : engineTasks.values()) {
+            collectEntryItems(task.entry(), toTerminate);
+        }
+        inflightEntries.clear();
+        engineTasks.clear();
+        inflightRequestCount.set(0);
+        for (InflightItem item : toTerminate) {
+            if (!item.isTerminated()) {
+                item.terminate(TerminalReason.FAILED, new RuntimeException(reason));
+            }
+        }
+    }
+
+    /**
+     * Collect all {@link InflightItem}s bound to an inflight entry by looking
+     * them up in the {@link InflightStore} by requestId.
+     */
+    private void collectEntryItems(PrefillInflightEntry entry, List<InflightItem> sink) {
+        if (inflightStore == null) return;
+        switch (entry) {
+            case PrefillInflightBatch batch -> {
+                for (BatchItem item : batch.requests()) {
+                    collectItem(item.requestId(), sink);
+                }
+            }
+            case PrefillInflightRequest request -> collectItem(request.requestId(), sink);
+        }
+    }
+
+    /**
+     * Look up an {@link InflightItem} by requestId and add it to the sink if
+     * found and not already terminal. Null-safe on {@code inflightStore}
+     * (tests may pass null).
+     */
+    private void collectItem(long requestId, List<InflightItem> sink) {
+        if (inflightStore == null) return;
+        InflightItem item = inflightStore.get(String.valueOf(requestId));
+        if (item != null && !item.isTerminated()) {
+            sink.add(item);
+        }
+    }
+
+    /**
+     * Terminate a single bound {@link InflightItem} by requestId. Used by
+     * STALE eviction to drive items terminal immediately instead of waiting
+     * for the TTL safety net (review A3).
+     */
+    private void terminateBoundItem(long requestId, String reason) {
+        if (inflightStore == null) return;
+        InflightItem item = inflightStore.get(String.valueOf(requestId));
+        if (item != null && !item.isTerminated()) {
+            item.terminate(TerminalReason.FAILED, new RuntimeException(reason));
         }
     }
 
@@ -310,7 +387,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
             dispatchExecutor.execute(() -> doDispatch(items, batchId, predMs, reason));
         } catch (RejectedExecutionException e) {
             Logger.warn("FlexLB batch dispatch rejected (executor shutdown), failing {} items", items.size());
-            releaseBatch(batchId);
+            repackBatch(batchId, items.stream()
+                    .map(BatchItem::requestId)
+                    .collect(Collectors.toSet()));
             for (BatchItem item : items) {
                 item.failDispatch(e);
             }
@@ -357,7 +436,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                             Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
                                     batchId, getIp(), getGrpcPort(), cause.getMessage());
                             if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
-                                releaseBatch(batchId);
+                                repackBatch(batchId, items.stream()
+                                        .map(BatchItem::requestId)
+                                        .collect(Collectors.toSet()));
                                 for (BatchItem item : items) {
                                     item.failTimeout(cause);
                                 }
@@ -380,7 +461,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     private void failItems(List<BatchItem> items, long batchId, String message) {
-        releaseBatch(batchId);
+        // Use repackBatch (computeIfPresent) instead of releaseBatch (remove)
+        // to avoid the C1 race: releaseBatch's non-atomic remove from both
+        // layers can race with calibrate's layer-1→layer-2 migration,
+        // causing inflightRequestCount to underflow. repackBatch with all
+        // request IDs atomically shrinks the entry to zero survivors on
+        // whichever layer currently tracks it.
+        Set<Long> failedIds = items.stream()
+                .map(BatchItem::requestId)
+                .collect(Collectors.toSet());
+        repackBatch(batchId, failedIds);
         RuntimeException error = new RuntimeException(message);
         for (BatchItem item : items) {
             item.failDispatch(error);
@@ -782,6 +872,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * consecutive calibrate rounds (lost completion report).
      */
     private void evictStaleEngineTasks(long round) {
+        List<InflightItem> toTerminate = new ArrayList<>();
         for (Map.Entry<Long, EngineTask<PrefillInflightEntry>> entry : engineTasks.entrySet()) {
             EngineTask<PrefillInflightEntry> task = entry.getValue();
             if (round - task.lastSeenRound() < STALE_EVICT_ROUNDS) {
@@ -791,6 +882,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 inflightRequestCount.addAndGet(-task.entry().requestCount());
                 logger.warn("Prefill calibrate: engine task key={} phase={} unseen for {} rounds, evicting as stale",
                         entry.getKey(), task.phase(), round - task.lastSeenRound());
+                // A3: STALE eviction now drives the bound InflightItem to a
+                // terminal state so the client future is settled in seconds,
+                // not the 300s TTL safety net.
+                collectEntryItems(task.entry(), toTerminate);
+            }
+        }
+        for (InflightItem item : toTerminate) {
+            if (!item.isTerminated()) {
+                item.terminate(TerminalReason.FAILED, new RuntimeException("engine evicted as stale"));
             }
         }
     }

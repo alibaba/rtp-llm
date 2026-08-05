@@ -21,6 +21,7 @@ import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_HARD_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
@@ -85,6 +86,7 @@ public class BatchSchedulerReporter {
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(DECODE_INFLIGHT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(DECODE_INFLIGHT_KV_RESERVED_HARD_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -252,6 +254,18 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", RoleType.DECODE.name());
         monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, kvReservedTokens);
+    }
+
+    /**
+     * Report per-decode-worker inflight hard KV cache reserved tokens (layer-1 Σ kvTokens, seqLen-only
+     * hard demand) via {@code app.flexlb.decode.inflight.kv.reserved.hard.tokens}.
+     * <p>Complements {@link #reportDecodeInflightKvReserved} which carries the expected
+     * (seqLen + maxNewTokens) view.
+     */
+    public void reportDecodeInflightKvReservedHard(String engineIp, long kvReservedHardTokens) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", RoleType.DECODE.name());
+        monitor.report(DECODE_INFLIGHT_KV_RESERVED_HARD_TOKENS, tags, kvReservedHardTokens);
     }
 
     // ==================== Prediction accuracy metrics ====================

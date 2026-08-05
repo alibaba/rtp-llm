@@ -158,12 +158,12 @@ public class QueueScheduler extends DirectScheduler {
     }
 
     /**
-     * Determine if a request should be retried: only resource-unavailable
-     * errors trigger retry, avoiding ineffective retry attempts.
+     * Determine if a request should be retried based on error code range:
+     * 8000-8999 are retryable (transient failures, resource unavailable);
+     * 4000-4999 are non-retryable (invalid request, queue full, persistent errors).
      */
     private static boolean shouldRetry(Response response) {
-        StrategyErrorType errorType = StrategyErrorType.fromErrorCode(response.getCode());
-        return errorType != null && errorType.isCanRetry();
+        return StrategyErrorType.isRetryableCode(response.getCode());
     }
 
     // ==================== Exception mapping (reactive pipeline) ====================

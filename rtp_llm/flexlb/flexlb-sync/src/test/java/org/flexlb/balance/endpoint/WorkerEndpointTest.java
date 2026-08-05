@@ -40,7 +40,7 @@ class WorkerEndpointTest {
         endpoint = new PrefillEndpoint(status, config,
                 Mockito.mock(EngineGrpcClient.class), Mockito.mock(BatchDispatchExecutor.class),
                 new BatchIdGenerator("127.0.0.1", 7001), () -> 0,
-                Mockito.mock(BatchSchedulerReporter.class));
+                Mockito.mock(BatchSchedulerReporter.class), null);
     }
 
     @AfterEach

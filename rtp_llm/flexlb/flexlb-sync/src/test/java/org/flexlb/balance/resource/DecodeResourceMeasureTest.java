@@ -154,7 +154,7 @@ class DecodeResourceMeasureTest {
 
     private DecodeEndpoint createAliveDecodeEndpoint() {
         WorkerStatus status = createAliveWorkerStatus();
-        return new DecodeEndpoint(status);
+        return new DecodeEndpoint(status, null);
     }
 
     private DecodeEndpoint registerDecodeEndpoint(String ipPort, WorkerStatus status) {

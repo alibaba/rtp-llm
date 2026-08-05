@@ -4,8 +4,10 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.Map;
 
@@ -22,7 +24,7 @@ class DecodeEndpointTest {
         status.setIp("10.0.0.1");
         status.setPort(8080);
         status.setGrpcPort(8081);
-        endpoint = new DecodeEndpoint(status);
+        endpoint = new DecodeEndpoint(status, null);
     }
 
     @Test
@@ -334,6 +336,21 @@ class DecodeEndpointTest {
         assertEquals(300, endpoint.decodeInflightHardKvReserved());
         assertEquals(400, endpoint.decodeInflightExpectedKvReserved());
         assertEquals(20000, endpoint.decodeKvTotal());
+    }
+
+    // ---- metrics wiring ----
+
+    @Test
+    void reportBatchMetrics_reportsHardAndExpectedKvSeparately() {
+        endpoint.reserve(100L, 500, 900);
+
+        BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class);
+        endpoint.reportBatchMetrics(reporter);
+
+        Mockito.verify(reporter).reportInflightRequestCount("DECODE", "10.0.0.1", 1);
+        Mockito.verify(reporter).reportDecodeTotalLoad("10.0.0.1", 1);
+        Mockito.verify(reporter).reportDecodeInflightKvReserved("10.0.0.1", 900L);
+        Mockito.verify(reporter).reportDecodeInflightKvReservedHard("10.0.0.1", 500L);
     }
 
     private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,

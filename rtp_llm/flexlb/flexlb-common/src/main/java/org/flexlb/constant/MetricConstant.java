@@ -87,6 +87,14 @@ public class MetricConstant {
     public static final String DECODE_INFLIGHT_KV_RESERVED_TOKENS = "app.flexlb.decode.inflight.kv.reserved.tokens";
 
     /**
+     * FlexLB scheduler inflight hard KV cache reserved tokens per decode worker (layer-1 Σ kvTokens,
+     * seqLen-only hard demand used for hard-capacity filtering). The non-suffixed
+     * {@code app.flexlb.decode.inflight.kv.reserved.tokens} carries the expected (seqLen + maxNewTokens) view.
+     */
+    public static final String DECODE_INFLIGHT_KV_RESERVED_HARD_TOKENS =
+            "app.flexlb.decode.inflight.kv.reserved.hard.tokens";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";

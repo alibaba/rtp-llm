@@ -49,7 +49,7 @@ class PrefillEndpointTest {
         endpoint = new PrefillEndpoint(status, config,
                 mock(EngineGrpcClient.class), mock(BatchDispatchExecutor.class),
                 new BatchIdGenerator("127.0.0.1", 7001), () -> 0,
-                mock(BatchSchedulerReporter.class));
+                mock(BatchSchedulerReporter.class), null);
     }
 
     @AfterEach

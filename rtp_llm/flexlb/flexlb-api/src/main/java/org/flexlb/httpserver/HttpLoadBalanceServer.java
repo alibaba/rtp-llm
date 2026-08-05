@@ -212,19 +212,35 @@ public class HttpLoadBalanceServer {
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
             for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
+                PrefillEndpoint prefill = entry.getValue();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("inflight_batches", entry.getValue().prefillInflightCount()
-                        + entry.getValue().prefillEngineTaskCount());
+                // Legacy two-layer sum, kept for external script compatibility
+                ep.put("inflight_batches", prefill.prefillInflightCount()
+                        + prefill.prefillEngineTaskCount());
+                // Layer 1: dispatched but not yet acknowledged by the engine
+                ep.put("inflight_entries", prefill.prefillInflightCount());
+                // Layer 2: engine-acknowledged tasks, with phase breakdown
+                ep.put("engine_tasks", prefill.prefillEngineTaskCount());
+                ep.put("engine_waiting", prefill.prefillEngineWaitingCount());
+                ep.put("engine_running", prefill.prefillEngineRunningCount());
                 prefillList.add(ep);
             }
             result.put("prefill_endpoints", prefillList);
 
             List<Map<String, Object>> decodeList = new ArrayList<>();
             for (Map.Entry<String, DecodeEndpoint> entry : endpointRegistry.getDecodeEndpoints().entrySet()) {
+                DecodeEndpoint decode = entry.getValue();
                 Map<String, Object> ep = new LinkedHashMap<>();
                 ep.put("ip_port", entry.getKey());
-                ep.put("inflight_requests", entry.getValue().decodeInflightCount());
+                // Layer 1: dispatched but not yet acknowledged by the engine
+                ep.put("inflight_requests", decode.decodeInflightCount());
+                // Layer 2: engine-acknowledged tasks (LOADING/RUNNING)
+                ep.put("engine_tasks", decode.decodeEngineTaskCount());
+                ep.put("total_load", decode.decodeTotalLoad());
+                // Layer-1 KV reservations: hard (seqLen) vs expected (seqLen + maxNewTokens)
+                ep.put("kv_reserved_hard", decode.decodeInflightHardKvReserved());
+                ep.put("kv_reserved_expected", decode.decodeInflightExpectedKvReserved());
                 decodeList.add(ep);
             }
             result.put("decode_endpoints", decodeList);
