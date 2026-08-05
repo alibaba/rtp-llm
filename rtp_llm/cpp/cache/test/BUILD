@@ -49,6 +49,17 @@ cc_library(
 )
 
 cc_test(
+    name = "runtime_memory_sizing_test",
+    srcs = ["RuntimeMemorySizingTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:runtime_memory_sizing",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "cache_topology_test",
     srcs = ["CacheTopologyTest.cc"],
     copts = test_copts,

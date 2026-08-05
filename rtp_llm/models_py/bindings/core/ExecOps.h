@@ -57,9 +57,58 @@ void cudaProfilerEnd();
 // Status queries
 // ===================================================================
 
+enum class TraceMemoryPhase : int {
+    Pending  = 0,
+    Active   = 1,
+    Finished = 2,
+};
+
+// Threading contract: the phase is atomic so any thread may *read* it (Python MoE modules poll
+// getTraceMemoryState() per layer forward), but the transitions must all be issued by a single
+// control thread -- the one driving startup: setTraceMemory(true) -> warmup forward ->
+// setTraceMemory(false)/finishTraceMemory(). The reason is that the phase and the CUDA baselines
+// it guards (g_reserved_baseline_bytes / g_cuda_used_baseline_bytes in ExecOps.cc) are two pieces
+// of state updated separately: setTraceMemory(false) finishes the phase and then zeroes the
+// baselines, so a concurrent getGpuExecStatus() on another thread could observe Active and read
+// baselines that are being cleared. Serializing the transitions with the measured forward removes
+// that window; the atomic only keeps the reads well-defined.
+class TraceMemoryState {
+public:
+    bool isActive() const {
+        return state_.load(std::memory_order_acquire) == static_cast<int>(TraceMemoryPhase::Active);
+    }
+
+    int get() const {
+        return state_.load(std::memory_order_acquire);
+    }
+
+    void activate() {
+        state_.store(static_cast<int>(TraceMemoryPhase::Active), std::memory_order_release);
+    }
+
+    void finish() {
+        state_.store(static_cast<int>(TraceMemoryPhase::Finished), std::memory_order_release);
+    }
+
+private:
+    std::atomic<int> state_{static_cast<int>(TraceMemoryPhase::Pending)};
+};
+
 ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
 void          setTraceMemory(bool trace_memory);
+void          finishTraceMemory();
+// True only inside the RAII-guarded warmup forward (between setTraceMemory(true/false)); the guard
+// transitions the startup lifecycle to finished on both success and exception paths.
+// Exposed to Python (compute_ops.is_trace_memory) so the MoE module can force worst-case
+// routing during warmup, making the measured peak already cover the skewed case.
+bool isTraceMemory();
+// 0=pending, 1=active, 2=finished. Finished ends one warmup lifecycle and is never revisited
+// within it, but it is not terminal for the process: a second model build calls
+// setTraceMemory(true) again, which re-activates the phase (see the deliberate
+// trace_memory_finished reset in MoeWarmupDiagnostics.reload_runtime_settings). activate() is
+// therefore unguarded on purpose.
+int getTraceMemoryState();
 
 // ===================================================================
 // Copy ops

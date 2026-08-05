@@ -1,4 +1,11 @@
-from rtp_llm.server.server_args.util import str2bool
+from functools import partial
+
+from rtp_llm.server.server_args.util import (
+    MAX_RUNTIME_MEMORY_MIB,
+    nonnegative_float,
+    nonnegative_int,
+    str2bool,
+)
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -6,6 +13,45 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     # KV Cache 相关配置
     ##############################################################################################################
     kv_cache_group = parser.add_argument_group("KVCache")
+    # Read both defaults off the freshly constructed C++ KVCacheConfig instead of
+    # restating them here. That config's fields default to
+    # kDefaultRuntimeMemorySafetyRatio / kDefaultRuntimeNoWarmupFloorMiB in
+    # rtp_llm/cpp/config/ConfigModules.h, which is the single source of truth;
+    # the cache-layer sizing math receives them as call arguments off this config.
+    default_safety_ratio = kv_cache_config.runtime_mem_safety_ratio
+    default_no_warmup_floor_mb = kv_cache_config.runtime_mem_no_warmup_floor_mb
+    kv_cache_group.add_argument(
+        "--runtime_mem_safety_ratio",
+        env_name="RUNTIME_MEM_SAFETY_RATIO",
+        bind_to=(kv_cache_config, "runtime_mem_safety_ratio"),
+        type=partial(nonnegative_float, max_value=1.0, max_value_exclusive=True),
+        default=default_safety_ratio,
+        help=(
+            f"GPU 显存安全比例，基数是 GPU 总显存：安全项 = 总显存 × 本比例"
+            f"（如 80GiB 卡上 0.05 约 4GiB）。范围 [0,1)，默认 {default_safety_ratio}；"
+            "值越大 KV cache 越小。两条路径语义不同："
+            "warmup 路径（PD 分离且实际执行 forward warmup）在 max(configured, 实测峰值, sampler) "
+            "之上**加性**追加该安全项，覆盖实测峰值未包含的运行期波动；"
+            "no-warmup 路径保持升级前的旧公式，该安全项只是 max(configured, sampler, "
+            "no_warmup_floor, 安全项) 中的一条下限，不做加性叠加，"
+            "因此未启用 warmup 的存量部署升级后 KV cache 尺寸不变。"
+            "PD 各 role 内所有进程应一致设置。"
+        ),
+    )
+    kv_cache_group.add_argument(
+        "--runtime_mem_no_warmup_floor_mb",
+        env_name="RUNTIME_MEM_NO_WARMUP_FLOOR_MB",
+        bind_to=(kv_cache_config, "runtime_mem_no_warmup_floor_mb"),
+        type=partial(nonnegative_int, max_value=MAX_RUNTIME_MEMORY_MIB),
+        default=default_no_warmup_floor_mb,
+        help=(
+            f"未执行 warmup 时的运行期显存绝对下限（MiB），默认 {default_no_warmup_floor_mb}，"
+            "与 ratio×total 动态下限一起取 max（对应升级前硬编码的 max(2048MiB, 5%×total)）。"
+            "warmup 路径有实测峰值，因此不应用该下限；若 warmup 路径仍需固定绝对预留，"
+            "请设置 --reserver_runtime_mem_mb。值越大 KV cache 越小。"
+            "PD 各 role 内所有进程应一致设置。"
+        ),
+    )
     kv_cache_group.add_argument(
         "--reuse_cache",
         env_name="REUSE_CACHE",

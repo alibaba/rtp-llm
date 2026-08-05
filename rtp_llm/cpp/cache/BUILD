@@ -2,6 +2,14 @@ load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "runtime_memory_sizing",
+    srcs = ["RuntimeMemorySizing.cc"],
+    hdrs = ["RuntimeMemorySizing.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cp_slot_mapper",
     srcs = ["CPSlotMapper.cc"],
     hdrs = ["CPSlotMapper.h"],
@@ -288,6 +296,7 @@ cc_library(
         ":batch_kv_cache_resource",
         ":cache_types",
         ":kv_cache_allocator",
+        ":runtime_memory_sizing",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",

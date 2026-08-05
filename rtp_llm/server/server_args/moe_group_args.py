@@ -1,4 +1,15 @@
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.server.server_args.util import greater_than_one_float, str2bool
+
+# The role and execution-path gates are separate from the warmup gate itself --
+# MoEConfigAdapter only enables the skew for RoleType::PREFILL, and it lives on
+# the models_py execution path, so a deployment running the C++ model path never
+# constructs it.
+_SKEW_SCOPE_HELP = (
+    "仅在以下全部满足时生效：CUDA 构建、PD 分离的 PREFILL role、实际执行了 forward warmup"
+    "（见 --warm_up 的跳过条件）、且使用 models_py 执行路径；DECODE 保持模型自然路由。"
+    "任一不满足时本参数静默无效，运行期显存预留请改用 --runtime_mem_no_warmup_floor_mb 与"
+    " --reserver_runtime_mem_mb 调整。"
+)
 
 
 def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
@@ -6,6 +17,31 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
     # MOE 特性
     ##############################################################################################################
     moe_group = parser.add_argument_group("MOE 专家并行")
+    # MoeConfig (C++ ConfigModules.h) is the single source of truth for this
+    # default: the value below feeds both `default=` and the help text, so a C++
+    # change cannot leave the documented default behind. The Python-side mirror in
+    # rtp_llm/utils/pre_import_config.py is pinned to the same value by
+    # tests/test_warmup_bindings.py.
+    default_skew_mult = moe_config.moe_skew_mult
+    moe_group.add_argument(
+        "--moe_skew_mult",
+        env_name="MOE_SKEW_MULT",
+        bind_to=(moe_config, "moe_skew_mult"),
+        type=greater_than_one_float,
+        default=default_skew_mult,
+        help=(
+            f"PD PREFILL warmup 中热点 rank(rank 0) 承载的 token 量相对均值的倍数，默认 {default_skew_mult:g}。"
+            + _SKEW_SCOPE_HELP
+            + "所有 PREFILL EP rank 应一致设置。"
+            "最终占比 skew_fraction = min(1, moe_skew_mult / ep_size)：热点 token 全部路由到 "
+            "rank 0，其余 token 均分到非 rank 0 的专家上，因此 rank 0 的实际负载占比精确等于该值"
+            "（top_k 超过 rank 0 本地专家数时会按比例放大热点行数补偿稀释，上限为整个 batch；"
+            "实际槽占比见 [MOE_WARMUP] 日志的 rank0_slot_share）。"
+            "取值必须严格大于 1，否则 warmup 退化为均匀路由、测出的峰值不含专家不均衡余量。"
+            "热点 rank 的 warmup 峰值最高、可用显存最低，经 KVCacheManager 的 block_num min 归约后"
+            "成为全簇 KV cache 上界，因此调高本项会等比收紧全簇 KV cache。"
+        ),
+    )
     moe_group.add_argument(
         "--use_deepep_moe",
         env_name="USE_DEEPEP_MOE",

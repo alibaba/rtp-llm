@@ -1,6 +1,11 @@
 import argparse
+from functools import partial
 
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.server.server_args.util import (
+    MAX_RUNTIME_MEMORY_MIB,
+    nonnegative_int,
+    str2bool,
+)
 
 
 def init_device_resource_group_args(parser, device_resource_config, runtime_config):
@@ -62,9 +67,12 @@ def init_device_resource_group_args(parser, device_resource_config, runtime_conf
             runtime_config,
             "reserve_runtime_mem_mb",
         ),  # Note: spelling difference (reserver -> reserve)
-        type=int,
+        type=partial(nonnegative_int, max_value=MAX_RUNTIME_MEMORY_MIB),
         default=1024,
-        help="设备保留的运行时显存大小",
+        help=(
+            "设备固定保留的运行时显存大小（MiB），同时参与 warmup 和 no-warmup 路径；"
+            "可用于为 warmup 路径恢复绝对显存下限。"
+        ),
     )
     device_resource_group.add_argument(
         "--specify_gpu_arch",

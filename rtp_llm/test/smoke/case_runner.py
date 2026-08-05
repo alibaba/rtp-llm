@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import shlex
 import traceback
 import time
 
@@ -99,27 +100,21 @@ class CaseRunner(object):
 
     @staticmethod
     def _extract_bool_arg(args_str: str, arg_name: str, default: bool = False) -> bool:
-        """Extract a boolean argument value from a smoke_args string (e.g. '--enable_remote_cache true')."""
+        """Extract a boolean argument value from a smoke_args string.
+
+        Accepts both spellings the server parser accepts for the same option:
+        '--enable_remote_cache true' and '--enable_remote_cache=true'. Reading only
+        the first form made a case written in the second silently fall back to
+        `default`, which reads as "feature off" while the server has it on.
+        """
         if not args_str:
             return default
-        tokens = args_str.split()
+        tokens = shlex.split(args_str)
         for i, token in enumerate(tokens):
             if token == arg_name and i + 1 < len(tokens):
                 return str_to_bool(tokens[i + 1])
-        return default
-
-    @staticmethod
-    def _extract_int_arg(args_str: str, arg_name: str, default: int) -> int:
-        """Extract an integer argument from a smoke argument string."""
-        if not args_str:
-            return default
-        tokens = args_str.split()
-        for i, token in enumerate(tokens):
-            if token == arg_name and i + 1 < len(tokens):
-                try:
-                    return int(tokens[i + 1])
-                except ValueError:
-                    return default
+            if token.startswith(f"{arg_name}="):
+                return str_to_bool(token.split("=", 1)[1])
         return default
 
     def run(self):

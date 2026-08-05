@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -13,13 +14,11 @@ class MemoryEvaluationHelper {
 public:
     static size_t
                   getDefaultRuntimeMemorySize(const RuntimeConfig&                             runtime_config,
-                                              const ParallelismConfig&                         parallelism_config,
                                               const ModelConfig&                               model_config,
                                               const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
     static size_t getKVCacheMemorySize(const RuntimeConfig&                             runtime_config,
                                        const KVCacheConfig&                             kv_cache_config,
                                        const ModelConfig&                               model_config,
-                                       const ParallelismConfig&                         parallelism_config,
                                        const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
                                        const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt);
 

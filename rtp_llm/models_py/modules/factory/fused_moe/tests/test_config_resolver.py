@@ -12,7 +12,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig
+from rtp_llm.ops import CPRotateMethod, MoeConfig, ParallelismConfig, RoleType
 
 
 def create_config_adapter(
@@ -23,6 +23,7 @@ def create_config_adapter(
     use_deepep_low_latency: bool = False,
     data_type: str = "fp16",
     cp_enabled: bool = False,
+    role_type: RoleType = RoleType.PDFUSION,
 ) -> MoEConfigAdapter:
     """Helper function to create MoEConfigAdapter for testing"""
     model_config = ModelConfig()
@@ -43,6 +44,7 @@ def create_config_adapter(
     parallelism_config.world_rank = 0
     parallelism_config.local_rank = 0
     parallelism_config.local_world_size = 1
+    parallelism_config.role_type = role_type
     if cp_enabled:
         parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
 
@@ -62,6 +64,17 @@ class TestMoeConfigResolver(unittest.TestCase):
     def setUp(self):
         """Prepare for testing"""
         self.resolver = MoeConfigResolver()
+
+    def test_warmup_skew_is_enabled_only_for_pd_prefill(self):
+        self.assertTrue(
+            create_config_adapter(role_type=RoleType.PREFILL).enable_moe_warmup_skew
+        )
+        self.assertFalse(
+            create_config_adapter(role_type=RoleType.DECODE).enable_moe_warmup_skew
+        )
+        self.assertFalse(
+            create_config_adapter(role_type=RoleType.PDFUSION).enable_moe_warmup_skew
+        )
 
     def test_get_device_type(self):
         """Test getting device type"""

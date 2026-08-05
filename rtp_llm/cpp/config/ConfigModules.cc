@@ -128,6 +128,8 @@ std::string KVCacheConfig::to_string() const {
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
+        << "runtime_mem_safety_ratio: " << runtime_mem_safety_ratio << "\n"
+        << "runtime_mem_no_warmup_floor_mb: " << runtime_mem_no_warmup_floor_mb << "\n"
         << "seq_size_per_block: " << seq_size_per_block << "\n"
         << "kernel_seq_size_per_block: " << kernel_seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
@@ -234,6 +236,7 @@ std::string MoeConfig::to_string() const {
         << "masked_max_token_num: " << masked_max_token_num << "\n"
         << "use_all_gather: " << use_all_gather << "\n"
         << "ll_num_max_token: " << ll_num_max_token << "\n"
+        << "moe_skew_mult: " << moe_skew_mult << "\n"
         << "moe_strategy: " << moe_strategy << "\n"
         << "fp4_moe_op: " << fp4_moe_op;
     return oss.str();

@@ -45,7 +45,7 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
         self.expert_num = config.expert_num
-        self.expert_num_per_rank = self.expert_num // self.ep_size
+        self.expert_num_per_rank = self.experts_per_ep_rank()
         self.mori_buffer_wrapper = MoriEPWrapper.get_instance()
         self._dispatch_ids: Optional[torch.Tensor] = None
         self._is_chunked = False
@@ -73,7 +73,9 @@ class MoriEpIntranodeRouter(FusedMoeDataRouter):
 
         local_start = self.ep_rank * self.expert_num_per_rank
         local_end = local_start + self.expert_num_per_rank
-        return remap_to_local_ids(dispatch_ids, dispatch_weights, local_start, local_end)
+        return remap_to_local_ids(
+            dispatch_ids, dispatch_weights, local_start, local_end
+        )
 
     def prepare(
         self,

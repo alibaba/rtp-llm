@@ -19,6 +19,17 @@ exec_ops_test_deps = [
 cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
 
 cc_test(
+    name = "memory_diagnostics_test",
+    srcs = ["MemoryDiagnosticsTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/models_py/bindings/core:device_data",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "exec_ops_test",
     srcs = ["ExecOpsTest.cc"],
     args = ["--gtest_filter=-" + cache_store_test_filter],

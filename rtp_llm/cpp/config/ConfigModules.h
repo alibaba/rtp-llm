@@ -9,6 +9,9 @@
 
 namespace rtp_llm {
 
+inline constexpr double  kDefaultRuntimeMemorySafetyRatio = 0.05;
+inline constexpr int64_t kDefaultRuntimeNoWarmupFloorMiB  = 2048;
+
 /** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
     std::string master_ip   = "";
@@ -159,15 +162,22 @@ struct KVCacheConfig {
     int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
     int                                     linear_step                       = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
-    int64_t     kv_cache_mem_mb           = -1;
-    int         seq_size_per_block        = 64;
-    int         kernel_seq_size_per_block = 0;
-    int         test_block_num            = 0;
-    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache       = true;
-    bool        enable_memory_cache       = false;
+    int         fp8_kv_cache    = 0;
+    std::string ssm_state_dtype = "bf16";
+    int64_t     kv_cache_mem_mb = -1;
+    // These two fields are the single source of truth for the runtime memory
+    // sizing defaults: the cache-layer sizing math takes them as call arguments
+    // off this config (MemoryEvaluationHelper.cc) instead of restating them, and
+    // the Python side reads them back off the constructed config (see
+    // kv_cache_group_args.py).
+    double  runtime_mem_safety_ratio       = kDefaultRuntimeMemorySafetyRatio;
+    int64_t runtime_mem_no_warmup_floor_mb = kDefaultRuntimeNoWarmupFloorMiB;
+    int     seq_size_per_block             = 64;
+    int     kernel_seq_size_per_block      = 0;
+    int     test_block_num                 = 0;
+    int     use_block_cache                = -1;  // -1 means not set, use Optional<int> equivalent
+    bool    enable_device_cache            = true;
+    bool    enable_memory_cache            = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
     bool    enable_memory_cache_sm_copy             = false;
     bool    enable_remote_cache                     = false;
@@ -270,6 +280,10 @@ struct MoeConfig {
     int         masked_max_token_num       = 256;
     bool        use_all_gather             = false;
     int         ll_num_max_token           = 0;
+    // Hot-rank share of cluster tokens during PREFILL warmup:
+    // min(1.0, moe_skew_mult / ep_size), i.e. exactly moe_skew_mult times the
+    // 1/ep_size mean share. Must be strictly greater than 1.0.
+    double      moe_skew_mult              = 2.0;
     std::string moe_strategy               = "auto";
     std::string fp4_moe_op                 = "auto";
     std::string to_string() const;
