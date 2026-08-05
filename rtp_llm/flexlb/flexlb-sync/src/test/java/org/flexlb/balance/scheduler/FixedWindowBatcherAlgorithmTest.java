@@ -8,7 +8,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -19,15 +18,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Pure decision tests for {@link FixedWindowBatcherAlgorithm#decide}.
+ *
+ * <p>The algorithm has no side effects, so every test asserts the returned
+ * {@link BatchDecision} (and that the queue is left untouched) instead of
+ * verifying endpoint or reporter interactions.
+ */
 class FixedWindowBatcherAlgorithmTest {
 
     @Test
@@ -55,13 +59,20 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     @Test
-    void sloCaseDispatchesWhenPredictionReachesThreshold() throws InterruptedException {
+    void emptyQueueYieldsNullDecision() {
+        BatcherContext context = context(
+                "test", null, sloCaseConfig(), queueWith(),
+                mock(BatchSchedulerReporter.class));
+
+        assertNull(new FixedWindowBatcherAlgorithm().decide(context));
+    }
+
+    @Test
+    void sloCaseDispatchesWhenPredictionReachesThreshold() {
         FlexlbConfig config = sloCaseConfig();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         when(predictor.predictBatchMs(anyList())).thenReturn(500.0);
 
         BatcherContext context = context(
@@ -70,39 +81,37 @@ class FixedWindowBatcherAlgorithmTest {
                         enqueuedItem(2, System.currentTimeMillis())),
                 mock(BatchSchedulerReporter.class));
 
-        new FixedWindowBatcherAlgorithm().processQueue(context);
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
 
-        ArgumentCaptor<List<BatchItem>> items = ArgumentCaptor.forClass(List.class);
-        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(endpoint).submitBatch(items.capture(), meta.capture());
-        assertEquals(2, items.getValue().size());
-        assertEquals("predict_threshold", meta.getValue().reason());
+        BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
+        assertEquals(2, dispatch.items().size());
+        assertEquals("predict_threshold", dispatch.reason());
+        assertEquals(2, dispatch.queueSizeBefore());
+        // Pure decision: the queue is untouched
+        assertEquals(2, context.size());
     }
 
     @Test
-    void sloCaseDispatchesAtFixedWindowWhenPredictionIsBelowThreshold() throws InterruptedException {
+    void sloCaseDispatchesAtFixedWindowWhenPredictionIsBelowThreshold() {
         FlexlbConfig config = sloCaseConfig();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         BatcherContext context = context(
                 "test", endpoint, config,
                 queueWith(enqueuedItem(1, System.currentTimeMillis() - 170)),
                 mock(BatchSchedulerReporter.class));
 
-        new FixedWindowBatcherAlgorithm().processQueue(context);
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
 
-        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(endpoint).submitBatch(anyList(), meta.capture());
-        assertEquals("fixed_window_timeout", meta.getValue().reason());
+        BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
+        assertEquals("fixed_window_timeout", dispatch.reason());
+        assertEquals(1, dispatch.items().size());
+        assertTrue(dispatch.headWaitMs() >= 170);
     }
 
     @Test
-    void sloCaseDispatchesWhenBatchReachesMaxSize() throws InterruptedException {
+    void sloCaseDispatchesWhenBatchReachesMaxSize() {
         FlexlbConfig config = sloCaseConfig();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         BatchItem[] items = new BatchItem[32];
         long now = System.currentTimeMillis() - 1_000;
         for (int index = 0; index < items.length; index++) {
@@ -112,17 +121,54 @@ class FixedWindowBatcherAlgorithmTest {
                 "test", endpoint, config, queueWith(items),
                 mock(BatchSchedulerReporter.class));
 
-        new FixedWindowBatcherAlgorithm().processQueue(context);
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
 
-        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
-        verify(endpoint).submitBatch(dispatched.capture(), meta.capture());
-        assertEquals(32, dispatched.getValue().size());
-        assertEquals("batch_full", meta.getValue().reason());
+        BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
+        assertEquals(32, dispatch.items().size());
+        assertEquals("batch_full", dispatch.reason());
+        assertEquals(32, dispatch.queueSizeBefore());
     }
 
     @Test
-    void fixedWindowBatchUsesEnginePaddedTokenCost() throws InterruptedException {
+    void backpressureYieldsNullParkDecision() {
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchFixedMaxInflightBatches(1);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.prefillInflightCount()).thenReturn(1);
+
+        BatcherContext context = context(
+                "test", endpoint, config,
+                queueWith(enqueuedItem(1, System.currentTimeMillis() - 1_000)),
+                mock(BatchSchedulerReporter.class));
+
+        assertNull(new FixedWindowBatcherAlgorithm().decide(context));
+        assertEquals(1, context.size());
+    }
+
+    @Test
+    void deadlineExceededHeadYieldsDropDecision() {
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchEnqueueDeadlineMs(100);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+
+        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 1_000, 10);
+        BatcherContext context = context(
+                "test", endpoint, config, queueWith(head),
+                mock(BatchSchedulerReporter.class));
+
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+
+        BatchDecision.Drop drop = assertInstanceOf(BatchDecision.Drop.class, decision);
+        assertEquals(BatchDecision.DropCause.QUEUE_DEADLINE_EXCEEDED, drop.cause());
+        assertEquals(head, drop.item());
+        assertTrue(drop.detail().contains("deadline_ms=100"));
+        // Pure decision: the item is neither removed nor settled
+        assertEquals(1, context.size());
+        assertFalse(head.future().isDone());
+    }
+
+    @Test
+    void fixedWindowBatchUsesEnginePaddedTokenCost() {
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchFixedWaitMs(0);
         config.setFlexlbBatchMaxCapacity(1_000);
@@ -132,8 +178,6 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxBatchTokensSize(100);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         long now = System.currentTimeMillis() - 1_000;
         BatcherContext context = context(
@@ -143,18 +187,17 @@ class FixedWindowBatcherAlgorithmTest {
                         enqueuedItem(3, now + 2, 30)),
                 mock(BatchSchedulerReporter.class));
 
-        new FixedWindowBatcherAlgorithm().processQueue(context);
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
 
-        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(endpoint).submitBatch(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
-        assertEquals(60L, dispatched.getValue().stream().mapToLong(BatchItem::seqLen).sum());
-        assertEquals(2, context.size());
-        assertEquals(2L, context.peek().requestId());
+        BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
+        assertEquals(List.of(1L), dispatch.items().stream().map(BatchItem::requestId).toList());
+        assertEquals(60L, dispatch.items().stream().mapToLong(BatchItem::seqLen).sum());
+        // Pure decision: all three items remain queued
+        assertEquals(3, context.size());
     }
 
     @Test
-    void largeMrcrRequestIsDispatchedAloneWhenPaddedBatchWouldOverflow() throws InterruptedException {
+    void largeMrcrRequestIsDispatchedAloneWhenPaddedBatchWouldOverflow() {
         final int engineBatchTokenLimit = 1_048_576;
 
         FlexlbConfig config = sloCaseConfig();
@@ -167,8 +210,6 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxBatchTokensSize(engineBatchTokenLimit);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         BatchItem[] items = new BatchItem[13];
         long now = System.currentTimeMillis() - 1_000;
@@ -181,16 +222,15 @@ class FixedWindowBatcherAlgorithmTest {
                 "test", endpoint, config, queueWith(items),
                 mock(BatchSchedulerReporter.class));
 
-        new FixedWindowBatcherAlgorithm().processQueue(context);
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
 
-        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(endpoint).submitBatch(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
-        assertEquals(12, context.size());
+        BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
+        assertEquals(List.of(1L), dispatch.items().stream().map(BatchItem::requestId).toList());
+        assertEquals(13, context.size());
     }
 
     @Test
-    void dynamicKvBudgetLimitsOnlyAdditionalBatchMembers() throws InterruptedException {
+    void dynamicKvBudgetLimitsOnlyAdditionalBatchMembers() {
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchFixedWaitMs(0);
 
@@ -200,8 +240,6 @@ class FixedWindowBatcherAlgorithmTest {
         status.getAvailableKvCacheTokens().set(70);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         long now = System.currentTimeMillis() - 1_000;
         BatcherContext context = context(
@@ -211,17 +249,14 @@ class FixedWindowBatcherAlgorithmTest {
                         enqueuedItem(3, now + 2, 5)),
                 mock(BatchSchedulerReporter.class));
 
-        new FixedWindowBatcherAlgorithm().processQueue(context);
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
 
-        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(endpoint).submitBatch(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
-        assertEquals(2, context.size());
-        assertEquals(2L, context.peek().requestId());
+        BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
+        assertEquals(List.of(1L), dispatch.items().stream().map(BatchItem::requestId).toList());
     }
 
     @Test
-    void everyDispatchedMrcrBatchSatisfiesEngineStrictTokenAdmission() throws InterruptedException {
+    void everyDispatchedMrcrBatchSatisfiesEngineStrictTokenAdmission() {
         final int requestCount = 32;
         final long seqLen = 32_769L;
         final int engineBatchTokenLimit = 1_048_576;
@@ -236,8 +271,6 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxBatchTokensSize(engineBatchTokenLimit);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         BatchItem[] items = new BatchItem[requestCount];
         long now = System.currentTimeMillis() - 1_000;
@@ -249,14 +282,18 @@ class FixedWindowBatcherAlgorithmTest {
                 mock(BatchSchedulerReporter.class));
 
         FixedWindowBatcherAlgorithm algorithm = new FixedWindowBatcherAlgorithm();
-        algorithm.processQueue(context);
-        algorithm.processQueue(context);
 
-        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(endpoint, times(2)).submitBatch(
-                dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        List<List<BatchItem>> batches = dispatched.getAllValues();
+        // Decision cycle 1 — batcher would remove the picked items, so
+        // simulate the execution step between the two pure decisions.
+        BatchDecision.Dispatch first = assertInstanceOf(
+                BatchDecision.Dispatch.class, algorithm.decide(context));
+        first.items().forEach(context::remove);
 
+        BatchDecision.Dispatch second = assertInstanceOf(
+                BatchDecision.Dispatch.class, algorithm.decide(context));
+        second.items().forEach(context::remove);
+
+        List<List<BatchItem>> batches = List.of(first.items(), second.items());
         assertEquals(List.of(31, 1), batches.stream().map(List::size).toList());
         assertEquals(requestCount, batches.stream().mapToInt(List::size).sum());
         for (List<BatchItem> batch : batches) {
@@ -268,7 +305,7 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     @Test
-    void maxSeqLenIsUsedWhenWorkerDoesNotReportBatchTokenLimit() throws InterruptedException {
+    void maxSeqLenIsUsedWhenWorkerDoesNotReportBatchTokenLimit() {
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchFixedWaitMs(0);
         config.setFlexlbBatchMaxCapacity(1_000);
@@ -277,8 +314,6 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxSeqLen(100);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
-        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         long now = System.currentTimeMillis();
         BatcherContext context = context(
@@ -286,16 +321,14 @@ class FixedWindowBatcherAlgorithmTest {
                 queueWith(enqueuedItem(1, now, 60), enqueuedItem(2, now + 1, 40)),
                 mock(BatchSchedulerReporter.class));
 
-        new FixedWindowBatcherAlgorithm().processQueue(context);
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
 
-        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(endpoint).submitBatch(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
-        assertEquals(1, context.size());
+        BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
+        assertEquals(List.of(1L), dispatch.items().stream().map(BatchItem::requestId).toList());
     }
 
     @Test
-    void requestAtEngineTokenLimitIsRejectedBeforeDispatch() throws InterruptedException {
+    void requestAtEngineTokenLimitIsRejectedBeforeDispatch() {
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchFixedWaitMs(0);
         config.setFlexlbBatchMaxCapacity(1_000);
@@ -310,13 +343,16 @@ class FixedWindowBatcherAlgorithmTest {
                 "test", endpoint, config, queueWith(item),
                 mock(BatchSchedulerReporter.class));
 
-        new FixedWindowBatcherAlgorithm().processQueue(context);
+        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
 
-        // Oversized item settles itself via failOffer: future completes with error
-        assertTrue(item.future().isDone());
-        assertFalse(item.future().join().isSuccess());
-        verify(endpoint, never()).submitBatch(anyList(), any(DispatchMeta.class));
-        assertEquals(0, context.size());
+        BatchDecision.Drop drop = assertInstanceOf(BatchDecision.Drop.class, decision);
+        assertEquals(BatchDecision.DropCause.EXCEEDS_BATCH_TOKEN_CAPACITY, drop.cause());
+        assertEquals(item, drop.item());
+        assertTrue(drop.detail().contains("seq_len=100"));
+        assertTrue(drop.detail().contains("capacity=100"));
+        // Pure decision: settlement happens in the batcher, not the algorithm
+        assertFalse(item.future().isDone());
+        assertEquals(1, context.size());
     }
 
     // ---- helpers ----

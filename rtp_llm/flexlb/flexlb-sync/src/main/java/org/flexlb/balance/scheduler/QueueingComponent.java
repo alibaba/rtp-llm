@@ -165,6 +165,15 @@ public class QueueingComponent {
         }
     }
 
+    /**
+     * Best-effort removal for cancelled requests. Unlike {@link #remove}, a
+     * miss is not an error: the request may already have been dequeued by a
+     * worker (or completed on the queue-full fast path before enqueue).
+     */
+    public void removeIfQueued(BalanceContext ctx) {
+        queue.remove(ctx);
+    }
+
     public int queueSize() {
         return queue.size();
     }
@@ -211,7 +220,8 @@ public class QueueingComponent {
 
     /**
      * Take a single valid request from the queue, waiting up to
-     * {@code blockTimeoutMs}. Requests whose queue wait already exceeds their
+     * {@code blockTimeoutMs}. Already-settled requests (e.g. cancelled while
+     * queued) are skipped; requests whose queue wait already exceeds their
      * generate timeout are expired in place ({@link TimeoutException} on the
      * raw future) and skipped.
      *
@@ -226,6 +236,11 @@ public class QueueingComponent {
                     return null;
                 }
                 ctx.setDequeueTime(System.currentTimeMillis());
+                if (ctx.getFuture() != null && ctx.getFuture().isDone()) {
+                    // Already terminal (cancelled or completed elsewhere) —
+                    // skip so the slot never blocks a live request.
+                    continue;
+                }
                 long waitTimeMs = System.currentTimeMillis() - ctx.getEnqueueTime();
                 long maxQueueWaitTimeMs = ctx.getRequest().getGenerateTimeout();
                 if (waitTimeMs > maxQueueWaitTimeMs) {

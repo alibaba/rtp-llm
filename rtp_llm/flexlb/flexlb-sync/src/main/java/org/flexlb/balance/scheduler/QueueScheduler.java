@@ -117,6 +117,18 @@ public class QueueScheduler extends DirectScheduler {
     }
 
     /**
+     * Cancel cascade: best-effort removal of the request from the routing
+     * queue so a cancelled request never keeps occupying a queue slot. The
+     * cancel already settled the pipeline future via the item's CAS; the raw
+     * worker future stays incomplete, so the worker-loop settled-skip is the
+     * second line of defence if the removal races a concurrent dequeue.
+     */
+    @Override
+    public void onCancel(InflightItem item) {
+        queueing.removeIfQueued(item.ctx());
+    }
+
+    /**
      * Retry-aware completion policy: retryable routing failures are re-queued
      * at the head (bounded by {@code maxRetryCount}; {@code <= 0} means
      * unlimited); everything else completes the future.

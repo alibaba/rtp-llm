@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 
@@ -10,15 +11,18 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Per-worker request batcher that owns the queue and lifecycle, delegating
- * dispatch decision logic to {@link FixedWindowBatcherAlgorithm}.
+ * Per-worker request batcher that owns the queue, lifecycle, and all side
+ * effects (dispatch execution, metric reporting, logging, parking),
+ * delegating the pure dispatch decision to {@link FixedWindowBatcherAlgorithm}.
  *
  * <p>One instance per Prefill worker. Requests are submitted via
- * {@link #offer(BatchItem)} and batched by the algorithm. Ready batches go
- * to {@link PrefillEndpoint#submitBatch} via the {@link BatcherContext};
+ * {@link #offer(BatchItem)} and batched by the algorithm. The run loop
+ * interprets each {@link BatchDecision}: ready batches go to
+ * {@link PrefillEndpoint#submitBatch} via the {@link BatcherContext};
  * rejected or expired items settle themselves through {@link BatchItem}
  * terminal transitions.
  */
@@ -64,7 +68,6 @@ public class WorkerBatcher {
         try {
             long sortKey = algorithm.computeSortKey(ctx, item);
             item.setSortKey(sortKey);
-            algorithm.onOffer(ctx, item, System.currentTimeMillis());
             queue.add(item);
         } catch (RuntimeException | Error e) {
             queueDepth.decrementAndGet();
@@ -87,7 +90,6 @@ public class WorkerBatcher {
     public void shutdown() {
         stopped = true;
         workerThread.interrupt();
-        algorithm.onShutdown(ctx);
         List<BatchItem> remaining = new ArrayList<>();
         ctx.drainTo(remaining);
         for (BatchItem item : remaining) {
@@ -102,13 +104,69 @@ public class WorkerBatcher {
         while (!stopped && !Thread.currentThread().isInterrupted()) {
             try {
                 waitForNonEmpty();
-                algorithm.processQueue(ctx);
+                BatchDecision decision = algorithm.decide(ctx);
+                if (decision == null) {
+                    // No action this cycle (park / engine backpressure)
+                    TimeUnit.MILLISECONDS.sleep(1);
+                    continue;
+                }
+                switch (decision) {
+                    case BatchDecision.Dispatch d -> executeDispatch(d);
+                    case BatchDecision.Drop d -> executeDrop(d);
+                }
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Throwable t) {
                 Logger.error("WorkerBatcher[{}] loop failed", key, t);
             }
+        }
+    }
+
+    /**
+     * Execute a {@link BatchDecision.Dispatch}: report metrics, log the
+     * decision, then remove the items from the queue and hand the batch to
+     * the endpoint.
+     */
+    private void executeDispatch(BatchDecision.Dispatch d) {
+        String role = RoleType.PREFILL.name();
+        String ip = ctx.prefillEp().getIp();
+        ctx.reporter().reportDispatchReason(role, ip, d.reason());
+        ctx.reporter().reportBatchSize(role, ip, d.reason(), d.items().size());
+
+        // Compute batch-aggregated cache hit ratio
+        long totalSeqLen = 0;
+        long totalHitCache = 0;
+        for (BatchItem item : d.items()) {
+            totalSeqLen += item.seqLen();
+            totalHitCache += item.hitCache();
+        }
+        ctx.reporter().reportBatchCacheHitMetrics(role, ip, totalHitCache, totalSeqLen);
+        ctx.reporter().reportBatchTotalTokens(role, ip, d.reason(), totalSeqLen);
+
+        Logger.debug("flexlb_batch_decision reason={} picked_size={} "
+                        + "wait_ms={} queue_before={} worker={} head_req_id={}",
+                d.reason(), d.items().size(), d.headWaitMs(),
+                d.queueSizeBefore(), ctx.key(), d.items().get(0).requestId());
+
+        ctx.dispatch(d.items(),
+                new DispatchMeta(d.reason(), ctx.size() - d.items().size()));
+    }
+
+    /**
+     * Execute a {@link BatchDecision.Drop}: log (deadline expiry only), then
+     * remove the head item from the queue and settle it through the matching
+     * {@link BatchItem} terminal transition.
+     */
+    private void executeDrop(BatchDecision.Drop d) {
+        switch (d.cause()) {
+            case QUEUE_DEADLINE_EXCEEDED -> {
+                Logger.warn("flexlb_batch_drop request_id={} reason=queue_deadline_exceeded {}",
+                        d.item().requestId(), d.detail());
+                ctx.dropHead(d.item());
+            }
+            case EXCEEDS_BATCH_TOKEN_CAPACITY ->
+                    ctx.rejectForBatchTokenCapacity(d.item(), ctx.batchTokenCapacity());
         }
     }
 

@@ -115,8 +115,9 @@ class PrefillEndpointDispatchTest {
     @Test
     void alreadyCompletedItemsAreNotDispatched() {
         BatchItem item = createItem(1L);
-        item.future().complete(Response.error(
-                org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED));
+        // Settle through the item's own terminal method (queue-expiry path)
+        // instead of completing the future externally.
+        item.failExpired();
 
         endpoint.submitBatch(List.of(item), meta());
 

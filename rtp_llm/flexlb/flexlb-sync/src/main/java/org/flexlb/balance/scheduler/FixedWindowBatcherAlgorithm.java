@@ -1,16 +1,19 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.strategy.PrefillTimePredictor;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Fixed-window batching algorithm with batch-full early dispatch, optional
  * predictor-based early dispatch, queue deadline drop, and resource-shape filtering.
+ *
+ * <p>The algorithm is a <b>pure decision function</b>: {@link #decide} only
+ * reads batcher state through {@link BatcherReadView} and returns a
+ * {@link BatchDecision} (or {@code null} for park / backpressure). All side
+ * effects — queue mutation, dispatch, metric reporting, logging, parking —
+ * are executed by {@link WorkerBatcher}.
  *
  * <h3>Algorithm</h3>
  * <ol>
@@ -53,43 +56,28 @@ public class FixedWindowBatcherAlgorithm {
      * item is enqueued; the result is stored via
      * {@link BatchItem#setSortKey(long)}.
      */
-    public long computeSortKey(BatcherContext ctx, BatchItem item) {
+    public long computeSortKey(BatcherReadView view, BatchItem item) {
         // FIFO: arrival timestamp as sort key
         return item.enqueuedAtMs();
     }
 
     /**
-     * Hook called by {@link WorkerBatcher#offer} after the sort key is
-     * computed and set. No arrival bookkeeping is needed for fixed-window
-     * batching.
-     */
-    public void onOffer(BatcherContext ctx, BatchItem item, long nowMs) {
-    }
-
-    /**
-     * Hook called by {@link WorkerBatcher#shutdown} before the queue is
-     * drained. No internal state to clean up for fixed-window batching.
-     */
-    public void onShutdown(BatcherContext ctx) {
-    }
-
-    /**
      * Estimated time a new request would wait before its batch is dispatched.
      */
-    public long queueWaitMs(BatcherContext ctx) {
-        long now = ctx.now();
-        long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
-        int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
+    public long queueWaitMs(BatcherReadView view) {
+        long now = view.now();
+        long fixedWaitMs = view.cfg().getFlexlbBatchFixedWaitMs();
+        int batchMaxCount = Math.max(1, view.cfg().getFlexlbBatchSizeMax());
 
         // 空队列 — 新请求启动新的 batch 周期
-        if (ctx.isEmpty()) {
+        if (view.isEmpty()) {
             if (batchMaxCount <= 1) {
                 return 0;
             }
             return fixedWaitMs;
         }
 
-        BatchItem head = ctx.peek();
+        BatchItem head = view.peek();
         if (head == null) {
             // 竞态：isEmpty() 和 peek() 之间队列被清空
             return fixedWaitMs;
@@ -101,7 +89,7 @@ public class FixedWindowBatcherAlgorithm {
         }
 
         long elapsedMs = now - head.enqueuedAtMs();
-        int queueSize = ctx.size();
+        int queueSize = view.size();
 
         // 新请求恰好填满一个 batch（当前 batch 或前置 dispatch 后的最后一个 batch）
         // 前面的满 batch 通过 step 2 (batch_full) 连续 dispatch，之间无 sleep 延迟
@@ -127,34 +115,37 @@ public class FixedWindowBatcherAlgorithm {
     }
 
     /**
-     * Core decision loop. Called by {@link WorkerBatcher#runLoop()} each
-     * iteration when the queue is non-empty. On each call it either
-     * dispatches items via {@link BatcherContext#dispatch}, drops the head
-     * item via {@link BatcherContext#dropHead}, or parks briefly and
-     * returns, letting the caller re-invoke.
+     * Core decision method. Called by {@link WorkerBatcher#runLoop()} each
+     * iteration when the queue is non-empty. Pure function of the read view:
+     * no queue mutation, no dispatch, no metrics, no logging, no sleeping.
+     *
+     * @return the decision for this cycle, or {@code null} when there is no
+     *         action to take (park / engine backpressure) and the caller
+     *         should park briefly and re-invoke
      */
-    public void processQueue(BatcherContext ctx) throws InterruptedException {
-        if (ctx.isEmpty()) {
-            return;
+    public BatchDecision decide(BatcherReadView view) {
+        if (view.isEmpty()) {
+            return null;
         }
 
-        BatchItem head = ctx.peek();
+        BatchItem head = view.peek();
         if (head == null) {
-            return;
+            return null;
         }
 
-        long elapsedMs = ctx.now() - head.enqueuedAtMs();
-        long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
-        int batchMaxCount = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
-        long predictThresholdMs = ctx.cfg().getFlexlbBatchPredictThresholdMs();
-        long batchMaxTokens = ctx.batchTokenCapacity();
+        long elapsedMs = view.now() - head.enqueuedAtMs();
+        long fixedWaitMs = view.cfg().getFlexlbBatchFixedWaitMs();
+        int batchMaxCount = Math.max(1, view.cfg().getFlexlbBatchSizeMax());
+        long predictThresholdMs = view.cfg().getFlexlbBatchPredictThresholdMs();
+        long batchMaxTokens = view.batchTokenCapacity();
 
         // The Engine admits a group only when padded context tokens are strictly
         // below max_batch_tokens_size. Reject an impossible head explicitly so
         // it cannot block the FIFO queue or cause an entire group to fast-fail.
         if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
-            ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
-            return;
+            return new BatchDecision.Drop(head,
+                    BatchDecision.DropCause.EXCEEDS_BATCH_TOKEN_CAPACITY,
+                    "seq_len=" + head.seqLen() + " capacity=" + batchMaxTokens);
         }
 
         // 0. Queue deadline: drop the head request if it has waited longer
@@ -162,57 +153,53 @@ public class FixedWindowBatcherAlgorithm {
         //     ensure stale requests are cleared even when the engine is
         //     under sustained backpressure — otherwise the deadline check
         //     would never execute and expired requests would accumulate.
-        long queueDeadlineMs = ctx.cfg().getFlexlbBatchEnqueueDeadlineMs();
+        long queueDeadlineMs = view.cfg().getFlexlbBatchEnqueueDeadlineMs();
         if (queueDeadlineMs > 0 && elapsedMs > queueDeadlineMs) {
-            Logger.warn("flexlb_batch_drop request_id={} reason=queue_deadline_exceeded "
-                            + "elapsed_ms={} deadline_ms={}",
-                    head.requestId(), elapsedMs, queueDeadlineMs);
-            ctx.dropHead(head);
-            return;
+            return new BatchDecision.Drop(head,
+                    BatchDecision.DropCause.QUEUE_DEADLINE_EXCEEDED,
+                    "elapsed_ms=" + elapsedMs + " deadline_ms=" + queueDeadlineMs);
         }
 
         // 1. Engine backpressure: park if the prefill worker already has too
         //    many batches inflight, to prevent overloading the engine.
-        int maxInflightBatches = ctx.cfg().getFlexlbBatchFixedMaxInflightBatches();
-        int inflightBatches = ctx.prefillEp().prefillInflightCount() + ctx.prefillEp().prefillEngineTaskCount();
-        if (maxInflightBatches > 0 && inflightBatches >= maxInflightBatches) {
-            TimeUnit.MILLISECONDS.sleep(1);
-            return;
+        int maxInflightBatches = view.cfg().getFlexlbBatchFixedMaxInflightBatches();
+        if (maxInflightBatches > 0 && view.currentInflightCount() >= maxInflightBatches) {
+            return null;
         }
 
         // 2. Queue size >= batchMaxCount → dispatch immediately (batch full)
-        if (ctx.size() >= batchMaxCount) {
+        int queueSizeBefore = view.size();
+        if (queueSizeBefore >= batchMaxCount) {
             List<BatchItem> picked = pickWithinCapacity(
-                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
+                    view, batchMaxCount, batchMaxTokens, view.batchKvCapacity());
             if (!picked.isEmpty()) {
-                dispatch(ctx, picked, "batch_full");
+                return new BatchDecision.Dispatch(picked, "batch_full", elapsedMs, queueSizeBefore);
             }
-            return;
+            return null;
         }
 
         // 3. Queue size < batchMaxCount → check window timeout
         if (elapsedMs >= fixedWaitMs) {
             List<BatchItem> picked = pickWithinCapacity(
-                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
+                    view, batchMaxCount, batchMaxTokens, view.batchKvCapacity());
             if (!picked.isEmpty()) {
-                dispatch(ctx, picked, "fixed_window_timeout");
+                return new BatchDecision.Dispatch(picked, "fixed_window_timeout", elapsedMs, queueSizeBefore);
             }
-            return;
+            return null;
         }
 
         // 4. Predictor-based early dispatch
         if (predictThresholdMs > 0) {
-            PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
+            PrefillTimePredictor predictor = view.predictor();
             List<BatchItem> candidates = pickWithinCapacity(
-                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
+                    view, batchMaxCount, batchMaxTokens, view.batchKvCapacity());
             if (!candidates.isEmpty() && predictor.predictBatchMs(candidates) >= predictThresholdMs) {
-                dispatch(ctx, candidates, "predict_threshold");
-                return;
+                return new BatchDecision.Dispatch(candidates, "predict_threshold", elapsedMs, queueSizeBefore);
             }
         }
 
         // 5. Park
-        TimeUnit.MILLISECONDS.sleep(1);
+        return null;
     }
 
     // ==================== Internal helpers ====================
@@ -225,13 +212,13 @@ public class FixedWindowBatcherAlgorithm {
      * KV pressure only prevents adding more members to this batch. The Engine
      * remains the final admission authority for the singleton request.
      */
-    private static List<BatchItem> pickWithinCapacity(BatcherContext ctx,
+    private static List<BatchItem> pickWithinCapacity(BatcherReadView view,
                                                        int maxCount,
                                                        long batchMaxTokens,
                                                        long batchKvTokens) {
         List<BatchItem> picked = new ArrayList<>();
         BatchShape shape = BatchShape.empty();
-        for (BatchItem item : ctx.sortedItems()) {
+        for (BatchItem item : view.sortedItems()) {
             if (picked.size() >= maxCount) {
                 break;
             }
@@ -246,30 +233,5 @@ public class FixedWindowBatcherAlgorithm {
             shape = candidate;
         }
         return picked;
-    }
-
-    private static void dispatch(BatcherContext ctx, List<BatchItem> picked, String reason) {
-        BatchItem head = picked.get(0);
-        long waitMs = ctx.now() - head.enqueuedAtMs();
-
-        ctx.reporter().reportDispatchReason(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason);
-        ctx.reporter().reportBatchSize(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, picked.size());
-
-        // Compute batch-aggregated cache hit ratio
-        long totalSeqLen = 0;
-        long totalHitCache = 0;
-        for (BatchItem item : picked) {
-            totalSeqLen += item.seqLen();
-            totalHitCache += item.hitCache();
-        }
-        ctx.reporter().reportBatchCacheHitMetrics(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), totalHitCache, totalSeqLen);
-        ctx.reporter().reportBatchTotalTokens(RoleType.PREFILL.name(), ctx.prefillEp().getIp(), reason, totalSeqLen);
-
-        Logger.debug("flexlb_batch_decision reason={} picked_size={} "
-                        + "wait_ms={} queue_before={} worker={} head_req_id={}",
-                reason, picked.size(), waitMs, ctx.size(), ctx.key(), head.requestId());
-
-        ctx.dispatch(picked,
-                new DispatchMeta(reason, ctx.size() - picked.size()));
     }
 }

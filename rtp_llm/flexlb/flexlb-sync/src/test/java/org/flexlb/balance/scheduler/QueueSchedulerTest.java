@@ -178,6 +178,34 @@ class QueueSchedulerTest {
         verify(metrics).reportTimeout();
     }
 
+    // ==================== Cancel cascade (queue slot release) ====================
+
+    @Test
+    void cancel_shouldReleaseQueueSlotThroughOnCancelCascade() {
+        // Workers not started — the request stays queued, occupying a slot.
+        CompletableFuture<Response> result = scheduler.submit(createContext(1L));
+        assertEquals(1, scheduler.queueSize());
+
+        assertTrue(scheduler.cancel("1"));
+
+        assertEquals(0, scheduler.queueSize()); // slot freed, not dead-occupied
+        assertTrue(result.isCompletedExceptionally());
+        assertTrue(inflightStore.get("1").isTerminated());
+    }
+
+    @Test
+    void cancel_onCancelCascadeIsBestEffortIdempotent() {
+        scheduler.submit(createContext(1L));
+        InflightItem item = inflightStore.get("1");
+
+        assertTrue(item.cancel());
+        item.scheduler().onCancel(item); // queued → removed
+        assertEquals(0, scheduler.queueSize());
+        // A second cascade against an absent entry must not throw.
+        item.scheduler().onCancel(item);
+        assertEquals(0, scheduler.queueSize());
+    }
+
     private BalanceContext createContext(long requestId) {
         BalanceContext ctx = new BalanceContext();
         Request request = new Request();

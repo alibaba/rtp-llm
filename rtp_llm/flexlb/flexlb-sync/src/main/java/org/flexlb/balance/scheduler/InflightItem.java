@@ -95,7 +95,13 @@ public final class InflightItem implements InflightEntry {
         return ctx;
     }
 
-    public CompletableFuture<Response> future() {
+    /**
+     * Package-private on purpose: the future's completion authority belongs to
+     * this item's terminal methods ({@link #complete}, {@link #fail},
+     * {@link #timeout}, {@link #cancel}, {@link #timeoutWithError}). External
+     * code should query {@link #isTerminated()} / {@link #state()} instead.
+     */
+    CompletableFuture<Response> future() {
         return future;
     }
 
@@ -221,16 +227,30 @@ public final class InflightItem implements InflightEntry {
      * its batch, and completes the future normally.
      */
     public void complete(Response response) {
-        InflightState targetState = response.isSuccess() ? InflightState.COMPLETED : InflightState.FAILED;
-        if (!transitionTo(targetState)) return;
+        boolean success = response.isSuccess();
+        complete(response,
+                success ? InflightState.COMPLETED : InflightState.FAILED,
+                success ? TerminalReason.COMPLETED : TerminalReason.FAILED);
+    }
+
+    /**
+     * Shared CAS-guarded settle path delivering a {@link Response} through the
+     * future: transition to the target terminal state, release EP-level
+     * resources, remove the item from its batch, report the terminal metric,
+     * and complete the future with the response.
+     *
+     * @return {@code true} if this call won the CAS (first terminal transition)
+     */
+    private boolean complete(Response response, InflightState targetState, TerminalReason reason) {
+        if (!transitionTo(targetState)) return false;
         if (prefillEp != null) prefillEp.release(ctx.getRequestId());
         if (decodeEp != null) decodeEp.release(ctx.getRequestId());
         if (batch != null) {
             batch.removeItem(this);
         }
-        TerminalReason reason = response.isSuccess() ? TerminalReason.COMPLETED : TerminalReason.FAILED;
         reportTerminalMetric(reason);
         future.complete(response);
+        return true;
     }
 
     /**
@@ -296,31 +316,22 @@ public final class InflightItem implements InflightEntry {
     /**
      * Time out the request with an error {@link Response} delivered through
      * the future — TTL safety net for requests that never reached a terminal
-     * state (e.g. a lost ACK). The error type is owned by the scheduler that
-     * registered the item ({@link AbstractScheduler#ttlExpiryErrorType()}):
-     * BATCH items expire with {@link StrategyErrorType#BATCH_SLO_EXPIRED},
-     * QUEUE/DIRECT items with {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED}.
-     * Items registered without a scheduler fall back to
-     * {@link StrategyErrorType#BATCH_SLO_EXPIRED} (legacy placeholder
-     * semantics).
+     * state (e.g. a lost ACK). All scheduling paths (BATCH/QUEUE/DIRECT)
+     * uniformly expire with {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED};
+     * the batch dispatch-timeout paths keep their own
+     * {@code BATCH_SLO_EXPIRED} semantics inside {@link BatchItem}.
      *
-     * <p>The future completes with the error response first, then the
-     * CAS-guarded {@link #timeout()} performs the terminal transition and
-     * resource release (its completeExceptionally on the already-done future
-     * is a no-op, so the error response is preserved).
+     * <p>Reuses the CAS-guarded {@link #complete} settle path with the
+     * {@link TerminalReason#TIMED_OUT} terminal kind, so the error response,
+     * resource release, and metric reporting all happen inside the single
+     * terminal transition — no external future completion.
      *
      * @return {@code true} if this call won the CAS
      */
     public boolean timeoutWithError() {
-        if (!future.isDone()) {
-            StrategyErrorType errorType = scheduler == null
-                    ? StrategyErrorType.BATCH_SLO_EXPIRED
-                    : scheduler.ttlExpiryErrorType();
-            Response errorResp = Response.error(errorType);
-            errorResp.setErrorMessage("inflight TTL expired");
-            future.complete(errorResp);
-        }
-        return timeout();
+        Response errorResp = Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED);
+        errorResp.setErrorMessage("inflight TTL expired");
+        return complete(errorResp, InflightState.TIMED_OUT, TerminalReason.TIMED_OUT);
     }
 
     // ---- terminal metric reporting ----

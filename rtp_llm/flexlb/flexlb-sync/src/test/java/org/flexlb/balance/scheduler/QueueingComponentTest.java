@@ -136,6 +136,19 @@ class QueueingComponentTest {
         assertEquals(0, queueing.queueSize());
     }
 
+    @Test
+    void removeIfQueued_shouldBeSilentNoOpWhenAbsent() {
+        BalanceContext ctx = createContext(1L);
+        queueing.enqueue(ctx);
+
+        queueing.removeIfQueued(ctx);
+        assertEquals(0, queueing.queueSize());
+
+        // Best-effort: removing an already-absent request must not throw.
+        queueing.removeIfQueued(ctx);
+        assertEquals(0, queueing.queueSize());
+    }
+
     // ==================== Worker loop semantics ====================
 
     @Test
@@ -192,6 +205,30 @@ class QueueingComponentTest {
             assertEquals(TimeoutException.class, e.getCause().getClass());
         }
         assertTrue(consumed.isEmpty());
+    }
+
+    @Test
+    void workerLoop_shouldSkipAlreadySettledRequest() throws Exception {
+        when(dynamicWorkerManager.tryAcquirePermit(anyLong(), any())).thenReturn(true);
+
+        // First in queue: already settled (e.g. cancelled while queued).
+        BalanceContext settled = createContext(1L);
+        CompletableFuture<Response> settledFuture = new CompletableFuture<>();
+        settledFuture.complete(Response.error(StrategyErrorType.QUEUE_FULL));
+        settled.setFuture(settledFuture);
+        assertTrue(queueing.enqueue(settled));
+
+        BalanceContext live = createContext(2L);
+        live.setFuture(new CompletableFuture<>());
+        assertTrue(queueing.enqueue(live));
+
+        queueing.start();
+        awaitConsumed(1);
+        // The settled request is skipped; only the live one reaches the consumer.
+        assertEquals(2L, consumed.get(0).getRequestId());
+        Thread.sleep(200);
+        assertEquals(1, consumed.size());
+        assertEquals(0, queueing.queueSize());
     }
 
     private void awaitConsumed(int expected) throws InterruptedException {

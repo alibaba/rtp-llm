@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -14,13 +15,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Controlled access to shared {@link WorkerBatcher} infrastructure.
  *
- * <p>Passed to {@link FixedWindowBatcherAlgorithm} methods so the algorithm can
- * inspect and mutate the queue, read config, and settle batching decisions
- * without directly depending on WorkerBatcher internals. Ready batches go
- * straight to {@link PrefillEndpoint#submitBatch}; rejected or expired items
- * settle themselves through {@link BatchItem} terminal transitions.
+ * <p>The read-only subset is exposed to {@link FixedWindowBatcherAlgorithm}
+ * through the {@link BatcherReadView} interface so the algorithm can inspect
+ * the queue, config, and engine state without producing side effects. The
+ * mutating execution methods ({@link #dispatch}, {@link #dropHead},
+ * {@link #rejectForBatchTokenCapacity}, {@link #remove}, {@link #drainTo})
+ * remain package-private for {@link WorkerBatcher} to execute decisions.
+ * Ready batches go straight to {@link PrefillEndpoint#submitBatch}; rejected
+ * or expired items settle themselves through {@link BatchItem} terminal
+ * transitions.
  */
-public class BatcherContext {
+public class BatcherContext implements BatcherReadView {
 
     private final String key;
     private final PrefillEndpoint prefillEp;
@@ -49,7 +54,8 @@ public class BatcherContext {
 
     // ---- accessors ----
 
-    String key() {
+    @Override
+    public String key() {
         return key;
     }
 
@@ -57,7 +63,8 @@ public class BatcherContext {
         return prefillEp;
     }
 
-    FlexlbConfig cfg() {
+    @Override
+    public FlexlbConfig cfg() {
         return cfg;
     }
 
@@ -65,21 +72,37 @@ public class BatcherContext {
         return reporter;
     }
 
-    long now() {
+    @Override
+    public long now() {
         return System.currentTimeMillis();
+    }
+
+    /** Current inflight batch count on the prefill worker, for backpressure. */
+    @Override
+    public int currentInflightCount() {
+        return prefillEp.prefillInflightCount() + prefillEp.prefillEngineTaskCount();
+    }
+
+    /** Prefill-time predictor for predictor-based early dispatch (read-only). */
+    @Override
+    public PrefillTimePredictor predictor() {
+        return prefillEp.getPredictor();
     }
 
     // ---- queue inspection ----
 
-    BatchItem peek() {
+    @Override
+    public BatchItem peek() {
         return queue.peek();
     }
 
-    boolean isEmpty() {
+    @Override
+    public boolean isEmpty() {
         return queueDepth.get() == 0;
     }
 
-    int size() {
+    @Override
+    public int size() {
         return queueDepth.get();
     }
 
@@ -104,7 +127,8 @@ public class BatcherContext {
      * Items sorted by {@link BatchItem#sortKey()}, suitable for
      * greedy-fill iteration in dispatch algorithms.
      */
-    List<BatchItem> sortedItems() {
+    @Override
+    public List<BatchItem> sortedItems() {
         List<BatchItem> candidates = new ArrayList<>(queue);
         candidates.sort(Comparator.comparingLong(BatchItem::sortKey));
         return candidates;
@@ -120,7 +144,8 @@ public class BatcherContext {
      * fallback for workers that have not populated the newer field yet. The
      * FlexLB setting remains an operator-controlled upper bound.
      */
-    long batchTokenCapacity() {
+    @Override
+    public long batchTokenCapacity() {
         long capacity = positiveOrUnlimited(cfg.getFlexlbBatchMaxCapacity());
         WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
         if (status == null) {
@@ -138,7 +163,8 @@ public class BatcherContext {
      * Latest worker-reported KV budget. A zero total means the worker has not
      * published KV capacity yet, so batching remains compute-bound only.
      */
-    long batchKvCapacity() {
+    @Override
+    public long batchKvCapacity() {
         WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
         long total = status == null ? 0 : status.getTotalKvCacheTokens().get();
         if (total <= 0) {
@@ -164,8 +190,9 @@ public class BatcherContext {
 
     /**
      * Remove items from queue and hand the ready batch to the endpoint.
-     * Caller is responsible for algorithm-specific logging and state cleanup
-     * (e.g. {@code lastParkByRequest.remove()}) before calling this.
+     * Called by {@link WorkerBatcher} when executing a
+     * {@link BatchDecision.Dispatch}; the batcher is responsible for metric
+     * reporting and decision logging before calling this.
      */
     void dispatch(List<BatchItem> items, DispatchMeta meta) {
         for (BatchItem item : items) {
@@ -176,8 +203,10 @@ public class BatcherContext {
 
     /**
      * Remove head from queue and settle it as expired.
-     * Only called by algorithms that support deadline-based expiry.
-     * Caller is responsible for algorithm-specific logging and state cleanup.
+     * Called by {@link WorkerBatcher} when executing a
+     * {@link BatchDecision.Drop} with cause
+     * {@link BatchDecision.DropCause#QUEUE_DEADLINE_EXCEEDED}; the batcher
+     * is responsible for drop logging before calling this.
      */
     void dropHead(BatchItem head) {
         remove(head);

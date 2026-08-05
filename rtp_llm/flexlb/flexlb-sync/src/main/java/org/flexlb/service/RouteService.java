@@ -128,8 +128,10 @@ public class RouteService {
      * Cancel an inflight request by its string-form request ID.
      *
      * <p>Looks up the {@link InflightItem} in the global inflight store and
-     * atomically cancels it via CAS. Returns {@code false} if the request was
-     * not found (already completed or never tracked).
+     * atomically cancels it via CAS. When the cancel wins the CAS, the owning
+     * scheduler's {@code onCancel} hook is cascaded so path-specific resources
+     * (e.g. a queue slot) are released. Returns {@code false} if the request
+     * was not found (already completed or never tracked).
      *
      * @param requestId string-form request ID
      * @return {@code true} if the request was found and cancelled
@@ -139,7 +141,11 @@ public class RouteService {
         if (item == null) {
             return false;
         }
-        return item.cancel();
+        boolean cancelled = item.cancel();
+        if (cancelled && item.scheduler() != null) {
+            item.scheduler().onCancel(item);
+        }
+        return cancelled;
     }
 
     /**

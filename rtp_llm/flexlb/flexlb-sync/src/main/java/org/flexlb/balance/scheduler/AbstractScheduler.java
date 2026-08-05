@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 
 import java.util.concurrent.CompletableFuture;
@@ -78,8 +77,10 @@ public abstract class AbstractScheduler {
      * Cancel an inflight request by its string-form request ID.
      *
      * <p>Looks up the {@link InflightItem} in the global store and atomically
-     * cancels it via CAS. Returns {@code false} if the request was not found
-     * (already evicted or never tracked) or is already terminal.
+     * cancels it via CAS. When the cancel wins the CAS, the owning scheduler's
+     * {@link #onCancel} hook is invoked to release path-specific resources.
+     * Returns {@code false} if the request was not found (already evicted or
+     * never tracked) or is already terminal.
      *
      * @param requestId string-form request ID (see {@link InflightItem#requestId()})
      * @return {@code true} if the request was found and cancelled
@@ -89,19 +90,24 @@ public abstract class AbstractScheduler {
         if (item == null) {
             return false;
         }
-        return item.cancel();
+        boolean cancelled = item.cancel();
+        if (cancelled && item.scheduler() != null) {
+            item.scheduler().onCancel(item);
+        }
+        return cancelled;
     }
 
     /**
-     * Error type delivered when a request tracked by this scheduler is timed
-     * out by the {@link InflightStore} TTL safety net
-     * ({@link InflightItem#timeoutWithError()}).
+     * Hook invoked after a cancel wins the terminal CAS, letting the owning
+     * scheduler release path-specific resources (e.g. a queue slot) with
+     * best-effort semantics — the request may already have left the
+     * scheduler's structures.
      *
-     * <p>Default: {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED}. The batch
-     * path overrides this to keep its SLO-expiry error semantics.
+     * <p>Default implementation is a no-op. Public (not protected) because
+     * the cascade is driven from {@code RouteService} in another package.
      */
-    protected StrategyErrorType ttlExpiryErrorType() {
-        return StrategyErrorType.INFLIGHT_TTL_EXPIRED;
+    public void onCancel(InflightItem item) {
+        // default: no path-specific cancel cleanup
     }
 
     /**

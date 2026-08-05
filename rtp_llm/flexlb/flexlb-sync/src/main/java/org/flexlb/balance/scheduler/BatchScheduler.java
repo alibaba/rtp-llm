@@ -36,8 +36,10 @@ import java.util.concurrent.CompletableFuture;
  * non-success completion (TTL expiry, cancel); both operations are
  * idempotent, so overlapping with the endpoint-side paths is safe.
  *
- * <p>TTL expiry of a batch item keeps the batch error semantics:
- * {@link StrategyErrorType#BATCH_SLO_EXPIRED} (see {@link #ttlExpiryErrorType()}).
+ * <p>TTL expiry of a batch item follows the unified inflight semantics:
+ * {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED} (see
+ * {@link InflightItem#timeoutWithError()}); batch dispatch timeouts keep
+ * {@code BATCH_SLO_EXPIRED} inside {@link BatchItem}.
  */
 public class BatchScheduler extends AbstractScheduler {
 
@@ -150,17 +152,6 @@ public class BatchScheduler extends AbstractScheduler {
                     "Submit failed: " + t.getMessage());
         }
         return future;
-    }
-
-    // ==================== TTL expiry semantics ====================
-
-    /**
-     * Batch items that hit the inflight TTL safety net expire with the batch
-     * SLO error, keeping the pre-refactor batch error semantics.
-     */
-    @Override
-    protected StrategyErrorType ttlExpiryErrorType() {
-        return StrategyErrorType.BATCH_SLO_EXPIRED;
     }
 
     // ==================== Internal: resource rollback (pre-BatchItem paths) ====================
