@@ -6,11 +6,13 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -19,7 +21,7 @@ class ResourceWaterLevelTest {
     @Test
     void prefillWaterLevelUsesEngineWaitingQueueWhenItIsLarger() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setMaxPrefillQueueSize(20);
+        config.setPrefillQueueSizeThreshold(20);
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setWaitingTaskList(Map.of(
@@ -35,7 +37,7 @@ class ResourceWaterLevelTest {
     @Test
     void prefillWaterLevelUsesLocalOutstandingTasksWhenEngineStatusLags() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setMaxPrefillQueueSize(20);
+        config.setPrefillQueueSizeThreshold(20);
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setWaitingTaskList(Map.of("request-1", new TaskInfo()));
@@ -45,7 +47,7 @@ class ResourceWaterLevelTest {
     }
 
     @Test
-    void prefillResourceIsUnavailableWhenLocalOutstandingTasksReachThreshold() {
+    void prefillResourceStopsRoutingWhenLocalOutstandingTasksReachThreshold() {
         FlexlbConfig config = new FlexlbConfig();
         config.setPrefillQueueSizeThreshold(3);
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
@@ -55,6 +57,48 @@ class ResourceWaterLevelTest {
         addLocalTasks(workerStatus, 3);
 
         assertFalse(measure.isResourceAvailable(workerStatus));
+    }
+
+    @Test
+    void prefillWaterLevelReachesFullScaleAtAvailabilityThreshold() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setPrefillQueueSizeThreshold(3);
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
+        WorkerStatus workerStatus = new WorkerStatus();
+        addLocalTasks(workerStatus, 3);
+
+        assertEquals(100.0, measure.calculateWorkerWaterLevel(workerStatus));
+    }
+
+    @Test
+    void prefillAverageWaterLevelIsFullWhenEveryWorkerReachesAvailabilityThreshold() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setPrefillQueueSizeThreshold(3);
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
+        Map<String, WorkerStatus> workerStatusMap = new HashMap<>();
+
+        for (int i = 0; i < 10; i++) {
+            WorkerStatus workerStatus = new WorkerStatus();
+            addLocalTasks(workerStatus, 3);
+            workerStatusMap.put("worker-" + i, workerStatus);
+        }
+
+        assertEquals(100.0, measure.calculateAverageWaterLevel(workerStatusMap));
+    }
+
+    @Test
+    void prefillResourceBecomesAvailableImmediatelyBelowThreshold() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setPrefillQueueSizeThreshold(3);
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setAlive(true);
+        addLocalTasks(workerStatus, 3);
+
+        assertFalse(measure.isResourceAvailable(workerStatus));
+
+        workerStatus.getLocalTaskMap().remove("local-request-2");
+        assertTrue(measure.isResourceAvailable(workerStatus));
     }
 
     @Test

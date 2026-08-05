@@ -5,7 +5,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.sync.status.EngineWorkerStatus;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -20,14 +19,10 @@ import java.util.Map;
 @Component
 public class PrefillResourceMeasure implements ResourceMeasure {
     private final long queueSizeThreshold;
-    private final long hysteresisBiasPercent;
-    private final long maxQueueSize;
 
     public PrefillResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
         this.queueSizeThreshold = config.getPrefillQueueSizeThreshold();
-        this.hysteresisBiasPercent = config.getHysteresisBiasPercent();
-        this.maxQueueSize = config.getMaxPrefillQueueSize();
     }
 
     @Override
@@ -37,7 +32,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         }
 
         long queueSize = effectiveQueueSize(workerStatus);
-        return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
+        return queueSize < queueSizeThreshold;
     }
 
     @Override
@@ -73,10 +68,10 @@ public class PrefillResourceMeasure implements ResourceMeasure {
 
         if (queueSize <= 0) {
             return 0.0;
-        } else if (queueSize >= maxQueueSize) {
+        } else if (queueSize >= queueSizeThreshold) {
             return 100.0;
         } else {
-            return (queueSize * 100.0) / maxQueueSize;
+            return (queueSize * 100.0) / queueSizeThreshold;
         }
     }
 

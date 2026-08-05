@@ -136,11 +136,6 @@ public class FlexlbConfig {
      */
     private long resourceCheckIntervalMs = 10;
 
-    /**
-     * Prefill maximum queue size
-     */
-    private int maxPrefillQueueSize = 20;
-
     // ========== Resource Water Level Configuration ==========
 
     /**

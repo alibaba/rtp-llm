@@ -21,17 +21,16 @@
 | `maxRetryCount` | 0（不限） | 路由重试上限 |
 | `routingRetryIntervalMs` | 10 | 重试间隔 |
 | `taskConfirmTimeoutMs` | 300000 | IN_TRANSIT 任务确认超时 |
-| `prefillQueueSizeThreshold` | 3 | Prefill 可用性滞回阈值 |
+| `prefillQueueSizeThreshold` | 3 | Prefill 停止分流阈值（低于该值可选）及水位 100% 刻度 |
 | `prefillCacheHitDiscount` | 0.7 | cache 命中 token 折扣 |
 | `prefillCachePreferenceMinBlockGap` | 2 | 改选 cache leader 的最小领先块数 |
 | `shortestTtftSimilarityThresholdRatio` | 0.2 | ttft 相似阈值比例 |
 | `cacheAffinityFirstQueueToleranceFactor` | 2.0 | cache leader 额外排队容忍系数 |
 | `cacheAffinityFirstColdWorkerProbeIntervalMs` | 5000 | 冷 worker 探测间隔（0 关闭） |
 | `decodeAvailableMemoryThreshold` | 90 | Decode 可用性滞回阈值（%） |
-| `hysteresisBiasPercent` | 15 | 滞回带宽（%） |
+| `hysteresisBiasPercent` | 15 | Decode 可用性滞回带宽（%） |
 | `scheduleWorkerSize` | CPU 核数 | 调度线程数 = 最大许可数 |
 | `resourceCheckIntervalMs` | 10 | 许可重算间隔 |
-| `maxPrefillQueueSize` | 20 | Prefill 水位满格队列长度 |
 | `decodeFullSpeedThreshold` / `decodeStopThreshold` | 40 / 80 | Decode 水位线性区间（%） |
 | `nettySelectThreadMultiplier` / `nettyWorkerThreadMultiplier` | 1 / 2 | Netty 线程倍数 |
 
