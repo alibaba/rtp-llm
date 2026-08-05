@@ -185,9 +185,11 @@ public class BatcherContext {
     }
 
     // ---- versioned CAS API ----
+    // Public so external callers (e.g. PriorityAdmissionScheduler eviction path)
+    // can inspect and atomically mutate the queue via optimistic version control.
 
     /** Current monotonic version of the queue. */
-    long version() {
+    public synchronized long version() {
         return version.get();
     }
 
@@ -195,7 +197,7 @@ public class BatcherContext {
      * Immutable snapshot of the queue state with the current version.
      * Use the returned version as expectedVersion for CAS operations.
      */
-    QueueSnapshot snapshot() {
+    public synchronized QueueSnapshot snapshot() {
         List<BatchItem> sorted = sortedItems();
         List<QueueSnapshot.ItemSummary> summaries = sorted.stream()
                 .map(item -> new QueueSnapshot.ItemSummary(
@@ -207,36 +209,39 @@ public class BatcherContext {
 
     /**
      * Remove items by request ID if the queue version matches expectedVersion.
-     * Uses synchronized on the queue for atomicity.
      *
-     * @return true if version matched and items were removed; false if version mismatch
+     * <p>Returns the removed {@link BatchItem}s so the caller can complete
+     * their futures (e.g. with PRIORITY_PREEMPTED) and clean up inflight
+     * state. The whole operation is atomic under the BatcherContext lock.
+     *
+     * @return {@code null} if version mismatch (caller should re-plan);
+     *         a (possibly empty) list of removed items if version matched
      */
-    synchronized boolean tryRemove(Set<Long> requestIds, long expectedVersion) {
+    public synchronized List<BatchItem> tryRemove(Set<Long> requestIds, long expectedVersion) {
         if (version.get() != expectedVersion) {
-            return false;
+            return null;
         }
-        boolean anyRemoved = false;
+        List<BatchItem> removed = new ArrayList<>();
         for (BatchItem item : new ArrayList<>(queue)) {
             if (requestIds.contains(item.requestId())) {
                 if (queue.remove(item)) {
                     queueDepth.decrementAndGet();
-                    anyRemoved = true;
+                    removed.add(item);
                 }
             }
         }
-        if (anyRemoved) {
+        if (!removed.isEmpty()) {
             version.incrementAndGet();
         }
-        return true;
+        return removed;
     }
 
     /**
      * Offer an item if the queue version matches expectedVersion and the queue is not full.
-     * Uses synchronized on the queue for atomicity.
      *
      * @return true if version matched and item was offered; false if version mismatch or queue full
      */
-    synchronized boolean tryOffer(BatchItem item, long expectedVersion) {
+    public synchronized boolean tryOffer(BatchItem item, long expectedVersion) {
         if (version.get() != expectedVersion) {
             return false;
         }
@@ -248,6 +253,53 @@ public class BatcherContext {
         queueDepth.incrementAndGet();
         version.incrementAndGet();
         return true;
+    }
+
+    /**
+     * Atomically remove victims and offer the incoming item under a single
+     * lock, all guarded by the same expected version. Used by the eviction
+     * committer so that no dispatch thread can interleave between the remove
+     * and the offer.
+     *
+     * @param victimIds       request IDs to remove
+     * @param incoming        item to offer after removal
+     * @param expectedVersion version from the snapshot used to plan
+     * @return {@code null} if version mismatch (re-plan);
+     *         otherwise the removed victims (may be empty) — the incoming
+     *         item has been offered iff {@code result != null}
+     */
+    public synchronized List<BatchItem> tryRemoveAndOffer(Set<Long> victimIds,
+                                                            BatchItem incoming,
+                                                            long expectedVersion) {
+        if (version.get() != expectedVersion) {
+            return null;
+        }
+        // 1. Remove victims
+        List<BatchItem> removed = new ArrayList<>();
+        for (BatchItem item : new ArrayList<>(queue)) {
+            if (victimIds.contains(item.requestId())) {
+                if (queue.remove(item)) {
+                    queueDepth.decrementAndGet();
+                    removed.add(item);
+                }
+            }
+        }
+        // 2. Offer incoming (capacity check uses post-removal depth)
+        int maxSize = cfg.getFlexlbBatchQueueMaxSize();
+        if (maxSize > 0 && queueDepth.get() >= maxSize) {
+            // Even after evicting, the queue is still full (e.g. victims not
+            // found because they were already dispatched). Roll back removals
+            // so the caller can re-plan on a fresh snapshot.
+            for (BatchItem v : removed) {
+                queue.add(v);
+                queueDepth.incrementAndGet();
+            }
+            return null;
+        }
+        queue.add(incoming);
+        queueDepth.incrementAndGet();
+        version.incrementAndGet();
+        return removed;
     }
 
     /**

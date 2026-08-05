@@ -3,6 +3,9 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.autotpm.EvictionPlanner;
+import org.flexlb.balance.autotpm.PlanCommitter;
+import org.flexlb.balance.autotpm.PrefillEvictionPlan;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -62,6 +65,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private final Map<Long, RequestLifecycleSnapshot> terminalStates = new ConcurrentHashMap<>();
     private final BatchIdGenerator batchIdGenerator;
 
+    /** Stateless eviction components; reused across all admission decisions. */
+    private final EvictionPlanner evictionPlanner = new EvictionPlanner();
+    private final PlanCommitter planCommitter = new PlanCommitter();
+
     @Autowired
     public FlexlbBatchScheduler(ConfigService configService,
                                 Router router,
@@ -104,77 +111,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     public CompletableFuture<Response> submit(BalanceContext ctx) {
         CompletableFuture<Response> future = new CompletableFuture<>();
         try {
-            if (ctx == null || ctx.getRequest() == null) {
-                completeError(future, StrategyErrorType.INVALID_REQUEST, null);
+            PreparedSubmit prepared = prepare(ctx, future);
+            if (prepared == null) {
                 return future;
             }
-
-            if (inflight.containsKey(ctx.getRequestId()) || terminalStates.containsKey(ctx.getRequestId())) {
-                completeError(future, StrategyErrorType.INVALID_REQUEST,
-                        "duplicate request_id: " + ctx.getRequestId());
-                return future;
-            }
-
-            int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
-            if (maxInflight > 0 && inflight.size() >= maxInflight) {
-                completeError(future, StrategyErrorType.QUEUE_FULL, null);
-                return future;
-            }
-
-            Response routeResponse = router.route(ctx);
-            if (routeResponse == null || !routeResponse.isSuccess()) {
-                if (routeResponse != null) {
-                    future.complete(routeResponse);
-                } else {
-                    completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER, null);
-                }
-                return future;
-            }
-
-            ServerStatus prefill = findServer(routeResponse, RoleType.PREFILL);
-            ServerStatus decode = findServer(routeResponse, RoleType.DECODE);
-            if (prefill == null) {
-                rollback(routeResponse);
-                completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
-                return future;
-            }
-
-            String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-            PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
-            if (prefillEp == null) {
-                rollback(routeResponse);
-                completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
-                return future;
-            }
-
-            DecodeEndpoint decodeEp = null;
-            if (decode != null) {
-                String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
-                decodeEp = endpointRegistry.getDecode(decodeIpPort);
-            }
-
-            BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
-                    prefillEp, decodeEp, System.currentTimeMillis());
-            item.setDeadlineMs(ctx.getDeadlineMs());
-            InflightEntry entry = new InflightEntry(item);
-            InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
-            if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
-                if (existing == null) {
-                    inflight.remove(ctx.getRequestId(), entry);
-                }
-                rollback(item);
-                completeError(future, StrategyErrorType.INVALID_REQUEST,
-                        "duplicate request_id: " + ctx.getRequestId());
-                return future;
-            }
-            WorkerBatcher batcher = prefillEp.getBatcher();
+            WorkerBatcher batcher = prepared.prefillEp.getBatcher();
             ctx.setRouteSubmittedNanos(System.nanoTime());
-            batcher.offer(item);
-
-            // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
+            batcher.offer(prepared.item);
             reporter.reportRouteSubmitTimeMs(
                     RoleType.PREFILL.name(),
-                    prefillEp.getIp(),
+                    prepared.prefillEp.getIp(),
                     System.currentTimeMillis() - ctx.getStartTime());
         } catch (Throwable t) {
             if (ctx != null) {
@@ -186,6 +132,214 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     "Submit failed: " + t.getMessage());
         }
         return future;
+    }
+
+    /**
+     * Priority-eviction-aware submit.
+     *
+     * <p>When the prefill queue is full, evicts lower-priority queued victims
+     * to admit the incoming higher-priority request. Delegates to
+     * {@link #submit} when eviction is disabled.
+     */
+    public CompletableFuture<Response> submitWithEviction(BalanceContext ctx) {
+        FlexlbConfig cfg = configService.loadBalanceConfig();
+        if (!cfg.isFlexlbPriorityEvictEnabled()) {
+            return submit(ctx);
+        }
+        CompletableFuture<Response> future = new CompletableFuture<>();
+        try {
+            PreparedSubmit prepared = prepare(ctx, future);
+            if (prepared == null) {
+                return future;
+            }
+            BatchItem item = prepared.item;
+            PrefillEndpoint prefillEp = prepared.prefillEp;
+            // Compute sort key + run algorithm onOffer (no enqueue).
+            prefillEp.prepareOffer(item);
+            ctx.setRouteSubmittedNanos(System.nanoTime());
+            reporter.reportRouteSubmitTimeMs(
+                    RoleType.PREFILL.name(),
+                    prefillEp.getIp(),
+                    System.currentTimeMillis() - ctx.getStartTime());
+
+            BatcherContext batcherCtx = prefillEp.getBatcherContext();
+            int maxVictims = cfg.getFlexlbPriorityEvictMaxVictims();
+            int maxRetries = 3;
+
+            for (int attempt = 0; attempt < maxRetries; attempt++) {
+                QueueSnapshot snapshot = batcherCtx.snapshot();
+                int maxSize = cfg.getFlexlbBatchQueueMaxSize();
+                // Fast path: queue not full → direct CAS offer
+                if (maxSize <= 0 || snapshot.queueSize() < maxSize) {
+                    if (batcherCtx.tryOffer(item, snapshot.version())) {
+                        return future; // queued; future completes on dispatch
+                    }
+                    continue; // version changed, retry
+                }
+                // Queue full → plan eviction
+                PrefillEvictionPlan plan = evictionPlanner.plan(
+                        snapshot, item.priority(), item.seqLen(), maxVictims);
+                if (plan.isEmpty()) {
+                    // No lower-priority victims eligible
+                    cancelQueuedVictim(item.requestId(),
+                            StrategyErrorType.QUEUE_FULL,
+                            "queue full and no eligible eviction victims");
+                    return future;
+                }
+                PlanCommitter.CommitResult result =
+                        planCommitter.execute(plan, item, batcherCtx);
+                if (result.isSuccess()) {
+                    for (BatchItem victim : result.victims()) {
+                        evictVictim(victim);
+                    }
+                    return future; // incoming queued; future completes on dispatch
+                }
+                Logger.debug("Eviction attempt {} failed ({}) request_id={}",
+                        attempt, result.failureReason(), item.requestId());
+            }
+            // All retries exhausted
+            cancelQueuedVictim(item.requestId(),
+                    StrategyErrorType.QUEUE_FULL,
+                    "queue full: eviction exhausted retries");
+        } catch (Throwable t) {
+            if (ctx != null) {
+                inflight.remove(ctx.getRequestId());
+            }
+            Logger.error("FlexlbBatchScheduler submitWithEviction failed for request id: {}",
+                    ctx == null ? null : ctx.getRequestId(), t);
+            completeError(future, StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Submit failed: " + t.getMessage());
+        }
+        return future;
+    }
+
+    /**
+     * Route + create {@link BatchItem} + register the inflight entry.
+     * Returns {@code null} (with {@code future} already completed) on failure.
+     */
+    private PreparedSubmit prepare(BalanceContext ctx, CompletableFuture<Response> future) {
+        if (ctx == null || ctx.getRequest() == null) {
+            completeError(future, StrategyErrorType.INVALID_REQUEST, null);
+            return null;
+        }
+        if (inflight.containsKey(ctx.getRequestId())
+                || terminalStates.containsKey(ctx.getRequestId())) {
+            completeError(future, StrategyErrorType.INVALID_REQUEST,
+                    "duplicate request_id: " + ctx.getRequestId());
+            return null;
+        }
+        int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
+        if (maxInflight > 0 && inflight.size() >= maxInflight) {
+            completeError(future, StrategyErrorType.QUEUE_FULL, null);
+            return null;
+        }
+        Response routeResponse = router.route(ctx);
+        if (routeResponse == null || !routeResponse.isSuccess()) {
+            if (routeResponse != null) {
+                future.complete(routeResponse);
+            } else {
+                completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER, null);
+            }
+            return null;
+        }
+        ServerStatus prefill = findServer(routeResponse, RoleType.PREFILL);
+        ServerStatus decode = findServer(routeResponse, RoleType.DECODE);
+        if (prefill == null) {
+            rollback(routeResponse);
+            completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
+            return null;
+        }
+        String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+        PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
+        if (prefillEp == null) {
+            rollback(routeResponse);
+            completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
+            return null;
+        }
+        DecodeEndpoint decodeEp = null;
+        if (decode != null) {
+            String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
+            decodeEp = endpointRegistry.getDecode(decodeIpPort);
+        }
+        BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
+                prefillEp, decodeEp, System.currentTimeMillis());
+        item.setDeadlineMs(ctx.getDeadlineMs());
+        InflightEntry entry = new InflightEntry(item);
+        InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
+        if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
+            if (existing == null) {
+                inflight.remove(ctx.getRequestId(), entry);
+            }
+            rollback(item);
+            completeError(future, StrategyErrorType.INVALID_REQUEST,
+                    "duplicate request_id: " + ctx.getRequestId());
+            return null;
+        }
+        return new PreparedSubmit(item, prefillEp);
+    }
+
+    /**
+     * Complete a queued (non-dispatched) victim's future with
+     * {@link StrategyErrorType#PRIORITY_PREEMPTED} and clean up its inflight
+     * entry. No engine cancel — the victim was never dispatched.
+     */
+    private void evictVictim(BatchItem victim) {
+        InflightEntry entry = entryFor(victim);
+        if (entry != null) {
+            synchronized (entry) {
+                if (entry.lifecycle.isTerminal()) {
+                    return;
+                }
+                rollbackOnce(entry);
+                RequestLifecycleSnapshot terminal = entry.lifecycle.fail(
+                        "priority preempted by higher-priority request");
+                completeError(victim.future(), StrategyErrorType.PRIORITY_PREEMPTED,
+                        "priority preempted by higher-priority request");
+                finishEntry(entry, terminal);
+            }
+        } else if (!victim.future().isDone()
+                && !terminalStates.containsKey(victim.requestId())) {
+            rollback(victim);
+            completeError(victim.future(), StrategyErrorType.PRIORITY_PREEMPTED,
+                    "priority preempted by higher-priority request");
+        }
+        reporter.reportPriorityCancel("eviction");
+        Logger.info("Priority eviction victim request_id={} priority={}",
+                victim.requestId(), victim.priority());
+    }
+
+    /**
+     * Cancel an inflight request that was prepared but could not be admitted.
+     * Completes the future with the given error type and cleans up inflight
+     * state (rollback + tombstone).
+     */
+    private void cancelQueuedVictim(long requestId,
+                                    StrategyErrorType errorType,
+                                    String message) {
+        InflightEntry entry = inflight.get(requestId);
+        if (entry == null) {
+            return;
+        }
+        synchronized (entry) {
+            if (entry.lifecycle.isTerminal()) {
+                return;
+            }
+            rollbackOnce(entry);
+            RequestLifecycleSnapshot terminal = entry.lifecycle.fail(message);
+            completeError(entry.item.future(), errorType, message);
+            finishEntry(entry, terminal);
+        }
+    }
+
+    /** Holder for a routed, inflight-registered item awaiting enqueue. */
+    private static final class PreparedSubmit {
+        final BatchItem item;
+        final PrefillEndpoint prefillEp;
+
+        PreparedSubmit(BatchItem item, PrefillEndpoint prefillEp) {
+            this.item = item;
+            this.prefillEp = prefillEp;
+        }
     }
 
     // ==================== Cancellation ====================

@@ -412,6 +412,14 @@ public class FlexlbConfig {
     private boolean flexlbPriorityEvictEnabled = false;
 
     /**
+     * Maximum number of victims evicted per single admission decision.
+     * Bounds the work done per incoming request and the cost of a single
+     * eviction wave. Default 8 (satisfies B=512 > 8*32=256).
+     * Environment variable: FLEXLB_PRIORITY_EVICT_MAX_VICTIMS.
+     */
+    private int flexlbPriorityEvictMaxVictims = 8;
+
+    /**
      * Comma-separated list of valid priority levels (e.g. "30,40,50,60,70").
      * Incoming priority values not in this set fall back to
      * {@link #flexlbPriorityDefault}.

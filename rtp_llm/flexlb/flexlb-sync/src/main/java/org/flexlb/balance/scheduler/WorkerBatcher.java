@@ -90,6 +90,26 @@ public class WorkerBatcher {
     }
 
     /**
+     * Direct access to the {@link BatcherContext} for callers that need the
+     * versioned CAS API (e.g. the eviction path in
+     * {@code PriorityAdmissionScheduler}).
+     */
+    public BatcherContext context() {
+        return ctx;
+    }
+
+    /**
+     * Compute the sort key and run the algorithm's {@code onOffer} callback
+     * for an item WITHOUT enqueuing it. Used by the eviction path, which
+     * enqueues via {@link BatcherContext#tryOffer} under a CAS.
+     */
+    public void prepareOffer(BatchItem item) {
+        long sortKey = algorithm.computeSortKey(ctx, item);
+        item.setSortKey(sortKey);
+        algorithm.onOffer(ctx, item, System.currentTimeMillis());
+    }
+
+    /**
      * Estimated time a new request would wait in the queue before dispatch.
      * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
      */

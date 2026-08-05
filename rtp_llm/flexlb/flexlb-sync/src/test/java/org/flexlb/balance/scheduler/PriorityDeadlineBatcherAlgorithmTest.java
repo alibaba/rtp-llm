@@ -18,6 +18,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -136,8 +138,10 @@ class PriorityDeadlineBatcherAlgorithmTest {
         long version = snapshot.version();
         assertEquals(2, snapshot.queueSize());
 
-        boolean result = ctx.tryRemove(Set.of(1L), version);
-        assertTrue(result, "tryRemove should succeed with correct version");
+        List<BatchItem> removed = ctx.tryRemove(Set.of(1L), version);
+        assertNotNull(removed, "tryRemove should return non-null list with correct version");
+        assertEquals(1, removed.size(), "exactly one victim should be removed");
+        assertEquals(1L, removed.get(0).requestId());
         assertEquals(1, ctx.size(), "Queue should have 1 item after removing 1");
     }
 
@@ -152,9 +156,9 @@ class PriorityDeadlineBatcherAlgorithmTest {
         QueueSnapshot snapshot = ctx.snapshot();
         long correctVersion = snapshot.version();
 
-        // Use wrong version
-        boolean result = ctx.tryRemove(Set.of(1L), correctVersion + 999);
-        assertFalse(result, "tryRemove should fail with wrong version");
+        // Use wrong version → must return null
+        List<BatchItem> removed = ctx.tryRemove(Set.of(1L), correctVersion + 999);
+        assertNull(removed, "tryRemove should return null with wrong version");
         assertEquals(1, ctx.size(), "Queue should remain unchanged after failed CAS");
     }
 

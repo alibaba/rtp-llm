@@ -30,7 +30,11 @@ public enum StrategyErrorType {
     BATCH_BUILD_FAILED(8512, false),
     // worker (decode engine) execution failure — non-retryable to prevent retry storms
     // on persistent errors such as OOM or input-too-long.
-    WORKER_EXECUTION_FAILED(8513, false);
+    WORKER_EXECUTION_FAILED(8513, false),
+    // Request was preempted from the prefill queue by a higher-priority incoming
+    // request. Non-retryable at the scheduler level to avoid re-entering the same
+    // full queue; the client may retry with backoff.
+    PRIORITY_PREEMPTED(8514, false);
 
     private final int errorCode;
     private final String errorMsg;

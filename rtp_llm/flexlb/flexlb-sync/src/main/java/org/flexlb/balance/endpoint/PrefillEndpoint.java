@@ -72,6 +72,22 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return batcher;
     }
 
+    /**
+     * Direct access to the batcher's {@link org.flexlb.balance.scheduler.BatcherContext}
+     * for callers that need the versioned CAS API (eviction path).
+     */
+    public org.flexlb.balance.scheduler.BatcherContext getBatcherContext() {
+        return batcher.context();
+    }
+
+    /**
+     * Compute sort key and run the algorithm onOffer callback for an item
+     * without enqueuing it (eviction path enqueues via the CAS API).
+     */
+    public void prepareOffer(BatchItem item) {
+        batcher.prepareOffer(item);
+    }
+
     @Override
     public void close() {
         try {

@@ -42,6 +42,11 @@ public class PriorityAdmissionScheduler {
      * <p>Sets the absolute deadline on the context before delegating to
      * the underlying batch scheduler. The deadline is computed as
      * {@code now + resolveSloMs(seqLen)}.
+     *
+     * <p>Delegates to {@link FlexlbBatchScheduler#submitWithEviction}, which
+     * transparently falls back to the normal submit path when priority
+     * eviction is disabled, and runs the eviction flow (Phase 3) when the
+     * prefill queue is full and a higher-priority request arrives.
      */
     public CompletableFuture<Response> submit(BalanceContext ctx) {
         if (ctx == null || ctx.getRequest() == null) {
@@ -57,6 +62,6 @@ public class PriorityAdmissionScheduler {
         Logger.debug("PriorityAdmissionScheduler submit request_id={} priority={} slo_ms={} deadline_ms={}",
                 ctx.getRequestId(), ctx.getPriority(), sloMs, deadlineMs);
 
-        return batchScheduler.submit(ctx);
+        return batchScheduler.submitWithEviction(ctx);
     }
 }
