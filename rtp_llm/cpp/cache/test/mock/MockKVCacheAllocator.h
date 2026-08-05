@@ -35,10 +35,10 @@ public:
     MOCK_METHOD(GroupedCacheLayerLayout, allLayerCacheBase, (), (const, override));
     MOCK_METHOD(bool,
                 updateKVBlock,
-                (const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                 const std::vector<int>&         block_src_batch,
-                 bool                            copy_last_block,
-                 std::vector<TaggedBlockIdPair>& block_update_mapping),
+                (const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                 const std::vector<int>&        block_src_batch,
+                 bool                           copy_last_block,
+                 std::vector<GroupBlockIdPair>& block_update_mapping),
                 (override));
     MOCK_METHOD(int, seqSizePerBlock, (), (const, override));
     MOCK_METHOD(int,

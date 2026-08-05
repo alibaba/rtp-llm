@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -33,6 +34,10 @@ public:
         return initialized_.load(std::memory_order_acquire);
     }
 
+    uint64_t generation() const {
+        return generation_.load(std::memory_order_acquire);
+    }
+
 private:
     CpuTpBroadcaster() = default;
     ~CpuTpBroadcaster();
@@ -41,10 +46,13 @@ private:
 
     std::mutex        mu_;
     std::atomic<bool> initialized_{false};
-    int               tp_rank_ = 0;
-    int               tp_size_ = 1;
-    std::string       base_path_;
-    int               listen_fd_ = -1;  // rank 0 only
+    // Changes whenever reset invalidates state associated with the previous
+    // communicator. Matching initialize() calls remain idempotent.
+    std::atomic<uint64_t> generation_{0};
+    int                   tp_rank_ = 0;
+    int                   tp_size_ = 1;
+    std::string           base_path_;
+    int                   listen_fd_ = -1;  // rank 0 only
     // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[tp_rank_] = -1.
     std::vector<int> peer_fds_;
     std::string      my_uds_path_;  // path to unlink at shutdown (rank 0 only)

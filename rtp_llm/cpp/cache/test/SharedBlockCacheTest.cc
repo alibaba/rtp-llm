@@ -12,7 +12,7 @@ constexpr std::string_view kFullTag        = "group_0";
 constexpr std::string_view kLinearTag      = "group_1";
 constexpr std::string_view kIndependentTag = "group_3";
 
-using TaggedBlockId = std::pair<std::string, BlockIdxType>;
+using GroupBlockId = std::pair<std::string, BlockIdxType>;
 
 class TestSharedBlockCache: public SharedBlockCache {
 public:
@@ -47,7 +47,7 @@ private:
     BlockPoolPtr pool_;
 };
 
-TaggedBlockId groupBlock(std::string_view tag, BlockIdxType block_id) {
+GroupBlockId groupBlock(std::string_view tag, BlockIdxType block_id) {
     return {std::string(tag), block_id};
 }
 

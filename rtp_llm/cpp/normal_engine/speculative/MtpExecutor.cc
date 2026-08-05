@@ -1364,7 +1364,7 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         // host bytes are ready for the downstream host memcpys.
         if (!useDeviceInput()) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(kv_cache_kernel_block_id_to_host)");
-            for (auto& [tag, table] : model_input.block_tables_by_tag) {
+            for (auto& [tag, table] : model_input.group_block_tables) {
                 (void)tag;
                 if (!table.kernel_block_ids.defined() || !table.kernel_block_ids.is_cuda()) {
                     continue;
@@ -1428,7 +1428,7 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     // Host-check before forward captures NULL slots without GPU coredumps.
     static const bool always_print = debugTargetVerifyInputEnabled();
 
-    if (model_input.block_tables_by_tag.empty() || !model_input.sequence_lengths.defined()) {
+    if (model_input.group_block_tables.empty() || !model_input.sequence_lengths.defined()) {
         return;
     }
     if (cache_manager_ == nullptr) {
@@ -1445,7 +1445,7 @@ void MtpExecutor::debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& mod
     }
 
     std::map<std::string, torch::Tensor> block_ids_by_group;
-    for (const auto& [tag, table] : model_input.block_tables_by_tag) {
+    for (const auto& [tag, table] : model_input.group_block_tables) {
         auto block_ids = table.kernel_block_ids.to(torch::kCPU);
         if (block_ids.scalar_type() != torch::kInt32 || block_ids.dim() != 2) {
             return;

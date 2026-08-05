@@ -356,14 +356,14 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
 
 // 块操作相关
 
-void KVCacheManager::blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+void KVCacheManager::blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping) {
     return allocator_->blockBatchCopy(copy_mapping);
 }
 
-bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                                   const std::vector<int>&         block_src_batch,
-                                   bool                            copy_last_block,
-                                   std::vector<TaggedBlockIdPair>& block_update_mapping) {
+bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                   const std::vector<int>&        block_src_batch,
+                                   bool                           copy_last_block,
+                                   std::vector<GroupBlockIdPair>& block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }

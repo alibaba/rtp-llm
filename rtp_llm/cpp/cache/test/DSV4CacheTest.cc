@@ -367,7 +367,7 @@ TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     EXPECT_EQ(config.groupForLayer(0, "swa_kv").tag, "swa_kv");
 }
 
-TEST(HybridPoolConfigCreatorTest, Dsv4ReverseSpecOrderPreservesTaggedGroups) {
+TEST(HybridPoolConfigCreatorTest, Dsv4ReverseSpecOrderPreservesGroups) {
     auto mc = makeFlashModelConfig();
     for (auto& layer_descs : mc.kv_cache_spec_descs) {
         std::reverse(layer_descs.begin(), layer_descs.end());

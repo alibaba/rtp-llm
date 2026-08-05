@@ -80,12 +80,12 @@ GroupBase makeGroup(const std::string& tag,
 
 GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>                    groups,
                                    std::vector<std::string>                  layer_tags,
-                                   std::map<std::string, BlockBufferPtrInfo> buffers_by_tag) {
-    EXPECT_EQ(groups.size(), buffers_by_tag.size());
+                                   std::map<std::string, BlockBufferPtrInfo> group_buffers) {
+    EXPECT_EQ(groups.size(), group_buffers.size());
     auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
     GroupedCacheLayerLayout::GroupLayouts layouts;
     for (const auto& group : topology->groups()) {
-        auto node = buffers_by_tag.extract(group.tag);
+        auto node = group_buffers.extract(group.tag);
         EXPECT_FALSE(node.empty());
         layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(node.mapped())}));
     }

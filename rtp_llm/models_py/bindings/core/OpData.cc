@@ -50,7 +50,7 @@ std::string GptModelInputs::debugString(bool force) const {
     if (combo_position_ids.defined()) {
         debug_string << ", combo_position_ids: " << tb(combo_position_ids);
     }
-    for (const auto& [tag, table] : block_tables_by_tag) {
+    for (const auto& [tag, table] : group_block_tables) {
         debug_string << ", kv_cache_kernel_block_id[" << tag << "]: " << tb(table.kernel_block_ids);
         debug_string << ", kv_cache_block_id[" << tag << "]: " << tb(table.block_ids);
     }

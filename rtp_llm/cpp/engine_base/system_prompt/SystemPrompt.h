@@ -12,11 +12,11 @@ namespace rtp_llm {
 
 struct SystemPromptParams {
     SystemPromptParams() {}
-    SystemPromptParams(const std::vector<int>& prompt_tokens, std::map<std::string, std::vector<int>> block_ids_by_tag):
-        prompt_tokens(prompt_tokens), block_ids_by_tag(std::move(block_ids_by_tag)) {}
+    SystemPromptParams(const std::vector<int>& prompt_tokens, std::map<std::string, std::vector<int>> group_block_ids):
+        prompt_tokens(prompt_tokens), group_block_ids(std::move(group_block_ids)) {}
 
     std::vector<int>                        prompt_tokens;
-    std::map<std::string, std::vector<int>> block_ids_by_tag;
+    std::map<std::string, std::vector<int>> group_block_ids;
 };
 
 class SystemPrompt {

@@ -81,7 +81,7 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-using BlockIdsByTag = std::map<std::string, std::shared_ptr<BlockIds>, std::less<>>;
+using GroupBlockIds = std::map<std::string, std::shared_ptr<BlockIds>, std::less<>>;
 
 class KVCacheResource {
 public:
@@ -104,7 +104,7 @@ public:
     int  groupNums() const;
     bool groupsInitialized() const;
 
-    const BlockIdsByTag& groupBlocks() const;
+    const GroupBlockIds& groupBlocks() const;
 
     const CacheKeysType& cacheKeys() const;
     void                 setCacheKeysAndBlockDependencies(CacheKeysType keys, BlockDependenciesType dependencies);
@@ -158,7 +158,7 @@ private:
     void rebuildLinearBlockDependencies();
 
     std::shared_ptr<const CacheTopology> topology_;
-    BlockIdsByTag                        group_block_ids_;
+    GroupBlockIds                        group_block_ids_;
     // One request-level timeline, derived from the request's global block geometry. Group tags only select physical
     // block vectors and must not own authoritative keys or dependencies.
     CacheKeysType         cache_keys;

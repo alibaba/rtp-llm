@@ -687,6 +687,10 @@ bool isCpuTpBroadcasterInitialized() {
     return CpuTpBroadcaster::instance().isInitialized();
 }
 
+uint64_t cpuTpBroadcasterGeneration() {
+    return CpuTpBroadcaster::instance().generation();
+}
+
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
     py::function           fn;
     py::gil_scoped_acquire gil;

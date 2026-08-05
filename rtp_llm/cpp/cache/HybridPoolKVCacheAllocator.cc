@@ -195,7 +195,7 @@ std::vector<BlockInfo> HybridPoolKVCacheAllocator::convertIndexToBuffer(
     return kv_cache_groups_.at(tag)->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
 }
 
-void HybridPoolKVCacheAllocator::blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_mapping) {
+void HybridPoolKVCacheAllocator::blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping) {
     if (copy_mapping.empty()) {
         return;
     }

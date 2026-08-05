@@ -343,7 +343,7 @@ protected:
         if (!computed_buffer->expectedBufferCount().has_value()) {
             computed_buffer->setExpectedBufferCount(static_cast<size_t>(worker_config_.layer_all_num));
         }
-        auto layer_cache_buffer = createTaggedLayerCacheBuffer(layer_id, cache_tag, 2);
+        auto layer_cache_buffer = createGroupLayerCacheBuffer(layer_id, cache_tag, 2);
         computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);
     }
 
@@ -352,7 +352,7 @@ protected:
         computed_buffer->setExpectedBufferCount(expected_buffer_count);
     }
 
-    std::shared_ptr<LayerCacheBuffer> createTaggedLayerCacheBuffer(int layer_id, std::string tag, int num_blocks) {
+    std::shared_ptr<LayerCacheBuffer> createGroupLayerCacheBuffer(int layer_id, std::string tag, int num_blocks) {
         auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, std::move(tag));
         for (int i = 0; i < num_blocks; ++i) {
             buffer->addBlockId(layer_id * 1000 + i, i);
@@ -786,8 +786,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_AllLayersSuccess) {
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(0, "group2", 2));
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(1, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(0, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(1, "group2", 2));
 
     std::thread completion_thread([this, unique_key]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -807,8 +807,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_PartialLayersFailed) {
     int64_t     deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(0, "group2", 2));
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(1, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(0, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(1, "group2", 2));
 
     std::thread completion_thread([this, unique_key]() {
         // Layer 0 成功，layer 1 失败
@@ -830,7 +830,7 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_Timeout) {
     int64_t     deadline_ms = currentTimeMs() + 10;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(0, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(0, "group2", 2));
 
     auto start_time_ms = currentTimeMs();
 
@@ -918,8 +918,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_RdmaTransferWaitTimeout) {
     int64_t deadline_ms = currentTimeMs() + 200;
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(0, "group2", 2));
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(1, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(0, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(1, "group2", 2));
 
     auto start_time_ms = currentTimeMs();
 
@@ -943,8 +943,8 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_CancelRead) {
     int64_t     deadline_ms = currentTimeMs() + 5000;  // 足够长的 deadline
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(0, "group2", 2));
-    layer_cache_buffers.push_back(createTaggedLayerCacheBuffer(1, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(0, "group2", 2));
+    layer_cache_buffers.push_back(createGroupLayerCacheBuffer(1, "group2", 2));
 
     std::atomic<bool> done{false};
     ErrorInfo         result;

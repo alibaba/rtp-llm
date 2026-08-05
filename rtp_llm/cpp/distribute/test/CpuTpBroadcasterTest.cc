@@ -323,18 +323,23 @@ TEST(CpuTpBroadcasterTest, NonRootRejectsBadLinkProbe) {
 }
 
 TEST(CpuTpBroadcasterTest, ResetAllowsNewBasePath) {
-    auto& bcast = CpuTpBroadcaster::instance();
+    auto&      bcast                   = CpuTpBroadcaster::instance();
+    const auto generation_before_reset = bcast.generation();
     bcast.reset();
+    EXPECT_EQ(bcast.generation(), generation_before_reset + 1);
 
     const std::string base1 = makeTempBase();
     const std::string base2 = makeTempBase();
     bcast.initialize(0, 1, base1);
     ASSERT_TRUE(bcast.isInitialized());
+    const auto first_generation = bcast.generation();
     bcast.reset();
     ASSERT_FALSE(bcast.isInitialized());
+    EXPECT_EQ(bcast.generation(), first_generation + 1);
 
     bcast.initialize(0, 1, base2);
     ASSERT_TRUE(bcast.isInitialized());
+    EXPECT_EQ(bcast.generation(), first_generation + 1);
     bcast.reset();
 
     cleanupTempBase(base1);
