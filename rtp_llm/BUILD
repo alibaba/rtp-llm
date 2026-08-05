@@ -209,7 +209,10 @@ py_library(
         ":psutil",
         ":utils",
         ":ops",
-    ],
+    ] + select({
+        "@//:using_cuda12": flashinfer,
+        "//conditions:default": [],
+    }),
 )
 
 py_library(

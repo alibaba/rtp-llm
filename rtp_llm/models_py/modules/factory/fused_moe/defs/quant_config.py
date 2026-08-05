@@ -3,6 +3,8 @@ from typing import Optional, Union
 
 import torch
 
+from rtp_llm.config.quant_config import NVFP4_BLOCK_SIZE
+
 # Type alias for quantization dtype
 QuantDtype = Union[None, torch.dtype, str]
 

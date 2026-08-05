@@ -37,6 +37,7 @@ py_library(
     data = [":cutlass_moe_config"],
     deps = [
         ":utils",
+        "//rtp_llm:device",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",

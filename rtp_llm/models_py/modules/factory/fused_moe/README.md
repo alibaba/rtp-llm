@@ -67,6 +67,12 @@ The interface is fully compatible with the old version, no need to modify existi
 The `fp4_b12x` strategy and `b12x` FP4 operator require BF16 ModelOpt NVFP4
 weights, an SM120/SM121 GPU, and `ep_size=1`. The kernel uses global expert
 IDs and therefore does not support expert-sharded weights or DeepEP routing.
+The validated dependency matrix is NVIDIA driver 580.159.03, CUDA toolkit
+12.9, PyTorch 2.8.0+cu129, and flashinfer-python
+0.6.12rc1+rtp.260523 on RTX PRO 5000 (SM120). The local adapter deliberately
+fails startup when that pinned FlashInfer version, the CUDA 12.9 compatibility
+version, or its private B12x APIs drift, so dependency updates must include
+adapter and GPU test updates.
 When CUDA Graph is enabled, the executor uses the configured decode capacity
 `ll_num_max_token` for captured calls and falls back to eager execution for
 larger prefill calls. The server derives this capacity from
@@ -88,6 +94,12 @@ replacement non-FP4 weights. Set
 12.9 compatibility path and restore FlashInfer's native CUDA-version failure.
 Both variables are low-level emergency controls, accept only the documented
 numeric values, and are logged once with their effective settings at startup.
+The thread-scoped patch assumes FlashInfer probes CUDA synchronously in wrapper
+construction. If a future wheel moves that probe to a worker or subprocess,
+construction fails with FlashInfer's native CUDA-version error instead of
+relaxing another thread. Kernel JIT occurs on the first B12x execution; issue
+an end-to-end health request before registering the server for traffic so a
+toolchain failure is reported during deployment rather than user traffic.
 
 Explicit `fp4_moe_op` values now survive backend-process serialization. After
 upgrading, a stale explicit value can therefore produce a startup strategy
