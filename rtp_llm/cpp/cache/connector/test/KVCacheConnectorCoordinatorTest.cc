@@ -385,7 +385,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
 
     KVCacheResource resource;
     resource.initGroups(cache_config_.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    resource.setCacheKeys(CacheKeysType{1, 2, 3});
 
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -408,7 +408,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
 
     auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    req_resource.setCacheKeys({1, 2, 3});
 
     // No connectors registered: asyncRead() still returns a fused read context; it will contain zero match contexts
     // and will be processed/cleaned up by the coordinator update loop if enabled.
@@ -455,7 +455,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
     coordinator->connectors_ = {mock_connector};
 
     auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    req_resource.setCacheKeys({1, 2, 3});
     auto resource = makeResourceWithAutoDecr();
 
     // Don't let gmock keep a ref to `resource` until program exit.
@@ -550,7 +550,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRef
     // Build a connector context with non-empty cache keys.
     auto ctx_resource = std::make_shared<KVCacheResource>();
     ctx_resource->initGroups(cache_config_.topologyPtr());
-    ctx_resource->cacheKeys()    = CacheKeysType{1, 2, 3};
+    ctx_resource->setCacheKeys(CacheKeysType{1, 2, 3});
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
         std::make_shared<TestMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
@@ -575,7 +575,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenMemory
 
     KVCacheResource resource;
     resource.initGroups(cache_config_.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    resource.setCacheKeys(CacheKeysType{1, 2, 3});
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
@@ -614,7 +614,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenConnec
 
     KVCacheResource resource;
     resource.initGroups(cache_config_.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    resource.setCacheKeys(CacheKeysType{1, 2, 3});
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
@@ -654,7 +654,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
 
     KVCacheResource resource;
     resource.initGroups(cache_config_.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{1, 2, 3};
+    resource.setCacheKeys(CacheKeysType{1, 2, 3});
 
     auto selected_resource        = makeResourceWithAutoDecr();
     auto selected_resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(selected_resource);
@@ -688,7 +688,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
 
     auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    req_resource.setCacheKeys({1, 2, 3});
     auto resource = makeResourceWithAutoDecr();
 
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
@@ -725,7 +725,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnContextAndEnqueue_WhenH
     coordinator->connectors_ = {mock_connector};
 
     auto req_resource = KVCacheResource{};
-    req_resource.cacheKeys().assign({1, 2, 3});
+    req_resource.setCacheKeys({1, 2, 3});
     auto resource = makeResourceWithAutoDecr();
 
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);

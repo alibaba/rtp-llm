@@ -208,8 +208,7 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
     // original partial key as a connector-only dummy tail so the drop-last
     // contract discards the dummy, not the usable selected key.
     if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
-        selected.cacheKeys().push_back(source.cacheKeys().back());
-        selected.rebuildLinearBlockDependencies();
+        selected.appendCacheKey(source.cacheKeys().back());
         selected.setLastBlockAligned(false);
     }
 
