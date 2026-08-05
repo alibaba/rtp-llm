@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, TypeAlias
+from typing import Any, Dict, List, Literal, Optional, Tuple, TypeAlias, cast, get_args
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 
@@ -10,6 +10,12 @@ GrammarFieldName: TypeAlias = Literal[
     "ebnf",
     "structural_tag",
 ]
+
+# Derive runtime iteration from the type definition so the field list has one source.
+GRAMMAR_FIELD_NAMES = cast(
+    Tuple[GrammarFieldName, ...],
+    get_args(GrammarFieldName),
+)
 
 
 def dump_compact_json(value: Any) -> str:
@@ -40,6 +46,13 @@ def load_json_field(name: str, value: Any) -> Any:
 
 
 def normalize_grammar_value(name: GrammarFieldName, value: Any) -> Any:
+    if name == "structural_tag":
+        value = load_json_field(name, value)
+        if isinstance(value, dict) and "type" not in value and (
+            "format" in value
+            or ("structures" in value and "triggers" in value)
+        ):
+            value = {"type": "structural_tag", **value}
     if name in ("json_schema", "structural_tag") and isinstance(value, dict):
         return dump_compact_json(value)
     return value
@@ -66,7 +79,7 @@ def has_bounded_region(node: Any) -> bool:
 
 @dataclass(frozen=True)
 class GrammarConstraint:
-    """Canonical one-of grammar constraint before it is written to GenerateConfig fields."""
+    """Canonical one-of constraint and owner of GenerateConfig grammar fields."""
 
     name: GrammarFieldName
     value: Any
@@ -94,16 +107,45 @@ class GrammarConstraint:
 
     @classmethod
     def collect_from_config(cls, config: Any) -> List["GrammarConstraint"]:
-        constraints = []
-        if config.json_schema is not None:
-            constraints.append(cls("json_schema", config.json_schema))
-        if config.regex is not None:
-            constraints.append(cls("regex", config.regex))
-        if config.ebnf is not None:
-            constraints.append(cls("ebnf", config.ebnf))
-        if config.structural_tag is not None:
-            constraints.append(cls("structural_tag", config.structural_tag))
-        return constraints
+        return [
+            cls(name, value)
+            for name in GRAMMAR_FIELD_NAMES
+            if (value := getattr(config, name)) is not None
+        ]
+
+    @classmethod
+    def clear_from_config(cls, config: Any) -> None:
+        for name in GRAMMAR_FIELD_NAMES:
+            setattr(config, name, None)
+
+    @classmethod
+    def normalize_config(cls, config: Any) -> None:
+        for constraint in cls.collect_from_config(config):
+            normalized = constraint.normalized()
+            setattr(config, normalized.name, normalized.value)
+
+    @classmethod
+    def resolve_from_config(cls, config: Any) -> Optional["GrammarConstraint"]:
+        constraints = cls.collect_from_config(config)
+        for constraint in constraints:
+            constraint.validate_not_empty()
+        if len(constraints) > 1:
+            field_names = " / ".join(GRAMMAR_FIELD_NAMES)
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                f"only one grammar constraint ({field_names}) may be set per request",
+            )
+        return constraints[0] if constraints else None
+
+    def apply_to_config(self, config: Any) -> None:
+        if self.name not in GRAMMAR_FIELD_NAMES:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"unsupported grammar field {self.name}",
+            )
+        normalized = self.normalized()
+        self.clear_from_config(config)
+        setattr(config, normalized.name, normalized.value)
 
     def normalized(self) -> "GrammarConstraint":
         return GrammarConstraint(

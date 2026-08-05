@@ -5,12 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import ValidationError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.grammar_constraint import (
-    GrammarConstraint,
-    dump_compact_json,
-    load_json_field,
-    normalize_grammar_value,
-)
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.response_format import normalize_think_tag, parse_response_format
 
 
@@ -124,14 +119,12 @@ class ResponseFormatBuilder:
                 "response_format must be finalized before engine serialization",
             )
 
-        constraints = GrammarConstraint.collect_from_config(config)
-        cls(config)._validate_grammar_constraints(constraints)
-        for constraint in constraints:
-            if not isinstance(constraint.value, str):
-                raise FtRuntimeException(
-                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    f"{constraint.name} must be finalized to a string before engine serialization",
-                )
+        constraint = GrammarConstraint.resolve_from_config(config)
+        if constraint is not None and not isinstance(constraint.value, str):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"{constraint.name} must be finalized to a string before engine serialization",
+            )
 
     @classmethod
     def restore_final_constraint(
@@ -148,31 +141,15 @@ class ResponseFormatBuilder:
         """
         config.response_format = None
         config.json_format = False
-        config.json_schema = None
-        config.regex = None
-        config.ebnf = None
-        config.structural_tag = None
         config._reasoning_envelope_applied = False
         config._reasoning_final_constraint = None
 
         if constraint is None:
+            GrammarConstraint.clear_from_config(config)
             cls.validate_finalized(config)
             return
 
-        normalized = constraint.normalized()
-        if normalized.name == "json_schema":
-            config.json_schema = normalized.value
-        elif normalized.name == "regex":
-            config.regex = normalized.value
-        elif normalized.name == "ebnf":
-            config.ebnf = normalized.value
-        elif normalized.name == "structural_tag":
-            config.structural_tag = normalized.value
-        else:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                f"unsupported grammar field {normalized.name}",
-            )
+        constraint.apply_to_config(config)
         cls.validate_finalized(config)
 
     def project_response_format(self) -> None:
@@ -220,86 +197,25 @@ class ResponseFormatBuilder:
         constraint = GrammarConstraint.from_response_format(rf)
         self.config.response_format = None
         self.config.json_format = False
-        self.config.json_schema = None
-        self.config.regex = None
-        self.config.ebnf = None
-        self.config.structural_tag = None
 
         if constraint is None:
+            GrammarConstraint.clear_from_config(self.config)
             return
 
-        normalized = constraint.normalized()
-        if normalized.name == "json_schema":
-            self.config.json_schema = normalized.value
-        elif normalized.name == "regex":
-            self.config.regex = normalized.value
-        elif normalized.name == "ebnf":
-            self.config.ebnf = normalized.value
-        elif normalized.name == "structural_tag":
-            self.config.structural_tag = normalized.value
-        else:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                f"unsupported grammar field {normalized.name}",
-            )
+        constraint.apply_to_config(self.config)
 
     def _project_legacy_json_format(self) -> None:
         if not self.config.json_format or self.config.response_format is not None:
             return
-        if (
-            self.config.json_schema is None
-            and self.config.regex is None
-            and self.config.ebnf is None
-            and self.config.structural_tag is None
-        ):
+        if not GrammarConstraint.collect_from_config(self.config):
             self.config.json_schema = {"type": "object"}
         self.config.json_format = False
 
     def _resolve_grammar_constraint(self) -> Optional[GrammarConstraint]:
         self.project_response_format()
         self._project_legacy_json_format()
-        if self.config.json_schema is not None:
-            self.config.json_schema = normalize_grammar_value(
-                "json_schema", self.config.json_schema
-            )
-        if self.config.regex is not None:
-            self.config.regex = normalize_grammar_value("regex", self.config.regex)
-        if self.config.ebnf is not None:
-            self.config.ebnf = normalize_grammar_value("ebnf", self.config.ebnf)
-        if self.config.structural_tag is not None:
-            structural_tag = load_json_field(
-                "structural_tag", self.config.structural_tag
-            )
-            if (
-                isinstance(structural_tag, dict)
-                and "type" not in structural_tag
-                and (
-                    "format" in structural_tag
-                    or ("structures" in structural_tag and "triggers" in structural_tag)
-                )
-            ):
-                structural_tag = {"type": "structural_tag", **structural_tag}
-            self.config.structural_tag = normalize_grammar_value(
-                "structural_tag", structural_tag
-            )
-        constraints = GrammarConstraint.collect_from_config(self.config)
-        self._validate_grammar_constraints(constraints)
-        if not constraints:
-            return None
-        return constraints[0]
-
-    def _validate_grammar_constraints(
-        self, constraints: List[GrammarConstraint]
-    ) -> None:
-        for constraint in constraints:
-            constraint.validate_not_empty()
-
-        if len(constraints) > 1:
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "only one grammar constraint (json_schema / regex / ebnf / "
-                "structural_tag) may be set per request",
-            )
+        GrammarConstraint.normalize_config(self.config)
+        return GrammarConstraint.resolve_from_config(self.config)
 
     def _wrap_grammar_with_reasoning_envelope(
         self, constraint: GrammarConstraint
@@ -325,7 +241,4 @@ class ResponseFormatBuilder:
                 "elements": elements,
             },
         }
-        self.config.structural_tag = dump_compact_json(envelope)
-        self.config.json_schema = None
-        self.config.regex = None
-        self.config.ebnf = None
+        GrammarConstraint("structural_tag", envelope).apply_to_config(self.config)

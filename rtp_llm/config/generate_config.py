@@ -1,6 +1,5 @@
 import copy
 import hashlib
-import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -16,20 +15,14 @@ from pydantic import (
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.response_format import ResponseFormatInput, normalize_think_tag
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
 
 if TYPE_CHECKING:
-    from rtp_llm.config.grammar_constraint import GrammarConstraint
     from rtp_llm.config.response_format_builder import ReasoningFormat
-
-
-def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 class RequestFormat:
@@ -715,14 +708,16 @@ class GenerateConfig(BaseModel):
                         self.prompt_logits_start <= self.prompt_logits_end,
                         f"prompt_logits_start ({self.prompt_logits_start}) must <= prompt_logits_end ({self.prompt_logits_end})",
                     )
-            has_grammar_constraint = self._has_grammar_constraint()
+            has_grammar_constraint = self.json_format or bool(
+                GrammarConstraint.collect_from_config(self)
+            )
             if (
                 self.has_num_beams() or self.num_return_sequences > 1
             ) and has_grammar_constraint:
                 raise ValueError(
                     "grammar-constrained decoding does not support beam search or num_return_sequences > 1"
                 )
-            self._normalize_grammar_fields()
+            GrammarConstraint.normalize_config(self)
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
 
@@ -730,21 +725,6 @@ class GenerateConfig(BaseModel):
         """Validate and finalize this config for engine serialization."""
         self._validate_fields()
         self.finalize_response_format()
-
-    def _has_grammar_constraint(self) -> bool:
-        return (
-            self.json_format
-            or self.json_schema is not None
-            or self.regex is not None
-            or self.ebnf is not None
-            or self.structural_tag is not None
-        )
-
-    def _normalize_grammar_fields(self):
-        if self.json_schema is not None:
-            self.json_schema = _compact_json(self.json_schema)
-        if self.structural_tag is not None:
-            self.structural_tag = _compact_json(self.structural_tag)
 
     def enforce_prompt_scoring_constraints(self):
         """Clamp config fields for prompt scoring mode. Call after setting return_prompt_logits=True."""
