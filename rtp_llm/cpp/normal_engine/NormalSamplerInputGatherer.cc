@@ -200,7 +200,8 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
 }
 
 void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
-                                                          std::list<GenerateStreamPtr>& all_streams) const {
+                                                          std::list<GenerateStreamPtr>& all_streams,
+                                                          bool                          score_batch) const {
     LogitsProcessorStatesPtr state_ptr = std::make_shared<LogitsProcessorStates>();
     size_t                   idx       = 0;
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, &idx](auto& stream) {

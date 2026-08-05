@@ -61,10 +61,10 @@ struct StreamRecommendationInfo {
         think_done(end_think_token_ids.empty()) {}
 
     // 默认拷贝构造/赋值即为深拷贝（std::set、std::vector 均值语义），无需手动 copy()。
-    StreamRecommendationInfo(const StreamRecommendationInfo&) = default;
+    StreamRecommendationInfo(const StreamRecommendationInfo&)            = default;
     StreamRecommendationInfo& operator=(const StreamRecommendationInfo&) = default;
     StreamRecommendationInfo(StreamRecommendationInfo&&)                 = default;
-    StreamRecommendationInfo& operator=(StreamRecommendationInfo&&) = default;
+    StreamRecommendationInfo& operator=(StreamRecommendationInfo&&)      = default;
 };
 
 class RecommendationLogitsProcessor: public BaseLogitsProcessor {

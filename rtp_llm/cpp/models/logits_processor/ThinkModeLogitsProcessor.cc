@@ -5,7 +5,7 @@ using namespace std;
 namespace rtp_llm {
 
 ThinkModeLogitsProcessor::ThinkModeLogitsProcessor(std::vector<StreamThinkInfo> think_infos):
-    think_infos_(think_infos){};
+    think_infos_(think_infos) {};
 
 std::optional<ErrorInfo>
 ThinkModeLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) {

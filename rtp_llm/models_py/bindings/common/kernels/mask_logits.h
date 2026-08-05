@@ -35,7 +35,7 @@ void invokePackedMaskLogits(T*             logits_batch,
                             const int      vocab_size,
                             const int      bitmask_row_stride,
                             const int      bitmask_words,
-                            cudaStream_t stream);
+                            cudaStream_t   stream);
 #endif
 
 }  // namespace rtp_llm

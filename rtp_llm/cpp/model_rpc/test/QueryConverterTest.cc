@@ -220,14 +220,12 @@ TEST_F(QueryConverterTest, MultipleGrammarConstraintsAreRejectedByFactory) {
         SetGrammarField set;
     };
     const std::array<GrammarFieldCase, 4> fields{{
-        {"json_schema", [](GenerateConfigPB* config) {
-             config->mutable_json_schema()->set_value(R"({"type":"object"})");
-         }},
+        {"json_schema",
+         [](GenerateConfigPB* config) { config->mutable_json_schema()->set_value(R"({"type":"object"})"); }},
         {"regex", [](GenerateConfigPB* config) { config->mutable_regex()->set_value("[a-z]+"); }},
         {"ebnf", [](GenerateConfigPB* config) { config->mutable_ebnf()->set_value("root ::= \"a\""); }},
-        {"structural_tag", [](GenerateConfigPB* config) {
-             config->mutable_structural_tag()->set_value(R"({"type":"structural_tag"})");
-         }},
+        {"structural_tag",
+         [](GenerateConfigPB* config) { config->mutable_structural_tag()->set_value(R"({"type":"structural_tag"})"); }},
     }};
 
     for (size_t first = 0; first < fields.size(); ++first) {
@@ -240,7 +238,7 @@ TEST_F(QueryConverterTest, MultipleGrammarConstraintsAreRejectedByFactory) {
             fields[second].set(config);
 
             auto generate_input = QueryConverter::transQuery(&input);
-            auto result = LogitsProcessorFactory::createLogitsProcessors(
+            auto result         = LogitsProcessorFactory::createLogitsProcessors(
                 std::move(generate_input), /*init_batch_size=*/1, /*max_batch_size=*/1, /*eos_token_id=*/0);
 
             ASSERT_FALSE(result.ok());
@@ -271,7 +269,7 @@ TEST_F(QueryConverterTest, GrammarWithMultipleSequencesIsRejectedByFactory) {
         test_case.configure(config);
 
         auto generate_input = QueryConverter::transQuery(&input);
-        auto result = LogitsProcessorFactory::createLogitsProcessors(
+        auto result         = LogitsProcessorFactory::createLogitsProcessors(
             std::move(generate_input), /*init_batch_size=*/1, /*max_batch_size=*/2, /*eos_token_id=*/0);
 
         ASSERT_FALSE(result.ok());

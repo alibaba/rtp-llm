@@ -175,8 +175,14 @@ class ResponseFormatBuilder:
             )
         cls.validate_finalized(config)
 
-    def _project_response_format_to_grammar_fields(self) -> None:
-        """Project response_format onto typed fields and clear it; rf wins over stale extra_configs grammar."""
+    def project_response_format(self) -> None:
+        """Project response_format onto typed fields and clear it.
+
+        This is also called before GenerateConfig field validation so every
+        accepted wire shape is classified by the same canonical parser and
+        projection used for engine serialization. response_format wins over
+        stale extra_configs grammar fields.
+        """
         raw_response_format = self.config.response_format
         if raw_response_format is None:
             return
@@ -250,7 +256,7 @@ class ResponseFormatBuilder:
         self.config.json_format = False
 
     def _resolve_grammar_constraint(self) -> Optional[GrammarConstraint]:
-        self._project_response_format_to_grammar_fields()
+        self.project_response_format()
         self._project_legacy_json_format()
         if self.config.json_schema is not None:
             self.config.json_schema = normalize_grammar_value(

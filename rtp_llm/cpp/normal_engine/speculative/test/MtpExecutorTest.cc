@@ -546,7 +546,7 @@ TEST_F(MtpExecutorTest, testApplySpecVerifyResultCapsAndCorrectsTokens) {
     constexpr int64_t token_stride = 2;
 
     SpecLogitsVerifyRunner::LaunchResult verify_result;
-    verify_result.spec_cap_cpu = torch::tensor({0, 1, 3, 2}, torch::kInt32);
+    verify_result.spec_cap_cpu     = torch::tensor({0, 1, 3, 2}, torch::kInt32);
     verify_result.processor_errors = {
         ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION, "grammar verify failed"),
         std::nullopt,
@@ -561,14 +561,13 @@ TEST_F(MtpExecutorTest, testApplySpecVerifyResultCapsAndCorrectsTokens) {
         target_values.push_back(1000 + row);
     }
     SamplerOutput target_sampler_output;
-    target_sampler_output.token_ids =
-        torch::from_blob(target_values.data(),
-                         {batch_size * (propose_step + 1), token_stride},
-                         torch::TensorOptions(torch::kInt32))
-            .clone();
+    target_sampler_output.token_ids = torch::from_blob(target_values.data(),
+                                                       {batch_size * (propose_step + 1), token_stride},
+                                                       torch::TensorOptions(torch::kInt32))
+                                          .clone();
 
     speculative::SpeculativeSamplerOutput output;
-    output.accept_len = {4, 4, 4, 1};
+    output.accept_len    = {4, 4, 4, 1};
     output.accept_tokens = {
         torch::tensor({10, 11, 12, 13}, torch::kInt32).reshape({1, 4}),
         torch::tensor({20, 21, 22, 23}, torch::kInt32).reshape({1, 4}),

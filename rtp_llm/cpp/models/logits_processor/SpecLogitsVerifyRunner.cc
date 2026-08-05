@@ -37,8 +37,8 @@ bool has2DCapacity(const torch::Tensor& tensor, int64_t rows, int64_t cols) {
     return tensor.defined() && tensor.dim() == 2 && tensor.size(0) >= rows && tensor.size(1) == cols;
 }
 
-SpecLogitsVerifyRunner::LaunchResult makeFailureResultForActiveStreams(
-    const SpecLogitsVerifyRunner::LaunchTask& task, const ErrorInfo& error) {
+SpecLogitsVerifyRunner::LaunchResult makeFailureResultForActiveStreams(const SpecLogitsVerifyRunner::LaunchTask& task,
+                                                                       const ErrorInfo& error) {
     SpecLogitsVerifyRunner::LaunchResult result;
     result.has_active_processor = !task.active.empty();
     result.processor_errors.resize(task.total_streams);
@@ -259,11 +259,9 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
         result.processor_errors = std::move(merge_result.processor_errors);
         return result;
     } catch (const std::bad_alloc& e) {
-        return makeFailureResultForActiveStreams(
-            task, detail::grammarMaskBuildError("MTP verify", e));
+        return makeFailureResultForActiveStreams(task, detail::grammarMaskBuildError("MTP verify", e));
     } catch (const c10::Error& e) {
-        return makeFailureResultForActiveStreams(
-            task, detail::grammarMaskBuildError("MTP verify", e));
+        return makeFailureResultForActiveStreams(task, detail::grammarMaskBuildError("MTP verify", e));
     }
 }
 

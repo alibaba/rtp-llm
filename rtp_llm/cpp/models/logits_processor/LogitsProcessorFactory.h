@@ -16,9 +16,8 @@ struct GrammarConfig;
 
 class LogitsProcessorFactory {
 public:
-    static void init(const ModelConfig&   model_config,
-                     const GrammarConfig& grammar_config,
-                     const std::string&   tree_decode_config);
+    static void
+    init(const ModelConfig& model_config, const GrammarConfig& grammar_config, const std::string& tree_decode_config);
 
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
     createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,

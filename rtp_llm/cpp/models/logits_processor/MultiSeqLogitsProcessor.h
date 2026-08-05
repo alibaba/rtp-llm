@@ -7,7 +7,7 @@ namespace rtp_llm {
 class MultiSeqLogitsProcessor: public BaseLogitsProcessor {
 public:
     MultiSeqLogitsProcessor() = default;
-    virtual ~MultiSeqLogitsProcessor(){};
+    virtual ~MultiSeqLogitsProcessor() {};
 
 public:
     static std::shared_ptr<MultiSeqLogitsProcessor> fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,

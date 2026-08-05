@@ -579,7 +579,7 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
     bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);

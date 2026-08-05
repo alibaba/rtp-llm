@@ -921,7 +921,7 @@ std::optional<ErrorInfo> GenerateStream::updateNormalLogitProcessorStatus(const 
 }
 
 std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,
-                                                                     int32_t              num_new_tokens) {
+                                                                    int32_t              num_new_tokens) {
     RTP_LLM_PROFILE_FUNCTION();
     if (num_new_tokens <= 0) {
         return std::nullopt;

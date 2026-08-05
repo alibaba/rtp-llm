@@ -53,10 +53,10 @@ TEST_F(CudaMaskLogitsOpTest, testMaskLogits) {
         auto logits_ptr = logits_cpu.data_ptr<float>();
 
         std::vector<float> expect_vec = {
-            0.f,    -FLT_MAX, 0.f,      -FLT_MAX, 0.2f,     0.3f,   0.f, 0.f,     0.f,   0.01f,
-            -FLT_MAX, 0.887f, 0.99999f, 0.1f,      0.2f,     0.3f,   0.f, 0.f,     0.99f, 0.989f,
-            0.221f, 0.f,      0.f,      0.1f,      0.2f,     0.321f, 0.f, 0.4432f, 0.44f, -FLT_MAX,
-            0.221f, 0.f,      0.f,      0.1f,      -FLT_MAX, 0.321f, 0.f, 0.4432f, 0.44f, 0.01f,
+            0.f,      -FLT_MAX, 0.f,      -FLT_MAX, 0.2f,     0.3f,   0.f, 0.f,     0.f,   0.01f,
+            -FLT_MAX, 0.887f,   0.99999f, 0.1f,     0.2f,     0.3f,   0.f, 0.f,     0.99f, 0.989f,
+            0.221f,   0.f,      0.f,      0.1f,     0.2f,     0.321f, 0.f, 0.4432f, 0.44f, -FLT_MAX,
+            0.221f,   0.f,      0.f,      0.1f,     -FLT_MAX, 0.321f, 0.f, 0.4432f, 0.44f, 0.01f,
         };
 
         ASSERT_EQ((size_t)logits_cpu.numel(), expect_vec.size()) << "Vectors x and y are of unequal length";

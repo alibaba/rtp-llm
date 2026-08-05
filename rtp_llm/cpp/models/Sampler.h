@@ -24,11 +24,11 @@ public:
 
 private:
     std::vector<std::optional<ErrorInfo>> preprocessLogits(const SamplerInputs& inputs);
-    void                   ensureGreedySamplingBuffers(size_t batch_size);
-    void                   allocateGreedySamplingBuffers(size_t max_batch_size);
-    void                   waitGreedySamplingBufferEvents();
-    GreedySamplingBuffers& nextGreedySamplingBuffers(size_t batch_size);
-    void                   markGreedySamplingBufferReady();
+    void                                  ensureGreedySamplingBuffers(size_t batch_size);
+    void                                  allocateGreedySamplingBuffers(size_t max_batch_size);
+    void                                  waitGreedySamplingBufferEvents();
+    GreedySamplingBuffers&                nextGreedySamplingBuffers(size_t batch_size);
+    void                                  markGreedySamplingBufferReady();
 
     struct GreedySamplingBufferSlot {
         GreedySamplingBuffers         buffers;

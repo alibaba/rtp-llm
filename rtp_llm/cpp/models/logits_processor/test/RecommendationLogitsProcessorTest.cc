@@ -831,7 +831,7 @@ TEST_F(RecommendationLogitsProcessorTest, testSingleSequenceCrossSeqBanNoOp) {
                                   0,
                                   false,
                                   banned,
-                                  {},
+                                               {},
                                   /*enable_cross_sequence_ban=*/true,
                                   /*cross_seq_diverge_start_combo=*/0);
     info.pos_in_combo          = 1;

@@ -15,6 +15,7 @@ fields:
     "result": {"response": "...", "finish_reason": 1}
   }
 """
+
 from __future__ import annotations
 
 import json
@@ -96,8 +97,7 @@ def _build_sampling_params(gc: Dict[str, Any]) -> SamplingParams:
         raise SmokeException(
             QueryStatus.VALID_FAILED,
             "DashSc smoke requires response_format/structural_tag wire fields; "
-            "unsupported typed grammar fields: "
-            + ", ".join(unsupported),
+            "unsupported typed grammar fields: " + ", ".join(unsupported),
         )
 
     kwargs: Dict[str, Any] = {}
@@ -158,9 +158,7 @@ def _answer_after_thinking(response: str) -> str:
         )
     end_pos = response.find(THINK_END, len(THINK_BEGIN))
     if end_pos < 0:
-        raise ValueError(
-            f"thinking response must contain {THINK_END!r}: {response!r}"
-        )
+        raise ValueError(f"thinking response must contain {THINK_END!r}: {response!r}")
     return response[end_pos + len(THINK_END) :]
 
 
@@ -199,7 +197,9 @@ class DashGrpcComparer(BaseComparer):
             # TokenizerFactory.create(ckpt_path, tokenizer_path, model_type).
             # Smoke fixtures keep the two paths in lockstep (tokenizer_path may
             # be None, in which case caller already substituted model_path).
-            self._tokenizer = TokenizerFactory.create(model_path, model_path, model_type)
+            self._tokenizer = TokenizerFactory.create(
+                model_path, model_path, model_type
+            )
         return self._tokenizer
 
     def _dash_port(self) -> int:
@@ -244,7 +244,10 @@ class DashGrpcComparer(BaseComparer):
                 QueryStatus.COMPARE_FAILED,
                 f"dash response mismatch:\n  expect: {expect.response!r}\n  actual: {actual.response!r}",
             )
-        if expect.finish_reason is not None and expect.finish_reason != actual.finish_reason:
+        if (
+            expect.finish_reason is not None
+            and expect.finish_reason != actual.finish_reason
+        ):
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
                 f"dash finish_reason mismatch: expect={expect.finish_reason} actual={actual.finish_reason}",
@@ -254,12 +257,18 @@ class DashGrpcComparer(BaseComparer):
                 QueryStatus.COMPARE_FAILED,
                 f"dash generated_ids mismatch: expect={expect.generated_ids} actual={actual.generated_ids}",
             )
-        if expect.prompt_token_ids and expect.prompt_token_ids != actual.prompt_token_ids:
+        if (
+            expect.prompt_token_ids
+            and expect.prompt_token_ids != actual.prompt_token_ids
+        ):
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
                 f"dash prompt_token_ids mismatch: expect={expect.prompt_token_ids} actual={actual.prompt_token_ids}",
             )
-        if expect.prompt_token_num is not None and expect.prompt_token_num != actual.prompt_token_num:
+        if (
+            expect.prompt_token_num is not None
+            and expect.prompt_token_num != actual.prompt_token_num
+        ):
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
                 f"dash prompt_token_num mismatch: expect={expect.prompt_token_num} actual={actual.prompt_token_num}",
@@ -311,7 +320,9 @@ class DashGrpcComparer(BaseComparer):
 
         port = self._dash_port()
         target = f"127.0.0.1:{port}"
-        channel = grpc.insecure_channel(target, options=dash_sc_grpc_client_channel_options())
+        channel = grpc.insecure_channel(
+            target, options=dash_sc_grpc_client_channel_options()
+        )
         try:
             stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
             generated_ids: List[int] = []
@@ -348,10 +359,18 @@ class DashGrpcComparer(BaseComparer):
                             )
                     elif out.name == "finish_reason":
                         last_finish = decode_finish_reason(out, raw)
-                    elif out.name == "prompt_token_num" and out.datatype == "INT32" and len(raw) >= 4:
+                    elif (
+                        out.name == "prompt_token_num"
+                        and out.datatype == "INT32"
+                        and len(raw) >= 4
+                    ):
                         values = _int32_values(out, raw)
                         prompt_token_num = values[0] if values else None
-                    elif out.name == "prompt_cached_token_num" and out.datatype == "INT32" and len(raw) >= 4:
+                    elif (
+                        out.name == "prompt_cached_token_num"
+                        and out.datatype == "INT32"
+                        and len(raw) >= 4
+                    ):
                         values = _int32_values(out, raw)
                         prompt_cached_token_num = values[0] if values else None
         finally:
@@ -377,7 +396,9 @@ class DashGrpcComparer(BaseComparer):
                 "dash return_input_ids mismatch: "
                 f"expect request input_ids={input_ids} actual={actual.prompt_token_ids}",
             )
-        if actual.prompt_token_num is not None and actual.prompt_token_num != len(input_ids):
+        if actual.prompt_token_num is not None and actual.prompt_token_num != len(
+            input_ids
+        ):
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
                 f"dash prompt_token_num mismatch: expect={len(input_ids)} actual={actual.prompt_token_num}",
@@ -387,6 +408,7 @@ class DashGrpcComparer(BaseComparer):
         self._dump_actual_to_artifact(actual)
 
         from smoke.utils import no_compare, save_response
+
         if save_response():
             self.qr_info["result"] = actual.model_dump(exclude_defaults=True)
         if no_compare():

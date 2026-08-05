@@ -18,10 +18,10 @@ public:
                       bool                                       terminate_without_stop_token = false,
                       int                                        max_rollback_tokens          = 200);
 
-    RtpGrammarMatcher(const RtpGrammarMatcher&) = delete;
+    RtpGrammarMatcher(const RtpGrammarMatcher&)            = delete;
     RtpGrammarMatcher& operator=(const RtpGrammarMatcher&) = delete;
-    RtpGrammarMatcher(RtpGrammarMatcher&&) = delete;
-    RtpGrammarMatcher& operator=(RtpGrammarMatcher&&) = delete;
+    RtpGrammarMatcher(RtpGrammarMatcher&&)                 = delete;
+    RtpGrammarMatcher& operator=(RtpGrammarMatcher&&)      = delete;
 
     [[nodiscard]] ErrorResult<bool> acceptToken(int32_t token_id);
 
@@ -45,8 +45,8 @@ public:
 private:
     std::shared_ptr<xgrammar::CompiledGrammar> compiled_;
     std::unique_ptr<xgrammar::GrammarMatcher>  matcher_;
-    bool                                        terminate_without_stop_token_ = false;
-    int                                         max_rollback_tokens_          = 200;
+    bool                                       terminate_without_stop_token_ = false;
+    int                                        max_rollback_tokens_          = 200;
 
     int64_t num_accepted_ = 0;
     bool    finished_     = false;

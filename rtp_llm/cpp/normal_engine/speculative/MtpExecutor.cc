@@ -103,8 +103,7 @@ void MtpExecutor::applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  v
                                 old_len,
                                 max_len);
         if (token_cap < max_cap && old_len > token_cap) {
-            output.accept_tokens[i].data_ptr<int32_t>()[token_cap] =
-                target_ptr[i * (propose_step + 1) + token_cap];
+            output.accept_tokens[i].data_ptr<int32_t>()[token_cap] = target_ptr[i * (propose_step + 1) + token_cap];
         }
 
         const int new_len    = std::min(old_len, token_cap + 1);

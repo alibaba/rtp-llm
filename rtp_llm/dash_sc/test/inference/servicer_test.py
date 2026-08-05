@@ -31,8 +31,8 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
     DashScParameterError,
-    LLMFinishReason,
     DashScRequestControls,
+    LLMFinishReason,
     SamplingParams,
 )
 from rtp_llm.dash_sc.inference.servicer import (
@@ -456,9 +456,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 503)
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
-        self.assertEqual(
-            access_agg.backend_error_code, "8500_ROUTE_ERROR"
-        )
+        self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -1656,9 +1654,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             finished=True,
             aux_info=AuxInfo(input_len=1, reuse_len=0),
         )
-        return _FakeVisitor(
-            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
-        )
+        return _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token
@@ -2168,9 +2164,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(
-            self, responses[0], "num_return_sequences > 1"
-        )
+        _assert_parameter_error_response(self, responses[0], "num_return_sequences > 1")
 
     async def test_dash_generation_guided_json_is_finalized_before_enqueue(
         self,

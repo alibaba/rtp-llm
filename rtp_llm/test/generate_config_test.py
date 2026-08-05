@@ -574,6 +574,29 @@ class GrammarMultiSequenceConfigTest(TestCase):
                     **fields,
                 )
 
+    def test_openai_wire_response_format_plus_multi_sequence_is_rejected(self):
+        request = ChatCompletionRequest(
+            messages=[], response_format={"type": "json_object"}
+        )
+        self.assertIsInstance(request.response_format, OpenAIResponseFormat)
+
+        for fields in ({"num_beams": 4}, {"num_return_sequences": 2}):
+            with self.subTest(fields=fields):
+                config = GenerateConfig(**fields)
+                # Mirror OpenaiEndpoint._extract_generation_config(), which
+                # assigns the already parsed wire model directly.
+                config.response_format = request.response_format
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    config.validate()
+                self.assertEqual(
+                    ctx.exception.exception_type,
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                )
+                self.assertIn(
+                    "grammar-constrained decoding does not support",
+                    ctx.exception.message,
+                )
+
     def test_thinking_plus_multi_sequence_is_rejected_before_engine(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
@@ -632,7 +655,7 @@ class ResponseFormatProjectionTest(TestCase):
         reasoning_format: Optional[ReasoningFormat] = None,
     ):
         if reasoning_format is not None:
-            ResponseFormatBuilder(cfg, reasoning_format=reasoning_format).finalize()
+            cfg.finalize_response_format(reasoning_format=reasoning_format)
         cfg.validate()
 
     def _enable_thinking(
@@ -817,9 +840,9 @@ class ResponseFormatProjectionTest(TestCase):
             max_thinking_tokens=64,
         )
         reasoning_format = self._enable_thinking(cfg)
-        final_constraint = ResponseFormatBuilder(
-            cfg, reasoning_format=reasoning_format
-        ).finalize()
+        final_constraint = cfg.finalize_response_format(
+            reasoning_format=reasoning_format
+        )
         cfg.validate()
 
         cfg.in_think_mode = False

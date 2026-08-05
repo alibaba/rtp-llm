@@ -662,13 +662,12 @@ async def iter_real_model_stream_infer(
                 logging.warning(
                     "[DashScGrpc] [%s] add_thinking_params failed: %s", tag, e
                 )
-                final_constraint = ResponseFormatBuilder(
-                    generate_config,
+                final_constraint = generate_config.finalize_response_format(
                     reasoning_format=reasoning_format,
-                ).finalize()
+                )
                 generate_config.validate()
         else:
-            final_constraint = ResponseFormatBuilder(generate_config).finalize()
+            final_constraint = generate_config.finalize_response_format()
             generate_config.validate()
         if runtime.eos_tokens and not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)

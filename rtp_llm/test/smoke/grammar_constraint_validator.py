@@ -289,9 +289,7 @@ def validate_reasoning_sequence(content: str, fmt: Dict[str, Any], idx: int) -> 
             or not isinstance(suffix_value, str)
             or not final_content.startswith(suffix_value)
         ):
-            raise ValueError(
-                f"choice[{idx}] reasoning sequence suffix was not emitted"
-            )
+            raise ValueError(f"choice[{idx}] reasoning sequence suffix was not emitted")
         final_content = final_content[len(suffix_value) :]
         final_idx = 2
 

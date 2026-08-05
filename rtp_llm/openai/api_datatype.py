@@ -251,7 +251,10 @@ class ChatCompletionRequest(BaseModel):
 
     def get_enable_thinking(self, default: Optional[bool] = None) -> Optional[bool]:
         chat_template_kwargs = self.get_chat_template_kwargs()
-        if chat_template_kwargs is None or "enable_thinking" not in chat_template_kwargs:
+        if (
+            chat_template_kwargs is None
+            or "enable_thinking" not in chat_template_kwargs
+        ):
             return default
         enable_thinking = chat_template_kwargs["enable_thinking"]
         if enable_thinking is True or enable_thinking is False:

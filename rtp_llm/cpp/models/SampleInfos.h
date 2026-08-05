@@ -70,11 +70,11 @@ public:
 
 struct SamplerOutput {
 public:
-    torch::Tensor token_ids;
-    torch::Tensor cum_log_probs;
-    torch::Tensor all_probs;
-    torch::Tensor beam_index;
-    torch::Tensor success;
+    torch::Tensor                         token_ids;
+    torch::Tensor                         cum_log_probs;
+    torch::Tensor                         all_probs;
+    torch::Tensor                         beam_index;
+    torch::Tensor                         success;
     std::vector<std::optional<ErrorInfo>> processor_errors;
 };
 

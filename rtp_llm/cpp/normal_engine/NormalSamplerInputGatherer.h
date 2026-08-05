@@ -31,7 +31,9 @@ public:
                                  bool                          score_batch  = false,
                                  size_t                        propose_step = 0) const;
 
-    void setLogitsProcessorInputs(SamplerInputs& sampler_inputs, std::list<GenerateStreamPtr>& all_streams) const;
+    void setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
+                                  std::list<GenerateStreamPtr>& all_streams,
+                                  bool                          score_batch = false) const;
 };
 
 }  // namespace rtp_llm

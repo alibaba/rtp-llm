@@ -21,11 +21,11 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
+    KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,

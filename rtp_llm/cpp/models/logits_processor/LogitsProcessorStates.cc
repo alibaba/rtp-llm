@@ -4,7 +4,7 @@ using namespace std;
 
 namespace rtp_llm {
 
-LogitsProcessorStates::LogitsProcessorStates(){};
+LogitsProcessorStates::LogitsProcessorStates() {};
 
 void LogitsProcessorStates::setIntervalError(std::vector<std::optional<ErrorInfo>>& errors,
                                              const std::pair<size_t, size_t>&       interval,

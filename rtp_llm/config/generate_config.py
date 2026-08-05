@@ -16,44 +16,20 @@ from pydantic import (
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.response_format import (
-    ResponseFormat,
-    ResponseFormatInput,
-    normalize_think_tag,
-)
+from rtp_llm.config.response_format import ResponseFormatInput, normalize_think_tag
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
 
 if TYPE_CHECKING:
     from rtp_llm.config.grammar_constraint import GrammarConstraint
-
-_GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
-    {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
-)
+    from rtp_llm.config.response_format_builder import ReasoningFormat
 
 
 def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def _response_format_is_grammar(rf: Optional[ResponseFormatInput]) -> bool:
-    if rf is None:
-        return False
-    if isinstance(rf, ResponseFormat):
-        return rf.type in _GRAMMAR_RESPONSE_FORMAT_TYPES
-    if isinstance(rf, str):
-        try:
-            rf = json.loads(rf)
-        except json.JSONDecodeError as e:
-            if rf != "text":
-                logging.warning("invalid response_format json string: %s", e)
-            return False
-    if not isinstance(rf, dict):
-        return False
-    return rf.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
 
 
 class RequestFormat:
@@ -528,6 +504,18 @@ class GenerateConfig(BaseModel):
         self.stop_words_list += special_tokens.stop_words_id_list
         self.stop_words_str += special_tokens.stop_words_str_list
 
+    def finalize_response_format(
+        self,
+        reasoning_format: Optional["ReasoningFormat"] = None,
+    ) -> Optional["GrammarConstraint"]:
+        """Finalize response-format fields for engine serialization."""
+
+        # Keep the builder as an implementation detail. The import is local to
+        # avoid a module cycle: ResponseFormatBuilder consumes this type.
+        from rtp_llm.config.response_format_builder import ResponseFormatBuilder
+
+        return ResponseFormatBuilder(self, reasoning_format=reasoning_format).finalize()
+
     def add_thinking_params(
         self,
         tokenizer,
@@ -555,18 +543,13 @@ class GenerateConfig(BaseModel):
         self.in_think_mode = in_think_mode
         self._validate_fields()
 
-        from rtp_llm.config.response_format_builder import (
-            ReasoningFormat,
-            ResponseFormatBuilder,
-        )
+        from rtp_llm.config.response_format_builder import ReasoningFormat
 
         if self.in_think_mode and reasoning_format is None:
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
             )
-        return ResponseFormatBuilder(
-            self, reasoning_format=reasoning_format
-        ).finalize()
+        return self.finalize_response_format(reasoning_format=reasoning_format)
 
     def add_stop_ids_from_str(self, tokenizer):
         ids_list = []
@@ -588,6 +571,15 @@ class GenerateConfig(BaseModel):
                 self.stop_words_list.append(item)
 
     def _validate_fields(self) -> None:
+        # Canonicalize the request envelope before compatibility checks.  In
+        # particular, OpenAI owns a separate Pydantic wire model for
+        # response_format; the builder's parse_response_format +
+        # GrammarConstraint projection is the single source of truth for all
+        # accepted wire shapes.
+        from rtp_llm.config.response_format_builder import ResponseFormatBuilder
+
+        ResponseFormatBuilder(self).project_response_format()
+
         try:
             check_with_info(
                 is_union_positive_integer(self.top_k),
@@ -737,12 +729,7 @@ class GenerateConfig(BaseModel):
     def validate(self) -> None:
         """Validate and finalize this config for engine serialization."""
         self._validate_fields()
-
-        # Keep the engine-ready contract owned by GenerateConfig. The import is
-        # local to avoid a module cycle: ResponseFormatBuilder consumes this type.
-        from rtp_llm.config.response_format_builder import ResponseFormatBuilder
-
-        ResponseFormatBuilder(self).finalize()
+        self.finalize_response_format()
 
     def _has_grammar_constraint(self) -> bool:
         return (
@@ -751,7 +738,6 @@ class GenerateConfig(BaseModel):
             or self.regex is not None
             or self.ebnf is not None
             or self.structural_tag is not None
-            or _response_format_is_grammar(self.response_format)
         )
 
     def _normalize_grammar_fields(self):

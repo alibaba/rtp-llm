@@ -13,8 +13,8 @@ namespace speculative {
 
 struct SpeculativeSamplerOutput {
 public:
-    std::vector<torch::Tensor> accept_tokens;
-    std::vector<int>           accept_len;
+    std::vector<torch::Tensor>            accept_tokens;
+    std::vector<int>                      accept_len;
     std::vector<std::optional<ErrorInfo>> processor_errors;
 };
 

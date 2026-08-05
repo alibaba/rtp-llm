@@ -23,8 +23,7 @@ int64_t vocabTypeId(const std::string& vocab_type) {
     throw std::runtime_error("serializeTokenizerInfo: invalid xgrammar vocab_type '" + vocab_type + "'");
 }
 
-const autil::legacy::Any&
-requireField(const autil::legacy::json::JsonMap& metadata, const std::string& field_name) {
+const autil::legacy::Any& requireField(const autil::legacy::json::JsonMap& metadata, const std::string& field_name) {
     const auto it = metadata.find(field_name);
     if (it == metadata.end()) {
         throw std::runtime_error("serializeTokenizerInfo: tokenizer metadata missing " + field_name);
@@ -44,9 +43,8 @@ std::string xgrammarMetadataJson(const std::string& tokenizer_metadata_json) {
 
     const auto hf_tokenizer_json_it = metadata.find("hf_tokenizer_json");
     if (hf_tokenizer_json_it != metadata.end()) {
-        auto xgrammar_metadata =
-            AnyCast<JsonMap>(ParseJson(xgrammar::TokenizerInfo::DetectMetadataFromHF(
-                AnyCast<std::string>(hf_tokenizer_json_it->second))));
+        auto xgrammar_metadata              = AnyCast<JsonMap>(ParseJson(
+            xgrammar::TokenizerInfo::DetectMetadataFromHF(AnyCast<std::string>(hf_tokenizer_json_it->second))));
         xgrammar_metadata["vocab_size"]     = requireField(metadata, "vocab_size");
         xgrammar_metadata["stop_token_ids"] = requireField(metadata, "stop_token_ids");
         return ToString(autil::legacy::Any(xgrammar_metadata), true);
@@ -54,8 +52,7 @@ std::string xgrammarMetadataJson(const std::string& tokenizer_metadata_json) {
 
     auto xgrammar_metadata = metadata;
     auto vocab_type_it     = xgrammar_metadata.find("vocab_type");
-    if (vocab_type_it != xgrammar_metadata.end()
-        && vocab_type_it->second.GetType() == typeid(std::string)) {
+    if (vocab_type_it != xgrammar_metadata.end() && vocab_type_it->second.GetType() == typeid(std::string)) {
         vocab_type_it->second = JsonNumber(vocabTypeId(AnyCast<std::string>(vocab_type_it->second)));
     }
     return ToString(autil::legacy::Any(xgrammar_metadata), true);
