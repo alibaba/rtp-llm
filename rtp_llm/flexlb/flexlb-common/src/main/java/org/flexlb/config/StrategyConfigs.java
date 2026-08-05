@@ -25,9 +25,19 @@ public class StrategyConfigs {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class ShortestTtftStrategyConfig {
 
+        public static final double DEFAULT_QUEUE_TIME_WEIGHT = 1.0;
+
+        private double queueTimeWeight = DEFAULT_QUEUE_TIME_WEIGHT;
         private CandidatePoolConfig candidatePool = new CandidatePoolConfig();
 
         private void normalize() {
+            if (!Double.isFinite(queueTimeWeight) || queueTimeWeight < 0.0 || queueTimeWeight > 1.0) {
+                log.warn(
+                        "Invalid shortestTtft queueTimeWeight: {}, fallback to default: {}",
+                        queueTimeWeight,
+                        DEFAULT_QUEUE_TIME_WEIGHT);
+                queueTimeWeight = DEFAULT_QUEUE_TIME_WEIGHT;
+            }
             if (candidatePool == null) {
                 candidatePool = new CandidatePoolConfig();
             }

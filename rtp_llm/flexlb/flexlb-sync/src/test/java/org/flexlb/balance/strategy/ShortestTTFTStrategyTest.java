@@ -201,6 +201,40 @@ class ShortestTTFTStrategyTest {
                 RoleType.PREFILL, 4096L);
     }
 
+    @Test
+    void should_apply_queue_time_weight_only_to_scheduling_score() {
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+
+        WorkerStatus highCacheWorker = createWorkerStatus("127.0.0.1", 1000L);
+        WorkerStatus noCacheWorker = createWorkerStatus("127.0.0.2", 0L);
+        prefillStatusMap.put(highCacheWorker.getIpPort(), highCacheWorker);
+        prefillStatusMap.put(noCacheWorker.getIpPort(), noCacheWorker);
+
+        EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+        CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        org.flexlb.balance.resource.ResourceMeasure resourceMeasure = Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.anyList(), Mockito.any(), Mockito.any()))
+                .thenReturn(Map.of(highCacheWorker.getIpPort(), 2));
+
+        ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
+                engineWorkerStatus,
+                engineHealthReporter,
+                cacheAwareService,
+                resourceMeasureFactory,
+                fixedCandidatePoolConfigService(1, 0.3));
+
+        ServerStatus result = strategy.select(createBalanceContext(1000L), RoleType.PREFILL, null);
+
+        Assertions.assertTrue(result.isSuccess(), "Result should be successful but got: " + result.getMessage());
+        Assertions.assertEquals("127.0.0.1", result.getServerIp());
+        long expectedEstimatedTtft = TaskInfo.estimatePrefillTimeMs(1000L, 512L) + 1000L;
+        Assertions.assertEquals(expectedEstimatedTtft, result.getPrefillTime());
+    }
+
     private ShortestTTFTStrategy createStrategy(EngineWorkerStatus engineWorkerStatus, ConfigService configService) {
         EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
@@ -220,8 +254,14 @@ class ShortestTTFTStrategyTest {
     }
 
     private ConfigService fixedCandidatePoolConfigService(int size) {
+        return fixedCandidatePoolConfigService(size, 1.0);
+    }
+
+    private ConfigService fixedCandidatePoolConfigService(int size, double queueTimeWeight) {
         StrategyConfigs strategyConfigs = new StrategyConfigs();
-        StrategyConfigs.CandidatePoolConfig candidatePool = strategyConfigs.getShortestTtft().getCandidatePool();
+        StrategyConfigs.ShortestTtftStrategyConfig shortestTtft = strategyConfigs.getShortestTtft();
+        shortestTtft.setQueueTimeWeight(queueTimeWeight);
+        StrategyConfigs.CandidatePoolConfig candidatePool = shortestTtft.getCandidatePool();
         candidatePool.setMode(StrategyConfigs.CandidatePoolMode.FIXED);
         candidatePool.setSize(size);
         strategyConfigs.normalize();
