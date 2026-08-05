@@ -27,11 +27,16 @@ def get_attention_inputs_value(inputs: PyModelInputs) -> AttentionInputs:
 def get_primary_attention_inputs(
     inputs: PyModelInputs, kv_cache: LayeredKVCache | None = None
 ) -> PyAttentionInputs:
-    """Return the common/single fast-path value without interpreting tag names."""
+    """Return metadata through an explicit topology tag binding."""
     value = get_attention_inputs_value(inputs)
     if isinstance(value, PyAttentionInputs):
         return value
-    return next(iter(value.values()))
+    layer_cache = get_single_layer_cache(kv_cache, 0)
+    if layer_cache is None:
+        raise RuntimeError(
+            "tagged attention inputs require KV-cache topology for explicit binding"
+        )
+    return select_attention_inputs_for_tag(value, str(layer_cache.tag))
 
 
 def select_attention_inputs_for_tag(
@@ -58,6 +63,22 @@ def get_layer_tags(kv_cache: LayeredKVCache | None, local_layer_idx: int) -> lis
     if not tags or any(not tag for tag in tags):
         raise RuntimeError(f"local layer {local_layer_idx} has no cache group tag")
     return tags
+
+
+def get_single_layer_cache(
+    kv_cache: LayeredKVCache | None, local_layer_idx: int
+) -> LayerKVCache | None:
+    if kv_cache is None:
+        return None
+    layer_caches = kv_cache.get_layer_cache_groups(local_layer_idx)
+    if len(layer_caches) != 1:
+        raise RuntimeError(
+            f"local layer {local_layer_idx} requires exactly one cache group, "
+            f"got {len(layer_caches)}"
+        )
+    for layer_cache in layer_caches:
+        return layer_cache
+    raise RuntimeError(f"local layer {local_layer_idx} has no cache group")
 
 
 def get_group_tags_for_layers(

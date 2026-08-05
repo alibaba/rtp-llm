@@ -99,6 +99,17 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitKernelBlockId   = 1u << 5,
 };
 
+struct CacheGroupHintWireFormat {
+    static constexpr size_t kMaxGroups     = 64;
+    static constexpr size_t kMaxTagBytes   = 128;
+    static constexpr size_t kTagWords      = kMaxTagBytes / sizeof(int32_t);
+    static constexpr size_t kWordsPerGroup = 4 + kTagWords;
+
+    static constexpr size_t wordsForGroups(size_t group_count) {
+        return group_count * kWordsPerGroup;
+    }
+};
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
 struct MicroBatchInfo {

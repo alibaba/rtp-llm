@@ -7,6 +7,8 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "autil/LockFreeThreadPool.h"
@@ -66,11 +68,15 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
 
 private:
+    using LayerBlockIds     = std::vector<const BlockIds*>;
+    using LayerAttnBlockIds = std::vector<std::unordered_map<std::string, const BlockIds*>>;
+
     struct LayerTagSlot {
-        int         layer_id{-1};
-        std::string tag;
-        int         group_id{-1};
-        size_t      stride_bytes{0};
+        int            layer_id{-1};
+        std::string    tag;
+        size_t         stride_bytes{0};
+        CacheGroupType group_type{CacheGroupType::FULL};
+        CacheBlockKind block_kind{CacheBlockKind::COMPLETE};
     };
     struct CopyInfoPerKey {
         CacheKeyType              cache_key{0};
@@ -172,7 +178,8 @@ private:
     bool validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
 
     void                             checkLayerBlockStrideBytes() const;
-    std::vector<LayerTagSlot>        layerTagSlots() const;
+    static std::vector<LayerTagSlot> buildLayerTagSlots(const CacheConfig& cache_config);
+    const std::vector<LayerTagSlot>& layerTagSlots() const;
     static std::vector<BlockIdxType> normalizeCopyItemGpuBlocks(const MemoryOperationRequestPB::CopyItem& item,
                                                                 const std::vector<LayerTagSlot>&          slots);
     static NormalizedCopyItem        normalizeCopyItem(const MemoryOperationRequestPB::CopyItem& item,
@@ -180,6 +187,7 @@ private:
     bool                             hasTypedLayerTagSlots(const std::vector<LayerTagSlot>& slots) const;
     bool                             supportsTypedPrefixCacheLayout(const std::vector<LayerTagSlot>& slots) const;
     bool                             checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
+    LayerBlockIds                    resourceLayerBlocks(const KVCacheResource& resource) const;
     LayerAttnBlockIds                resourceLayerRegionBlocks(const KVCacheResource&           resource,
                                                                const std::vector<LayerTagSlot>& slots) const;
     bool                             checkLayerRegionBlocks(const LayerAttnBlockIds&         layer_attn_block_ids,
@@ -190,8 +198,6 @@ private:
                                                        const std::vector<LayerTagSlot>& slots,
                                                        size_t                           key_index) const;
     bool                             usePrefixTreeMemoryCache() const;
-    CacheGroupPolicy                 groupPolicyForSlot(const LayerTagSlot& slot) const;
-    CacheBlockKind                   kindForSlot(const LayerTagSlot& slot) const;
     bool                             kindRequiredAt(const LayerAttnBlockIds&         layer_attn_block_ids,
                                                     const std::vector<LayerTagSlot>& slots,
                                                     size_t                           key_index,
@@ -305,6 +311,7 @@ private:
     const ParallelismConfig           parallelism_config_;
     std::shared_ptr<KVCacheAllocator> allocator_;
     const std::vector<std::string>    tp_addrs_;
+    const std::vector<LayerTagSlot>   layer_tag_slots_;
 
     std::shared_ptr<BlockPool>                  block_pool_;
     mutable std::mutex                          malloc_mutex_;

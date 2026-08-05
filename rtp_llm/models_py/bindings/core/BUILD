@@ -64,6 +64,7 @@ cc_library(
     deps = [
         ":type_convert",
         ":common_defines",
+        "//rtp_llm/cpp/cache:cache_types_hdr",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:stats",

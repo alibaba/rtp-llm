@@ -15,23 +15,27 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.is_multimodal           = model_config.mm_model_config.is_multimodal;
     model_input_gatherer_config_.mm_position_ids_style =
         static_cast<PositionIdsStyle>(model_config.mm_model_config.mm_position_ids_style);
-    model_input_gatherer_config_.position_id_len_factor = model_config.attn_config.rope_config.index_factor;
-    model_input_gatherer_config_.role_type              = pd_sep_config.role_type;
-    model_input_gatherer_config_.decode_entrance        = pd_sep_config.decode_entrance;
-    model_input_gatherer_config_.block_stride_bytes     = cache_config.kv_block_stride_bytes;
-    model_input_gatherer_config_.scale_stride_bytes     = cache_config.kv_scale_stride_bytes;
-    model_input_gatherer_config_.seq_size_per_block     = cache_config.seq_size_per_block;
-    const auto kernel_gid                               = cache_config.kernelAddressedFullGroupId();
-    model_input_gatherer_config_.kernel_seq_size_per_block =
-        kernel_gid.has_value() ? cache_config.kernelSeqSizePerBlockForGroup(*kernel_gid) :
-                                 cache_config.seq_size_per_block;
-    model_input_gatherer_config_.kernel_blocks_per_kv_block =
-        kernel_gid.has_value() ? cache_config.kernelBlocksPerKvBlockForGroup(*kernel_gid) : 1;
-    model_input_gatherer_config_.kv_cache_group_nums       = cache_config.groupNums();
+    model_input_gatherer_config_.position_id_len_factor    = model_config.attn_config.rope_config.index_factor;
+    model_input_gatherer_config_.role_type                 = pd_sep_config.role_type;
+    model_input_gatherer_config_.decode_entrance           = pd_sep_config.decode_entrance;
+    model_input_gatherer_config_.block_stride_bytes        = cache_config.kv_block_stride_bytes;
+    model_input_gatherer_config_.scale_stride_bytes        = cache_config.kv_scale_stride_bytes;
+    model_input_gatherer_config_.seq_size_per_block        = cache_config.seq_size_per_block;
+    model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.seq_size_per_block;
     model_input_gatherer_config_.use_opaque_kv_cache_store = cache_config.use_opaque_kv_cache_store;
-    if (model_input_gatherer_config_.kv_cache_group_nums > 0) {
-        model_input_gatherer_config_.kv_cache_group_types = cache_config.groupTypesSnapshot();
-        model_input_gatherer_config_.kv_cache_group_tags  = cache_config.groupTagsSnapshot();
+    if (cache_config.groupNums() > 0) {
+        const auto kernel_tag = cache_config.kernelAddressedFullGroupTag();
+        if (kernel_tag.has_value()) {
+            model_input_gatherer_config_.kernel_seq_size_per_block =
+                cache_config.kernelSeqSizePerBlockForGroup(*kernel_tag);
+        }
+        for (const auto& group : cache_config.topology().groups()) {
+            RTP_LLM_CHECK(
+                model_input_gatherer_config_.kv_cache_group_types.emplace(group.tag, group.policy.group_type).second);
+            RTP_LLM_CHECK(model_input_gatherer_config_.kernel_blocks_per_kv_block_by_tag
+                              .emplace(group.tag, cache_config.kernelBlocksPerKvBlockForGroup(group.tag))
+                              .second);
+        }
     }
     model_input_gatherer_config_.warm_up           = warm_up;
     model_input_gatherer_config_.enable_detail_log = profiling_debug_logging_config.enable_detail_log;
@@ -56,9 +60,10 @@ absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     return sampler_input_gatherer_->gather(stream_groups, model_inputs, model_output);
 }
 
-absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
-                                                                                     TensorHolder& host_holder) const {
-    return model_input_gatherer_->gatherKvCacheKernelBlockId(stream_groups, host_holder);
+absl::Status NormalBatchStreamProcessor::gatherKvCacheKernelBlockIds(GptModelInputs&     model_input,
+                                                                     const StreamGroups& stream_groups,
+                                                                     TensorHolder&       host_holder) const {
+    return model_input_gatherer_->gatherKvCacheKernelBlockIds(model_input, stream_groups, host_holder);
 }
 
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,

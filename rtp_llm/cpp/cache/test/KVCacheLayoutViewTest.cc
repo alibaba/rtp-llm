@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <set>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -77,15 +78,16 @@ GroupBase makeGroup(const std::string& tag,
     return group;
 }
 
-GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>          groups,
-                                   std::vector<std::string>        layer_tags,
-                                   std::vector<BlockBufferPtrInfo> buffers) {
-    EXPECT_EQ(groups.size(), buffers.size());
+GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>                    groups,
+                                   std::vector<std::string>                  layer_tags,
+                                   std::map<std::string, BlockBufferPtrInfo> buffers_by_tag) {
+    EXPECT_EQ(groups.size(), buffers_by_tag.size());
     auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
     GroupedCacheLayerLayout::GroupLayouts layouts;
-    for (size_t group_id = 0; group_id < topology->groups().size(); ++group_id) {
-        layouts.emplace(topology->groupById(group_id).tag,
-                        CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[group_id])}));
+    for (const auto& group : topology->groups()) {
+        auto node = buffers_by_tag.extract(group.tag);
+        EXPECT_FALSE(node.empty());
+        layouts.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(node.mapped())}));
     }
     return GroupedCacheLayerLayout(std::move(topology), std::move(layouts));
 }
@@ -101,10 +103,9 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
                            /*k_elems=*/32,
                            /*v_elems=*/32,
                            /*local_kv_heads=*/1);
-    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"full"}, {{base, scale}}));
+    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"full"}, {{"full", {base, scale}}}));
 
-    const auto layer  = cache.getLayerCache(0);
-    const auto by_tag = cache.getLayerCache(0, "full");
+    const auto layer = cache.getLayerCache(0, "full");
     EXPECT_EQ(layer.seq_size_per_block, 2);
     EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, 1, 2, 4}));
     EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
@@ -114,10 +115,7 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_TRUE(torch::equal(layer.kv_scale_base[0], torch::arange(0, 4, scale.options())));
     EXPECT_TRUE(torch::equal(layer.kv_scale_base[1], torch::arange(4, 8, scale.options())));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
-    EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
-    EXPECT_EQ(by_tag.group_id, 0);
-    EXPECT_EQ(by_tag.tag, "full");
-    EXPECT_EQ(cache.groupTags(), std::vector<std::string>{"full"});
+    EXPECT_EQ(layer.tag, "full");
     EXPECT_EQ(cache.layerCount(), 1u);
     EXPECT_EQ(cache.getSeqSizePerBlock("full"), 8);
     EXPECT_EQ(cache.getKernelSeqSizePerBlock("full"), 2);
@@ -135,7 +133,7 @@ TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
                            2,
                            /*k_elems=*/32,
                            /*v_elems=*/16);
-    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"mla"}, {{base, scale}}));
+    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"mla"}, {{"mla", {base, scale}}}));
 
     const auto layer = cache.getLayerCache(0, "mla");
     EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{8, 2, 6}));
@@ -147,8 +145,8 @@ TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
 TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
     const auto opaque       = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 64});
     auto       opaque_group = makeGroup("opaque", KVCacheSpecType::OpaqueKV, CacheGroupType::FULL, 512, 128, 64, 0);
-    torch_ext::KVCache opaque_cache(makeLayout({std::move(opaque_group)}, {"opaque"}, {{opaque, {}}}));
-    const auto         opaque_layer = opaque_cache.getLayerCache(0);
+    torch_ext::KVCache opaque_cache(makeLayout({std::move(opaque_group)}, {"opaque"}, {{"opaque", {opaque, {}}}}));
+    const auto         opaque_layer = opaque_cache.getLayerCache(0, "opaque");
     EXPECT_EQ(opaque_layer.seq_size_per_block, 128);
     EXPECT_EQ(opaque_layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 16}));
 
@@ -158,8 +156,8 @@ TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
              {"swa", KVCacheSpecType::MultiHeadAttention, CacheGroupType::SWA},
              {"state", KVCacheSpecType::OpaqueState, CacheGroupType::FULL}}) {
         auto               group = makeGroup(tag, spec_type, policy, 8, 2, 32, 32);
-        torch_ext::KVCache cache(makeLayout({std::move(group)}, {tag}, {{physical, {}}}));
-        const auto         layer = cache.getLayerCache(0);
+        torch_ext::KVCache cache(makeLayout({std::move(group)}, {tag}, {{tag, {physical, {}}}}));
+        const auto         layer = cache.getLayerCache(0, tag);
         EXPECT_EQ(layer.seq_size_per_block, 8) << tag;
         EXPECT_EQ(layer.kv_cache_base.sizes().vec(), physical.sizes().vec()) << tag;
         EXPECT_EQ(layer.kv_cache_base.data_ptr(), physical.data_ptr()) << tag;
@@ -172,19 +170,22 @@ TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder)
     auto       full_group = makeGroup("full", KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL, 8, 8, 32, 32);
     auto       linear_group = makeGroup("linear", KVCacheSpecType::LinearAttention, CacheGroupType::LINEAR, 8, 8, 9, 0);
     auto       empty_group  = makeGroup("empty", KVCacheSpecType::OpaqueState, CacheGroupType::LINEAR, 1, 1, 1, 0);
+    empty_group.layer_ids.clear();
     torch_ext::KVCache cache(makeLayout({std::move(full_group), std::move(linear_group), std::move(empty_group)},
-                                        {"full", "linear", "empty"},
-                                        {{full, {}}, {linear, {}}, {{}, {}}}));
+                                        {"full", "linear"},
+                                        {{"full", {full, {}}}, {"linear", {linear, {}}}, {"empty", {{}, {}}}}));
 
-    EXPECT_ANY_THROW(cache.getLayerCache(0));
     const auto groups = cache.getLayerCacheGroups(0);
     ASSERT_EQ(groups.size(), 2u);
-    EXPECT_EQ(groups[0].tag, "full");
-    EXPECT_EQ(groups[1].tag, "linear");
+    std::set<std::string> group_tags;
+    for (const auto& group : groups) {
+        group_tags.emplace(group.tag);
+    }
+    EXPECT_EQ(group_tags, (std::set<std::string>{"full", "linear"}));
     EXPECT_EQ(cache.getLayerCache(0, "linear").kv_cache_base.data_ptr(), linear.data_ptr());
 
-    EXPECT_ANY_THROW(cache.getLayerCache(-1));
-    EXPECT_ANY_THROW(cache.getLayerCache(1));
+    EXPECT_ANY_THROW(cache.getLayerCache(-1, "full"));
+    EXPECT_ANY_THROW(cache.getLayerCache(1, "full"));
     EXPECT_ANY_THROW(cache.getLayerCache(0, "missing"));
     EXPECT_ANY_THROW(cache.getLayerCache(0, "empty"));
     EXPECT_ANY_THROW(cache.getSeqSizePerBlock("missing"));

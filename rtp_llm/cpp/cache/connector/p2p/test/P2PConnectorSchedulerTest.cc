@@ -60,7 +60,7 @@ protected:
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer_id).add({i});
+                resource->mutableBlockIds("group" + std::to_string(layer_id)).add({i});
             }
         }
 
@@ -134,11 +134,24 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_LayerCacheBuffersEmpty)
     ErrorInfo error_info =
         scheduler_->sendKVCache(invalid_resource, "test_unique_key", 1001, decode_transfer_servers, deadline_ms);
 
-    EXPECT_TRUE(error_info.hasError());
+    EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
 
     // 验证 BroadcastTp 没有被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 0);
+    }
+}
+
+TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_UninitializedResource) {
+    auto                                          resource                = std::make_shared<KVCacheResource>();
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers = {{"127.0.0.1", 12345}};
+
+    const auto error_info = scheduler_->sendKVCache(
+        resource, "test_uninitialized_resource", 1002, decode_transfer_servers, currentTimeMs() + 1000);
+
+    EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
     }
 }
 

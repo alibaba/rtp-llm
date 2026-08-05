@@ -15,19 +15,12 @@ size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
         return 0;
     }
 
-    for (const auto& group_block_ids : resource_->groupBlocks()) {
-        if (group_block_ids && group_block_ids->blocksNum() > 0) {
-            return group_block_ids->blocksNum();
-        }
+    size_t matched_blocks = 0;
+    for (const auto& [tag, block_ids] : resource_->groupBlocks()) {
+        (void)tag;
+        matched_blocks = std::max(matched_blocks, block_ids->blocksNum());
     }
-    for (const auto& layer_groups : resource_->layerGroupBlocks()) {
-        for (const auto& group_block_ids : layer_groups) {
-            if (group_block_ids && group_block_ids->blocksNum() > 0) {
-                return group_block_ids->blocksNum();
-            }
-        }
-    }
-    return 0;
+    return std::min(matched_blocks, resource_->cacheKeys().size());
 }
 
 bool P2PConnectorAsyncMatchContext::done() const {

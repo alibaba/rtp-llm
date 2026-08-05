@@ -422,7 +422,8 @@ public:
                                                                             /*tokens_per_block=*/2,
                                                                             rtp_llm::TYPE_INT8,
                                                                             /*local_head_num_kv=*/128,
-                                                                            /*size_per_head=*/256));
+                                                                            /*size_per_head=*/256,
+                                                                            /*tag=*/"full"));
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.sp_config        = sp_config;

@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
@@ -16,6 +17,15 @@
 #include <type_traits>
 
 namespace rtp_llm {
+
+struct GroupBlockTable {
+    std::string    tag;
+    CacheGroupType type = CacheGroupType::FULL;
+    torch::Tensor  block_ids;         // [batch, width]
+    torch::Tensor  kernel_block_ids;  // [batch, kernel_width]
+};
+
+using BlockTablesByGroup = std::map<std::string, GroupBlockTable>;
 
 enum class ParallelMode {
     TP        = 0,
@@ -52,13 +62,8 @@ struct GptModelInputs {
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
-    // - single-type cache: [batch_size, block_nums]
-    // - hybrid cache: [group_nums, batch_size, block_nums]
-    torch::Tensor kv_cache_block_id;
-    torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
-
-    torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
-    torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_id, src block, dst block
+    BlockTablesByGroup             block_tables_by_tag;
+    std::vector<TaggedBlockIdPair> kv_cache_update_mapping;
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
@@ -165,8 +170,8 @@ struct BatchCopyParams {
 struct KvCacheInfo {
     int           layer_num;
     torch::Tensor kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
-    // only meaningful for hybrid cache, per-group block tables, each is [batch_size, block_nums]
-    std::vector<torch::Tensor> kv_cache_block_ids_by_group;
+    // Only meaningful for hybrid cache; tag -> [batch_size, block_nums].
+    std::map<std::string, torch::Tensor> kv_cache_block_ids_by_tag;
     // Base buffer for kv cache blocks. For current cache layout, this represents the base (K) address of kv blocks.
     // V address can be derived by offset/stride when needed.
     torch::Tensor kv_cache_buffer;

@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/Types.h"
 
 namespace rtp_llm {
 

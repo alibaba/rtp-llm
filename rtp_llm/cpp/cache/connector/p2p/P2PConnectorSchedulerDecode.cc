@@ -45,7 +45,6 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
         RTP_LLM_LOG_WARNING("asyncRead: meta or resource is null");
         return {nullptr, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta or resource is null")};
     }
-
     // Extract routing from Meta::p2pRouting()
     auto routing = meta->p2pRouting();
     if (!routing.has_value()) {

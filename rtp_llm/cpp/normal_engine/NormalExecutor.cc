@@ -257,7 +257,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         // update kv cache
-        if (model_input.kv_cache_update_mapping.defined()) {
+        if (!model_input.kv_cache_update_mapping.empty()) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
             cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
         }

@@ -16,11 +16,11 @@ HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
 
 
-class GroupedBlockTableModel:
+class TaggedBlockTableModel:
     """Small graph-safe model whose output exposes both tag-local block tables."""
 
     def __init__(self) -> None:
-        self.recorders: dict[str, GroupPrepareRecorder] = {}
+        self.recorders: dict[str, TaggedPrepareRecorder] = {}
         self.capture_table_pointers: set[int] = set()
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -34,7 +34,7 @@ class GroupedBlockTableModel:
                 inputs.attention_inputs[tag].kv_cache_block_id_device,
             )
         }
-        self.recorders = {tag: GroupPrepareRecorder() for tag in GROUP_TAGS}
+        self.recorders = {tag: TaggedPrepareRecorder() for tag in GROUP_TAGS}
         return self.recorders
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
@@ -50,21 +50,15 @@ class GroupedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
-class GroupPrepareRecorder:
+class TaggedPrepareRecorder:
     def __init__(self) -> None:
-        self.host_kernel: torch.Tensor | None = None
         self.host_physical: torch.Tensor | None = None
-        self.device_kernel: torch.Tensor | None = None
-        self.device_physical: torch.Tensor | None = None
 
     def prepare_cuda_graph(self, inputs: PyAttentionInputs) -> None:
-        self.host_kernel = inputs.kv_cache_kernel_block_id.clone()
         self.host_physical = inputs.kv_cache_block_id.clone()
-        self.device_kernel = inputs.kv_cache_kernel_block_id_device.clone()
-        self.device_physical = inputs.kv_cache_block_id_device.clone()
 
 
-class GroupedSequenceLengthModel:
+class TaggedSequenceLengthModel:
     """Expose the cumulative lengths used by a tagged captured graph."""
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
@@ -81,14 +75,6 @@ class GroupedSequenceLengthModel:
             )
         ).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
-
-
-class SingleBlockTableModel:
-    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
-        return None
-
-    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
-        return PyModelOutputs(inputs.input_hiddens)
 
 
 def _tag_attention_inputs(
@@ -252,7 +238,6 @@ def _build_target_verify_inputs(
     query_len: int = 5,
     prefix_len: int = 11,
     is_prefill: bool = True,
-    block_count: int | None = None,
 ) -> PyModelInputs:
     token_count = batch_size * query_len
 
@@ -320,25 +305,7 @@ def _expected_signature(
     )
 
 
-class TestCudaGraphGroupedCache(unittest.TestCase):
-    def _assert_recorded_block_tables(
-        self,
-        model: GroupedBlockTableModel,
-        tag: str,
-        expected_kernel: torch.Tensor,
-        expected_physical: torch.Tensor,
-    ) -> None:
-        recorder = model.recorders[tag]
-        for actual, expected in (
-            (recorder.host_kernel, expected_kernel),
-            (recorder.host_physical, expected_physical),
-            (recorder.device_kernel, expected_kernel.cuda()),
-            (recorder.device_physical, expected_physical.cuda()),
-        ):
-            if actual is None:
-                self.fail(f"missing recorded block table for tag={tag}")
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
+class TestCudaGraphTaggedCache(unittest.TestCase):
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:
@@ -349,7 +316,7 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
         torch.testing.assert_close(output.hidden_states, expected_output)
 
     def test_decode_tag_validation_and_replay_updates(self) -> None:
-        model = GroupedBlockTableModel()
+        model = TaggedBlockTableModel()
         runner = CudaGraphRunner()
         runner.init_decode(
             model,
@@ -393,20 +360,6 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
         torch.testing.assert_close(
             model.recorders["full"].host_physical,
             torch.tensor([[7, 7, 0, 0], [7, 7, 0, 0]], dtype=torch.int32),
-            rtol=0,
-            atol=0,
-        )
-        self._assert_recorded_block_tables(
-            model,
-            "full",
-            torch.tensor([[2, 2, 2, 0], [2, 2, 2, 0]], dtype=torch.int32),
-            torch.tensor([[7, 7, 0, 0], [7, 7, 0, 0]], dtype=torch.int32),
-        )
-        self._assert_recorded_block_tables(
-            model,
-            "aux",
-            torch.tensor([[1, 1, 1, 0], [1, 1, 1, 0]], dtype=torch.int32),
-            torch.tensor([[3, 3, 0, 0], [3, 3, 0, 0]], dtype=torch.int32),
         )
 
         second_kernel = {"full": 5, "aux": 3}
@@ -424,20 +377,6 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
         torch.testing.assert_close(
             model.recorders["full"].host_physical,
             torch.tensor([[11, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.int32),
-            rtol=0,
-            atol=0,
-        )
-        self._assert_recorded_block_tables(
-            model,
-            "full",
-            torch.tensor([[5, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.int32),
-            torch.tensor([[11, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.int32),
-        )
-        self._assert_recorded_block_tables(
-            model,
-            "aux",
-            torch.tensor([[3, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.int32),
-            torch.tensor([[13, 0, 0, 0], [0, 0, 0, 0]], dtype=torch.int32),
         )
 
         self.assertFalse(runner.canRun(_build_decode_inputs(["full"], {"full": 2})))
@@ -455,57 +394,8 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
             )
         )
 
-    def test_decode_accepts_cuda_resident_host_kernel_tables(self) -> None:
-        model = GroupedBlockTableModel()
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            model,
-            HIDDEN_SIZE,
-            4 * TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            [2],
-            GROUP_TAGS,
-        )
-
-        kernel_values = {"full": 6, "aux": 3}
-        physical_values = {"full": 5, "aux": 2}
-        inputs = _build_decode_inputs(
-            GROUP_TAGS,
-            kernel_values,
-            physical_values,
-            batch_size=2,
-            kernel_block_count=2,
-            physical_block_count=1,
-        )
-        for group_inputs in inputs.attention_inputs.values():
-            group_inputs.kv_cache_kernel_block_id = (
-                group_inputs.kv_cache_kernel_block_id_device
-            )
-            self.assertTrue(group_inputs.kv_cache_kernel_block_id.is_cuda)
-
-        self._assert_replay_signature(
-            runner,
-            inputs,
-            _expected_signature(kernel_values, physical_values, 2, 2, 1),
-        )
-        for tag, value in kernel_values.items():
-            host_kernel = model.recorders[tag].host_kernel
-            if host_kernel is None:
-                self.fail(f"missing prepared host kernel table for tag={tag}")
-            self.assertFalse(host_kernel.is_cuda)
-            torch.testing.assert_close(
-                host_kernel,
-                torch.tensor(
-                    [[value, value, 0, 0], [value, value, 0, 0]],
-                    dtype=torch.int32,
-                ),
-                rtol=0,
-                atol=0,
-            )
-
-    def test_prefill_grouped_capture_and_replay_updates(self) -> None:
-        model = GroupedBlockTableModel()
+    def test_prefill_tagged_capture_and_replay_updates(self) -> None:
+        model = TaggedBlockTableModel()
         runner = CudaGraphRunner()
         runner.init_prefill(
             model,
@@ -534,14 +424,6 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
         torch.testing.assert_close(
             model.recorders["aux"].host_physical,
             torch.tensor([[4, 4], [0, 0]], dtype=torch.int32),
-            rtol=0,
-            atol=0,
-        )
-        self._assert_recorded_block_tables(
-            model,
-            "aux",
-            torch.tensor([[2, 2], [0, 0]], dtype=torch.int32),
-            torch.tensor([[4, 4], [0, 0]], dtype=torch.int32),
         )
 
         second_kernel = {"full": 4, "aux": 3}
@@ -556,20 +438,12 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
         torch.testing.assert_close(
             model.recorders["aux"].host_physical,
             torch.tensor([[5, 0], [0, 0]], dtype=torch.int32),
-            rtol=0,
-            atol=0,
-        )
-        self._assert_recorded_block_tables(
-            model,
-            "aux",
-            torch.tensor([[3, 0], [0, 0]], dtype=torch.int32),
-            torch.tensor([[5, 0], [0, 0]], dtype=torch.int32),
         )
 
-    def test_grouped_block_table_validation_falls_back(self) -> None:
+    def test_tagged_block_table_validation_falls_back(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            GroupedBlockTableModel(),
+            TaggedBlockTableModel(),
             HIDDEN_SIZE,
             2 * TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -578,138 +452,48 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
             GROUP_TAGS,
         )
 
-        def missing_table() -> PyModelInputs:
-            inputs = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-            runner.clearTaggedPhysicalBlockTable(inputs, "full", False)
-            return inputs
+        missing = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        runner.clearTaggedPhysicalBlockTable(missing, "full", False)
+        self.assertFalse(runner.canRun(missing))
 
-        def wrong_type() -> PyModelInputs:
-            inputs = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-            inputs.attention_inputs["full"].kv_cache_block_id_device = (
-                inputs.attention_inputs["full"].kv_cache_block_id_device.to(torch.int64)
-            )
-            return inputs
-
-        def wrong_dimension() -> PyModelInputs:
-            inputs = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-            inputs.attention_inputs["aux"].kv_cache_block_id = inputs.attention_inputs[
-                "aux"
-            ].kv_cache_block_id.flatten()
-            return inputs
-
-        def over_capacity() -> PyModelInputs:
-            return _build_decode_inputs(
-                GROUP_TAGS,
-                {"full": 1, "aux": 2},
-                physical_block_count=3,
-            )
-
-        def non_unit_host_stride() -> PyModelInputs:
-            inputs = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-            host_base = torch.ones((2, 2), dtype=torch.int32).pin_memory()
-            inputs.attention_inputs["full"].kv_cache_block_id = host_base[:, ::2]
-            self.assertEqual(
-                inputs.attention_inputs["full"].kv_cache_block_id.stride(1), 2
-            )
-            return inputs
-
-        def non_unit_device_stride() -> PyModelInputs:
-            inputs = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-            device_base = torch.ones((2, 2), dtype=torch.int32, device="cuda")
-            inputs.attention_inputs["aux"].kv_cache_kernel_block_id_device = (
-                device_base[:, ::2]
-            )
-            self.assertEqual(
-                inputs.attention_inputs["aux"].kv_cache_kernel_block_id_device.stride(
-                    1
-                ),
-                2,
-            )
-            return inputs
-
-        cases = (
-            ("undefined", missing_table),
-            ("dtype", wrong_type),
-            ("dimension", wrong_dimension),
-            ("capacity", over_capacity),
-            ("host_stride", non_unit_host_stride),
-            ("device_stride", non_unit_device_stride),
+        wrong_type = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        wrong_type.attention_inputs["full"].kv_cache_block_id_device = (
+            wrong_type.attention_inputs["full"].kv_cache_block_id_device.to(torch.int64)
         )
-        for expected_count, (name, build_inputs) in enumerate(cases, start=1):
-            with self.subTest(name=name):
-                self.assertFalse(runner.canRun(build_inputs()))
-                self.assertEqual(runner.groupedCacheFallbackCount(), expected_count)
+        self.assertFalse(runner.canRun(wrong_type))
 
-    def test_groups_have_independent_capture_capacity(self) -> None:
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            GroupedBlockTableModel(),
-            HIDDEN_SIZE,
-            2 * TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            [2],
+        wrong_dimension = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        wrong_dimension.attention_inputs["aux"].kv_cache_block_id = (
+            wrong_dimension.attention_inputs["aux"].kv_cache_block_id.flatten()
+        )
+        self.assertFalse(runner.canRun(wrong_dimension))
+
+        over_capacity = _build_decode_inputs(
             GROUP_TAGS,
-            group_capacities={"full": (2, 2), "aux": (4, 8)},
+            {"full": 1, "aux": 2},
+            physical_block_count=3,
         )
-        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-        aux = inputs.attention_inputs["aux"]
-        aux.kv_cache_kernel_block_id = torch.ones(
-            (2, 8), dtype=torch.int32
-        ).pin_memory()
-        aux.kv_cache_kernel_block_id_device = aux.kv_cache_kernel_block_id.cuda()
-        aux.kv_cache_block_id = torch.ones((2, 4), dtype=torch.int32).pin_memory()
-        aux.kv_cache_block_id_device = aux.kv_cache_block_id.cuda()
-        self.assertTrue(runner.canRun(inputs))
+        self.assertFalse(runner.canRun(over_capacity))
 
-        full = inputs.attention_inputs["full"]
-        full.kv_cache_block_id = torch.ones((2, 3), dtype=torch.int32).pin_memory()
-        full.kv_cache_block_id_device = full.kv_cache_block_id.cuda()
-        self.assertFalse(runner.canRun(inputs))
-        self.assertEqual(runner.groupedCacheFallbackCount(), 1)
-
-    def test_group_capture_capacities_must_be_positive(self) -> None:
-        for capacity_name, capacities in (
-            ("physical", {"full": (0, 2), "aux": (2, 2)}),
-            ("kernel", {"full": (2, 0), "aux": (2, 2)}),
+    def test_duplicate_capture_tag_is_rejected(self) -> None:
+        runner = CudaGraphRunner()
+        with self.assertRaisesRegex(
+            RuntimeError, "duplicate CUDA graph KV cache tag=full"
         ):
-            with self.subTest(capacity_name=capacity_name):
-                runner = CudaGraphRunner()
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    rf"{capacity_name} block-table capacity must be positive",
-                ):
-                    runner.init_decode(
-                        GroupedBlockTableModel(),
-                        HIDDEN_SIZE,
-                        2 * TOKENS_PER_BLOCK,
-                        TOKENS_PER_BLOCK,
-                        TOKENS_PER_BLOCK,
-                        [2],
-                        GROUP_TAGS,
-                        group_capacities=capacities,
-                    )
-
-    def test_single_group_runner_rejects_grouped_inputs(self) -> None:
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            SingleBlockTableModel(),
-            HIDDEN_SIZE,
-            2 * TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            [2],
-            ["full"],
-        )
-
-        inputs = _build_decode_inputs(["full"], {"full": 1})
-        self.assertFalse(runner.canRun(inputs))
-        self.assertEqual(runner.groupedCacheFallbackCount(), 1)
+            runner.init_decode(
+                TaggedBlockTableModel(),
+                HIDDEN_SIZE,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                [1],
+                ["full", "full"],
+            )
 
     def test_target_verify_validates_exact_tag_set(self) -> None:
         runner = CudaGraphRunner()
         runner.init_decode(
-            GroupedBlockTableModel(),
+            TaggedBlockTableModel(),
             HIDDEN_SIZE,
             TOKENS_PER_BLOCK,
             TOKENS_PER_BLOCK,
@@ -752,47 +536,12 @@ class TestCudaGraphGroupedCache(unittest.TestCase):
         )
         self.assertFalse(runner.canRun(non_prefill))
 
-    def test_target_verify_includes_speculative_steps_in_block_capacity(self) -> None:
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            GroupedBlockTableModel(),
-            HIDDEN_SIZE,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            [2],
-            GROUP_TAGS,
-            is_target_verify=True,
-            sp_steps=2,
-        )
-
-        exact_capacity = _build_target_verify_inputs(
-            GROUP_TAGS,
-            {"full": 2, "aux": 1},
-            batch_size=2,
-            query_len=1,
-            prefix_len=1,
-            block_count=3,
-        )
-        self.assertTrue(runner.canRun(exact_capacity))
-
-        over_capacity = _build_target_verify_inputs(
-            GROUP_TAGS,
-            {"full": 2, "aux": 1},
-            batch_size=2,
-            query_len=1,
-            prefix_len=1,
-            block_count=4,
-        )
-        self.assertFalse(runner.canRun(over_capacity))
-        self.assertEqual(runner.groupedCacheFallbackCount(), 1)
-
     def test_target_verify_clears_rounded_batch_sequence_lengths(self) -> None:
         query_len = 5
         prefix_len = 11
         runner = CudaGraphRunner()
         runner.init_decode(
-            GroupedSequenceLengthModel(),
+            TaggedSequenceLengthModel(),
             HIDDEN_SIZE,
             64,
             TOKENS_PER_BLOCK,

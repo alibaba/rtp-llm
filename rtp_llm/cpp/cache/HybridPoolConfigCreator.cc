@@ -46,14 +46,15 @@ void validateHybridPoolDescs(const ModelConfig& model_config, int gen_num_per_cy
     }
 }
 
-void populateGroupsFromLayerSpecs(CacheConfig&                        config,
-                                  const LayerKVCacheSpecBuildResults& layer_specs,
-                                  const ModelConfig&                  model_config,
-                                  const ParallelismConfig&            parallelism_config) {
-    RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(config.layer_num),
+std::pair<std::vector<GroupBase>, std::vector<LayerBase>>
+buildGroupsFromLayerSpecs(const LayerKVCacheSpecBuildResults& layer_specs,
+                          const ModelConfig&                  model_config,
+                          const ParallelismConfig&            parallelism_config) {
+    const auto layer_num = static_cast<uint32_t>(model_config.num_layers);
+    RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(layer_num),
                             "hybrid-pool layer spec count %zu != layer_num %u",
                             layer_specs.size(),
-                            config.layer_num);
+                            layer_num);
 
     struct GroupBuildState {
         KVCacheSpecPtr   spec;
@@ -66,7 +67,7 @@ void populateGroupsFromLayerSpecs(CacheConfig&                        config,
     std::map<std::string, GroupBuildState> group_by_tag;
     std::vector<std::string>               ordered_tags;
 
-    for (uint32_t layer = 0; layer < config.layer_num; ++layer) {
+    for (uint32_t layer = 0; layer < layer_num; ++layer) {
         const auto& specs = layer_specs[layer];
         RTP_LLM_CHECK_WITH_INFO(!specs.empty(), "hybrid-pool layer %u has no specs", layer);
         std::set<std::string> layer_tags;
@@ -103,7 +104,7 @@ void populateGroupsFromLayerSpecs(CacheConfig&                        config,
     }
 
     std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
+    std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
     for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
         layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
@@ -122,15 +123,14 @@ void populateGroupsFromLayerSpecs(CacheConfig&                        config,
             layer.group_tags.push_back(tag);
         }
     }
-    config.setTopology(std::move(groups), std::move(layers));
+    return {std::move(groups), std::move(layers)};
 }
 
-void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
+void setupIndependentPoolSizes(CacheConfig&           config,
+                               std::vector<GroupBase> groups,
+                               std::vector<LayerBase> layers,
+                               bool                   is_mtp) {
     config.use_independent_block_pools = true;
-    const auto            group_num    = static_cast<size_t>(config.groupNums());
-    std::vector<uint32_t> group_block_nums(group_num, 0);
-    std::vector<size_t>   group_kv_block_stride_bytes(group_num, 0);
-    std::vector<size_t>   group_kv_scale_stride_bytes(group_num, 0);
 
     size_t   max_kv_stride           = 0;
     size_t   max_scale_stride        = 0;
@@ -139,17 +139,18 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     uint32_t max_group_layers        = 0;
 
     config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        const auto& spec = config.specForGroup(gid);
-        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
-        const auto   layer_count         = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
-        const size_t kv_stride           = spec->block_size_bytes();
-        const size_t scale_stride        = spec->scale_block_size_bytes();
-        group_kv_block_stride_bytes[gid] = kv_stride;
-        group_kv_scale_stride_bytes[gid] = scale_stride;
-        const auto type                  = config.typeForGroup(gid);
-        const bool is_paged_group        = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
-        if (is_paged_group && !config.usesExplicitIndependentBlocks(gid)) {
+    for (auto& group : groups) {
+        const auto& spec = group.spec;
+        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec tag=%s is null", group.tag.c_str());
+        const auto   layer_count    = static_cast<uint32_t>(group.layer_ids.size());
+        const size_t kv_stride      = spec->block_size_bytes();
+        const size_t scale_stride   = spec->scale_block_size_bytes();
+        group.block_num             = 0;
+        group.kv_block_stride_bytes = kv_stride;
+        group.kv_scale_stride_bytes = scale_stride;
+        const auto type             = group.policy.group_type;
+        const bool is_paged_group   = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
+        if (is_paged_group && group.policy.explicit_block_num == 0) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         }
@@ -157,9 +158,9 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         max_scale_stride = std::max(max_scale_stride, scale_stride);
         max_group_layers = std::max(max_group_layers, layer_count);
 
-        for (int layer_id : config.layerIdsForGroup(gid)) {
-            config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] =
-                static_cast<int>(kv_stride + scale_stride);
+        for (int layer_id : group.layer_ids) {
+            auto& layer_stride = config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)];
+            layer_stride       = std::max(layer_stride, static_cast<int>(kv_stride + scale_stride));
         }
     }
 
@@ -179,7 +180,8 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         config.block_size_bytes = paged_block_bytes;
     }
     config.explicitly_sized_pool_reserve_bytes = 0;
-    config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
+    config.setTopology(std::move(groups), std::move(layers));
+    config.group_block_layout_initialized = true;
 }
 
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
@@ -211,9 +213,9 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
         auto refreshed_specs        = CacheConfigCreator::buildLayerSpecsFromDescs(
             model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
-        populateGroupsFromLayerSpecs(config, refreshed_specs, model_config, parallelism_config);
-        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-            const auto& spec               = config.specForGroup(gid);
+        auto [groups, layers] = buildGroupsFromLayerSpecs(refreshed_specs, model_config, parallelism_config);
+        for (const auto& group : groups) {
+            const auto& spec               = group.spec;
             config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
                                              || spec->type == KVCacheSpecType::OpaqueState;
             config.use_opaque_kv_cache_store = config.use_opaque_kv_cache_store
@@ -227,12 +229,12 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
         }
         config.disable_decode_first_malloc_device_reuse =
             config.disable_decode_first_malloc_device_reuse || config.use_opaque_kv_cache_store;
+        setupIndependentPoolSizes(config, std::move(groups), std::move(layers), is_mtp);
     } else {
         RTP_LLM_CHECK_WITH_INFO(false, "HybridPoolConfigCreator requires kv_cache_spec_descs");
     }
 
     RTP_LLM_CHECK_WITH_INFO(config.groupNums() > 0, "hybrid-pool config produced no cache specs");
-    setupIndependentPoolSizes(config, is_mtp);
     return config;
 }
 
