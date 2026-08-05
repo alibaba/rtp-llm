@@ -77,8 +77,9 @@ When CUDA Graph is enabled, the executor uses the configured decode capacity
 `ll_num_max_token` for captured calls and falls back to eager execution for
 larger prefill calls. The server derives this capacity from
 `--concurrency_limit`. The persistent MMA blockscale footprint per layer is
-`3 * expert_num * hidden_size * moe_intermediate_size / 16` bytes; construction
-replaces the source swizzled scales rather than retaining both layouts.
+`3 * expert_num * hidden_size * moe_intermediate_size / 16` bytes; model weight
+preprocessing replaces the source swizzled scales rather than retaining both
+layouts, and executor construction treats the prepared dictionary as read-only.
 
 The backend fixes activation global scales to 1 and does not consume the
 checkpoint `input_scale`, so compatible checkpoints must have activation
@@ -88,12 +89,13 @@ the B12X path fails, rollback requires non-FP4 MoE weights; explicitly selecting
 `trtllm` fails during startup. By default, model loading rejects a checkpoint
 when folding `weight_scale_2` into e4m3 block scales loses more than 0.1% of
 scale energy. Operators may temporarily override that limit with
-`RTP_LLM_B12X_ZEROED_ENERGY_LIMIT` in the range `[0, 1]` while preparing
-replacement non-FP4 weights. Set
-`RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT=1` to disable the construction-time CUDA
-12.9 compatibility path and restore FlashInfer's native CUDA-version failure.
-Both variables are low-level emergency controls, accept only the documented
-numeric values, and are logged once with their effective settings at startup.
+`--b12x_zeroed_energy_limit` / `RTP_LLM_B12X_ZEROED_ENERGY_LIMIT` in the range
+`[0, 1]` while preparing replacement non-FP4 weights. Set
+`--b12x_disable_cuda12_9_compat=true` /
+`RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT=true` to disable the construction-time
+CUDA 12.9 compatibility path and restore FlashInfer's native CUDA-version
+failure. Both options are low-level emergency controls and are logged once with
+their effective settings at startup.
 The thread-scoped patch assumes FlashInfer probes CUDA synchronously in wrapper
 construction. If a future wheel moves that probe to a worker or subprocess,
 construction fails with FlashInfer's native CUDA-version error instead of

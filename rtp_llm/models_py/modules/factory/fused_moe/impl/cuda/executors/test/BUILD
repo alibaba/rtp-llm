@@ -134,4 +134,8 @@ py_test(
         "//rtp_llm:nvidia-cutlass-dsl",
         "//rtp_llm:utils",
     ],
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )

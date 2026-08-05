@@ -2,7 +2,6 @@
 
 import functools
 import logging
-import os
 import threading
 from contextlib import contextmanager
 from typing import Any, Callable, NamedTuple, Optional
@@ -10,12 +9,10 @@ from typing import Any, Callable, NamedTuple, Optional
 import torch
 
 from rtp_llm.config.quant_config import NVFP4_BLOCK_SIZE
-from rtp_llm.utils.util import str_to_bool
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_FLASHINFER_VERSION = "0.6.12rc1+rtp.260523"
-DISABLE_CUDA12_9_COMPAT_ENV = "RTP_LLM_DISABLE_B12X_CUDA12_9_COMPAT"
 
 _version_gate_warned = False
 _version_gate_lock = threading.Lock()
@@ -25,19 +22,6 @@ class _B12xSymbols(NamedTuple):
     wrapper: type
     convert_sf_to_mma_layout: Callable[..., torch.Tensor]
     kernel_tile_n: int
-
-
-def get_disable_cuda12_9_compat() -> bool:
-    raw_value = os.getenv(DISABLE_CUDA12_9_COMPAT_ENV)
-    if not raw_value:
-        return False
-    try:
-        return str_to_bool(raw_value)
-    except ValueError as error:
-        raise ValueError(
-            f"{DISABLE_CUDA12_9_COMPAT_ENV} must be one of "
-            f"yes/true/1/no/false/0, got {raw_value!r}"
-        ) from error
 
 
 @functools.cache
@@ -99,7 +83,7 @@ def convert_b12x_blockscale_to_mma_layout(
 
 
 @contextmanager
-def relaxed_b12x_cuda_version_gate():
+def relaxed_b12x_cuda_version_gate(disable_cuda12_9_compat: bool = False):
     """Relax the CUDA>=13 probe only for synchronous wrapper construction."""
     from flashinfer.jit import cpp_ext
 
@@ -117,7 +101,7 @@ def relaxed_b12x_cuda_version_gate():
         if (real_version.major, real_version.minor) != (
             12,
             9,
-        ) or get_disable_cuda12_9_compat():
+        ) or disable_cuda12_9_compat:
             # The native gate passes, the toolchain is not the validated 12.9
             # combination, or the operator disabled compatibility. Preserve
             # FlashInfer's behavior.
@@ -148,14 +132,18 @@ def relaxed_b12x_cuda_version_gate():
 
 
 def create_b12x_wrappers(
-    wrapper_args: dict[str, Any], enable_cuda_graph: bool
+    wrapper_args: dict[str, Any],
+    enable_cuda_graph: bool,
+    disable_cuda12_9_compat: bool = False,
 ) -> tuple[Any, Optional[Any]]:
     """Create the graph wrapper and its optional oversized-prefill fallback."""
     wrapper_class = _load_b12x_symbols().wrapper
     # FusedMoeFactory constructs executors under torch.inference_mode().
     # FlashInfer mutates its routing workspace on every run, so wrapper-owned
     # buffers must be normal tensors while model weights stay inference tensors.
-    with torch.inference_mode(False), relaxed_b12x_cuda_version_gate():
+    with torch.inference_mode(False), relaxed_b12x_cuda_version_gate(
+        disable_cuda12_9_compat
+    ):
         graph_wrapper = wrapper_class(
             **wrapper_args,
             use_cuda_graph=enable_cuda_graph,
