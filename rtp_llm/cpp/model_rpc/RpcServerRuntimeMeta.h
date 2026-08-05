@@ -60,6 +60,16 @@ public:
         running_streams_[request_id] = RunningEntry{new_task, stream};
     }
 
+    // Look up a running stream by request_id (engine Cancel RPC).
+    GenerateStreamPtr getStream(int64_t request_id) {
+        std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+        auto                                ptr = running_streams_.find(request_id);
+        if (ptr == running_streams_.end()) {
+            return nullptr;
+        }
+        return ptr->second.stream;
+    }
+
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                ptr = running_streams_.find(request_id);

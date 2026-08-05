@@ -63,6 +63,13 @@ public:
         return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "FetchResponse not implemented on this role");
     }
 
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) override {
+        if (!readyForRegularRpc()) {
+            return notReadyStatus("Cancel");
+        }
+        return local_server_->Cancel(context, request, response);
+    }
+
     ::grpc::Status
     GetWorkerStatus(::grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
         return local_server_->GetWorkerStatus(context, request, response);

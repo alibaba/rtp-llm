@@ -393,6 +393,26 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
     return grpc::Status::OK;
 }
 
+grpc::Status LocalRpcServer::Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) {
+    int64_t request_id = request->request_id();
+    RTP_LLM_LOG_INFO(
+        "receive Cancel rpc request from client: %s, request_id: %ld", context->peer().c_str(), request_id);
+    auto stream = meta_->getStream(request_id);
+    if (stream) {
+        // Report CANCELLED first so dequeue() records error_code=CANCELLED in
+        // finished_streams_ (dequeue checks stream->hasError()). The engine
+        // scheduler will evict the errored stream on its next loop iteration.
+        stream->reportError(ErrorCode::CANCELLED, "cancelled by master cancel rpc");
+        meta_->dequeue(request_id, stream);
+        RTP_LLM_LOG_INFO("Cancel rpc: request_id=%ld cancelled, moved to finished_streams_", request_id);
+    } else {
+        // Stream not in running_streams_ (already finished or never enqueued).
+        // Idempotent: return OK so the Master can advance latestFinishedTaskVersion.
+        RTP_LLM_LOG_INFO("Cancel rpc: request_id=%ld not found in running streams", request_id);
+    }
+    return grpc::Status::OK;
+}
+
 grpc::Status
 LocalRpcServer::SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response) {
     std::string log_level_str = request->log_level();
