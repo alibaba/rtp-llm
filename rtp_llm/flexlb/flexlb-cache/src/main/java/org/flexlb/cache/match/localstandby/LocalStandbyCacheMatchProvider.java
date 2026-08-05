@@ -8,6 +8,7 @@ import org.flexlb.cache.domain.LocalStandbyHashResult;
 import org.flexlb.cache.hash.LocalStandbyHashService;
 import org.flexlb.cache.match.CacheMatchProvider;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.LocalStandbyConfig;
@@ -57,9 +58,9 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
     }
 
     @Override
-    public Map<String, Integer> findMatchingEngines(String requestId, List<Long> blockCacheKeys,
-                                                    long blockSize, RoleType roleType, String group) {
-        return cacheManager.findMatchingEngines(blockCacheKeys, roleType, group);
+    public Map<String, HostCacheMatch> findMatchingEngines(String requestId, List<Long> blockCacheKeys,
+                                                           long blockSize, RoleType roleType, String group) {
+        return HostCacheMatch.fromLocalMatches(cacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
     public CompletableFuture<CacheMatchResult> asyncLocalStandbyMatch(CacheMatchQuery query) {
@@ -77,7 +78,7 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
                             return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, queryTimeUs);
                         }
 
-                        Map<String, Integer> matches = findMatchingEngines(
+                        Map<String, HostCacheMatch> matches = findMatchingEngines(
                                 query.requestId(),
                                 hashResult.blockCacheKeys(),
                                 hashResult.blockSize(),
@@ -85,10 +86,7 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
                                 query.group());
                         long queryTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
                         return new CacheMatchResult(
-                                matches,
-                                CacheMatchSource.LOCAL_STANDBY,
-                                queryTimeUs,
-                                hashResult.blockSize());
+                                matches, CacheMatchSource.LOCAL_STANDBY, queryTimeUs, hashResult.blockSize());
                     }, asyncMatchExecutor
                     );
         } catch (RejectedExecutionException e) {

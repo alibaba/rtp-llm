@@ -3,13 +3,15 @@ package org.flexlb.cache.domain;
 import java.util.Collections;
 import java.util.Map;
 
+import org.flexlb.dao.cache.HostCacheMatch;
+
 /**
  * Cache matches and the block size used to produce them.
  *
- * <p>{@code blockSize} is the only valid unit for converting matched block counts to token counts.
+ * <p>Each worker has one {@link HostCacheMatch} containing the raw local/P2P block counts.
  */
 public record CacheMatchResult(
-        Map<String, Integer> matches,
+        Map<String, HostCacheMatch> hostMatches,
         CacheMatchSource source,
         long queryTimeUs,
         long blockSize) {
@@ -21,4 +23,9 @@ public record CacheMatchResult(
     public static CacheMatchResult failed(CacheMatchSource source, long queryTimeUs) {
         return new CacheMatchResult(Collections.emptyMap(), source, queryTimeUs, 0);
     }
+
+    public HostCacheMatch hostMatch(String workerIpPort) {
+        return hostMatches.get(workerIpPort);
+    }
+
 }

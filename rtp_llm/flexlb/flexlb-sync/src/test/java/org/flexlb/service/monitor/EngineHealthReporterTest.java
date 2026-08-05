@@ -8,6 +8,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.TaskStateEnum;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -56,6 +57,12 @@ class EngineHealthReporterTest {
         verify(monitor).register("app.cache.hit.comparison.predicted.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.actual.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.delta.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.kvcm.local.delta.tokens",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.kvcm.p2p.total.match.delta.tokens",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.kvcm.effective.delta.tokens",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.delta.tokens",
@@ -277,6 +284,27 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void shouldReportSelectedKvcmP2pMatchDetails() {
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1", 40, 80, 100, 60, true);
+
+        verify(cacheMetricsReporter).reportKvcmSelectedMatch(
+                RoleType.PREFILL, "10.0.0.1", 40, 80, 100, 60);
+    }
+
+    @Test
+    void shouldSkipSelectedKvcmP2pMetricsWhenDetailsAreUnavailable() {
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1", 0, 0, 0, 0, false);
+
+        verify(cacheMetricsReporter, never()).reportKvcmSelectedMatch(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test
     void shouldNotReportLocalStandbyMetricsWhenPredictionIsUnavailable() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group", "10.0.0.1", 8080,
@@ -296,6 +324,28 @@ class EngineHealthReporterTest {
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.predicted.ratio"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
                 org.mockito.ArgumentMatchers.anyDouble());
+    }
+
+    @Test
+    void shouldReportKvcmLocalP2pAndEffectiveDeltasWhenAvailable() {
+        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1", 8080,
+                "running", 200, 64, 0, 60,
+                true, 40, 80, 100,
+                0, false, 120, 60, 80, 20, 0);
+
+        reporter.reportCacheHitComparisonMetrics("test-model", comparison);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "group", "test-group",
+                "taskState", "running",
+                "cacheMatchSource", "KVCM");
+        verify(monitor).report("app.cache.hit.comparison.kvcm.local.delta.tokens", expectedTags, 80.0);
+        verify(monitor).report("app.cache.hit.comparison.kvcm.p2p.total.match.delta.tokens", expectedTags, 20.0);
+        verify(monitor).report("app.cache.hit.comparison.kvcm.effective.delta.tokens", expectedTags, 60.0);
     }
 
     @Test

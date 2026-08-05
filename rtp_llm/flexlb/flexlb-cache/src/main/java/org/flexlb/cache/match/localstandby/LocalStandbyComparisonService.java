@@ -5,8 +5,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.domain.CacheMatchQuery;
-import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
@@ -48,7 +48,7 @@ public class LocalStandbyComparisonService {
         CompletableFuture<StandbyPrediction> localStandbyPredictionTask =
                 localStandbyProvider.asyncLocalStandbyMatch(query)
                         .thenApply(matchResult ->
-                                new StandbyPrediction(matchResult.matches(), matchResult.blockSize()));
+                                new StandbyPrediction(matchResult.hostMatches(), matchResult.blockSize()));
         pendingLocalStandbyPredictions.put(
                 new LocalStandbyPredictionKey(query.requestId(), query.roleType()), localStandbyPredictionTask);
     }
@@ -79,8 +79,10 @@ public class LocalStandbyComparisonService {
 
     private CacheHitComparisonResult withLocalStandbyPrediction(CacheHitFeedback feedback, StandbyPrediction standbyPrediction) {
         String workerIpPort = feedback.workerIp() + ":" + feedback.workerPort();
-        int matchedBlocks = standbyPrediction.matches().getOrDefault(workerIpPort, 0);
-        long localStandbyPredictedHitTokens = matchedBlocks * standbyPrediction.blockSize();
+        HostCacheMatch match = standbyPrediction.matches().get(workerIpPort);
+        long localStandbyPredictedHitTokens = match == null
+                ? 0
+                : match.localMatchBlocks() * standbyPrediction.blockSize();
         return result(feedback, standbyPrediction.blockSize(), localStandbyPredictedHitTokens, true);
     }
 
@@ -93,6 +95,12 @@ public class LocalStandbyComparisonService {
                                             boolean localStandbyPredictionAvailable) {
         long localStandbyDeltaHitTokens = localStandbyPredictionAvailable
                 ? feedback.actualHitTokens() - localStandbyPredictedHitTokens
+                : 0;
+        long kvcmLocalDeltaHitTokens = feedback.kvcmMatchAvailable()
+                ? feedback.actualHitTokens() - feedback.kvcmLocalMatchTokens()
+                : 0;
+        long kvcmP2pTotalMatchDeltaHitTokens = feedback.kvcmMatchAvailable()
+                ? feedback.actualHitTokens() - feedback.kvcmP2pTotalMatchTokens()
                 : 0;
         return new CacheHitComparisonResult(
                 feedback.eventType(),
@@ -107,10 +115,16 @@ public class LocalStandbyComparisonService {
                 feedback.blockSize(),
                 localStandbyBlockSize,
                 feedback.predictedHitTokens(),
+                feedback.kvcmMatchAvailable(),
+                feedback.kvcmLocalMatchTokens(),
+                feedback.kvcmP2pFetchTokens(),
+                feedback.kvcmP2pTotalMatchTokens(),
                 localStandbyPredictedHitTokens,
                 localStandbyPredictionAvailable,
                 feedback.actualHitTokens(),
                 feedback.deltaHitTokens(),
+                kvcmLocalDeltaHitTokens,
+                kvcmP2pTotalMatchDeltaHitTokens,
                 localStandbyDeltaHitTokens);
     }
 
@@ -126,7 +140,7 @@ public class LocalStandbyComparisonService {
     private record LocalStandbyPredictionKey(String requestId, RoleType roleType) {
     }
 
-    private record StandbyPrediction(Map<String, Integer> matches, long blockSize) {
+    private record StandbyPrediction(Map<String, HostCacheMatch> matches, long blockSize) {
 
         private StandbyPrediction {
             matches = matches == null ? Collections.emptyMap() : matches;

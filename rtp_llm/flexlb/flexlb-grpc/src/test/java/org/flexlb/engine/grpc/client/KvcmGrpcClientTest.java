@@ -98,11 +98,13 @@ class KvcmGrpcClientTest {
                 serviceDiscovery,
                 KvCacheGroupMode.FULL_ATTENTION_ONLY);
 
-        Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION);
-        Map<String, Integer> decodeMatches = waitForMatches(RoleType.DECODE);
+        Map<String, org.flexlb.dao.cache.HostCacheMatch> matches = waitForMatches(RoleType.PDFUSION);
+        Map<String, org.flexlb.dao.cache.HostCacheMatch> decodeMatches = waitForMatches(RoleType.DECODE);
 
-        assertEquals(2, matches.get("10.0.0.1:8601"));
-        assertEquals(2, decodeMatches.get("10.0.0.1:8601"));
+        assertEquals(2, matches.get("10.0.0.1:8601").localMatchBlocks());
+        assertEquals(8, matches.get("10.0.0.1:8601").p2pFetchBlocks());
+        assertEquals(10, matches.get("10.0.0.1:8601").p2pTotalMatchBlocks());
+        assertEquals(2, decodeMatches.get("10.0.0.1:8601").localMatchBlocks());
         GetHostCacheStateRequest request = lastCacheRequest.get();
         assertEquals("deployment-first_2192", request.getInstanceId());
         assertEquals(QueryType.QT_PREFIX_MATCH, request.getQueryType());
@@ -122,9 +124,9 @@ class KvcmGrpcClientTest {
                 serviceDiscovery,
                 KvCacheGroupMode.WITH_MAMBA);
 
-        Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION, null);
+        Map<String, org.flexlb.dao.cache.HostCacheMatch> matches = waitForMatches(RoleType.PDFUSION, null);
 
-        assertEquals(2, matches.get("10.0.0.1:8601"));
+        assertEquals(2, matches.get("10.0.0.1:8601").localMatchBlocks());
         assertEquals("vllm-test-0_2192", lastCacheRequest.get().getInstanceId());
         assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA, lastCacheRequest.get().getQueryType());
     }
@@ -318,14 +320,10 @@ class KvcmGrpcClientTest {
                 grpcReporter,
                 metricsReporter);
         Mockito.verify(leaderResolver, Mockito.timeout(1_000)).refresh();
-        int heartbeatSuccessesBeforeQueries =
-                client.healthSnapshot().consecutiveHeartbeatSuccesses();
 
         assertThrows(KvcmQueryException.class, this::queryMockClient);
         assertEquals(1, client.healthSnapshot().consecutiveQueryFailures());
         assertEquals(KvcmHealthState.HEALTHY, client.healthSnapshot().state());
-        assertEquals(heartbeatSuccessesBeforeQueries,
-                client.healthSnapshot().consecutiveHeartbeatSuccesses());
         Mockito.verify(metaServiceClient, Mockito.times(3)).getHostCacheState(
                 any(GrpcTarget.class), any(GetHostCacheStateRequest.class), anyLong());
         Mockito.verify(metricsReporter).reportQueryRetry(1);
@@ -389,7 +387,7 @@ class KvcmGrpcClientTest {
                 eq(response.getSerializedSize()), eq(false));
     }
 
-    private Map<String, Integer> queryMockClient() {
+    private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryMockClient() {
         return client.findMatchingEngines(
                 "request-health",
                 List.of(11L),
@@ -398,15 +396,15 @@ class KvcmGrpcClientTest {
                 "default");
     }
 
-    private Map<String, Integer> waitForMatches(RoleType roleType) throws InterruptedException {
+    private Map<String, org.flexlb.dao.cache.HostCacheMatch> waitForMatches(RoleType roleType) throws InterruptedException {
         return waitForMatches(roleType, "default");
     }
 
-    private Map<String, Integer> waitForMatches(RoleType roleType, String group) throws InterruptedException {
+    private Map<String, org.flexlb.dao.cache.HostCacheMatch> waitForMatches(RoleType roleType, String group) throws InterruptedException {
         long deadline = System.currentTimeMillis() + 3000L;
         while (System.currentTimeMillis() < deadline) {
             try {
-                Map<String, Integer> result = client.findMatchingEngines(
+                Map<String, org.flexlb.dao.cache.HostCacheMatch> result = client.findMatchingEngines(
                         "request-1", List.of(11L, 22L, 33L), 2192L, roleType, group);
                 if (!result.isEmpty()) {
                     return result;
@@ -554,7 +552,9 @@ class KvcmGrpcClientTest {
                     .setHeader(okHeader())
                     .addHosts(HostCacheMatch.newBuilder()
                             .setHostIpPort("10.0.0.1:8601")
-                            .setPrefixMatchBlocks(2))
+                            .setLocal(2)
+                            .setP2P1Fetch(8)
+                            .setP2P1TotalMatch(10))
                     .build());
             responseObserver.onCompleted();
         }

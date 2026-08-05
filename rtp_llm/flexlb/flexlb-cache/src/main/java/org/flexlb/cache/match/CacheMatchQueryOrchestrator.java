@@ -16,6 +16,7 @@ import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -79,10 +80,10 @@ public class CacheMatchQueryOrchestrator {
         }
 
         try {
-            Map<String, Integer> matches = kvcmProvider.findMatchingEngines(
+            Map<String, HostCacheMatch> kvcmMatches = kvcmProvider.findMatchingEngines(
                     query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group());
             comparisonService.trackLocalStandbyPrediction(query);
-            return result(matches, CacheMatchSource.KVCM, startTimeNs, query.blockSize());
+            return new CacheMatchResult(kvcmMatches, CacheMatchSource.KVCM, elapsedUs(startTimeNs), query.blockSize());
         } catch (RuntimeException e) {
             log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY", query.requestId(), e);
             cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
@@ -135,7 +136,7 @@ public class CacheMatchQueryOrchestrator {
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
             return emptyResult(CacheMatchSource.LOCAL_SYNC, startTimeNs);
         }
-        Map<String, Integer> matches = localSyncProvider.findMatchingEngines(
+        Map<String, HostCacheMatch> matches = localSyncProvider.findMatchingEngines(
                 query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group());
         return result(matches, CacheMatchSource.LOCAL_SYNC, startTimeNs, query.blockSize());
     }
@@ -150,13 +151,17 @@ public class CacheMatchQueryOrchestrator {
         if (hashResult.blockCacheKeys().isEmpty()) {
             return emptyResult(CacheMatchSource.LOCAL_STANDBY, startTimeNs);
         }
-        Map<String, Integer> matches = localStandbyProvider.findMatchingEngines(
+        Map<String, HostCacheMatch> matches = localStandbyProvider.findMatchingEngines(
                 query.requestId(), hashResult.blockCacheKeys(), hashResult.blockSize(), query.roleType(), query.group());
         return result(matches, CacheMatchSource.LOCAL_STANDBY, startTimeNs, hashResult.blockSize());
     }
 
-    private CacheMatchResult result(Map<String, Integer> matches, CacheMatchSource source, long startTimeNs, long blockSize) {
-        return new CacheMatchResult(matches, source, (System.nanoTime() - startTimeNs) / 1_000, blockSize);
+    private CacheMatchResult result(Map<String, HostCacheMatch> matches, CacheMatchSource source, long startTimeNs, long blockSize) {
+        return new CacheMatchResult(matches, source, elapsedUs(startTimeNs), blockSize);
+    }
+
+    private long elapsedUs(long startTimeNs) {
+        return (System.nanoTime() - startTimeNs) / 1_000;
     }
 
     private CacheMatchResult emptyResult(CacheMatchSource source, long startTimeNs) {

@@ -1,6 +1,7 @@
 package org.flexlb.cache.match;
 
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
@@ -13,7 +14,7 @@ public interface CacheMatchProvider {
 
     CacheMatchSource source();
 
-    Map<String, Integer> findMatchingEngines(
+    Map<String, HostCacheMatch> findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,
             long blockSize,

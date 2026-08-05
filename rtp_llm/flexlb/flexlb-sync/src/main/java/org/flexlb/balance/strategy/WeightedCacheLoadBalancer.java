@@ -10,6 +10,7 @@ import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -96,7 +97,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                             request.getLocalStandbyBlockSize(),
                             roleType,
                             group));
-            long prefixLength = calcPrefixMatchLength(selectedWorker, cacheMatchResult);
+            long prefixLength = calcPrefixMatchLength(
+                    selectedWorker, cacheMatchResult, config.getP2pHitDiscount());
             balanceContext.recordCacheMatch(
                     cacheMatchResult.source().name(),
                     cacheMatchResult.queryTimeUs(),
@@ -137,16 +139,17 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
     }
 
-    private long calcPrefixMatchLength(WorkerStatus workerStatus, CacheMatchResult cacheMatchResult) {
-        Map<String, Integer> cacheMatches = cacheMatchResult.matches();
-        if (cacheMatches == null) {
-            return 0;
-        }
+    private long calcPrefixMatchLength(WorkerStatus workerStatus, CacheMatchResult cacheMatchResult, double p2pHitDiscount) {
         // KVCM returns the host_ip_port reported by Subscriber, while WorkerStatus uses the
         // service-discovery address. No code-level normalization guarantees they are identical;
         // the end-to-end integration must keep both values aligned.
-        int prefixMatchBlocks = cacheMatches.getOrDefault(workerStatus.getIpPort(), 0);
-        return cacheMatchResult.blockSize() * prefixMatchBlocks;
+        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getIpPort());
+        if (match == null) {
+            return 0L;
+        }
+        long p2pAddedMatchBlocks = Math.max(0L, match.p2pTotalMatchBlocks() - match.localMatchBlocks());
+        double effectiveMatchBlocks = match.localMatchBlocks() + p2pAddedMatchBlocks * Math.max(0.0, p2pHitDiscount);
+        return Math.round(cacheMatchResult.blockSize() * effectiveMatchBlocks);
     }
 
     /**

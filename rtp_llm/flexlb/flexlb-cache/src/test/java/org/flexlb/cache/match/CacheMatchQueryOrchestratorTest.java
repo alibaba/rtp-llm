@@ -14,6 +14,7 @@ import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
@@ -67,13 +68,13 @@ class CacheMatchQueryOrchestratorTest {
     @Test
     void usesLocalSyncWhenKvcmIsDisabled() {
         when(localSyncProvider.findMatchingEngines("request-1", List.of(11L, 22L), 2192, RoleType.PREFILL, "default"))
-                .thenReturn(Map.of("10.0.0.1:8080", 2));
+                .thenReturn(Map.of("10.0.0.1:8080", HostCacheMatch.local(2)));
 
         CacheMatchResult result = orchestrator(false, false).findMatchingEngines(query);
 
         assertEquals(CacheMatchSource.LOCAL_SYNC, result.source());
         assertEquals(2192, result.blockSize());
-        assertEquals(2, result.matches().get("10.0.0.1:8080"));
+        assertEquals(2, result.hostMatch("10.0.0.1:8080").localMatchBlocks());
         verify(kvcmProvider, never()).findMatchingEngines(any(), any(), any(Long.class), any(), any());
     }
 
@@ -87,14 +88,14 @@ class CacheMatchQueryOrchestratorTest {
                 .thenReturn(CompletableFuture.completedFuture(
                         new LocalStandbyHashResult(List.of(101L), 4096)));
         when(localStandbyProvider.findMatchingEngines("request-1", List.of(101L), 4096, RoleType.PREFILL, "default"))
-                .thenReturn(Map.of("10.0.0.2:8080", 1));
+                .thenReturn(Map.of("10.0.0.2:8080", HostCacheMatch.local(1)));
 
         CacheMatchResult result =
                 orchestrator(true, false).findMatchingEngines(query);
 
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
         assertEquals(4096, result.blockSize());
-        assertEquals(1, result.matches().get("10.0.0.2:8080"));
+        assertEquals(1, result.hostMatch("10.0.0.2:8080").localMatchBlocks());
         verify(comparisonService, never()).trackLocalStandbyPrediction(query);
         verify(cacheMetricsReporter).reportStandbyFallback("kvcm_query_failure");
     }
@@ -103,12 +104,14 @@ class CacheMatchQueryOrchestratorTest {
     void startsAsyncComparisonAfterKvcmSuccess() {
         when(failoverManager.activeSource()).thenReturn(CacheMatchSource.KVCM);
         when(kvcmProvider.findMatchingEngines("request-1", List.of(11L, 22L), 2192, RoleType.PREFILL, "default"))
-                .thenReturn(Map.of("10.0.0.1:8080", 2));
+                .thenReturn(Map.of("10.0.0.1:8080", new HostCacheMatch(2, 8, 10)));
 
         CacheMatchResult result = orchestrator().findMatchingEngines(query);
 
         assertEquals(CacheMatchSource.KVCM, result.source());
         assertEquals(2192, result.blockSize());
+        assertEquals(2, result.hostMatch("10.0.0.1:8080").localMatchBlocks());
+        assertEquals(10, result.hostMatch("10.0.0.1:8080").p2pTotalMatchBlocks());
         verify(comparisonService).trackLocalStandbyPrediction(query);
         verify(localStandbyHashService, never()).getHashResult(any(), any(), anyLong());
     }
@@ -129,7 +132,7 @@ class CacheMatchQueryOrchestratorTest {
 
         assertEquals(CacheMatchSource.KVCM, result.source());
         assertEquals(0, result.blockSize());
-        assertEquals(Map.of(), result.matches());
+        assertEquals(Map.of(), result.hostMatches());
         verify(kvcmProvider, never()).findMatchingEngines(any(), any(), any(Long.class), any(), any());
         verify(comparisonService, never()).trackLocalStandbyPrediction(any(CacheMatchQuery.class));
     }
@@ -150,7 +153,7 @@ class CacheMatchQueryOrchestratorTest {
 
         assertEquals(CacheMatchSource.LOCAL_SYNC, result.source());
         assertEquals(0, result.blockSize());
-        assertEquals(Map.of(), result.matches());
+        assertEquals(Map.of(), result.hostMatches());
         verify(localSyncProvider, never()).findMatchingEngines(any(), any(), any(Long.class), any(), any());
     }
 
@@ -171,7 +174,7 @@ class CacheMatchQueryOrchestratorTest {
 
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
         assertEquals(0, result.blockSize());
-        assertEquals(Map.of(), result.matches());
+        assertEquals(Map.of(), result.hostMatches());
         verify(localStandbyHashService, never()).getHashResult(any(), any(), anyLong());
         verify(localStandbyProvider, never())
                 .findMatchingEngines(any(), any(), any(Long.class), any(), any());
@@ -194,7 +197,7 @@ class CacheMatchQueryOrchestratorTest {
         when(localStandbyHashService.getHashResult("request-2", null, 4096)).thenReturn(pendingHash);
         when(localStandbyProvider.findMatchingEngines(
                 "request-2", List.of(101L), 4096, RoleType.PREFILL, "default"))
-                .thenReturn(Map.of("10.0.0.2:8080", 1));
+                .thenReturn(Map.of("10.0.0.2:8080", HostCacheMatch.local(1)));
 
         CompletableFuture<CacheMatchResult> routingResult =
                 CompletableFuture.supplyAsync(() -> orchestrator().findMatchingEngines(pendingQuery));
@@ -207,7 +210,7 @@ class CacheMatchQueryOrchestratorTest {
 
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
         assertEquals(4096, result.blockSize());
-        assertEquals(1, result.matches().get("10.0.0.2:8080"));
+        assertEquals(1, result.hostMatch("10.0.0.2:8080").localMatchBlocks());
     }
 
     @Test
@@ -234,7 +237,7 @@ class CacheMatchQueryOrchestratorTest {
         CacheMatchResult result = routingResult.get(1, TimeUnit.SECONDS);
 
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
-        assertEquals(Map.of(), result.matches());
+        assertEquals(Map.of(), result.hostMatches());
         assertTrue(result.queryTimeUs() > 0);
     }
 

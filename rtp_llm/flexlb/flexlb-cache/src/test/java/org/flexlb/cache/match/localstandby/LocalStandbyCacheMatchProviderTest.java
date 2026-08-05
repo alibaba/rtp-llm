@@ -52,7 +52,7 @@ class LocalStandbyCacheMatchProviderTest {
             pendingHash.complete(new LocalStandbyHashResult(List.of(101L), 4096));
             CacheMatchResult result = match.get(1, TimeUnit.SECONDS);
 
-            assertEquals(Map.of("10.0.0.1:8080", 1), result.matches());
+            assertEquals(1, result.hostMatch("10.0.0.1:8080").localMatchBlocks());
             assertEquals(4096, result.blockSize());
             verify(cacheManager).findMatchingEngines(List.of(101L), RoleType.PREFILL, "default");
         } finally {

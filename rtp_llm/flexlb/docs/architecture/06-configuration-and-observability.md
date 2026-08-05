@@ -23,6 +23,7 @@
 | `taskConfirmTimeoutMs` | 300000 | IN_TRANSIT 任务确认超时 |
 | `prefillQueueSizeThreshold` | 3 | Prefill 停止分流阈值（低于该值可选）及水位 100% 刻度 |
 | `prefillCacheHitDiscount` | 0.7 | cache 命中 token 折扣 |
+| `p2pHitDiscount` | 0.2 | KVCM 单远端 P2P 拉取后新增命中 block 的路由折扣；本地命中始终按 1.0 计入 |
 | `prefillCachePreferenceMinBlockGap` | 2 | 改选 cache leader 的最小领先块数 |
 | `shortestTtftSimilarityThresholdRatio` | 0.2 | ttft 相似阈值比例 |
 | `cacheAffinityFirstQueueToleranceFactor` | 2.0 | cache leader 额外排队容忍系数 |

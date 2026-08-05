@@ -7,6 +7,7 @@ import org.flexlb.cache.match.CacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
@@ -35,13 +36,13 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider {
     }
 
     @Override
-    public Map<String, Integer> findMatchingEngines(
+    public Map<String, HostCacheMatch> findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,
             long blockSize,
             RoleType roleType,
             String group) {
-        return kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group);
+        return HostCacheMatch.fromLocalMatches(kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {

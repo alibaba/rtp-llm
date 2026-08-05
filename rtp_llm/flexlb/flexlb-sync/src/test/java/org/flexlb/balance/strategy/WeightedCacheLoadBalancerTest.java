@@ -26,6 +26,7 @@ import org.mockito.Mockito;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.flexlb.dao.cache.HostCacheMatch;
 
 @Slf4j
 class WeightedCacheLoadBalancerTest {
@@ -203,7 +204,8 @@ class WeightedCacheLoadBalancerTest {
                 .put("127.0.0.1:8080", worker);
 
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(new CacheMatchResult(Map.of("127.0.0.1:8080", 4), CacheMatchSource.KVCM, 321, 256));
+                .thenReturn(new CacheMatchResult(
+                        Map.of("127.0.0.1:8080", HostCacheMatch.local(4)), CacheMatchSource.KVCM, 321, 256));
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);

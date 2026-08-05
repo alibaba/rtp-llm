@@ -86,6 +86,14 @@ public class FlexlbConfig {
     private double prefillCacheHitDiscount = 0.7;
 
     /**
+     * Credit applied to cache blocks made available through one P2P fetch.
+     *
+     * <p>Local cache hits retain full credit. A value of 0.2 treats a P2P-added block as one
+     * fifth of a local hit when estimating routing work.
+     */
+    private double p2pHitDiscount = 0.2;
+
+    /**
      * Minimum cache lead, in blocks, required to prefer a cache-richer worker
      * over the shortest-TTFT worker when their estimated TTFT is similar.
      */

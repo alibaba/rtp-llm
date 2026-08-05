@@ -214,6 +214,20 @@ public class MetricConstant {
      */
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO = "app.cache.hit.comparison.local.standby.predicted.ratio";
 
+    public static final String CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS = "app.cache.kvcm.selected.local.match.tokens";
+
+    public static final String CACHE_KVCM_SELECTED_P2P_FETCH_TOKENS = "app.cache.kvcm.selected.p2p.fetch.tokens";
+
+    public static final String CACHE_KVCM_SELECTED_P2P_TOTAL_MATCH_TOKENS = "app.cache.kvcm.selected.p2p.total.match.tokens";
+
+    public static final String CACHE_KVCM_SELECTED_EFFECTIVE_MATCH_TOKENS = "app.cache.kvcm.selected.effective.match.tokens";
+
+    public static final String CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS = "app.cache.hit.comparison.kvcm.local.delta.tokens";
+
+    public static final String CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS = "app.cache.hit.comparison.kvcm.p2p.total.match.delta.tokens";
+
+    public static final String CACHE_HIT_COMPARISON_KVCM_EFFECTIVE_DELTA_TOKENS = "app.cache.hit.comparison.kvcm.effective.delta.tokens";
+
     /**
      * Local Standby mappings rejected because the configured capacity has been reached.
      */

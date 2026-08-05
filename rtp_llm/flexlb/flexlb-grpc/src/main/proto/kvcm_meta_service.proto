@@ -69,13 +69,15 @@ message GetHostCacheStateRequest {
   string trace_id = 1;
   string instance_id = 2;
   QueryType query_type = 3;
-  repeated int64 block_cache_keys = 4;
-  repeated string medium = 5;
+  repeated int64 block_cache_keys = 4;  // Ordered prompt block cache keys.
+  repeated string medium = 5;           // Empty means all storage media.
 }
 
 message HostCacheMatch {
-  string host_ip_port = 1;
-  int64 prefix_match_blocks = 2;
+  string host_ip_port = 1;            // Must match WorkerStatus#getIpPort().
+  int64 local = 2;                    // Local continuous prefix matches.
+  int64 p2p_1_fetch = 3;              // Local-miss blocks fetched from one remote peer.
+  int64 p2p_1_total_match = 4;        // Continuous prefix matches after that P2P fetch.
 }
 
 message GetHostCacheStateResponse {

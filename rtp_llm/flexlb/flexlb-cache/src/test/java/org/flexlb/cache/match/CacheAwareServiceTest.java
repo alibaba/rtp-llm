@@ -11,6 +11,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -39,7 +40,8 @@ class CacheAwareServiceTest {
     void delegatesCacheQueriesToOrchestrator() {
         when(queryOrchestrator.effectiveSource()).thenReturn(CacheMatchSource.KVCM);
         when(queryOrchestrator.findMatchingEngines(any(CacheMatchQuery.class)))
-                .thenReturn(new CacheMatchResult(Map.of("127.0.0.1:8080", 1), CacheMatchSource.KVCM, 10, 2192));
+                .thenReturn(new CacheMatchResult(
+                        Map.of("127.0.0.1:8080", HostCacheMatch.local(1)), CacheMatchSource.KVCM, 10, 2192));
 
         CacheMatchResult result = service().findMatchingEngines(new CacheMatchQuery(
                 "request-1",
@@ -50,7 +52,7 @@ class CacheAwareServiceTest {
                 RoleType.PREFILL,
                 "default"));
 
-        assertEquals(1, result.matches().get("127.0.0.1:8080"));
+        assertEquals(1, result.hostMatch("127.0.0.1:8080").localMatchBlocks());
         assertEquals(CacheMatchSource.KVCM, result.source());
         verify(queryOrchestrator).findMatchingEngines(any(CacheMatchQuery.class));
     }
@@ -85,8 +87,8 @@ class CacheAwareServiceTest {
                 1024,
                 RoleType.PREFILL,
                 "default");
-        CacheMatchResult expected =
-                new CacheMatchResult(Map.of("127.0.0.1:8080", 1), CacheMatchSource.LOCAL_STANDBY, 10, 1024);
+        CacheMatchResult expected = new CacheMatchResult(
+                Map.of("127.0.0.1:8080", HostCacheMatch.local(1)), CacheMatchSource.LOCAL_STANDBY, 10, 1024);
         when(queryOrchestrator.effectiveSource()).thenReturn(CacheMatchSource.LOCAL_STANDBY);
         when(queryOrchestrator.findMatchingEngines(query)).thenReturn(expected);
         CacheMatchResult result = service().findMatchingEngines(query);

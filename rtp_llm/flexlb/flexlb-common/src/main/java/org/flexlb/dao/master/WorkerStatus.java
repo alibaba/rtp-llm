@@ -306,6 +306,10 @@ public class WorkerStatus {
                 inputTokens,
                 blockSize,
                 predictedHitTokens,
+                localTask.isKvcmMatchAvailable(),
+                localTask.getKvcmLocalMatchTokens(),
+                localTask.getKvcmP2pFetchTokens(),
+                localTask.getKvcmP2pTotalMatchTokens(),
                 actualHitTokens,
                 actualHitTokens - predictedHitTokens));
     }

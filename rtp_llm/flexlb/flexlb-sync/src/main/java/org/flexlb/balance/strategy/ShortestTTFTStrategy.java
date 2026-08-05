@@ -6,9 +6,11 @@ import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
@@ -152,7 +154,11 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                         group));
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(
-                availableWorkers, cacheMatchResult, seqLen, config.getPrefillCacheHitDiscount());
+                availableWorkers,
+                cacheMatchResult,
+                seqLen,
+                config.getPrefillCacheHitDiscount(),
+                config.getP2pHitDiscount());
 
         ScoredWorker bestWorker = selectBestWorker(
                 scoredWorkers, balanceContext, roleType, group, seqLen, config);
@@ -174,7 +180,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 roleType,
                 requestId,
                 seqLen,
-                config.getPrefillCacheHitDiscount());
+                config.getPrefillCacheHitDiscount(),
+                cacheMatchResult);
     }
 
     /**
@@ -212,12 +219,16 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param seqLen Sequence length
      * @return List of scored workers
      */
-    private List<ScoredWorker> scoreWorkers(
-            List<WorkerStatus> workers, CacheMatchResult cacheMatchResult, long seqLen, double cacheHitDiscount) {
+    private List<ScoredWorker> scoreWorkers(List<WorkerStatus> workers,
+                                            CacheMatchResult cacheMatchResult,
+                                            long seqLen,
+                                            double cacheHitDiscount,
+                                            double p2pHitDiscount) {
         return workers.stream()
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
-                    long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResult);
+                    long hitCacheTokens = calculatePrefixMatchLength(
+                            workerStatus, cacheMatchResult, p2pHitDiscount);
                     long prefillTime = TaskInfo.estimatePrefillTimeMs(
                             seqLen, hitCacheTokens, cacheHitDiscount);
                     long queueTime = workerStatus.getRunningQueueTime().get();
@@ -250,7 +261,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                  RoleType roleType,
                                                  String requestId,
                                                  long seqLen,
-                                                 double cacheHitDiscount) {
+                                                 double cacheHitDiscount,
+                                                 CacheMatchResult cacheMatchResult) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
@@ -262,6 +274,19 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 selectedWorker.hitCacheTokens(),
                 balanceContext.getCacheMatchSource(),
                 cacheHitDiscount);
+        recordKvcmMatch(
+                task,
+                cacheMatchResult.source(),
+                cacheMatchResult.hostMatch(workerStatus.getIpPort()),
+                cacheMatchResult.blockSize());
+        engineHealthReporter.reportKvcmSelectedMatch(
+                roleType,
+                workerStatus.getIp(),
+                task.getKvcmLocalMatchTokens(),
+                task.getKvcmP2pFetchTokens(),
+                task.getKvcmP2pTotalMatchTokens(),
+                selectedWorker.hitCacheTokens(),
+                task.isKvcmMatchAvailable());
         workerStatus.putLocalTask(requestId, task);
 
         return buildServerStatus(selectedWorker, roleType, requestId);
@@ -694,18 +719,26 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param cacheMatchResult Cache match result
      * @return Number of tokens hit
      */
-    private long calculatePrefixMatchLength(WorkerStatus workerStatus, CacheMatchResult cacheMatchResult) {
-        Map<String, Integer> cacheMatchResults = cacheMatchResult.matches();
-        if (cacheMatchResults == null) {
+    private long calculatePrefixMatchLength(WorkerStatus workerStatus,
+                                            CacheMatchResult cacheMatchResult,
+                                            double p2pHitDiscount) {
+        HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getIpPort());
+        if (match == null) {
             return 0L;
         }
+        long p2pAddedMatchBlocks = Math.max(0L, match.p2pTotalMatchBlocks() - match.localMatchBlocks());
+        double effectiveMatchBlocks = match.localMatchBlocks() + p2pAddedMatchBlocks * Math.max(0.0, p2pHitDiscount);
+        return Math.round(cacheMatchResult.blockSize() * effectiveMatchBlocks);
+    }
 
-        Integer prefixMatchLength = cacheMatchResults.get(workerStatus.getIpPort());
-        if (prefixMatchLength == null) {
-            return 0L;
+    private void recordKvcmMatch(TaskInfo task, CacheMatchSource source, HostCacheMatch match, long blockSize) {
+        if (source != CacheMatchSource.KVCM || match == null || blockSize <= 0) {
+            return;
         }
-
-        return cacheMatchResult.blockSize() * prefixMatchLength;
+        task.setKvcmMatchAvailable(true);
+        task.setKvcmLocalMatchTokens(blockSize * match.localMatchBlocks());
+        task.setKvcmP2pFetchTokens(blockSize * match.p2pFetchBlocks());
+        task.setKvcmP2pTotalMatchTokens(blockSize * match.p2pTotalMatchBlocks());
     }
 
     private CacheMatchQuery cacheMatchQuery(BalanceContext balanceContext, long blockSize,

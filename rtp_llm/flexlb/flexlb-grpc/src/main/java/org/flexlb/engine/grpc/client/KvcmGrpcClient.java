@@ -122,8 +122,8 @@ public class KvcmGrpcClient {
                 workerMetadataResolver.usesConfiguredNamespace() ? "configuration" : "worker-status");
     }
 
-    public Map<String, Integer> findMatchingEngines(String requestId, List<Long> blockCacheKeys, long blockSize,
-                                                    RoleType roleType, String group) {
+    public Map<String, org.flexlb.dao.cache.HostCacheMatch> findMatchingEngines(String requestId, List<Long> blockCacheKeys,
+                                                                                long blockSize, RoleType roleType, String group) {
         if (!enabled) {
             log.warn("Skipping KVCM cache query because the KVCM client is disabled, "
                             + "requestId={}, role={}, group={}",
@@ -159,11 +159,12 @@ public class KvcmGrpcClient {
         return queryWithRetry(requestId, blockCacheKeys, namespace, queryType, roleType, group);
     }
 
-    private Map<String, Integer> queryWithRetry(String requestId, List<Long> blockCacheKeys, String namespace,
-                                                QueryType queryType, RoleType roleType, String group) {
+    private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryWithRetry(String requestId, List<Long> blockCacheKeys,
+                                                                            String namespace, QueryType queryType,
+                                                                            RoleType roleType, String group) {
         for (int attemptIndex = 0; attemptIndex <= maxQueryRetryCount; attemptIndex++) {
             try {
-                Map<String, Integer> matches = queryOnce(
+                Map<String, org.flexlb.dao.cache.HostCacheMatch> matches = queryOnce(
                         requestId, blockCacheKeys, namespace, queryType, roleType, group, attemptIndex > 0);
                 recordQuerySuccess();
                 return matches;
@@ -180,13 +181,9 @@ public class KvcmGrpcClient {
         throw new IllegalStateException("KVCM query retry loop completed without a result");
     }
 
-    private Map<String, Integer> queryOnce(String requestId,
-                                           List<Long> blockCacheKeys,
-                                           String namespace,
-                                           QueryType queryType,
-                                           RoleType roleType,
-                                           String group,
-                                           boolean retry) {
+    private Map<String, org.flexlb.dao.cache.HostCacheMatch> queryOnce(String requestId, List<Long> blockCacheKeys,
+                                                                       String namespace, QueryType queryType,
+                                                                       RoleType roleType, String group, boolean retry) {
         GrpcTarget currentLeader = leaderResolver.resolve();
         if (currentLeader == null) {
             throw new KvcmQueryException("KVCM leader is unavailable");
@@ -220,7 +217,7 @@ public class KvcmGrpcClient {
                         "KVCM GetHostCacheState failed, code=" + code + ", message="
                                 + response.getHeader().getStatus().getMessage());
             }
-            Map<String, Integer> matches = toPrefixMatchBlocksByHost(response.getHostsList());
+            Map<String, org.flexlb.dao.cache.HostCacheMatch> matches = toMatchesByHost(response.getHostsList());
             if (log.isDebugEnabled()) {
                 log.debug("KVCM GetHostCacheState response: requestId={}, traceId={}, matches={}",
                         requestId, traceId, matches);
@@ -344,14 +341,17 @@ public class KvcmGrpcClient {
         }
     }
 
-    private Map<String, Integer> toPrefixMatchBlocksByHost(List<HostCacheMatch> matches) {
-        Map<String, Integer> result = new HashMap<>();
+    private Map<String, org.flexlb.dao.cache.HostCacheMatch> toMatchesByHost(List<HostCacheMatch> matches) {
+        Map<String, org.flexlb.dao.cache.HostCacheMatch> result = new HashMap<>();
         for (HostCacheMatch match : matches) {
             if (StringUtils.isBlank(match.getHostIpPort())) {
                 continue;
             }
-            int prefixMatchBlocks = Math.toIntExact(match.getPrefixMatchBlocks());
-            result.merge(match.getHostIpPort(), prefixMatchBlocks, Math::max);
+            org.flexlb.dao.cache.HostCacheMatch current = new org.flexlb.dao.cache.HostCacheMatch(
+                    match.getLocal(),
+                    match.getP2P1Fetch(),
+                    match.getP2P1TotalMatch());
+            result.put(match.getHostIpPort(), current);
         }
         return result;
     }

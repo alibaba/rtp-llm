@@ -43,6 +43,15 @@ public class TaskInfo {
     @JsonIgnore
     private double cacheHitDiscount = DEFAULT_CACHE_HIT_DISCOUNT;
 
+    @JsonIgnore
+    private boolean kvcmMatchAvailable;
+    @JsonIgnore
+    private long kvcmLocalMatchTokens;
+    @JsonIgnore
+    private long kvcmP2pFetchTokens;
+    @JsonIgnore
+    private long kvcmP2pTotalMatchTokens;
+
     // Task state related fields
     private TaskStateEnum taskState = TaskStateEnum.CREATED;
     private long lastActiveTimeUs = System.nanoTime() / 1000;

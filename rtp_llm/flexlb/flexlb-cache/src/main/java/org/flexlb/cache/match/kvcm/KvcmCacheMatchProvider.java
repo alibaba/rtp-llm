@@ -2,6 +2,7 @@ package org.flexlb.cache.match.kvcm;
 
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheMatchProvider;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.KvcmGrpcClient;
 import org.springframework.stereotype.Component;
@@ -27,8 +28,8 @@ public class KvcmCacheMatchProvider implements CacheMatchProvider {
     }
 
     @Override
-    public Map<String, Integer> findMatchingEngines(String requestId, List<Long> blockCacheKeys, long blockSize,
-                                                    RoleType roleType, String group) {
+    public Map<String, HostCacheMatch> findMatchingEngines(String requestId, List<Long> blockCacheKeys, long blockSize,
+                                                           RoleType roleType, String group) {
         return kvcmGrpcClient.findMatchingEngines(requestId, blockCacheKeys, blockSize, roleType, group);
     }
 }

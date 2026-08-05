@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.flexlb.dao.cache.HostCacheMatch;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -96,7 +97,8 @@ class ShortestTTFTStrategyTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(new CacheMatchResult(Map.of("127.0.0.2:8080", 3), CacheMatchSource.KVCM, 123, 256));
+                .thenReturn(new CacheMatchResult(
+                        Map.of("127.0.0.2:8080", HostCacheMatch.local(3)), CacheMatchSource.KVCM, 123, 256));
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
@@ -263,7 +265,7 @@ class ShortestTTFTStrategyTest {
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
                 .thenReturn(new CacheMatchResult(
-                        cacheMatches,
+                        HostCacheMatch.fromLocalMatches(cacheMatches),
                         CacheMatchSource.KVCM,
                         123,
                         workers.getFirst().getCacheStatus().getBlockSize()));

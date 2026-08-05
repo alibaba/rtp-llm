@@ -11,6 +11,7 @@ import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.dao.master.CacheHitFeedback;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -46,14 +47,16 @@ class LocalStandbyComparisonServiceTest {
 
         verify(provider).asyncLocalStandbyMatch(query);
         pendingMatch.complete(new CacheMatchResult(
-                Map.of("10.0.0.1:8080", 1),
+                Map.of("10.0.0.1:8080", HostCacheMatch.local(1)),
                 CacheMatchSource.LOCAL_STANDBY,
                 10,
                 4096));
 
         CacheHitFeedback feedback = new CacheHitFeedback(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
-                "10.0.0.1", 8080, "running", 8000, 2192, 4384, 6000, 1616);
+                "10.0.0.1", 8080, "running", 8000, 2192, 4384,
+                true, 4000, 8000, 10000,
+                6000, 1616);
         CacheHitComparisonResult result =
                 comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
 
@@ -61,6 +64,11 @@ class LocalStandbyComparisonServiceTest {
         assertEquals(4096, result.localStandbyPredictedHitTokens());
         assertEquals(6000, result.actualHitTokens());
         assertEquals(1616, result.routingDeltaHitTokens());
+        assertEquals(4000, result.kvcmLocalPredictedHitTokens());
+        assertEquals(8000, result.kvcmP2pFetchTokens());
+        assertEquals(10000, result.kvcmP2pTotalMatchTokens());
+        assertEquals(2000, result.kvcmLocalDeltaHitTokens());
+        assertEquals(-4000, result.kvcmP2pTotalMatchDeltaHitTokens());
         assertEquals(1904, result.localStandbyDeltaHitTokens());
         assertTrue(result.localStandbyPredictionAvailable());
     }

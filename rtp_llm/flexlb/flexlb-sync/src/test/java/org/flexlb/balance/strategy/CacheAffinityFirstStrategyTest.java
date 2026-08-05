@@ -26,6 +26,7 @@ import org.mockito.Mockito;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import org.flexlb.dao.cache.HostCacheMatch;
 import java.util.Set;
 
 class CacheAffinityFirstStrategyTest {
@@ -181,7 +182,8 @@ class CacheAffinityFirstStrategyTest {
 
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123, BLOCK_SIZE));
+                .thenReturn(new CacheMatchResult(
+                        HostCacheMatch.fromLocalMatches(cacheMatches), CacheMatchSource.KVCM, 123, BLOCK_SIZE));
 
         return new CacheAffinityFirstStrategy(
                 new EngineWorkerStatus(new ModelMetaConfig()),
