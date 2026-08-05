@@ -356,7 +356,7 @@ class PyFlashinferPrefillAttnOp(object):
         cu_seqlens = attn_inputs.cu_seqlens[: batch_size + 1]
 
         # Ragged prefill also uses the device metadata planner.
-        self.fmha_params.fill_params_mha_device(
+        self.params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,

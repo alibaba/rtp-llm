@@ -20,6 +20,11 @@ from rtp_llm.models_py.modules import (
     LinearFactory,
     RMSNorm,
 )
+from rtp_llm.models_py.modules.dsv4.aux_hidden_states import (
+    AuxHiddenStatesCapture,
+    make_aux_hidden_states_layers_tensor,
+    resolve_aux_hidden_states_layers,
+)
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
@@ -990,6 +995,20 @@ class Qwen3NextModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
+        aux_capture: Optional[AuxHiddenStatesCapture] = None
+        aux_layers: list[int] = []
+        if bool(getattr(inputs, "need_aux_hidden_states", False)):
+            aux_layers = resolve_aux_hidden_states_layers(
+                getattr(inputs, "aux_hidden_states_layer_ids", None),
+                num_layers=len(self.layers),
+            )
+            capture_template = (
+                hidden_states.unsqueeze(-2)
+                if hidden_states.dim() == 2
+                else hidden_states
+            )
+            aux_capture = AuxHiddenStatesCapture(aux_layers, capture_template)
+
         for i, decoder_layer in enumerate(self.layers):
             # Switch to correct block_map for this layer in hybrid attention mode
             select_block_map_for_layer(attention_inputs, i)
@@ -1000,6 +1019,14 @@ class Qwen3NextModel(GptModelBase):
                 attention_inputs=attention_inputs,
                 attn_meta=attn_meta,
             )
+            if aux_capture is not None:
+                aux_capture.maybe_capture(i, hidden_states)
 
         hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        outputs = PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        if aux_capture is not None:
+            outputs.aux_hidden_states = aux_capture.tensor
+            outputs.aux_hidden_states_layers = make_aux_hidden_states_layers_tensor(
+                aux_layers, hidden_states.device
+            )
+        return outputs
