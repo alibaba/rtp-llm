@@ -33,6 +33,10 @@ TEST(TraceMemoryStateTest, FinishIsSafeBeforeActivationAndAfterFailureCleanup) {
     EXPECT_FALSE(state.isActive());
 
     state.activate();
+    // Finished is not terminal: a second model build re-activates the phase on purpose
+    // (see the ExecOps.h comment on activate()), so pin that the transition takes effect.
+    EXPECT_TRUE(state.isActive());
+    EXPECT_EQ(state.get(), static_cast<int>(TraceMemoryPhase::Active));
     try {
         throw std::runtime_error("simulated warmup failure");
     } catch (const std::runtime_error&) { state.finish(); }

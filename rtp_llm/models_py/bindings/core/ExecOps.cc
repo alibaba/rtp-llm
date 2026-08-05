@@ -564,7 +564,21 @@ int getTraceMemoryState() {
 }
 
 void finishTraceMemory() {
+    // Read-then-finish is race-free: all transitions run on the single startup
+    // control thread (see TraceMemoryState in ExecOps.h).
+    const int prior = g_trace_memory_state.get();
     g_trace_memory_state.finish();
+    if (prior == static_cast<int>(TraceMemoryPhase::Active)) {
+        RTP_LLM_LOG_WARNING(
+            "finishTraceMemory: trace phase forced Active -> Finished. The traced warmup window was "
+            "still open, so this lifecycle's memory measurement is discarded; the normal close is "
+            "setTraceMemory(false), which also clears the CUDA baselines.");
+    } else if (prior == static_cast<int>(TraceMemoryPhase::Pending)) {
+        RTP_LLM_LOG_INFO("finishTraceMemory: trace phase Pending -> Finished "
+                         "(warmup skipped or entrypoint without NormalEngine).");
+    }
+    // Already Finished: idempotent no-op, unlogged -- NormalEngine calls this after
+    // setTraceMemory(false) on every startup.
 }
 
 void setTraceMemory(bool trace_memory) {

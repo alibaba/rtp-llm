@@ -20,6 +20,14 @@ from rtp_llm.utils.pre_import_config import DEFAULT_MOE_SKEW_MULT
 
 logger = logging.getLogger(__name__)
 
+# Mirror of TraceMemoryPhase in rtp_llm/models_py/bindings/core/ExecOps.h. The
+# values are a cross-language contract pinned by a static_assert next to that
+# enum, so a C++ renumbering fails the build rather than silently disabling the
+# Active gate below (test_warmup_bindings.py pins the same values through the
+# real binding).
+_TRACE_PHASE_ACTIVE = 1
+_TRACE_PHASE_FINISHED = 2
+
 
 try:
     from rtp_llm.ops.compute_ops import (
@@ -101,10 +109,10 @@ class MoeWarmupDiagnostics:
         # finish_trace_memory binding before serving forwards (see the class
         # docstring for the entrypoint list).
         state = int(self.get_trace_memory_state())
-        if state == 2:
+        if state == _TRACE_PHASE_FINISHED:
             self.trace_memory_finished = True
             return False
-        return state == 1
+        return state == _TRACE_PHASE_ACTIVE
 
     def skew_fraction(self, ep_size: int, expert_num: int, top_k: int) -> float:
         """Share of the whole cluster's tokens routed onto the hot rank (rank 0).
@@ -144,6 +152,15 @@ class MoeWarmupDiagnostics:
         compensated by scaling the hot row count (see skew_fraction). The log
         line reports n_local and the exact rank-0 slot share including both
         effects.
+
+        Exactness caveat: the reported rank0_slot_share is exact only for
+        divisible layouts (expert_num % ep_size == 0, the only ones EP routers
+        accept for non-redundant models). For a redundant layout whose logical
+        expert count is not divisible by ep_size, this method sizes the hot
+        window with ceil while routers partition with floor and a phy2log
+        placement of their own, so the value is an UPPER BOUND on rank 0's real
+        dispatched share -- do not read it as exact when judging whether the
+        measured peak covered the skew for such layouts.
         """
         if ep_size <= 1:
             return topk_ids
@@ -156,7 +173,11 @@ class MoeWarmupDiagnostics:
             return topk_ids
         # Divisible layouts retain their exact per-rank size. For a redundant
         # custom layout, ceil gives the logical skew a complete hot partition
-        # without consulting its physical replica placement.
+        # without consulting its physical replica placement. Caveat: when such a
+        # layout is also non-divisible, routers partition with floor
+        # (experts_per_ep_rank), so the ceil window's tail ids dispatch to other
+        # ranks and the logged rank0_slot_share overstates rank 0's real share --
+        # see the upper-bound note on this method's docstring and the log line.
         n_local = (expert_num + ep_size - 1) // ep_size
         num_tokens, top_k = topk_ids.shape[0], topk_ids.shape[1]
         if top_k > expert_num:
@@ -225,6 +246,8 @@ class MoeWarmupDiagnostics:
     # exact "skew_fraction=%.6f"-formatted substring via
     # SMOKE_EXPECTED_SKEW_FRACTION. Changing the tag, the field name, or the
     # precision requires updating both in the same commit.
+    # rank0_slot_share is exact for divisible layouts and an upper bound for
+    # redundant non-divisible ones (see the warmup_skew_topk_ids docstring).
     def log_warmup_skew_once(
         self,
         executor_name: str,

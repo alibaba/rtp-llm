@@ -29,6 +29,10 @@ delete it while enforcing the paragraph above.
 
 import unittest
 
+# TraceMemoryPhase values from rtp_llm/models_py/bindings/core/ExecOps.h. A
+# static_assert next to that enum pins them at 0/1/2 precisely because this file
+# and warmup_diagnostics.py compare the binding's return value against these
+# literals: a C++ renumbering fails the build instead of silently diverging.
 _PENDING, _ACTIVE, _FINISHED = 0, 1, 2
 
 

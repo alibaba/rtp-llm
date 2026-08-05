@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, TypeVar, Uni
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import KVCacheConfig, MoeConfig
+from rtp_llm.server.server_args.util import DEFAULT_RESERVER_RUNTIME_MEM_MB
 from rtp_llm.server.server_args.batch_decode_scheduler_group_args import (
     init_batch_decode_scheduler_group_args,
 )
@@ -70,15 +71,23 @@ from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 _T = TypeVar("_T")
 
 # Dests that must abort startup on an invalid env value even on the CLI-mixed
-# path. Deliberately limited to the arguments this feature introduces: widening
-# it would change startup behaviour for deployments carrying stale env values
-# whose converters historically raised ValueError/TypeError and were ignored.
+# path. Deliberately limited to the arguments this feature introduces or
+# retypes: widening it further would change startup behaviour for deployments
+# carrying stale env values whose converters historically raised
+# ValueError/TypeError and were ignored. reserver_runtime_mem_mb (the argparse
+# dest keeps the option's trailing "r"; it binds to
+# RuntimeConfig.reserve_runtime_mem_mb) belongs here because this feature
+# retyped it from int to nonnegative_int, whose ArgumentTypeError is fail-fast
+# on the mixed path regardless -- listing it keeps this set an accurate
+# description of actual behaviour (a declared compatibility change: invalid
+# RESERVER_RUNTIME_MEM_MB used to fall back).
 # Operational recovery is to correct or unset the named env; no persisted state
 # changes before parsing succeeds.
 _STRICT_RUNTIME_ENV_DESTS = frozenset(
     (
         "runtime_mem_safety_ratio",
         "runtime_mem_no_warmup_floor_mb",
+        "reserver_runtime_mem_mb",
         "moe_skew_mult",
     )
 )
@@ -283,8 +292,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
         is handed to argparse as an argument, so an invalid one has always
         aborted startup. On the CLI-mixed path, legacy ValueError/TypeError
         conversions fall back as before, while argparse.ArgumentTypeError keeps
-        its historical fail-fast behavior. In all fail-fast cases this handler
-        adds the environment variable name to the diagnostic.
+        its historical fail-fast behavior. _STRICT_RUNTIME_ENV_DESTS members
+        fail fast by dest membership as well, so the set stays an accurate
+        list of strict dests even where the converter's exception class already
+        implies fail-fast. In all fail-fast cases this handler adds the
+        environment variable name to the diagnostic.
         """
         message = f"invalid value for {env_name}={env_value!r}: {error}"
         if (
@@ -618,10 +630,14 @@ def _log_runtime_tuning_summary(py_env_configs: PyEnvConfigs) -> None:
     rank and spot a fork, and raise the level to WARNING once any value leaves its
     default so the line is greppable without knowing the defaults. Defaults come
     from freshly constructed configs rather than literals (the C++ structs in
-    ConfigModules.h own them).
+    ConfigModules.h own them) -- except reserver_runtime_mem_mb, whose default is
+    the argparse layer's DEFAULT_RESERVER_RUNTIME_MEM_MB: the bare C++
+    RuntimeConfig deliberately defaults it to 0, so a fresh RuntimeConfig() would
+    flag every default deployment as tuned.
     """
     kv_cache_config = py_env_configs.kv_cache_config
     moe_config = py_env_configs.moe_config
+    runtime_config = py_env_configs.runtime_config
     default_kv_cache_config, default_moe_config = KVCacheConfig(), MoeConfig()
 
     tuned = [
@@ -638,6 +654,11 @@ def _log_runtime_tuning_summary(py_env_configs: PyEnvConfigs) -> None:
                 default_kv_cache_config.runtime_mem_no_warmup_floor_mb,
             ),
             (
+                "reserver_runtime_mem_mb",
+                runtime_config.reserve_runtime_mem_mb,
+                DEFAULT_RESERVER_RUNTIME_MEM_MB,
+            ),
+            (
                 "moe_skew_mult",
                 moe_config.moe_skew_mult,
                 default_moe_config.moe_skew_mult,
@@ -649,7 +670,8 @@ def _log_runtime_tuning_summary(py_env_configs: PyEnvConfigs) -> None:
     summary = (
         "Runtime memory tuning: world_rank=%s role_type=%s "
         "runtime_mem_safety_ratio=%s runtime_mem_no_warmup_floor_mb=%s "
-        "moe_skew_mult=%s. All ranks in a role/group must agree; "
+        "reserver_runtime_mem_mb=%s moe_skew_mult=%s. "
+        "All ranks in a role/group must agree; "
         "a diverging rank is not rejected, it just min-reduces the cluster's KV cache."
     )
     summary_args = (
@@ -657,6 +679,7 @@ def _log_runtime_tuning_summary(py_env_configs: PyEnvConfigs) -> None:
         py_env_configs.role_config.role_type,
         kv_cache_config.runtime_mem_safety_ratio,
         kv_cache_config.runtime_mem_no_warmup_floor_mb,
+        runtime_config.reserve_runtime_mem_mb,
         moe_config.moe_skew_mult,
     )
     if tuned:

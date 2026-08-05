@@ -294,6 +294,16 @@ class WarmupSkewTopkIdsTest(DiagnosticsTestCase):
         # q = 2.0/8 = 0.25 over 8 tokens -> 2 hot rows.
         self.assertTrue(torch.all(out[:2] < 8))
         self.assertTrue(torch.all(out[2:] >= 8))
+        # Documented upper-bound semantics (warmup_skew_topk_ids docstring): the
+        # ceil hot window is wider than the floor partition EP routers derive
+        # (60 // 8 == 7), so hot rows legitimately carry id 7 -- which a floor-
+        # partitioned router dispatches off rank 0. That makes the logged
+        # rank0_slot_share an upper bound for redundant non-divisible layouts,
+        # not a bug in the rewrite; this assertion pins the window mismatch the
+        # caveat describes.
+        floor_window = expert_num // ep_size
+        self.assertGreater(8, floor_window)
+        self.assertTrue(torch.any(out[:2] >= floor_window))
 
     def test_nonempty_batch_always_has_a_hot_token(self):
         # ep=4, top_k=1, single token would round down without the lower bound.

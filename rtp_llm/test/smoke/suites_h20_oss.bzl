@@ -201,7 +201,12 @@ def h20_oss_suites():
             ),
             smoke_test(
                 name="moe_forward_warmup_pd_ep2",
-                task_info="data/model/qwen3_moe/q_r_30b_forward_warmup_pd.json",
+                # Shares moe_cp_pd's golden on purpose: same model, query, and
+                # expected response, and this case's real assertions are the
+                # warmup/KV-sizing log gates below, not the response text. If
+                # this case ever needs its own query or expectation, split the
+                # file then.
+                task_info="data/model/qwen3_moe/q_r_30b_fp8_py_cp2.json",
                 envs={
                     # MOE_SKEW_MULT is deliberately non-default (default is 2.0)
                     # so the case proves the value actually travels

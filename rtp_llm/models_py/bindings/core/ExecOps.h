@@ -63,6 +63,18 @@ enum class TraceMemoryPhase : int {
     Finished = 2,
 };
 
+// These integers are a cross-language contract, not an implementation detail: Python compares
+// get_trace_memory_state() against the literals (warmup_diagnostics.py gates the MoE skew on
+// them, test_warmup_bindings.py pins them). Renumbering would error nowhere at runtime -- the
+// Python gate would just stop matching and silently disable the skew (fail-open) -- so make it
+// fail every build instead.
+static_assert(static_cast<int>(TraceMemoryPhase::Pending) == 0
+                  && static_cast<int>(TraceMemoryPhase::Active) == 1
+                  && static_cast<int>(TraceMemoryPhase::Finished) == 2,
+              "TraceMemoryPhase values 0/1/2 are pinned by Python callers of "
+              "get_trace_memory_state(); update warmup_diagnostics.py and "
+              "test_warmup_bindings.py in the same commit if they must change");
+
 // Threading contract: the phase is atomic so any thread may *read* it (Python MoE modules poll
 // getTraceMemoryState() per layer forward), but the transitions must all be issued by a single
 // control thread -- the one driving startup: setTraceMemory(true) -> warmup forward ->

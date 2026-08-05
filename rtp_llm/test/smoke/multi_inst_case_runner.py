@@ -1,6 +1,7 @@
 import glob
 import logging
 import os
+import re
 from typing import Dict, List, Optional, Union
 
 from smoke.case_runner import CaseRunner
@@ -111,7 +112,22 @@ class PdSeperationCaseRunner(CaseRunner):
             raise AssertionError(f"{role} server log path is unavailable")
         with open(log_path, "r", encoding="utf-8", errors="replace") as log_file:
             output = log_file.read()
-        for marker in ("[WARMUP_DONE]", "[KV_ALLOC] warm_up=1"):
+        # Field-level match, not tag presence: a broken memory-trace pipeline still
+        # emits the tag with measured_peak_growth_bytes=0 (and the sizing layer then
+        # degrades to the no-warmup formula, so warm_up=1 below also disappears).
+        warmup_done = re.search(r"\[WARMUP_DONE\] measured_peak_growth_bytes=(\d+)", output)
+        if warmup_done is None:
+            raise AssertionError(
+                f"{role} server log {log_path} is missing "
+                "'[WARMUP_DONE] measured_peak_growth_bytes='"
+            )
+        if int(warmup_done.group(1)) == 0:
+            raise AssertionError(
+                f"{role} warmup completed but measured_peak_growth_bytes=0: a real "
+                "forward cannot produce zero growth, so the memory-trace "
+                "measurement is broken"
+            )
+        for marker in ("[KV_ALLOC] warm_up=1",):
             if marker not in output:
                 raise AssertionError(
                     f"{role} server log {log_path} is missing {marker}"

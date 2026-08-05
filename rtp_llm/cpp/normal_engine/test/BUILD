@@ -70,3 +70,16 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+# Host-side pure math (mirrors //rtp_llm/cpp/cache/test:runtime_memory_sizing_test):
+# the target under test is dependency-free, so no GPU scheduling or torch deps.
+cc_test(
+    name = "prefill_warmup_batch_sizing_test",
+    srcs = ["PrefillWarmupBatchSizingTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:prefill_warmup_batch_sizing",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

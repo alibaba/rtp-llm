@@ -1,18 +1,34 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+# Dependency-free on purpose (like //rtp_llm/cpp/cache:runtime_memory_sizing) so
+# its unit test builds without the engine, torch, or a GPU toolchain.
+cc_library(
+    name = "prefill_warmup_batch_sizing",
+    srcs = ["PrefillWarmupBatchSizing.cc"],
+    hdrs = ["PrefillWarmupBatchSizing.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "normal_engine",
-    hdrs = glob([
-        "*.h",
-        "speculative/*.h",
-    ]),
-    srcs = glob([
-        "*.cc",
-        "speculative/*.cc",
-    ]),
+    hdrs = glob(
+        [
+            "*.h",
+            "speculative/*.h",
+        ],
+        exclude = ["PrefillWarmupBatchSizing.h"],
+    ),
+    srcs = glob(
+        [
+            "*.cc",
+            "speculative/*.cc",
+        ],
+        exclude = ["PrefillWarmupBatchSizing.cc"],
+    ),
     deps = [
-        "//rtp_llm/cpp/cache:runtime_memory_sizing",
+        ":prefill_warmup_batch_sizing",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base/stream:generate_config",

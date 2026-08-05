@@ -333,27 +333,45 @@ class ServerArgsSetTest(TestCase):
         ]
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].levelno, logging.INFO)
-        self.assertIn("world_rank=", records[0].getMessage())
+        message = records[0].getMessage()
+        self.assertIn("world_rank=", message)
+        # The reserver default lives at the argparse layer (1024), not in the C++
+        # RuntimeConfig (0): rendering 1024 here at INFO proves the summary compares
+        # against the right default, else this default run would log a WARNING.
+        self.assertIn("reserver_runtime_mem_mb=1024", message)
 
     def test_runtime_tuning_summary_warns_on_non_default_values(self):
         from rtp_llm.server.server_args.server_args import setup_args
 
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            self.assertLogs(level="INFO") as logs,
+        for args, expected_fragments in (
+            (
+                ["--moe_skew_mult", "1.75"],
+                ("moe_skew_mult=1.75", "(default 2.0)"),
+            ),
+            # The only knob whose default is argparse-level (1024) rather than a
+            # freshly constructed C++ config: it must still trip the WARNING branch.
+            (
+                ["--reserver_runtime_mem_mb", "8192"],
+                ("reserver_runtime_mem_mb=8192", "(default 1024)"),
+            ),
         ):
-            setup_args(["--moe_skew_mult", "1.75"])
+            with self.subTest(args=args):
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    self.assertLogs(level="INFO") as logs,
+                ):
+                    setup_args(args)
 
-        records = [
-            record
-            for record in logs.records
-            if record.getMessage().startswith("Runtime memory tuning:")
-        ]
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].levelno, logging.WARNING)
-        message = records[0].getMessage()
-        self.assertIn("moe_skew_mult=1.75", message)
-        self.assertIn("(default 2.0)", message)
+                records = [
+                    record
+                    for record in logs.records
+                    if record.getMessage().startswith("Runtime memory tuning:")
+                ]
+                self.assertEqual(len(records), 1)
+                self.assertEqual(records[0].levelno, logging.WARNING)
+                message = records[0].getMessage()
+                for fragment in expected_fragments:
+                    self.assertIn(fragment, message)
 
     def test_provided_dest_probe_rejects_accumulating_actions(self):
         """Pin the probe constraint documented on _provided_argument_dests.
@@ -368,8 +386,57 @@ class ServerArgsSetTest(TestCase):
         parser = EnvArgumentParser(description="append probe constraint test")
         parser.add_argument("--tag", action="append")
 
-        with self.assertRaises(Exception):
+        # Prove the probe itself is alive before asserting how it fails: a bare
+        # assertRaises(Exception) would also pass if _provided_argument_dests were
+        # renamed away (AttributeError on the lookup), turning this tripwire into
+        # a false pass. An empty command line never touches the append action.
+        self.assertEqual(parser._provided_argument_dests([]), set())
+
+        # The append action copies the seeded sentinel and calls .append on it.
+        with self.assertRaisesRegex(AttributeError, "append"):
             parser._provided_argument_dests(["--tag", "a"])
+
+    def test_production_parser_registers_no_accumulating_actions(self):
+        """No production argument may use an accumulating action.
+
+        The synthetic-parser test above pins how the probe fails on one; this one
+        guards the actual argument registry, where such an action would break env
+        filling for every CLI-mixed startup, not a test fixture. _ExtendAction
+        subclasses _AppendAction, so the isinstance check covers extend too.
+        """
+        import argparse
+
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            PyEnvConfigs,
+            init_all_group_args,
+        )
+
+        parser = EnvArgumentParser(description="accumulating action registry scan")
+        py_env_configs = PyEnvConfigs()
+        parser.set_root_config(py_env_configs)
+        init_all_group_args(parser, py_env_configs)
+
+        forbidden = (
+            argparse._AppendAction,
+            argparse._AppendConstAction,
+            argparse._CountAction,
+        )
+        violations = [
+            action.option_strings
+            for action in parser._actions
+            if isinstance(action, forbidden)
+        ]
+        self.assertEqual(
+            violations,
+            [],
+            msg=(
+                f"accumulating actions registered: {violations}. "
+                "_provided_argument_dests cannot probe them (it pre-seeds every "
+                "dest with a sentinel these actions try to extend); rework the "
+                "probe before adding one."
+            ),
+        )
 
     def test_strict_runtime_env_dests_all_exist(self):
         """Guard the fail-fast set against a silent dest rename.
@@ -399,6 +466,61 @@ class ServerArgsSetTest(TestCase):
             set(),
             msg=f"_STRICT_RUNTIME_ENV_DESTS names dests no argument registers: {sorted(missing)}",
         )
+
+    def test_production_parser_help_renders_without_error(self):
+        """Tripwire for bare % in any help string.
+
+        argparse expands help text with the % operator, so a literal percent
+        sign written as a bare % (instead of %%) makes format_help() raise
+        ValueError. That only fires when help is rendered, so servers start
+        fine and nothing else catches it -- this test does, for every argument
+        the production parser registers.
+        """
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            PyEnvConfigs,
+            init_all_group_args,
+        )
+
+        parser = EnvArgumentParser(description="help rendering tripwire")
+        py_env_configs = PyEnvConfigs()
+        parser.set_root_config(py_env_configs)
+        init_all_group_args(parser, py_env_configs)
+
+        help_text = parser.format_help()
+        # The %% escape must render back to a single literal percent sign.
+        self.assertIn("5%×total", help_text)
+
+    def test_invalid_reserver_env_fails_fast_on_mixed_path(self):
+        """The dest reserver_runtime_mem_mb is in _STRICT_RUNTIME_ENV_DESTS.
+
+        Before this feature its converter was a plain int whose ValueError fell
+        back to the default on the CLI-mixed path; nonnegative_int made an
+        invalid env abort startup instead. Pin that as the intended behavior
+        for both an unparsable and an out-of-range value, with the env name
+        and raw value echoed for diagnosis.
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for env_value in ("not-an-int", "-1"):
+            with self.subTest(env_value=env_value):
+                os.environ["RESERVER_RUNTIME_MEM_MB"] = env_value
+                with (
+                    patch("sys.stderr", new_callable=StringIO) as stderr,
+                    self.assertRaises(SystemExit),
+                ):
+                    setup_args([])
+
+                self.assertIn(
+                    f"RESERVER_RUNTIME_MEM_MB={env_value!r}", stderr.getvalue()
+                )
+
+    def test_valid_reserver_cli_overrides_invalid_env(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        os.environ["RESERVER_RUNTIME_MEM_MB"] = "not-an-int"
+        py_env_configs = setup_args(["--reserver_runtime_mem_mb", "2048"])
+        self.assertEqual(py_env_configs.runtime_config.reserve_runtime_mem_mb, 2048)
 
     def test_invalid_runtime_env_reports_name_and_raw_value(self):
         from rtp_llm.server.server_args.server_args import setup_args

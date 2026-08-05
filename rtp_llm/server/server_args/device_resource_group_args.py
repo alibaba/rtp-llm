@@ -2,6 +2,7 @@ import argparse
 from functools import partial
 
 from rtp_llm.server.server_args.util import (
+    DEFAULT_RESERVER_RUNTIME_MEM_MB,
     MAX_RUNTIME_MEMORY_MIB,
     nonnegative_int,
     str2bool,
@@ -68,7 +69,8 @@ def init_device_resource_group_args(parser, device_resource_config, runtime_conf
             "reserve_runtime_mem_mb",
         ),  # Note: spelling difference (reserver -> reserve)
         type=partial(nonnegative_int, max_value=MAX_RUNTIME_MEMORY_MIB),
-        default=1024,
+        metavar="INT",
+        default=DEFAULT_RESERVER_RUNTIME_MEM_MB,
         help=(
             "设备固定保留的运行时显存大小（MiB），同时参与 warmup 和 no-warmup 路径；"
             "可用于为 warmup 路径恢复绝对显存下限。"

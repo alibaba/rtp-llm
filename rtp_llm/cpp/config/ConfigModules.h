@@ -10,7 +10,9 @@
 namespace rtp_llm {
 
 inline constexpr double  kDefaultRuntimeMemorySafetyRatio = 0.05;
-inline constexpr int64_t kDefaultRuntimeNoWarmupFloorMiB  = 2048;
+// "Mb" matches the runtime_mem_no_warmup_floor_mb field spelling; the unit is MiB.
+inline constexpr int64_t kDefaultRuntimeNoWarmupFloorMb   = 2048;
+inline constexpr double  kDefaultMoeSkewMult              = 2.0;
 
 /** NCCL communication config (ip + ports). Aligns with Python NcclCommConfig. */
 struct NcclCommConfig {
@@ -171,7 +173,7 @@ struct KVCacheConfig {
     // the Python side reads them back off the constructed config (see
     // kv_cache_group_args.py).
     double  runtime_mem_safety_ratio       = kDefaultRuntimeMemorySafetyRatio;
-    int64_t runtime_mem_no_warmup_floor_mb = kDefaultRuntimeNoWarmupFloorMiB;
+    int64_t runtime_mem_no_warmup_floor_mb = kDefaultRuntimeNoWarmupFloorMb;
     int     seq_size_per_block             = 64;
     int     kernel_seq_size_per_block      = 0;
     int     test_block_num                 = 0;
@@ -283,7 +285,7 @@ struct MoeConfig {
     // Hot-rank share of cluster tokens during PREFILL warmup:
     // min(1.0, moe_skew_mult / ep_size), i.e. exactly moe_skew_mult times the
     // 1/ep_size mean share. Must be strictly greater than 1.0.
-    double      moe_skew_mult              = 2.0;
+    double      moe_skew_mult              = kDefaultMoeSkewMult;
     std::string moe_strategy               = "auto";
     std::string fp4_moe_op                 = "auto";
     std::string to_string() const;

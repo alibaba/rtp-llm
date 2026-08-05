@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/RuntimeMemorySizing.h"
+#include "rtp_llm/cpp/normal_engine/PrefillWarmupBatchSizing.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -158,8 +158,10 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                          model_config_.max_seq_len,
                          int(runtime_config.warm_up_with_loss));
         warm_up_result = warmUp(params);
-        // Machine-greppable summary (smoke asserts on the [WARMUP_DONE] tag); the values are
-        // growth deltas over the warmup, not absolute peaks.
+        // Machine-greppable summary; the values are growth deltas over the warmup, not absolute
+        // peaks. Smoke contract (multi_inst_case_runner._assert_warmup_sizing_logs): it regex-
+        // matches "[WARMUP_DONE] measured_peak_growth_bytes=<int>" and requires the value > 0,
+        // so the tag, the field name, and the plain-integer formatting must change together.
         RTP_LLM_LOG_INFO("[WARMUP_DONE] measured_peak_growth_bytes=%ld device_reserved_bytes=%ld",
                          warm_up_result->measured_peak_growth_bytes,
                          warm_up_result->device_reserved_bytes);
@@ -331,10 +333,17 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     const size_t max_seq_len = (size_t)model_config_.max_seq_len;
     // Real per-forward prefill token budget is max_batch_tokens_size (FIFOScheduler's per-round cap),
     // not max_context_batch_size × max_seq_len. Fall back to that default if it is unset (0).
-    const auto batch_sizing =
-        calculatePrefillWarmupBatchSizing(max_seq_len,
-                                          (size_t)runtime_config.fifo_scheduler_config.max_batch_tokens_size,
-                                          (size_t)runtime_config.fifo_scheduler_config.max_context_batch_size);
+    // The batch-sizing helper is dependency-free and reports bad inputs as std exceptions;
+    // convert them so they go through myAssert's ERROR log and core-dump switch.
+    PrefillWarmupBatchSizing batch_sizing;
+    try {
+        batch_sizing =
+            calculatePrefillWarmupBatchSizing(max_seq_len,
+                                              (size_t)runtime_config.fifo_scheduler_config.max_batch_tokens_size,
+                                              (size_t)runtime_config.fifo_scheduler_config.max_context_batch_size);
+    } catch (const std::exception& e) {
+        RTP_LLM_FAIL("%s", e.what());
+    }
     const size_t max_batch_tokens = batch_sizing.max_batch_tokens;
     const size_t num_seqs         = batch_sizing.num_sequences;
     const size_t tokens_per_seq   = max_seq_len - 1;

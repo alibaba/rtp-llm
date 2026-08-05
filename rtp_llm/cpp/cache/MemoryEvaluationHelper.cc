@@ -86,7 +86,8 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
     size_t configured_runtime_required_bytes =
         MemoryEvaluationHelper::getDefaultRuntimeMemorySize(runtime_config, model_config, sp_config);
 
-    size_t warmup_required_bytes = 0;
+    size_t warmup_required_bytes      = 0;
+    bool   warmup_measurement_valid   = false;
     if (warm_up_result) {
         if (device_reserved_memory_bytes != warm_up_result->device_reserved_bytes) {
             RTP_LLM_LOG_WARNING("device reserved memory bytes %ld when create config does not equal to "
@@ -105,7 +106,20 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
         // NormalEngine.cc), because it differs by role: PREFILL growth is mostly process-global
         // lazy initialisation that survives teardown, while DECODE also allocates per-captured-
         // graph driver state that is released with the executor and does have to be reserved.
-        warmup_required_bytes = warm_up_result->measured_peak_growth_bytes;
+        warmup_required_bytes    = warm_up_result->measured_peak_growth_bytes;
+        warmup_measurement_valid = warmup_required_bytes > 0;
+        if (!warmup_measurement_valid) {
+            // A real warmup forward always grows the torch allocator peak above the baseline
+            // snapshotted in setTraceMemory(true), so 0 means the measurement pipeline broke
+            // (trace window not active, baselines not captured, peak stats reset elsewhere).
+            // Sizing with 0 would make the additive warmup formula reserve *less* than the
+            // untraced path (it has no no_warmup_floor), so fall back to the no-warmup formula.
+            RTP_LLM_LOG_WARNING(
+                "warmup ran but measured_peak_growth_bytes is 0, which a real forward cannot produce: "
+                "the memory-trace measurement is broken. Falling back to the no-warmup sizing formula "
+                "(including runtime_mem_no_warmup_floor_mb) so the runtime reserve cannot drop below "
+                "the untraced path. [KV_ALLOC] below reports warm_up=0 for this reason.");
+        }
 
         // non_torch_transient assumes the warmup rank had the GPU to itself: another
         // process allocating during warmup inflates it and every inflated byte is
@@ -132,14 +146,22 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
     // Named assignment on purpose: four of these fields are adjacent size_t, so a
     // positional aggregate would compile fine with any two of them swapped.
     RuntimeMemorySizingInput sizing_input;
-    sizing_input.has_warmup               = warm_up_result.has_value();
+    sizing_input.has_warmup               = warmup_measurement_valid;
     sizing_input.configured_reserve_bytes = configured_runtime_required_bytes;
     sizing_input.warmup_required_bytes    = warmup_required_bytes;
     sizing_input.sampler_required_bytes   = sample_need_mem;
     sizing_input.total_gpu_bytes          = total_gpu_bytes;
     sizing_input.safety_ratio             = safety_ratio;
     sizing_input.no_warmup_floor_bytes    = no_warmup_floor_bytes;
-    const auto   sizing                 = calculateRuntimeMemorySizing(sizing_input);
+    // The sizing layer stays dependency-free and reports configuration errors as
+    // std exceptions; convert them here so they go through myAssert's ERROR log
+    // and core-dump switch like every other startup configuration failure.
+    RuntimeMemorySizingResult sizing;
+    try {
+        sizing = calculateRuntimeMemorySizing(sizing_input);
+    } catch (const std::exception& e) {
+        RTP_LLM_FAIL("%s", e.what());
+    }
     const size_t runtime_required_bytes = sizing.runtime_required_bytes;
 
     // Name every knob that feeds runtime_required and its live value: this aborts startup, so
@@ -153,8 +175,8 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
         "runtime_mem_safety_ratio%s, or bypass this sizing entirely with an explicit kv_cache_mem_mb.",
         device_reserved_memory_bytes / 1024 / 1024,
         runtime_required_bytes / 1024 / 1024,
-        warm_up_result ? "max(configured, measured_peak, sampler) + safety_term" :
-                         "max(configured, sampler, no_warmup_floor, safety_term)",
+        warmup_measurement_valid ? "max(configured, measured_peak, sampler) + safety_term" :
+                                   "max(configured, sampler, no_warmup_floor, safety_term)",
         configured_runtime_required_bytes / 1024 / 1024,
         sizing.safety_ratio_bytes / 1024 / 1024,
         runtime_config.reserve_runtime_mem_mb,
@@ -162,7 +184,7 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
         kv_cache_config.runtime_mem_no_warmup_floor_mb,
         sample_need_mem / 1024 / 1024,
         total_gpu_bytes / 1024 / 1024,
-        warm_up_result ? "" : " / runtime_mem_no_warmup_floor_mb");
+        warmup_measurement_valid ? "" : " / runtime_mem_no_warmup_floor_mb");
 
     const auto kv_cache_mem_size = device_reserved_memory_bytes - runtime_required_bytes;
     // Every input of the sizing decision is logged so total is derivable (see
@@ -171,6 +193,8 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
     //   warm_up=0: total = max(configured, sampler, no_warmup_floor, safety) -- the pre-warmup
     //              formula, where the ratio term is a floor, so upgrades without a traced warmup
     //              keep their old KV cache size.
+    // warm_up reflects the formula actually used: a warmup whose measurement came back 0 is
+    // degraded to the no-warmup formula (WARNING above) and reports warm_up=0 here.
     // measured_peak = torch_peak + non_torch_transient. non_torch_resident is logged but is not a
     // term: it is already absent from device_reserved. Watch the split -- non_torch_transient
     // growing into the GiB range means the warmup teardown is handing back far more driver memory
@@ -180,7 +204,7 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                      "no_warmup_floor=%ld MiB safety_%.0f%%=%ld MiB total=%ld MiB | "
                      "non_torch_transient=%ld MiB (in measured_peak) non_torch_resident=%ld MiB "
                      "(already excluded from device_reserved) | kv_cache_free=%ld MiB (%.2f GiB)",
-                     warm_up_result.has_value(),
+                     warmup_measurement_valid,
                      device_reserved_memory_bytes / 1024 / 1024,
                      warmup_required_bytes / 1024 / 1024,
                      configured_runtime_required_bytes / 1024 / 1024,
