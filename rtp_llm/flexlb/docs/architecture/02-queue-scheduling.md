@@ -57,6 +57,7 @@ FlexLB 支持两种路由模式，由 `FLEXLB_CONFIG.enableQueueing`（默认 **
     循环条件自然退出）。
   - 每次 `router.route(ctx)` 都单独上报 `app.routing.route.attempt.execution.time.ms`；该耗时包含一次
     worker 选择和同步 cache match，但不包含队列等待或两次尝试之间的 retry sleep。
+  - 每次实际决定 retry 时立即上报 `app.routing.retry.qps=1`；不会等到请求终态后再累计补报。
   - **重试发生在工作线程内部**，请求不回队列（不存在 `offerToHead` 之类的头部重排机制）。
 - **停机**：`@PreDestroy` → `running=false` → `shutdown()` → `awaitTermination(10s)` →
   必要时 `shutdownNow()`。

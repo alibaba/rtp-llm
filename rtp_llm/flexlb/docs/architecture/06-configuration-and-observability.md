@@ -106,7 +106,7 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
     队列时间、任务表大小；
   - `app.routing.*`：队列长度/入队/超时/拒绝/取消 QPS、排队等待、路由执行耗时、
     单次路由尝试耗时（`app.routing.route.attempt.execution.time.ms`，不含 retry sleep）、
-    成功/失败（tag `code`）/重试 QPS（`RoutingQueueReporter`，全 PRECISE）；
+    成功/失败（tag `code`）/每次实际 retry 的重试 QPS（`RoutingQueueReporter`，全 PRECISE）；
   - `app.cache.*`：两级索引规模、命中数/率、预测 vs 实际对比（`hit.comparison.*`）、
     Local Standby 容量/拒绝/映射数、`cache.match.active.source`、`standby.fallback.qps`、
     `kvcm.query.retry.qps`、diff 大小、find/update RT；

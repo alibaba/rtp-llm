@@ -159,6 +159,7 @@ public class RequestScheduler {
                 response.getCode(),
                 ctx.getRetryCount());
         metrics.reportRoutingFailureQps(response.getCode());
+        metrics.reportRoutingRetryQps();
     }
 
     /**
@@ -175,7 +176,7 @@ public class RequestScheduler {
     private void completeRouting(BalanceContext ctx, Response response) {
         ctx.setRouteEndTime(System.currentTimeMillis());
         ctx.getFuture().complete(response);
-        metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+        metrics.reportRoutingSuccessQps();
     }
 
     private void waitBeforeRetry() throws InterruptedException {

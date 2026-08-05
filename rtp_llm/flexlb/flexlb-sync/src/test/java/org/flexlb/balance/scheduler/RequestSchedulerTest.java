@@ -11,6 +11,7 @@ import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -68,7 +70,7 @@ class RequestSchedulerTest {
 
         assertTrue(ctx.getFuture().isDone());
         assertTrue(ctx.getFuture().get().isSuccess());
-        verify(metrics).reportRoutingSuccessQps(0);
+        verify(metrics).reportRoutingSuccessQps();
     }
 
     @Test
@@ -87,6 +89,12 @@ class RequestSchedulerTest {
         assertTrue(ctx.getFuture().get().isSuccess());
         verify(router, times(2)).route(ctx);
         verify(metrics).reportRoutingFailureQps(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
+        verify(metrics).reportRoutingRetryQps();
+
+        InOrder retryBeforeNextAttempt = inOrder(router, metrics);
+        retryBeforeNextAttempt.verify(router).route(ctx);
+        retryBeforeNextAttempt.verify(metrics).reportRoutingRetryQps();
+        retryBeforeNextAttempt.verify(router).route(ctx);
     }
 
     @Test
@@ -116,6 +124,7 @@ class RequestSchedulerTest {
 
         assertEquals(3, ctx.getRetryCount());
         verify(router, times(4)).route(ctx);
+        verify(metrics, times(3)).reportRoutingRetryQps();
         assertTrue(ctx.getFuture().isDone());
         assertFalse(ctx.getFuture().get().isSuccess());
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), ctx.getFuture().get().getCode());

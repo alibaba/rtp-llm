@@ -102,11 +102,17 @@ public class RoutingQueueReporter {
     }
 
     /**
-     * Report routing success metrics
+     * Report routing success metrics.
      */
-    public void reportRoutingSuccessQps(int retryTimes) {
+    public void reportRoutingSuccessQps() {
         monitor.report(ROUTING_SUCCESS_QPS, tags, 1.0);
-        monitor.report(ROUTING_RETRY_QPS, tags, retryTimes);
+    }
+
+    /**
+     * Report one retry decision made by a scheduling worker.
+     */
+    public void reportRoutingRetryQps() {
+        monitor.report(ROUTING_RETRY_QPS, tags, 1.0);
     }
 
     /**
