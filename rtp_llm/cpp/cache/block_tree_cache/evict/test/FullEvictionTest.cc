@@ -516,6 +516,37 @@ TEST(FullPruneTest, PrunesCascadedDescendantGroupResourcesAndTopology) {
     EXPECT_EQ(cache->getStats().device_heap_total_size, 2u);
 }
 
+TEST(FullPruneTest, RefreshesSurvivingFullResourceAfterDescendantPrune) {
+    DeviceBlockPoolPtr full0_device_pool = block_tree_cache_test::makeStructuralDevicePool(0);
+    DeviceBlockPoolPtr full1_device_pool = block_tree_cache_test::makeStructuralDevicePool(1);
+    auto               full0_host_pool   = block_tree_cache_test::makeHostPool(1, 2);
+    auto full0 = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{full0_device_pool}, full0_host_pool, nullptr);
+    auto full1 = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{full1_device_pool}, nullptr, nullptr);
+
+    BlockTreeCacheConfig config;
+    config.enable_memory_cache = true;
+    auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full0, full1}, config);
+    ASSERT_NE(cache, nullptr);
+
+    const BlockIdxType full0_host_block = full0->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    ASSERT_FALSE(isNullBlockIdx(full0_host_block));
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
+    resources[0][0].host_block    = full0_host_block;
+    resources[0][1].device_blocks = {20};
+    resources[1][0].device_blocks = {10};
+    resources[1][1].device_blocks = {21};
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200}, resources));
+
+    // FULL group 0 is complete across tiers. Dropping its HOST root prunes
+    // the descendant closure, so group 1 at [100] becomes a DEVICE leaf.
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::HOST), 1);
+    ASSERT_EQ(cache->tree()->findNode({100, 200}).size(), 1u);
+    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
+    EXPECT_EQ(cache->getStats().tree_node_count, 0u);
+}
+
 TEST(FullPruneTest, DetachesBusyDescendantGroupResource) {
     DeviceBlockPoolPtr full_device_pool = block_tree_cache_test::makeStructuralDevicePool(0);
     DeviceBlockPoolPtr swa_device_pool  = block_tree_cache_test::makeStructuralDevicePool(1);

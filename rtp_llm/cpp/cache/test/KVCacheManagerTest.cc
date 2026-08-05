@@ -1306,25 +1306,23 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
     EXPECT_GE(info.available_kv_cache, device_only_available);
 }
 
-TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
+TEST_F(KVCacheManagerTest, DSV4AllocationPressureEvictsCachedResources) {
     // This test verifies that when block pools are exhausted by cached (but freed) requests,
-    // a new allocation correctly triggers LRU eviction from each group's independent block tree cache.
+    // a new allocation correctly triggers eviction through BlockTreeCache.
     //
     // Setup: block_num=8 → 7 usable blocks per group (block 0 reserved).
-    // Request seq_len = 3*spb. FULL groups allocate 3 blocks. Reusable SWA groups allocate
-    // linear-step blocks (step=1 here, so all 3), while HCA_STATE keeps only its active tail block.
-    // insertIntoCache drops the active tail slot, so each completed request caches:
-    //   FULL groups: 2 blocks per group
-    //   SWA/state groups: fixed-window cached blocks; HCA_STATE skips reuse.
-    //
-    // After 3 requests are cached and request-freed:
-    //   FULL groups (0,1,2): 6 blocks cached, 1 free → new request needs 3, triggers eviction
-    //   SWA/state groups (3,4,5,6): reusable groups may also evict under their independent pools.
-    //
-    // The fourth allocation MUST succeed via eviction on FULL groups.
+    // Two disjoint three-block requests are inserted and then release their request
+    // references, leaving resources held only by the cache. With the allocator's
+    // reserve, at least one group cannot satisfy the third request without reclaiming
+    // cached resources first.
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/8);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
+
+    // Keep this test focused on allocation-pressure eviction. Watermark eviction
+    // is covered by BlockTreeCache tests and would otherwise prune while A-B are
+    // inserted, before the pool-exhaustion path under test is reached.
+    manager->blockTreeCache()->setTierWatermark(Tier::DEVICE, /*ratio=*/0.0, /*capacity=*/0);
 
     const int    spb         = static_cast<int>(manager_config.seq_size_per_block);
     const int    seq_len     = 3 * spb;
@@ -1358,7 +1356,9 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     manager->free(free_a);
 
     const size_t free_after_a = manager->freeBlocksNum();
+    const size_t nodes_after_a = manager->blockTreeCache()->getStats().tree_node_count;
     EXPECT_LT(free_after_a, free_before);
+    EXPECT_GT(nodes_after_a, 0u);
 
     // --- Request B: different tokens → different cache keys ---
     auto       res_b    = makeDSV4BatchResource(manager_config);
@@ -1374,40 +1374,27 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     manager->free(free_b);
 
     const size_t free_after_b = manager->freeBlocksNum();
+    const size_t nodes_before_c = manager->blockTreeCache()->getStats().tree_node_count;
     EXPECT_LT(free_after_b, free_after_a);
+    ASSERT_GT(nodes_before_c, nodes_after_a);
 
-    // --- Request C: still fits, but leaves FULL groups with only one free block ---
+    // --- Request C: allocation pressure triggers cache eviction ---
     auto       res_c    = makeDSV4BatchResource(manager_config);
     auto       tokens_c = makeTokens(/*offset=*/20000);
     MallocInfo malloc_c{res_c, tokens_c};
     malloc_c.reuse_cache         = true;
     malloc_c.enable_cache_lookup = false;
-    ASSERT_TRUE(manager->malloc(malloc_c).success);
 
-    InsertInfo insert_c{res_c, tokens_c, /*is_resident=*/false};
-    manager->insertIntoCache(insert_c);
-    FreeInfo free_c{res_c, tokens_c};
-    manager->free(free_c);
+    auto result_c = manager->malloc(malloc_c);
+    ASSERT_TRUE(result_c.success) << "Third allocation should succeed via eviction";
+    EXPECT_LT(manager->blockTreeCache()->getStats().tree_node_count, nodes_before_c)
+        << "Allocation pressure should evict at least one cached tree node";
 
-    const size_t free_after_c = manager->freeBlocksNum();
-    EXPECT_LE(free_after_c, free_after_b);
-
-    // --- Request D: triggers eviction on FULL groups ---
-    auto       res_d    = makeDSV4BatchResource(manager_config);
-    auto       tokens_d = makeTokens(/*offset=*/30000);
-    MallocInfo malloc_d{res_d, tokens_d};
-    malloc_d.reuse_cache         = true;
-    malloc_d.enable_cache_lookup = false;
-
-    // This allocation MUST succeed — FULL groups trigger ensureFreeBlocks → evict from cache.
-    auto result_d = manager->malloc(malloc_d);
-    ASSERT_TRUE(result_d.success) << "Fourth allocation should succeed via eviction";
-
-    // Verify block structure for request D.
-    ASSERT_EQ(res_d->groupNums(), kDsv4PoolNum);
+    // Verify block structure for request C.
+    ASSERT_EQ(res_c->groupNums(), kDsv4PoolNum);
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        ASSERT_EQ(res_d->blocksNum(0, gid), 3) << "group " << gid;
-        const auto& blocks = res_d->blocks(0, gid);
+        ASSERT_EQ(res_c->blocksNum(0, gid), 3) << "group " << gid;
+        const auto& blocks = res_c->blocks(0, gid);
         if (isFullGroup(manager_config, gid)) {
             for (int i = 0; i < 3; ++i) {
                 EXPECT_FALSE(isNullBlockIdx(blocks[i])) << "FULL group " << gid << " pos " << i;
@@ -1417,17 +1404,11 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
         }
     }
 
-    EXPECT_LE(manager->freeBlocksNum(), free_after_c) << "Pool should be tighter after D allocated";
-
-    // --- Free D and verify blocks return to pool ---
-    FreeInfo free_d{res_d, tokens_d};
-    manager->free(free_d);
-
-    // After freeing D, its blocks (request_ref→0, cache_ref=0 since we did not insert D into cache)
-    // return to the free pool.
-    // But cached blocks from eviction of A are fully freed (both refs=0) so they also count.
-    // Expect freeBlocksNum >= free_after_c (at least as good as before D was allocated).
-    EXPECT_GE(manager->freeBlocksNum(), free_after_c);
+    // C is not inserted into the cache. Releasing its request references returns
+    // those blocks, while resources evicted to make room stay free.
+    FreeInfo free_c{res_c, tokens_c};
+    manager->free(free_c);
+    EXPECT_GE(manager->freeBlocksNum(), free_after_b);
 
     // --- Reclaim all remaining BlockTreeCache holders and verify full pool recovery ---
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*manager->blockTreeCache(), /*num_blocks=*/4096);

@@ -818,6 +818,8 @@ void BlockTreeEvictor::finalizeFullPrune(const EvictionPlan& plan) {
             eraseNodeFromAllHeaps(node);
             tree_->detachNode(node);
             detached_nodes.insert(node);
+        } else {
+            onTopologyChanged(node);
         }
     }
 

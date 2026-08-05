@@ -1391,9 +1391,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
         }
     }
     for (size_t group_id = 0; group_id < allocator->groupBlockPools().size(); ++group_id) {
-        const auto&  pool           = allocator->groupBlockPools()[group_id];
-        const size_t expected_delta = reclaimed_group_ids.find(group_id) != reclaimed_group_ids.end() ? reclaimed : 0u;
-        EXPECT_EQ(pool->freeBlocksNum(), free_before[group_id] + expected_delta) << "group_id=" << group_id;
+        const auto& pool = allocator->groupBlockPools()[group_id];
+        if (reclaimed_group_ids.find(group_id) != reclaimed_group_ids.end()) {
+            // FULL subtree pruning also releases unreachable descendants, so a
+            // cascaded group may reclaim more blocks than the triggering pool.
+            EXPECT_GE(pool->freeBlocksNum(), free_before[group_id] + reclaimed) << "group_id=" << group_id;
+        } else {
+            // Other group types can still own resources below the dropped FULL
+            // prefix. Those unreachable descendants are pruned as well.
+            EXPECT_GE(pool->freeBlocksNum(), free_before[group_id]) << "group_id=" << group_id;
+        }
     }
     EXPECT_EQ(allocator->groupBlockPools()[static_cast<size_t>(target_group_id)]->freeBlocksNum(),
               free_before[static_cast<size_t>(target_group_id)] + static_cast<size_t>(reclaimed));
