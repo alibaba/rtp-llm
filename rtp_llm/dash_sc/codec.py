@@ -43,6 +43,16 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
+_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV = "DASH_SC_PACK_EOS_FOR_EMPTY_GENERATED_IDS"
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _pack_eos_for_empty_generated_ids() -> bool:
+    return (
+        os.environ.get(_PACK_EOS_FOR_EMPTY_GENERATED_IDS_ENV, "").strip().lower()
+        in _TRUE_ENV_VALUES
+    )
+
 
 FINISH_REASON_LENGTH = 1
 FINISH_REASON_STOP_ENGINE_PARAM = 8
@@ -1234,17 +1244,11 @@ def _append_generated_ids_output(
     infer: predict_v2_pb2.ModelInferResponse,
     generated_ids: list[int],
 ) -> None:
-    """``generated_ids``: INT32 little-endian, shape ``[1, len]``.
-
-    When empty, a 4-byte filler (single INT32 ``0``) is appended because
-    ``raw_input_contents`` indices must stay aligned with ``outputs``. The consumer
-    side (access_log ``_scan_response_outputs``) checks declared ``shape`` so the
-    filler byte does not leak into token accumulators.
-    """
+    """``generated_ids``: INT32 little-endian, shape ``[1, len]``."""
     raw = (
         struct.pack("<%di" % len(generated_ids), *generated_ids)
         if generated_ids
-        else struct.pack("<i", 0)
+        else b""
     )
     out = infer.outputs.add()
     out.name = "generated_ids"
@@ -1260,10 +1264,9 @@ def prepend_to_generated_ids_tensor(
     """Prepend ``token_ids`` to the already-appended ``generated_ids`` tensor on ``infer``.
 
     Returns ``False`` and leaves ``infer`` untouched when ``token_ids`` is empty, when
-    ``generated_ids`` is absent, or when its declared shape is a zero-length / filler
-    payload (``shape[-1] <= 0``). On success, re-packs the raw bytes as
-    ``token_ids + existing_ids`` (INT32 little-endian) and updates ``shape`` to
-    ``[1, len(token_ids) + cur_len]``.
+    ``generated_ids`` is absent, or when its declared shape is zero-length. On
+    success, re-packs the raw bytes as ``token_ids + existing_ids`` (INT32
+    little-endian) and updates ``shape`` to ``[1, len(token_ids) + cur_len]``.
     """
     if not token_ids:
         return False
@@ -1425,6 +1428,10 @@ def build_stream_response_from_generate_outputs(
         if token_ids is not None
         else _token_ids_list_from_generate_output(out_py)
     )
+    if not generated_ids and finished and _pack_eos_for_empty_generated_ids():
+        if eos_token_id is None:
+            raise RuntimeError("eos_token_id is required for terminal response")
+        generated_ids = [int(eos_token_id)]
 
     if return_input_ids and request_input_ids is not None:
         _append_prompt_token_ids_output(infer, request_input_ids)
