@@ -26,14 +26,17 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_library(
+    name = "jit_sys_path_setup",
+    srcs = ["jit_sys_path_setup.py"],
+    deps = [":filelock"],
+)
+
 py_binary(
     name = "gpu_lock",
-    deps = [":filelock", ":torch"],
+    deps = [":jit_sys_path_setup", ":filelock", ":torch"],
     main = "device_resource.py",
-    srcs = [
-        "device_resource.py",
-        "jit_sys_path_setup.py",
-    ],
+    srcs = ["device_resource.py"],
 )
 
 py_library(
@@ -45,6 +48,7 @@ py_library(
 py_library(
     name = "maga_server_manager",
     srcs = ["maga_server_manager.py"],
+    deps = [":test_util"],
     visibility = ["//visibility:public"],
 )
 

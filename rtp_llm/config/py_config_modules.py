@@ -502,9 +502,13 @@ class MasterConfig:
 class JITConfig:
     def __init__(self):
         self.remote_jit_dir: str = ""
+        self.jit_cache_setup_timeout_s: int = 180
 
     def to_string(self):
-        return f"remote_jit_dir: {self.remote_jit_dir}"
+        return (
+            f"remote_jit_dir: {self.remote_jit_dir}\n"
+            f"jit_cache_setup_timeout_s: {self.jit_cache_setup_timeout_s}"
+        )
 
 
 class DeepEPConfig:

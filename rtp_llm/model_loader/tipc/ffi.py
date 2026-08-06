@@ -1,7 +1,5 @@
 import fcntl
 import hashlib
-import importlib.util
-import logging
 import os
 from pathlib import Path
 
@@ -25,27 +23,27 @@ class __CompileHelper__:
         self.__CUDA_EXTENTION__ = None
 
     def compile(self):
-        """
-        Compiles a CUDA extension from all source files in the source directory.
+        """Compile (or warm-load) the CUDA extension; needs C++17 + CUDA."""
+        from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
 
-        This function automatically finds all .c, .cc, .cpp, and .cu files
-        in the specified source directory and compiles them using JIT compilation.
-        The compiled extension is a CUDAExtension object that can be called from Python.
-
-        Requires CUDA and C++17 for compilation.
-        """
         source_dir = Path(__file__).with_name("csrc")
         sources = self._find_all_source_files(source_dir)
         cflags, cuda_cflags = ["-O3"], ["-O3", "-use_fast_math"]
-        # Fold GPU arch + CUDA version into the build-dir name so a different device
-        # or toolkit won't reuse a .so built for another arch. Probe the device
-        # directly (not TORCH_CUDA_ARCH_LIST) so it holds even when that's unset.
+        # Keys build_dir below, so a wrong arch would serve a wrong binary: fail
+        # hard here, unlike the cache scope probe that only gates caching.
         major, minor = torch.cuda.get_device_capability()
+        fingerprint = torch_abi_fingerprint()
+        if fingerprint is None:
+            raise RuntimeError("torch C++ ABI flag unavailable; cannot key TIPC build")
         build_args = [
             *cflags,
             *cuda_cflags,
             f"sm_{major}{minor}",
             torch.version.cuda or "",
+            *map(str, fingerprint),
+            # These envs change the binary without touching sources (e.g. load()
+            # derives -gencode from TORCH_CUDA_ARCH_LIST).
+            *filter(None, (os.environ.get(name, "") for name in COMPILE_FLAG_ENVS)),
         ]
         build_dir = (
             Path(
@@ -56,28 +54,10 @@ class __CompileHelper__:
             / _source_signature(source_dir, build_args)
         )
         build_dir.mkdir(parents=True, exist_ok=True)
-        so = build_dir / f"{PROGRAM_NAME}.so"
-        # flock auto-releases on process exit, so a dead builder can't block us.
+        # Serialize load() and clear a stale FileBaton left by a killed builder.
         with (build_dir / ".load.lock").open("w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            # Holding the flock, any leftover FileBaton `lock` is a corpse; drop it
-            # or load() would wait on it forever.
             (build_dir / "lock").unlink(missing_ok=True)
-            if so.is_file():
-                try:
-                    spec = importlib.util.spec_from_file_location(PROGRAM_NAME, so)
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
-                    self.__CUDA_EXTENTION__ = module
-                    return module
-                except Exception:
-                    logging.warning("TIPC cache is unusable; rebuilding", exc_info=True)
-                    so.unlink(missing_ok=True)
-            print(
-                f"{PROGRAM_NAME} is currently compiling the code, which may take some time. "
-                f"If any errors occur, please check your compilation environment: {PROGRAM_NAME} "
-                "requires C++17 and CUDA."
-            )
             self.__CUDA_EXTENTION__ = load(
                 PROGRAM_NAME,
                 sources,

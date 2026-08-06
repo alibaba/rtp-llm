@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest import TestCase
 from unittest.mock import patch
@@ -10,6 +11,15 @@ from rtp_llm.config.server_config_setup import (
 )
 from rtp_llm.ops import NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
+
+# Importing torch queues _check_capability, which iterates device_count() at lazy
+# init. Wiping gpu_lock's CUDA_VISIBLE_DEVICES makes that re-read as every host card
+# while the driver still exposes only the locked one, so lazy init asserts.
+_PINNED_DEVICES = {
+    name: os.environ[name]
+    for name in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES")
+    if name in os.environ
+}
 
 
 class ServerConfigPortLayoutTest(TestCase):
@@ -42,17 +52,6 @@ class ServerConfigPortLayoutTest(TestCase):
 
 
 class GenerateConfigTest(TestCase):
-
-    def setUp(self):
-        # clear=True below removes CUDA_VISIBLE_DEVICES after torch is imported;
-        # these config-only tests must not trigger real CUDA lazy initialization.
-        cuda_available = patch(
-            "rtp_llm.config.server_config_setup.torch.cuda.is_available",
-            return_value=False,
-        )
-        cuda_available.start()
-        self.addCleanup(cuda_available.stop)
-
     @patch.dict(
         "os.environ",
         {
@@ -97,6 +96,45 @@ class GenerateConfigTest(TestCase):
         self.assertFalse(config.enable_gpu_prefix_tree)
         self.assertFalse(config.enable_prefix_tree_memory_cache)
         self.assertTrue(config.enable_legacy_memory_connector_fallback)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "TP_SIZE": "1",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "1",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+            "REMOTE_JIT_DIR": "/remote/jit",
+            "JIT_CACHE_SETUP_TIMEOUT_S": "60",
+        },
+        clear=True,
+    )
+    def test_jit_args_propagate_from_env(self):
+        config = setup_args([]).jit_config
+        self.assertEqual(config.remote_jit_dir, "/remote/jit")
+        self.assertEqual(config.jit_cache_setup_timeout_s, 60)
+
+    @patch.dict(
+        "os.environ",
+        {
+            **_PINNED_DEVICES,
+            "TP_SIZE": "1",
+            "PP_SIZE": "1",
+            "WORLD_SIZE": "1",
+            "WORLD_RANK": "0",
+            "LOCAL_WORLD_SIZE": "1",
+            "START_PORT": "20000",
+            "MODEL_TYPE": "fake_model",
+        },
+        clear=True,
+    )
+    def test_jit_config_defaults(self):
+        config = setup_args([]).jit_config
+        self.assertEqual(config.remote_jit_dir, "")
+        self.assertEqual(config.jit_cache_setup_timeout_s, 180)
 
     def test_engine_config_propagates_role_to_parallelism_config(self):
         py_env_configs = PyEnvConfigs()
@@ -203,6 +241,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "4",
             "PP_SIZE": "1",
             "WORLD_SIZE": "4",
@@ -241,6 +280,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "2",
             "PP_SIZE": "1",
             "WORLD_SIZE": "2",
@@ -292,6 +332,7 @@ class GenerateConfigTest(TestCase):
     @patch.dict(
         "os.environ",
         {
+            **_PINNED_DEVICES,
             "TP_SIZE": "4",
             "DP_SIZE": "2",
             "PP_SIZE": "1",
