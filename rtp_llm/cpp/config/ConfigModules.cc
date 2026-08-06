@@ -378,6 +378,7 @@ std::string FIFOSchedulerConfig::to_string() const {
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
         << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache << "\n"
+        << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams;
     return oss.str();
 }
@@ -406,6 +407,8 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up: " << warm_up << "\n"
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "model_warm_up: " << model_warm_up << "\n"
+        << "enable_sleep_mode: " << enable_sleep_mode << "\n"
+        << "sleep_mode_level: " << sleep_mode_level << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "use_gather_batch_scheduler: " << use_gather_batch_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"

@@ -19,6 +19,11 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.model_loader.weight_memory_saver import (
+    suppress_weights_region,
+    weights_region,
+)
+
 from ..._profiler import record_function_range
 from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
@@ -26,6 +31,7 @@ from ..mega_buf import (
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
     _mega_moe_enabled,
+    _register_mega_strategy,
 )
 from ..mega_jit_warmup import (
     clamp_token_counts,
@@ -35,8 +41,8 @@ from ..mega_jit_warmup import (
     parse_mega_moe_jit_warmup_tokens_override,
 )
 from ..shared_expert import strict_fused_moe_enabled
-from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ..warmup_sync import sync_cuda_graph_warmup_ranks
+from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
 _MEGA_MOE_NVCC_TMPDIR_ENV = "DSV4_MEGA_MOE_NVCC_TMPDIR"
@@ -76,7 +82,9 @@ def _get_gate_pack_kernels():
 
 def _gate_pack_input_packer_env_allows() -> bool:
     mode = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER", "fused").strip().lower()
-    impl = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+    impl = (
+        os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+    )
     return mode in ("auto", "fused") and impl == "optimized"
 
 
@@ -209,8 +217,91 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         interleave allocates another ~size(w13)+size(w2) transient) OOMs
         268 GB on V4-Pro cp4. Splitting keeps the live set ≤ one stack.
         """
-        import deep_gemm
         import torch.distributed as dist
+
+        # Build the interleaved Mega kernel weights (_mega_l1_w/_l1_sf/_l2_w/
+        # _l2_sf) from the raw routed stacks. Split into its own method so the
+        # level-2 wake reload can re-derive JUST these computed weights
+        # (reload_routed_weights) without re-running the symm-buffer allocation /
+        # distributed rendezvous below.
+        self._apply_routed_weight_transform(layer_weights)
+
+        cfg = self.cfg
+        D = cfg.dim
+        inter = cfg.moe_inter_dim
+        device = self._mega_l1_w.device
+
+        # (4) Allocate the symmetric-memory buffer.  Uses
+        # ``torch.distributed.group.WORLD`` because our DP+EP layout has
+        # ``ep_size == world_size`` — every rank holds a distinct 64/256
+        # slice.  ``num_max_tokens_per_rank`` caps per-rank token count
+        # fed into the MoE; bounded from ``max_tokens_per_rank`` (plumbed
+        # from ``V4Args.max_seq_len`` upstream).  The library aligns this
+        # up to ``get_token_alignment_for_mega_moe()`` internally (384 on
+        # SM100).
+        assert dist.is_initialized(), (
+            "Mega MoE requires torch.distributed initialised; "
+            "_mega_moe_available() should have gated this earlier"
+        )
+        group = dist.group.WORLD
+        self._mega_group = group
+        # Symm buffer is single-layer staging — share one across all MoE layers
+        # via the module-level cache (see _get_or_create_mega_buf). Store the
+        # creation kwargs so the buffer (and the small bf16 output staging buffer)
+        # can be dropped at engine sleep and lazily re-created on the first
+        # forward after wake -- see _ensure_mega_buffers / release_mega_symm_buffers
+        # (sleep release is opt-in via RTP_LLM_SLEEP_FREE_MEGA_SYMM=1).
+        self._mega_buf_kwargs = dict(
+            num_experts=cfg.n_routed_experts,
+            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
+            num_topk=cfg.n_activated_experts,
+            hidden=D,
+            intermediate_hidden=inter,
+            use_fp8_dispatch=True,
+            activation="swiglu",
+        )
+        # Single-layer staging output. All MoE layers execute sequentially, so one
+        # process-local buffer is enough and avoids O(layers) persistent memory.
+        self._mega_out_hidden = D
+        self._mega_out_capacity_tokens = cfg.max_tokens_per_rank
+        self._mega_out_device = device
+        self._mega_buf = None
+        self._mega_y = None
+        _register_mega_strategy(self)
+        # Create eagerly now (init-time collective rendezvous, in lockstep with
+        # every rank's warmup) so JIT warmup below has a live buffer.
+        self._ensure_mega_buffers()
+        self._input_packer = get_mega_moe_input_packer()
+        self._maybe_warmup_jit_once()
+
+    def _apply_routed_weight_transform(
+        self, layer_weights: Dict, isolate_scratch: bool = False
+    ) -> None:
+        """Derive the interleaved Mega kernel weights from the raw EP-sliced
+        routed stacks, popping the raws so only the kernel buffers stay resident.
+
+        Extracted from ``setup_weights`` so the level-2 wake reload can re-run the
+        weight transform alone (see ``reload_routed_weights``). Must run with the
+        ``weights_region`` NOT suppressed so the fresh ``_mega_*`` buffers are
+        re-tagged ``weights`` and reclaimed by the next engine sleep.
+
+        ``isolate_scratch`` (L2 wake only): run the ENTIRE transform in the default
+        pool and copy the four kernel buffers IN PLACE into the existing
+        blank-remapped ``_mega_*`` tensors (rather than allocating fresh tagged
+        buffers). Rationale, established empirically: the private ``weights``
+        MemPool can never hand freed pages back to the driver via ``empty_cache``
+        (weight_memory_saver.py:273). At cold load that is harmless -- the pool
+        grows monotonically and transform scratch is reused by later layers. But on
+        the wake re-derive the region is already full-size, and a free+realloc of
+        the tagged buffers (the earlier approach) fragments the MemPool: the
+        caching allocator does not perfectly reuse the freed VAs, so it grabs ~35
+        GiB of fresh segments it can never return -- inflating the RUNNING footprint
+        past capacity and OOMing the KV-cache resume. Copying into the buffers in
+        place touches ZERO MemPool allocation (no free, no realloc), so the pool
+        neither fragments nor grows; only the transform scratch is allocated, in the
+        returnable default pool, and freed by ``empty_cache``.
+        """
+        import deep_gemm
 
         from rtp_llm.utils.model_weight import W
 
@@ -244,70 +335,126 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         torch.cuda.empty_cache()
 
         # --- L2 (down): only after L1's fp32 buffer has been freed.
+        #
+        # Sleep-mode: the mega transform's L2 output ``l2_w`` ALIASES the ``w2``
+        # input buffer in place (only L1's gate/up output ``l1_w`` is a fresh
+        # interleaved allocation). So ``w2`` must be allocated INSIDE
+        # weights_region: tagging only the transform (as the earlier fix did)
+        # tags the fresh ``l1_w`` but leaves ``l2_w`` sitting on ``w2``'s
+        # DEFAULT-pool, untagged segment -- which ``tms.pause("weights")`` can
+        # never unmap. That was ~9.5GiB/rank of residual (38 layers x 256MiB,
+        # surfacing as ``mega.py:setup_weights`` in the sleep snapshot). Scoping
+        # w2's allocation into the region moves the aliased segment under the
+        # ``weights`` tag so engine sleep unmaps it too. L1's inputs
+        # (w13/s13_int) stay in the default pool: l1_w is a fresh region
+        # allocation, so w13 is genuinely freed by the empty_cache() below.
+        #
+        # Both l1/l2 int8/int32 buffers ARE the resident kernel weights (the
+        # bulk of the DSV4 per-rank weight footprint); the transform's transient
+        # interleave scratch (w2/s2 raw + int) also lands in the region's private
+        # pool but is bounded (reused across layers) and paused at sleep.
         st_w2_w = layer_weights.pop(W.v4_routed_w2_w)
         st_w2_s = layer_weights.pop(W.v4_routed_w2_s)
-        w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
-        s2_raw = torch.empty(
-            (E, D, inter // FP4_BLOCK),
-            dtype=torch.float8_e8m0fnu,
-            device=device,
+        # Cold load: w2/l2_w must be allocated INSIDE weights_region (l2_w aliases
+        # w2 in place, so tagging only the transform would leave l2_w on an untagged
+        # segment the sleep pause can never unmap -- see the block comment above).
+        # Wake re-derive (isolate_scratch): force the whole transform into the
+        # default pool so its scratch stays returnable; the four outputs are cloned
+        # into the tag afterwards.
+        transform_region = (
+            suppress_weights_region if isolate_scratch else weights_region
         )
-        w2.copy_(st_w2_w)
-        s2_raw.copy_(st_w2_s)
-        del st_w2_w, st_w2_s
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
-        del s2_raw
-        torch.cuda.empty_cache()
+        with transform_region():
+            w2 = torch.empty((E, D, inter // 2), dtype=torch.int8, device=device)
+            s2_raw = torch.empty(
+                (E, D, inter // FP4_BLOCK),
+                dtype=torch.float8_e8m0fnu,
+                device=device,
+            )
+            w2.copy_(st_w2_w)
+            s2_raw.copy_(st_w2_s)
+            del st_w2_w, st_w2_s
+            s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+            del s2_raw
+            torch.cuda.empty_cache()
 
-        # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
-        # both SFs UTCCP-transposed. Drop inputs immediately after.
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-            (w13, s13_int),
-            (w2, s2_int),
-        )
+            # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
+            # both SFs UTCCP-transposed. Drop inputs immediately after.
+            (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
+                (w13, s13_int),
+                (w2, s2_int),
+            )
+            if not isolate_scratch:
+                # Cold load: stash the region-tagged buffers as plain attributes
+                # (not Parameters — the kernel reads raw int8/int32 buffers with no
+                # autograd). Original stacked fp32 SFs are dropped now that the int
+                # layout has been derived.
+                self._mega_l1_w = l1_w
+                self._mega_l1_sf = l1_sf
+                self._mega_l2_w = l2_w
+                self._mega_l2_sf = l2_sf
+        if isolate_scratch:
+            # L2 wake: copy the freshly computed (default-pool) buffers IN PLACE
+            # into the existing blank-remapped tagged buffers. No free + realloc of
+            # the tagged buffers, so the private weights MemPool neither fragments
+            # nor grows. The default-pool transform outputs + scratch are returned
+            # to the driver by the empty_cache() below.
+            assert (
+                self._mega_l1_w is not None
+                and self._mega_l1_sf is not None
+                and self._mega_l2_w is not None
+                and self._mega_l2_sf is not None
+            ), "reload_routed_weights: blank-remapped _mega_* buffers missing"
+            self._mega_l1_w.copy_(l1_w)
+            self._mega_l1_sf.copy_(l1_sf)
+            self._mega_l2_w.copy_(l2_w)
+            self._mega_l2_sf.copy_(l2_sf)
+            del l1_w, l1_sf, l2_w, l2_sf
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
 
-        # Stash as plain attributes (not Parameters — the kernel reads
-        # raw int8/int32 buffers with no autograd).  Original stacked
-        # fp32 SFs are dropped now that the int layout has been derived.
-        self._mega_l1_w = l1_w
-        self._mega_l1_sf = l1_sf
-        self._mega_l2_w = l2_w
-        self._mega_l2_sf = l2_sf
+    def reload_routed_weights(self, layer_weights: Dict) -> None:
+        """Level-2 wake: re-derive the Mega kernel weights from freshly reloaded
+        raw routed stacks.
 
-        # (4) Allocate the symmetric-memory buffer.  Uses
-        # ``torch.distributed.group.WORLD`` because our DP+EP layout has
-        # ``ep_size == world_size`` — every rank holds a distinct 64/256
-        # slice.  ``num_max_tokens_per_rank`` caps per-rank token count
-        # fed into the MoE; bounded from ``max_tokens_per_rank`` (plumbed
-        # from ``V4Args.max_seq_len`` upstream).  The library aligns this
-        # up to ``get_token_alignment_for_mega_moe()`` internally (384 on
-        # SM100).
-        group = dist.group.WORLD
-        self._mega_group = group
-        # Symm buffer is single-layer staging — share one across all
-        # MoE layers via the module-level cache (see _get_or_create_mega_buf).
-        self._mega_buf = _get_or_create_mega_buf(
-            group=group,
-            num_experts=cfg.n_routed_experts,
-            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
-            num_topk=cfg.n_activated_experts,
-            hidden=D,
-            intermediate_hidden=inter,
-            use_fp8_dispatch=True,
-            activation="swiglu",
-        )
-        # Single-layer staging output. All MoE layers execute sequentially, so one
-        # process-local buffer is enough and avoids O(layers) persistent memory.
-        self._mega_y = _get_or_create_mega_output(
-            _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
-            D,
-            torch.bfloat16,
-            device,
-        )
-        self._input_packer = get_mega_moe_input_packer()
-        self._maybe_warmup_jit_once()
+        The old ``_mega_*`` buffers were blank-remapped in place by
+        ``resume("weights")`` (level 2 keeps no host backup), so their contents
+        are garbage but their tagged allocations are intact. We re-run the
+        transform in the default pool and copy the results IN PLACE into those
+        existing buffers (``isolate_scratch=True``) -- deliberately NOT freeing +
+        reallocating them, which would fragment the private weights MemPool and
+        leak ~35 GiB of unreturnable reserved segments across the MoE layers,
+        OOMing the KV-cache resume. The symm-mem dispatch buffer is untouched: it
+        is released at sleep (``release_mega_symm_buffers``) and lazily re-created
+        on the first post-wake forward (``_ensure_mega_buffers``).
+
+        ``layer_weights`` is a plain dict carrying exactly this layer's six
+        ``W.v4_routed_*`` tensors, assembled by ``reload_weights_from_loader``
+        from the re-streamed checkpoint (the raws are popped at cold load so they
+        are not tracked in the live ``ModelWeights`` and cannot be copied in
+        place).
+        """
+        self._apply_routed_weight_transform(layer_weights, isolate_scratch=True)
+
+    def _ensure_mega_buffers(self) -> None:
+        """Create the symm-mem dispatch buffer + bf16 output staging buffer if
+        absent. Called at construction and at the top of every forward path, so a
+        sleep-time release (``release_mega_symm_buffers``) is transparently undone
+        on the first forward after wake. ``_get_or_create_mega_buf`` runs a
+        symmetric-memory rendezvous (a collective) -- safe here because all ranks
+        execute the same MoE layer's forward in lockstep, exactly as at init."""
+        if self._mega_buf is None:
+            self._mega_buf = _get_or_create_mega_buf(
+                group=self._mega_group,
+                **self._mega_buf_kwargs,
+            )
+        if self._mega_y is None:
+            self._mega_y = _get_or_create_mega_output(
+                _mega_output_capacity(self._mega_buf, self._mega_out_capacity_tokens),
+                self._mega_out_hidden,
+                torch.bfloat16,
+                self._mega_out_device,
+            )
 
     def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
         cfg = self.cfg
@@ -513,6 +660,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         """
         import deep_gemm
 
+        # Lazily re-create the symm buffer if it was released at sleep (all ranks
+        # hit this in lockstep on the first post-wake forward -> collective safe).
+        self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
         if T > buf.num_max_tokens_per_rank:
@@ -589,6 +739,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             _,
         ) = kernels
 
+        # Lazily re-create the symm buffer if it was released at sleep (all ranks
+        # hit this in lockstep on the first post-wake forward -> collective safe).
+        self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
         if T > buf.num_max_tokens_per_rank:
@@ -685,9 +838,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         rank = dist.get_rank(group)
         world_size = dist.get_world_size(group)
         device = self._mega_l1_w.device
-        _log_pre_kernel_barrier(
-            "enter", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
 
         if device.type == "cuda":
             with torch.cuda.device(device):
@@ -702,6 +853,4 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         else:
             dist.barrier(group=group)
 
-        _log_pre_kernel_barrier(
-            "leave", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)

@@ -272,6 +272,28 @@ class ModelFactory:
             target_model=model,
         )
 
+        # Level-2 sleep: a checkpoint-backed propose/draft model (e.g. DSV4 MTP)
+        # is a fully independent BaseModel with its OWN GPU weights + WeightManager
+        # loaded from --sp_checkpoint_path (see get_sp_model). Those weights are
+        # torch_memory_saver-tracked and blank-remapped by the level-2 wake resume
+        # just like the main model's, but the C++ wake hook only reloads the main
+        # model's manager. Chain the draft manager onto the main one so the wake
+        # reload fans out and restores the draft weights in place too; otherwise
+        # speculative decoding would run on blank draft weights after wake. No-op
+        # unless a propose model with its own manager exists.
+        if propose_model is not None:
+            sp_base_model = getattr(propose_model, "model", None)
+            main_wm = getattr(model, "weight_manager", None)
+            sp_wm = getattr(sp_base_model, "weight_manager", None)
+            if main_wm is not None and sp_wm is not None:
+                main_wm.register_chained_reload(sp_wm)
+                logging.info(
+                    "level-2 sleep: chained propose-model weight reload onto main "
+                    "model (main_scope=%s, sp_scope=%s)",
+                    getattr(main_wm, "_model_scope", None),
+                    getattr(sp_wm, "_model_scope", None),
+                )
+
         # Create engine using create_engine function (replaces AsyncModel)
         alog_conf_path = engine_config.profiling_debug_logging_config.ft_alog_conf_path
 

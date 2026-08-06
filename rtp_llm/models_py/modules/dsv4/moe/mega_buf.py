@@ -12,8 +12,10 @@ The cache key set MUST stay invariant across the refactor — see Phase 1 risk
 #9 in ``.claude/plans/optimized-riding-mist.md``.
 """
 
+import gc
 import logging
 import os
+import weakref
 
 import torch
 
@@ -22,6 +24,108 @@ import torch
 # collide; in practice there's only ever one entry per process.
 _MEGA_BUF_CACHE: dict = {}
 _MEGA_OUTPUT_CACHE: dict = {}
+
+# Live Mega MoE strategy instances. Each MoE layer captures a STRONG reference to
+# the shared symm buffer in ``self._mega_buf`` (read directly on the forward hot
+# path), so clearing ``_MEGA_BUF_CACHE`` alone cannot free the buffer at sleep --
+# every layer's reference must be dropped too. This weak registry lets the sleep
+# reclaim reach them without keeping them alive. See ``release_mega_symm_buffers``.
+_MEGA_STRATEGY_REGISTRY: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def _register_mega_strategy(strategy) -> None:
+    """Track a live Mega MoE strategy so its per-layer buffer refs can be dropped
+    at sleep. Best-effort; never raises.
+
+    Also stamp the owning model's build scope (``id(base_model)`` while its
+    py-model is under construction) so the level-2 wake reload can attribute this
+    strategy to one model. A checkpoint-backed MTP draft coexisting with the main
+    model registers here too and its lone layer collides on ``layer_id=0`` with
+    the main model's layer 0; the stamp lets each ``WeightManager`` re-derive only
+    its own layers. ``None`` when built outside a scope (e.g. non-sleep runs) —
+    harmless, as the reload filter matches ``None`` scope managers to ``None``
+    stamps."""
+    try:
+        from rtp_llm.model_loader.weight_memory_saver import current_model_scope
+
+        strategy._sleep_model_scope = current_model_scope()
+    except Exception:
+        pass
+    try:
+        _MEGA_STRATEGY_REGISTRY.add(strategy)
+    except Exception:
+        pass
+
+
+def iter_mega_strategies() -> list:
+    """Snapshot of the live Mega MoE strategies (one per MoE layer).
+
+    Used by the level-2 wake reload (``WeightManager.reload_weights_from_loader``)
+    to re-derive each layer's kernel weights from the re-streamed checkpoint via
+    ``MegaStrategy.reload_routed_weights``. Returns a plain list so callers do not
+    hold the weakset during iteration."""
+    return list(_MEGA_STRATEGY_REGISTRY)
+
+
+def release_mega_output_buffers() -> tuple[int, float]:
+    """Drop per-layer refs to the shared bf16 output staging buffer.
+
+    Returns ``(cache_entries, GiB)`` for sleep-reclaim diagnostics.
+    """
+    freed_bytes = 0
+    for buf in _MEGA_OUTPUT_CACHE.values():
+        try:
+            freed_bytes += buf.numel() * buf.element_size()
+        except Exception:
+            pass
+    entries = len(_MEGA_OUTPUT_CACHE)
+    for strat in list(_MEGA_STRATEGY_REGISTRY):
+        try:
+            strat._mega_y = None
+        except Exception:
+            pass
+    _MEGA_OUTPUT_CACHE.clear()
+    return entries, freed_bytes / (1024**3)
+
+
+def release_mega_symm_buffers() -> float:
+    """Sleep-time reclaim of the Mega MoE symmetric-memory buffer (+ bf16 output
+    staging buffer).
+
+    Drops every per-layer strong reference (``self._mega_buf`` / ``self._mega_y``
+    across all registered strategies), destroys the cached buffers, clears the
+    module caches, and gc's so the symmetric-memory allocation is actually
+    released to the driver. Returns the GiB of symm buffer dropped (best-effort
+    estimate).
+
+    Non-collective (pure Python ref-drops + ``SymmBuffer.destroy()``), so it is
+    safe on the quiesced sleep path. The buffers are lazily re-created on the
+    first forward after wake via ``MegaStrategy._ensure_mega_buffers`` -- that
+    path runs ``symm_mem.rendezvous`` (a collective), which is safe because all
+    ranks execute the same MoE layer's forward in lockstep, exactly as at init.
+    """
+    freed_bytes = 0.0
+    for buf in _MEGA_BUF_CACHE.values():
+        try:
+            freed_bytes += buf.buffer.numel() * buf.buffer.element_size()
+        except Exception:
+            pass
+    # 1) Drop per-layer strong refs first, else the buffers stay alive below.
+    for strat in list(_MEGA_STRATEGY_REGISTRY):
+        try:
+            strat._mega_buf = None
+        except Exception:
+            pass
+    # 2) Destroy the cached buffers (nulls each SymmBuffer's handle/tensor refs).
+    for buf in list(_MEGA_BUF_CACHE.values()):
+        try:
+            buf.destroy()
+        except Exception:
+            pass
+    _MEGA_BUF_CACHE.clear()
+    release_mega_output_buffers()
+    gc.collect()
+    return freed_bytes / (1024**3)
 
 
 def estimate_mega_moe_symm_buffer_bytes(

@@ -621,9 +621,15 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         return LocalRpcServer::GenerateStreamCall(server_context, request, writer);
     }
 
-    AtomicGuardPtr request_guard = make_shared<AtomicGuard>(onflight_requests_);
-    RPCContext     rpc_context{request, writer};
-    auto           prefill_context         = PrefillGenerateContext(&this->resource(),
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_lease = std::move(admission.lease);
+    c10::InferenceMode inference_guard(true);
+    AtomicGuardPtr     request_guard = make_shared<AtomicGuard>(onflight_requests_);
+    RPCContext         rpc_context{request, writer};
+    auto               prefill_context     = PrefillGenerateContext(&this->resource(),
                                                   rpc_context,
                                                   request->generate_config().timeout_ms(),
                                                   server_context,

@@ -129,4 +129,9 @@ std::vector<CacheKeyType> MemoryBlockCache::cacheKeys() const {
     return keys;
 }
 
+void MemoryBlockCache::clear() {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    lru_cache_.clear();
+}
+
 }  // namespace rtp_llm

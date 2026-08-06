@@ -37,6 +37,10 @@ import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.model_loader.weight_memory_saver import (
+    current_model_scope,
+    model_build_scope,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
@@ -452,6 +456,25 @@ class DeepSeekV4Model(GptModelBase):
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
 
+        # Capture the level-2 sleep model-build scope while it is still open on
+        # this thread. base_model.py runs ``_create_python_model`` (hence this
+        # __init__) inside ``model_build_scope(id(base_model))`` on MainThread,
+        # so ``current_model_scope()`` reads the correct token here. But the
+        # actual MoE strategy / attention compressor construction is DEFERRED to
+        # ``_initialize_impl`` (V4Transformer build), which the C++ engine calls
+        # LATER on a worker thread — long after this scope has closed. Those
+        # modules self-register into DSV4's global WeakSet registries and stamp
+        # ``current_model_scope()`` at registration time; without re-opening the
+        # scope there, they stamp None while ``WeightManager._model_scope`` is
+        # ``id(base_model)`` (non-None), so the level-2 wake re-derive filter
+        # (``_owned``) drops every mega/compressor → blank kernel weights →
+        # garbage output after wake. Stash the token so ``_initialize_impl`` can
+        # re-establish the scope around the deferred construction. The MTP draft
+        # (DeepSeekV4MtpModel, num_layers=1, layer_id=0) captures ``id(draft)``
+        # via its own build scope, keeping it distinct from the main model's
+        # layer-0 strategy for the reload attribution.
+        self._build_scope_token: Any = current_model_scope()
+
         # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
         # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
         self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
@@ -710,8 +733,14 @@ class DeepSeekV4Model(GptModelBase):
         prev_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
         try:
-            with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+            # Re-open the model-build scope captured in __init__ so the MoE
+            # strategies / attention compressors constructed inside
+            # V4Transformer stamp the owning model's token when they
+            # self-register — this deferred build runs on a worker thread that
+            # never saw the original (MainThread) scope. See __init__ for why.
+            with model_build_scope(self._build_scope_token):
+                with torch.device("meta"):
+                    self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
         if self._captures_aux_hidden:

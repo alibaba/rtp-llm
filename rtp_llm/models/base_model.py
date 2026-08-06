@@ -176,18 +176,27 @@ class BaseModel(object):
         self._load(device_str)
         from rtp_llm.model_loader.weight_manager import WeightManager
 
+        # model_scope=id(self): a stable per-model token. DSV4's global Mega-MoE /
+        # compressor registries are attributed by this token (stamped during
+        # _create_python_model below) so the level-2 wake reload re-derives only
+        # this model's computed weights -- required once a checkpoint-backed MTP
+        # draft coexists with the main model and their layer ids collide.
         self.weight_manager = WeightManager(
             self.device,
             self.weight,
             self.model_weights_loader,
             non_owned_global_weights=self._weight_alias_names,
+            model_scope=id(self),
         )
         if skip_python_model:
             return
         logging.info(
             f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
         )
-        self._create_python_model()
+        from rtp_llm.model_loader.weight_memory_saver import model_build_scope
+
+        with model_build_scope(id(self)):
+            self._create_python_model()
 
     def _create_python_model(self):
         pass
@@ -232,7 +241,27 @@ class BaseModel(object):
         3. 临时的LoRA缓存
 
         这可以显著减少host内存占用，为KV cache等运行时内存需求腾出空间。
+
+        例外：level-2 sleep（丢弃权重）在 wake 时需要由 model loader 从原始
+        checkpoint 原地重载权重（WeightManager.reload_weights_from_loader ->
+        ModelLoader.prepare_weights_fastsafetensor 优先，不可用时回退
+        prepare_weights，两者均经 _load_config.database 重读）。若此处清理
+        database（关闭 safetensor 句柄并清空 tensor 索引），wake 重载会以
+        "ts is empty" 失败。因此 level-2 保留 database；其余模式照旧释放。保留的
+        只是 tensor 索引 + safetensor header 元数据（KB~MB 级）与 mmap 句柄，
+        权重本体仍按需分页，不常驻 host。
         """
+        from rtp_llm.model_loader.weight_memory_saver import (
+            is_enabled,
+            sleep_mode_level,
+        )
+
+        if is_enabled() and sleep_mode_level() == 2:
+            logging.info(
+                "sleep level-2: keeping loader database alive for wake-time "
+                "in-place weight reload (skipping cleanup_database)"
+            )
+            return
         self.model_weights_loader.cleanup_database()
 
     @classmethod

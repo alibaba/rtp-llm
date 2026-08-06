@@ -54,6 +54,11 @@ public:
 
     std::vector<CacheKeyType> cacheKeys() const;
 
+    // Drop all cached entries in place. The cache object (and its address) stays valid,
+    // so concurrent readers holding a stable pointer stay safe; only the internal
+    // LRU state is reset under the write lock.
+    void clear();
+
 private:
     mutable LRUCache<CacheKeyType, CacheItem> lru_cache_;
     mutable std::shared_mutex                 mutex_;

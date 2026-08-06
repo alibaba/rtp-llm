@@ -511,6 +511,18 @@ def setup_args() -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
+    # Sleep mode is parsed into RuntimeConfig, but Python weight allocation
+    # wrappers run before C++ hooks. Mirror these switches into the process
+    # environment so ENABLE_SLEEP_MODE / SLEEP_MODE_LEVEL work the same from CLI
+    # and env. SLEEP_MODE_LEVEL is read at weight-load time to decide whether the
+    # torch_memory_saver weights region is opened with host cpu_backup (level 1)
+    # or as discard-only (level 2).
+    os.environ["ENABLE_SLEEP_MODE"] = (
+        "1" if getattr(parsed_args, "enable_sleep_mode", False) else "0"
+    )
+    os.environ["SLEEP_MODE_LEVEL"] = str(
+        getattr(parsed_args, "sleep_mode_level", 1) or 1
+    )
 
     # Normalize the two switches before model construction and process spawn.
     from rtp_llm.utils.warmup import configure_warmup

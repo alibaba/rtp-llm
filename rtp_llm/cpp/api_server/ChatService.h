@@ -21,7 +21,7 @@ public:
                 const std::shared_ptr<autil::AtomicCounter>&    request_counter,
                 const std::shared_ptr<Tokenizer>&               tokenizer,
                 const std::shared_ptr<ChatRender>&              render,
-                const ModelConfig&                             model_config,
+                const ModelConfig&                              model_config,
                 const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
         engine_(engine),
         mm_processor_(mm_processor),

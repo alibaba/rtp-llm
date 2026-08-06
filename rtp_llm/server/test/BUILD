@@ -55,3 +55,15 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "sleep_mode_compatibility_test",
+    srcs = ["sleep_mode_compatibility_test.py"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+    tags = ["manual"],
+)

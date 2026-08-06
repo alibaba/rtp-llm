@@ -68,6 +68,11 @@ public:
     size_t                    size() const;
     std::vector<CacheKeyType> cacheKeys() const;
 
+    // Sleep/wake_up: drop every cache entry in place (keeps the object address stable so
+    // shared_ptr holders never race a pointer swap). Used when the underlying host KV buffer
+    // is released/reallocated and the cache-key -> block index index becomes invalid.
+    void clear();
+
 private:
     struct EvictKey {
         uint64_t     last_access_seq{0};

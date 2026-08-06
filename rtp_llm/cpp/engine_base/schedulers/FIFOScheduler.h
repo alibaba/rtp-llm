@@ -32,6 +32,10 @@ public:
                                                  enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
+    void                                         wake() override;
+    void setForcePoll(bool enable) override {
+        force_poll_.store(enable, std::memory_order_relaxed);
+    }
     bool                                         empty() override;
 
     void reportMetrics();
@@ -109,6 +113,9 @@ protected:
     size_t                          max_inited_kv_cache_streams_    = 0;
     const bool                      need_fill_fake_stream_          = false;
     const size_t                    prefill_cp_size_                = 1;
+    // Keep polling while collective sleep-quiesce is armed so drained ranks
+    // continue issuing the synchronization co-steps.
+    std::atomic<bool>               force_poll_                     = false;
     std::atomic<bool>               stop_                        = false;
     bool                            schedule_trigger_            = false;
     std::mutex                      lock_;

@@ -8,11 +8,18 @@ from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.engine_config import EngineConfig, update_worker_addrs
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.sleep_mode_compatibility import (
+    Level2SleepCompatibility,
+    reject_embedding_sleep,
+    validate_level2_sleep_compatibility,
+)
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.concurrency_controller import get_global_controller
+from rtp_llm.utils.gpu_mem_probe import log_gpu_mem
 
 if TYPE_CHECKING:
     from rtp_llm.async_decoder_engine.base_engine import BaseEngine
@@ -40,31 +47,14 @@ class BackendManager(object):
 
     def start(self):
         """Initialize backend server without entering service loop"""
+        # [InitMem] baseline: CUDA context + torch runtime only, before NCCL /
+        # symm / weights. Anchors the sleep-residual decomposition.
+        log_gpu_mem("start/baseline")
         self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
             self.py_env_configs,
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
-        )
-
-        if engine_config.parallelism_config.world_size > 1:
-            init_distributed_environment(
-                engine_config.parallelism_config,
-                nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
-                nccl_init_port=self._distributed_server.get_nccl_init_port(),
-                backend="nccl",
-                timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
-            )
-        world_info = get_world_info(
-            self.py_env_configs.server_config,
-            self.py_env_configs.distribute_config,
-            self.py_env_configs.parallelism_config,
-            distributed_server=self._distributed_server,
-        )
-        update_worker_addrs(
-            engine_config.runtime_config,
-            engine_config.parallelism_config,
-            world_info,
         )
         # Build main model_config
         model_config = ModelFactory.create_model_config(
@@ -77,6 +67,51 @@ class BackendManager(object):
             quantization_config=self.py_env_configs.quantization_config,
             render_config=self.py_env_configs.render_config,
             eplb_config=self.py_env_configs.eplb_config,
+        )
+        validate_level2_sleep_compatibility(
+            enable_sleep_mode=engine_config.runtime_config.enable_sleep_mode,
+            sleep_mode_level=engine_config.runtime_config.sleep_mode_level,
+            compatibility=Level2SleepCompatibility(
+                lora_adapter_count=len(model_config.lora_infos),
+                merge_lora=self.py_env_configs.lora_config.merge_lora,
+                local_multimodal_vit=(
+                    model_config.mm_model_config.is_multimodal
+                    and self.py_env_configs.vit_config.vit_separation
+                    == VitSeparation.VIT_SEPARATION_LOCAL
+                ),
+                checkpoint_backed_propose_model=bool(
+                    engine_config.sp_config.checkpoint_path
+                ),
+                eplb_enabled=self.py_env_configs.eplb_config.enable_eplb(),
+                redundant_expert=self.py_env_configs.eplb_config.redundant_expert,
+            ),
+        )
+        reject_embedding_sleep(
+            enable_sleep_mode=engine_config.runtime_config.enable_sleep_mode,
+            is_embedding=model_config.task_type != TaskType.LANGUAGE_MODEL,
+        )
+
+        if engine_config.parallelism_config.world_size > 1:
+            log_gpu_mem("before_nccl_init")
+            init_distributed_environment(
+                engine_config.parallelism_config,
+                nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
+                nccl_init_port=self._distributed_server.get_nccl_init_port(),
+                backend="nccl",
+                timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
+            )
+            # delta vs before = NCCL comm buffers (non-torch cudaMalloc)
+            log_gpu_mem("after_nccl_init")
+        world_info = get_world_info(
+            self.py_env_configs.server_config,
+            self.py_env_configs.distribute_config,
+            self.py_env_configs.parallelism_config,
+            distributed_server=self._distributed_server,
+        )
+        update_worker_addrs(
+            engine_config.runtime_config,
+            engine_config.parallelism_config,
+            world_info,
         )
         # Let engine_config finalize based on model_config (e.g. scheduler config)
         ModelFactory.update_engine_config_from_model_config(
@@ -103,6 +138,9 @@ class BackendManager(object):
             model_args=self.py_env_configs.model_args,
         )
 
+        # delta vs after_nccl = symm buffer + weights (torch) + KV (torch) +
+        # JIT cubins + plugin/cuBLAS workspaces bound during warmup.
+        log_gpu_mem("before_engine_create")
         # Finally create engine using the new API
         self.engine = ModelFactory.from_model_configs(
             model_config=model_config,
@@ -112,6 +150,10 @@ class BackendManager(object):
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
         )
+        # Full steady-state footprint (context + NCCL + symm + weights + KV +
+        # JIT + workspaces). Compare against [SleepMem][sleep/SLEEPING] to see
+        # exactly which buckets the VMM pause did and did not reclaim.
+        log_gpu_mem("after_engine_create")
         logging.info(
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,

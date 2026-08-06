@@ -244,6 +244,16 @@ size_t MemoryDiskBlockCache::size() const {
     return items_.size();
 }
 
+void MemoryDiskBlockCache::clear() {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    items_.clear();
+    memory_complete_lru_.clear();
+    memory_incomplete_lru_.clear();
+    disk_complete_lru_.clear();
+    disk_incomplete_lru_.clear();
+    access_seq_ = 0;
+}
+
 std::vector<CacheKeyType> MemoryDiskBlockCache::cacheKeys() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<CacheItem>              values;

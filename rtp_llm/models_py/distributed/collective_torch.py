@@ -6,7 +6,7 @@ import os
 import re
 from datetime import timedelta
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed
@@ -18,6 +18,9 @@ _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_DP_AND_TP = 2
 _UDS_SUN_PATH_LIMIT = 108
+# Dedicated communicator for the sleep-quiesce consensus all-reduce (see OpData.h
+# ParallelMode::SLEEP_QUIESCE). Same rank set as DP_AND_TP but a separate NCCL comm.
+_CPP_PARALLEL_MODE_SLEEP_QUIESCE = 6
 
 
 class Group(Enum):
@@ -26,6 +29,10 @@ class Group(Enum):
     DP = "DP"
     TP = "TP"
     DP_AND_TP = "DP_AND_TP"
+    # Dedicated group carrying ONLY the async sleep-quiesce consensus all-reduce, so it
+    # never interleaves with forward / EPLB collectives on DP_AND_TP. Created lazily and
+    # only when sleep mode is enabled on a DP/EP deployment.
+    SLEEP_QUIESCE = "SLEEP_QUIESCE"
 
 
 # Global process group storage
@@ -290,6 +297,88 @@ def _create_process_groups(
         # Single TP group: WORLD is the TP group, init symm_mem for it
         _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
 
+    _maybe_create_sleep_quiesce_group(parallelism_config, backend)
+
+
+def _sleep_quiesce_group_needed(parallelism_config: ParallelismConfig) -> bool:
+    """Whether to build the dedicated sleep-quiesce communicator.
+
+    Mirrors C++ NormalEngine::collectiveSleepQuiesceEnabled(): sleep mode enabled AND a
+    multi-rank DP/EP deployment. Plain single-rank or pure-TP deployments quiesce without
+    a per-step collective (releasePendingTpCollectiveForPause), so they need no extra comm.
+    """
+    world_size = parallelism_config.world_size
+    dp_size = parallelism_config.dp_size
+    ep_size = getattr(parallelism_config, "ep_size", 1) or 1
+    if world_size <= 1 or not (dp_size > 1 or ep_size > 1):
+        return False
+    try:
+        from rtp_llm.model_loader.weight_memory_saver import (
+            is_enabled as _sleep_enabled,
+        )
+
+        return bool(_sleep_enabled())
+    except (
+        Exception
+    ):  # pragma: no cover - defensive: never block group setup on this probe
+        return os.environ.get("ENABLE_SLEEP_MODE", "0") == "1"
+
+
+def _maybe_create_sleep_quiesce_group(
+    parallelism_config: ParallelismConfig, backend: str
+) -> None:
+    """Create a dedicated CPU (gloo) group (all world ranks) for the sleep-quiesce consensus.
+
+    new_group() is a collective, so every rank must call it; we gate on a launch-time
+    condition (_sleep_quiesce_group_needed) that is identical on every rank, keeping the
+    call rank-symmetric. The group spans the full world (same membership as DP_AND_TP)
+    because the consensus needs every rank.
+
+    The backend is GLOO (host), NOT nccl, on purpose. The consensus is a tiny 2-int
+    control-plane all-reduce issued once per step during the sleep drain while the engine
+    still co-steps a fake-decode forward to hold EP lockstep. If it ran on NCCL it would
+    execute on a GPU stream concurrently with the fake-decode's DeepEP low-latency kernels,
+    which launch full-grid persistent kernels that occupy every SM -- the tiny NCCL
+    all-reduce then never gets an SM, never completes, and the next forward's process()
+    blocks forever (observed: MTP tp1/dp2 decode /sleep hangs at "round in flight, poll not
+    done", non-MTP escaped only because its single short forward left GPU gaps). Running the
+    reduce on the host removes the SM contention entirely: it completes regardless of GPU
+    occupancy, and stays async (async_op + is_completed poll) so an arm-skew of up to a step
+    between ranks is tolerated without blocking the engine loop.
+    """
+    global _group_map
+    if Group.SLEEP_QUIESCE in _group_map:
+        return
+    if not _sleep_quiesce_group_needed(parallelism_config):
+        return
+    world_size = parallelism_config.world_size
+    world_rank = parallelism_config.world_rank
+    quiesce_group = torch.distributed.new_group(
+        ranks=list(range(world_size)),
+        backend="gloo",
+        timeout=timedelta(days=36500),
+    )
+    _group_map[Group.SLEEP_QUIESCE] = quiesce_group
+    logging.info(
+        f"[rank: {world_rank}] Created SLEEP_QUIESCE gloo group {quiesce_group} with ranks: "
+        f"{list(range(world_size))}"
+    )
+
+    # Warm the gloo group's lazy TCP rendezvous once at startup so the first arm-time
+    # all-reduce during a sleep enqueues onto an already-connected group. This is a host
+    # collective (CPU tensor), so unlike the old NCCL warmup it neither touches the GPU nor
+    # collides with EP traffic; it is pure insurance against first-collective latency.
+    # Rank-symmetric: every rank that created the group reaches this call.
+    try:
+        _warm = torch.zeros(1, dtype=torch.int64)  # CPU tensor for the gloo group
+        torch.distributed.all_reduce(_warm, group=quiesce_group)
+        logging.info(f"[rank: {world_rank}] warmed up SLEEP_QUIESCE gloo group")
+    except Exception as e:  # pragma: no cover - never block startup on the warmup
+        logging.warning(
+            f"[rank: {world_rank}] SLEEP_QUIESCE group warmup failed "
+            f"(lazy init will run on first sleep): {e}"
+        )
+
 
 def _register_process_groups_to_cpp():
     """Register Python comm op callbacks for C++ to call back into."""
@@ -316,6 +405,10 @@ def _register_process_groups_to_cpp():
             if _CPP_PARALLEL_MODE_DP_AND_TP not in registered_modes:
                 mode_to_group[_CPP_PARALLEL_MODE_DP_AND_TP] = pg
                 registered_modes.add(_CPP_PARALLEL_MODE_DP_AND_TP)
+        elif group_key == Group.SLEEP_QUIESCE:
+            if _CPP_PARALLEL_MODE_SLEEP_QUIESCE not in registered_modes:
+                mode_to_group[_CPP_PARALLEL_MODE_SLEEP_QUIESCE] = pg
+                registered_modes.add(_CPP_PARALLEL_MODE_SLEEP_QUIESCE)
         elif isinstance(group_key, str):
             if group_key.startswith(Group.TP.name):
                 if _parallelism_config is not None:
@@ -480,7 +573,60 @@ def _register_process_groups_to_cpp():
             if recv_on_cpu:
                 recv_buf.copy_(gpu_recv)
 
+    # --- Async comm ops (used by the sleep-quiesce consensus) -------------------------
+    # A monotonically-increasing id keys in-flight torch Work handles. Access is
+    # single-threaded in practice (only the engine loop thread issues/polls), so no lock
+    # is needed; the dict just bridges the opaque uint64 handle held on the C++ side back
+    # to the Python Work object.
+    _async_works: Dict[int, Any] = {}
+    _async_work_counter = [0]
+
+    def cpp_allreduce_async(tensor: torch.Tensor, op: int, mode: int) -> int:
+        """Enqueue an async (async_op=True) in-place all-reduce; return an opaque handle.
+
+        Returns 0 when the group is absent/degenerate (nothing to reduce): the caller
+        treats 0 as "already complete" and reads the local buffer unchanged.
+        """
+        pg = mode_to_group.get(mode)
+        if pg is None or pg.size() < 2:
+            return 0
+        # The sleep-quiesce consensus runs on the gloo (CPU/host) group, so the buffer is
+        # CPU-resident and the reduce executes on the host -- never competing with GPU
+        # forward/DeepEP kernels for SMs. Pass the tensor through unchanged: do NOT promote
+        # it to CUDA (gloo cannot reduce a CUDA tensor, and a GPU reduce is exactly the SM
+        # contention we are avoiding). The reduce is in place, so the C++ caller reads the
+        # summed verdict straight out of its CPU buffer once cpp_comm_poll reports complete.
+        work = torch.distributed.all_reduce(
+            tensor,
+            op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM),
+            group=pg,
+            async_op=True,
+        )
+        _async_work_counter[0] += 1
+        handle = _async_work_counter[0]
+        _async_works[handle] = work
+        return handle
+
+    def cpp_comm_poll(handle: int) -> bool:
+        """Return True once the async collective for handle has completed.
+
+        On completion the Work is waited on (so the reduced buffer is safe to read on the
+        engine stream) and dropped. Unknown/zero handles return True (nothing to wait on).
+        """
+        if handle == 0:
+            return True
+        work = _async_works.get(handle)
+        if work is None:
+            return True
+        if not work.is_completed():
+            return False
+        work.wait()
+        _async_works.pop(handle, None)
+        return True
+
     librtp_compute_ops.register_comm_ops(cpp_broadcast, cpp_allreduce, cpp_allgather)
+    if hasattr(librtp_compute_ops, "register_async_comm_ops"):
+        librtp_compute_ops.register_async_comm_ops(cpp_allreduce_async, cpp_comm_poll)
     logging.info(
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )
@@ -687,7 +833,9 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
@@ -762,6 +910,42 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
     # torch.distributed.all_gather(tensor_list, tensor, group=process_group)
     # return torch.cat(tensor_list, dim=0)
+
+
+def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Reduce-scatter a tensor across all ranks in the group.
+
+    Reduces (sums) the input tensor across all ranks and scatters the result
+    so that each rank receives a 1/world_size chunk of the reduced tensor.
+
+    Args:
+        input_tensor: Full-size tensor to reduce-scatter
+            (shape: [world_size * chunk_size] + remaining_dims)
+        group: Process group to use
+
+    Returns:
+        Scattered chunk of the reduced tensor for this rank
+        (shape: [chunk_size] + remaining_dims)
+    """
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    assert input_tensor.shape[0] % world_size == 0, (
+        f"reduce_scatter: input dim 0 ({input_tensor.shape[0]}) "
+        f"must be divisible by world_size ({world_size})"
+    )
+    chunk_size = input_tensor.shape[0] // world_size
+    output_tensor = torch.empty(
+        [chunk_size] + list(input_tensor.shape[1:]),
+        device=input_tensor.device,
+        dtype=input_tensor.dtype,
+    )
+    torch.distributed.reduce_scatter_tensor(
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
+    )
+    return output_tensor
 
 
 def barrier(group: Group) -> None:

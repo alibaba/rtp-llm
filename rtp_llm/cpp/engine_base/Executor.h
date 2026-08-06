@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <cstdlib>
 
@@ -16,6 +17,23 @@ class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+    virtual absl::Status processForPause() {
+        std::list<GenerateStreamPtr> empty_streams;
+        return process(empty_streams);
+    }
+    virtual bool consumeLastPauseSignal() {
+        return false;
+    }
+
+    // Drain any outstanding stream-async worker tasks (dispatch / MTP prepare-verify
+    // runners) so nothing referencing weights or KV is left in flight. Called by the
+    // engine when it arms a sleep-quiesce, BEFORE it stops issuing forwards and starts
+    // the consensus rounds: otherwise the last pre-pause step's async runners keep work
+    // pending on their own streams, and across a torch_memory_saver release/restore that
+    // stale state leaves NCCL/CUDA inconsistent -- the *next* sleep's SLEEP_QUIESCE
+    // all-reduce then never completes (2nd sleep hangs with MTP on; clean without).
+    // Default: no async runners to drain.
+    virtual void drainAsyncRunners() {}
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

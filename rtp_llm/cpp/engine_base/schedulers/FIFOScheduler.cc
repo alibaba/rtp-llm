@@ -94,6 +94,14 @@ absl::Status FIFOScheduler::stop() {
     return absl::OkStatus();
 }
 
+void FIFOScheduler::wake() {
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        schedule_trigger_ = true;
+    }
+    cond_.notify_all();
+}
+
 int64_t FIFOScheduler::lastScheduleTime() {
     return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() : last_schedule_time_.load();
 }
@@ -350,7 +358,7 @@ void FIFOScheduler::accountBatchMetrics(const GenerateStreamPtr& new_stream) {
 }
 
 bool FIFOScheduler::waitPredicate() {
-    return stop_ || !waiting_streams_.empty() || !loading_cache_streams_.empty() || !running_streams_.empty()
+    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty() || !running_streams_.empty()
            || !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
 }
 
@@ -650,11 +658,12 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_) {
+    if (need_fill_fake_stream_ || force_poll_.load(std::memory_order_relaxed)) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
+    schedule_trigger_ = false;
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;

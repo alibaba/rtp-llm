@@ -1,4 +1,8 @@
+#include <ATen/cuda/CachingHostAllocator.h>
+
 #include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -20,6 +24,9 @@
 
 #if USING_CUDA
 #include <cuda_runtime.h>
+#include <ATen/cuda/MemPool.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#include <c10/cuda/CUDAFunctions.h>
 #endif
 
 namespace rtp_llm {
@@ -27,6 +34,26 @@ namespace rtp_llm {
 namespace {
 
 bool shouldPinHostBlockPool();
+
+class AllocationRegionGuard {
+public:
+    AllocationRegionGuard(VmmBackend& backend, const std::string& tag):
+        backend_(backend), active_(backend.isAvailable() && backend.beginAllocationRegion(tag)) {}
+
+    ~AllocationRegionGuard() {
+        if (active_) {
+            backend_.endAllocationRegion();
+        }
+    }
+
+    bool active() const {
+        return active_;
+    }
+
+private:
+    VmmBackend& backend_;
+    bool        active_;
+};
 
 const char* allocationTypeName(AllocationType allocation_type) {
     switch (allocation_type) {
@@ -117,8 +144,69 @@ BlockPool::BlockPool(const BlockPoolConfig& config,
     use_pinned_cpu_backing_(use_pinned_cpu_backing),
     use_cuda_malloc_backing_(use_cuda_malloc_backing) {}
 
+BlockPool::BlockPool(const BlockPoolConfig& config, torch::Tensor device_backing):
+    BlockPool(config, AllocationType::DEVICE, false, false) {
+    external_device_backing_ = std::move(device_backing);
+}
+
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
+}
+
+torch::Tensor BlockPool::allocatePausableDeviceBacking(size_t size_bytes) {
+    const auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+    VmmBackend vmm_backend;
+
+#if USING_CUDA
+    if (vmm_backend.isAvailable()) {
+        // Route the KV big-buffer through the torch_memory_saver preload shim so its physical
+        // pages become pausable under the "kv_cache" tag. Two ingredients are required; setting
+        // the shim's interesting-region flag alone is NOT enough (that was the sleep-mode bug):
+        //
+        //   1) The allocation must trigger a *fresh* cudaMalloc. The shim intercepts cudaMalloc
+        //      (armed by the flag) and backs it with VMM pages; if torch serves the request from a
+        //      pre-existing cached block (allocated before the flag was set, e.g. a model-load
+        //      transient), no cudaMalloc happens, the pages are plain non-VMM memory, and a later
+        //      tms_pause("kv_cache") frees nothing. A brand-new private pool starts empty, so the
+        //      first allocation into it always misses the cache and issues a real cudaMalloc.
+        //   2) The VMM segment must stay isolated from the default pool. torch's default-pool
+        //      emptyCache()/cudaFree() paths cannot handle an unmapped/paused VMM range and raise
+        //      cudaErrorInvalidValue; keeping it in a dedicated pool prevents those paths from ever
+        //      touching it. This mirrors the proven weights path (torch_memory_saver.region(),
+        //      which enters use_mem_pool(primary_pool) before tagging).
+        //
+        // The pool is created and never released: the arena lives for the whole process, and there
+        // is exactly one per KV cache, so a permanent private-pool refcount is intentional.
+        const auto device  = c10::cuda::current_device();
+        const auto pool_id = at::cuda::MemPool::graph_pool_handle(/*is_user_created=*/true);
+        c10::cuda::CUDACachingAllocator::createOrIncrefPool(device, pool_id);
+        // Return unused default-pool reservations to the driver first (belt-and-suspenders; the
+        // fresh private pool already guarantees a cache miss).
+        c10::cuda::CUDACachingAllocator::emptyCache();
+        c10::cuda::CUDACachingAllocator::beginAllocateToPool(device, pool_id, [](cudaStream_t) { return true; });
+
+        torch::Tensor buffer;
+        {
+            AllocationRegionGuard region_guard(vmm_backend, KVCachePhysicalMemoryController::kDefaultTag);
+            try {
+                buffer = torch::empty({static_cast<int64_t>(size_bytes)}, options);
+            } catch (...) {
+                c10::cuda::CUDACachingAllocator::endAllocateToPool(device, pool_id);
+                throw;
+            }
+        }
+        c10::cuda::CUDACachingAllocator::endAllocateToPool(device, pool_id);
+        RTP_LLM_LOG_INFO("device backing (%zu bytes) allocated under VMM tag '%s' in isolated pool (%llu,%llu)",
+                         size_bytes,
+                         KVCachePhysicalMemoryController::kDefaultTag,
+                         static_cast<unsigned long long>(pool_id.first),
+                         static_cast<unsigned long long>(pool_id.second));
+        return buffer;
+    }
+#endif
+
+    // Shim unavailable: plain device allocation (not pausable; sleep mode inactive).
+    return torch::empty({static_cast<int64_t>(size_bytes)}, options);
 }
 
 void BlockPool::validateConfig() const {
@@ -142,7 +230,17 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
-    if (allocation_type_ == AllocationType::HOST) {
+    if (external_device_backing_.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(external_device_backing_.is_cuda() && external_device_backing_.is_contiguous(),
+                                "external backing must be a contiguous CUDA tensor, pool_name=%s",
+                                config_.pool_name.c_str());
+        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(external_device_backing_.numel()) == config_.total_size_bytes,
+                                "external backing size mismatch, pool_name=%s, expected=%zu, actual=%ld",
+                                config_.pool_name.c_str(),
+                                config_.total_size_bytes,
+                                external_device_backing_.numel());
+        cache_aligned_buffer_ = external_device_backing_;
+    } else if (allocation_type_ == AllocationType::HOST) {
         auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                        torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
         if (shouldPinHostBlockPool()) {
@@ -169,13 +267,12 @@ void BlockPool::initializeCacheBuffer() {
     } else if (use_cuda_malloc_backing_) {
         initializeCudaMallocBuffer();
     } else {
-        cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        cache_aligned_buffer_ = allocatePausableDeviceBacking(config_.total_size_bytes);
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr, "block pool allocate cache aligned buffer is null");
-    const bool is_cuda   = cache_aligned_buffer_.is_cuda();
-    const bool is_pinned = !is_cuda && cache_aligned_buffer_.is_pinned();
+    const bool              is_cuda     = cache_aligned_buffer_.is_cuda();
+    const bool              is_pinned   = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
@@ -401,6 +498,86 @@ void BlockPool::initFreeBlocks() {
     req_con_ref_counter_.init(config_.block_num);
     block_cache_ref_counter_.init(config_.block_num);
     req_cache_ref_counter_.init(config_.block_num);
+    block_cache_ = std::make_shared<BlockCache>();
+}
+
+BlockCachePtr BlockPool::blockCache() {
+    return block_cache_;
+}
+
+void BlockPool::resetMetadata() {
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    free_block_ids_.clear();
+    // block 0 is reserved, same as initFreeBlocks()
+    for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
+        free_block_ids_.insert(i);
+    }
+    request_ref_counter_.init(config_.block_num);
+    connector_ref_counter_.init(config_.block_num);
+    req_con_ref_counter_.init(config_.block_num);
+    block_cache_ref_counter_.init(config_.block_num);
+    req_cache_ref_counter_.init(config_.block_num);
+    RTP_LLM_LOG_INFO("BlockPool metadata reset to fresh state: free_blocks=%zu, total_blocks=%u",
+                     free_block_ids_.size(),
+                     config_.block_num);
+}
+
+void BlockPool::releaseHostBuffer() {
+    RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::HOST,
+                            "releaseHostBuffer is only valid for HOST block pool");
+    if (host_released_) {
+        return;
+    }
+    {
+        // Prevent malloc() from handing out blocks that point into the freed buffer.
+        std::scoped_lock lock(ref_mu_, free_mu_);
+        free_block_ids_.clear();
+    }
+    // Drop everything that views into cache_aligned_buffer_ so the tensor's refcount
+    // reaches zero and the pinned host memory is actually returned to the OS.
+    layout_strategies_.clear();
+    global_layer_kv_tensors_.clear();
+    global_layer_kv_scale_tensors_.clear();
+    global_layer_to_local_.clear();
+    block_cache_          = std::make_shared<BlockCache>();
+    cache_base_ptr_       = nullptr;
+    cache_aligned_buffer_ = torch::Tensor();
+    // The buffer was allocated via torch's CachingHostAllocator (pin_memory()); dropping
+    // the tensor only returns the block to torch's pinned-memory *cache*, NOT to the OS.
+    // Flush that cache so the pinned pages are actually cudaHostFree'd and RAM is reclaimed
+    // (the whole point of discarding the memory cache on sleep). Only frees unused blocks.
+    at::getHostAllocator(at::kCUDA)->empty_cache();
+    host_released_ = true;
+    RTP_LLM_LOG_INFO("BlockPool host buffer released for sleep (%zu bytes freed)", config_.total_size_bytes);
+}
+
+void BlockPool::reallocateHostBuffer() {
+    RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::HOST,
+                            "reallocateHostBuffer is only valid for HOST block pool");
+    if (!host_released_) {
+        return;
+    }
+    // Mirror init(): re-create the pinned buffer and every derived layer view/layout.
+    initializeCacheBuffer();
+    initializeLayerMappings();
+    initializeLayoutStrategies();
+    {
+        // Locked reset of block metadata to a fresh pool (same as initFreeBlocks()),
+        // safe against the connector's metrics-reporter thread reading counts.
+        std::scoped_lock lock(ref_mu_, free_mu_);
+        free_block_ids_.clear();
+        for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
+            free_block_ids_.insert(i);
+        }
+        request_ref_counter_.init(config_.block_num);
+        connector_ref_counter_.init(config_.block_num);
+        req_con_ref_counter_.init(config_.block_num);
+        block_cache_ref_counter_.init(config_.block_num);
+        req_cache_ref_counter_.init(config_.block_num);
+        block_cache_ = std::make_shared<BlockCache>();
+    }
+    host_released_ = false;
+    RTP_LLM_LOG_INFO("BlockPool host buffer reallocated on wake (%zu bytes)", config_.total_size_bytes);
 }
 
 std::vector<torch::Tensor> BlockPool::allLayerCacheBase() const {
