@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>FlexLB has three layers of inflight tracking:
  * <ol>
  *   <li>scheduler-level batch inflight tracking</li>
- *   <li>{@link PrefillEndpoint#prefillInflightCount()} + {@link PrefillEndpoint#prefillEngineTaskCount()}
+ *   <li>{@link PrefillEndpoint#prefillInflightCount()} + {@link PrefillEndpoint#prefillEngineWorkCount()}
  *       — per-worker batch tracking</li>
  *   <li>{@link DecodeEndpoint#decodeInflightCount()} — per-worker decode reservation</li>
  * </ol>
@@ -23,7 +23,7 @@ public final class InflightAssertions {
     }
 
     private static int prefillTrackedCount(PrefillEndpoint prefillEp) {
-        return prefillEp.prefillInflightCount() + prefillEp.prefillEngineTaskCount();
+        return prefillEp.prefillInflightCount() + prefillEp.prefillEngineWorkCount();
     }
 
     /**

@@ -57,8 +57,25 @@ public class InflightStore {
     private final ConcurrentMap<AbstractScheduler, AtomicInteger> schedulerActiveCounts =
             new ConcurrentHashMap<>();
 
-    /** Tombstone retention period: items stay in the store this long after termination. */
-    private static final long TTL_MS = 60_000;
+    /**
+     * Tombstone retention period: items stay in the store this long after
+     * termination. Configurable via {@code flexlbTombstoneTtlMs} (default 60s).
+     *
+     * <p>TTL layering design:
+     * <ul>
+     *   <li><b>Scheduler-level</b> ({@code flexlbInflightTtlMs}, default 300s):
+     *       RUNNING items older than this are timed out — the safety net for
+     *       requests that never reached a terminal state (lost ACK).</li>
+     *   <li><b>Tombstone</b> (this field, {@code flexlbTombstoneTtlMs},
+     *       default 60s): terminal items are retained as tombstones so late
+     *       cancel lookups return false (already terminal) rather than null
+     *       (not found). Short because tombstones only serve deduplication,
+     *       not inflight tracking.</li>
+     *   <li><b>EP-level</b> ({@code flexlbEpInflightTtlMs}, default 600s):
+     *       used by PrefillEndpoint/DecodeEndpoint for layer-2 engineWork
+     *       eviction — longer because engine-accepted tasks run longer.</li>
+     * </ul>
+     */
 
     /** Evictor runs at this interval. */
     private static final long EVICT_INTERVAL_MS = 10_000;
@@ -168,7 +185,7 @@ public class InflightStore {
      *       requests that never reached a terminal state (e.g. a lost ACK).
      *       Error semantics and resource rollback are owned by the item; the
      *       resulting tombstone is evicted on a later sweep.</li>
-     *   <li>Terminated items (tombstones) older than {@link #TTL_MS} are
+     *   <li>Terminated items (tombstones) older than {@code flexlbTombstoneTtlMs} are
      *       removed from the store.</li>
      * </ul>
      *
@@ -180,6 +197,7 @@ public class InflightStore {
     public void evict() {
         try {
             long inflightTtlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
+            long tombstoneTtlMs = configService.loadBalanceConfig().getFlexlbTombstoneTtlMs();
             long now = System.currentTimeMillis();
             store.forEach((reqId, item) -> {
                 if (item.state() == InflightState.RUNNING
@@ -190,7 +208,7 @@ public class InflightStore {
                     }
                 } else if (item.state().isTerminal()
                         && item.getTerminalTime() > 0
-                        && (now - item.getTerminalTime()) > TTL_MS) {
+                        && (now - item.getTerminalTime()) > tombstoneTtlMs) {
                     store.remove(reqId);
                 }
             });

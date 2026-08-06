@@ -2,8 +2,10 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.InflightItem;
+import org.flexlb.balance.scheduler.InflightState;
 import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.TerminalReason;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -28,7 +30,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *       {@link PrefillEndpoint}: any phase appearing in runningTaskInfo means
  *       the engine has taken ownership. KV reservation counters are tied to
  *       this layer only.</li>
- *   <li>layer 2 ({@link #engineTasks}) — engine-accepted tasks keyed by
+ *   <li>layer 2 ({@link #engineWork}) — engine-accepted tasks keyed by
  *       requestId with a phase (PENDING/RECEIVED → WAITING, KV_ALLOCATED →
  *       LOADING, RUNNING → RUNNING) and lastSeenRound. Replaces the legacy
  *       {@code confirmedRunningCount} flat counter with per-request phase
@@ -46,25 +48,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong reportedKvAvailable = new AtomicLong();
 
     /** Layer 2: engine-accepted tasks with phase state and lastSeenRound. */
-    private final ConcurrentHashMap<Long, EngineTask<RequestInflight>> engineTasks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, EngineTask<RequestInflight>> engineWork = new ConcurrentHashMap<>();
 
     private final InflightEvictor<Long, RequestInflight> requestEvictor;
-    private final InflightEvictor<Long, EngineTask<RequestInflight>> engineTaskEvictor;
+    private final InflightEvictor<Long, EngineTask<RequestInflight>> engineWorkEvictor;
     private final InflightStore inflightStore;
+    private final FlexlbConfig config;
 
-    /** Monotonic calibrate round counter driving stale engine-task eviction. */
+    /** Monotonic calibrate round counter driving stale engineWork eviction. */
     private final AtomicLong calibrateRound = new AtomicLong(0);
 
     /**
-     * Evict an engine task absent from both running and finished reports for
-     * this many consecutive calibrate rounds (lost completion report).
-     * TODO(config): couple with the worker-status sync interval once the
-     * config wiring lands with the consumer-migration phase.
+     * Evict an engineWork entry absent from both running and finished reports
+     * for this many consecutive calibrate rounds. Configurable via
+     * {@code flexlbStaleEvictRounds} (default 3).
      */
-    private static final int STALE_EVICT_ROUNDS = 3;
+    private final int staleEvictRounds;
 
-    public DecodeEndpoint(WorkerStatus status, InflightStore inflightStore) {
+    public DecodeEndpoint(WorkerStatus status, FlexlbConfig config, InflightStore inflightStore) {
         super(status);
+        this.config = config;
+        this.staleEvictRounds = config != null ? config.getFlexlbStaleEvictRounds() : 3;
         this.inflightStore = inflightStore;
         this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {
             inflightKvReservedTotal.addAndGet(-req.kvTokens());
@@ -72,7 +76,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         });
         // Layer-2 KV reservations were already released on acceptance, so no
         // counter adjustment is needed on eviction.
-        this.engineTaskEvictor = new InflightEvictor<>(engineTasks, null);
+        this.engineWorkEvictor = new InflightEvictor<>(engineWork, null);
     }
 
     @Override
@@ -91,13 +95,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     private void drainInflight(String reason) {
         List<InflightItem> toTerminate = new ArrayList<>();
-        for (Long requestId : engineTasks.keySet()) {
+        for (Long requestId : engineWork.keySet()) {
             collectItem(requestId, toTerminate);
         }
         for (Long requestId : inflightRequests.keySet()) {
             collectItem(requestId, toTerminate);
         }
-        engineTasks.clear();
+        engineWork.clear();
         inflightRequests.clear();
         inflightKvReservedTotal.set(0);
         inflightExpectedKvReservedTotal.set(0);
@@ -154,7 +158,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Release the layer-1 reservation for {@code requestId}.
-     * <p>Layer 2 is intentionally untouched: engineTasks mirror what the
+     * <p>Layer 2 is intentionally untouched: engineWork mirror what the
      * engine reports as accepted, so entries leave via finishedTaskInfo or
      * stale-round eviction — same coverage the legacy
      * {@code confirmedRunningCount} had (recomputed purely from reports).
@@ -185,8 +189,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *       legacy two-pass scan).</li>
      *   <li>completion — finished tasks are removed from whichever layer
      *       tracks them (fast path: finished while still in layer 1).</li>
-     *   <li>staleness — engine tasks absent from reports for
-     *       {@link #STALE_EVICT_ROUNDS} consecutive rounds are evicted.</li>
+     *   <li>staleness — engineWork entries absent from reports for
+     *       {@link #staleEvictRounds} consecutive rounds are evicted.</li>
      * </ol>
      */
     private void calibrate(Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
@@ -196,12 +200,30 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         observeRunningTasks(runningTaskInfo, round, statusMs);
         processFinishedTasks(finishedTaskInfo);
-        evictStaleEngineTasks(round);
+        evictStaleEngineWork(round);
     }
 
     /**
      * Acceptance step: migrate accepted requests layer 1 → layer 2 and
      * refresh phases of already-accepted tasks.
+     *
+     * <p>Foreign key pre-check: when a requestId is not in layer 1
+     * (inflightRequests) or layer 2 (engineWork), we consult the global
+     * {@link InflightStore} to distinguish three cases:
+     * <ol>
+     *   <li><b>Foreign key</b> — store.get returns null: the requestId
+     *       belongs to another master (multi-master failover). Do NOT create
+     *       an engineWork entry — it is not ours to track.</li>
+     *   <li><b>Already terminal</b> — store.get returns a terminal item: the
+     *       request has finished/cancelled but the engine still reports it as
+     *       running (stale report). Skip.</li>
+     *   <li><b>Cross-EP failover</b> — store.get returns a RUNNING item: the
+     *       request was dispatched by this master but the local reservation was
+     *       lost (e.g. EP restart). Create an engineWork entry with KV estimated
+     *       from TaskInfo input_length instead of (0,0) to avoid under-estimating
+     *       decode load. Formula: {@code kvTokens = max(inputLength, defaultKvTokens)},
+     *       {@code expectedKv = kvTokens + maxNewTokens}.</li>
+     * </ol>
      */
     private void observeRunningTasks(Map<String, TaskInfo> runningTaskInfo, long round, long statusMs) {
         if (runningTaskInfo == null || runningTaskInfo.isEmpty()) {
@@ -211,7 +233,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long requestId = task.getRequestId();
             TaskPhase reported = task.getPhase();
 
-            EngineTask<RequestInflight> existing = engineTasks.get(requestId);
+            EngineTask<RequestInflight> existing = engineWork.get(requestId);
             if (existing != null) {
                 existing.observe(EngineTaskPhase.fromDecode(reported), round, statusMs);
                 continue;
@@ -221,15 +243,37 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // reported in runningTaskInfo means the engine has taken ownership,
             // so the request migrates to layer 2 and its KV reservation is
             // released (engine now accounts for it in its own reports).
-
-            // A task reported accepted but never reserved locally (e.g. traffic
-            // from another master) is still tracked with an empty reservation so
-            // decodeTotalLoad keeps the legacy confirmedRunningCount coverage.
             RequestInflight reserved = inflightRequests.get(requestId);
-            RequestInflight payload = reserved != null ? reserved : new RequestInflight(0, 0);
-            engineTasks.putIfAbsent(requestId,
-                    new EngineTask<>(payload, EngineTaskPhase.fromDecode(reported), round, statusMs));
-            removeInflight(requestId);
+            if (reserved != null) {
+                // Normal path: locally reserved, migrate to layer 2
+                engineWork.putIfAbsent(requestId,
+                        new EngineTask<>(reserved, EngineTaskPhase.fromDecode(reported), round, statusMs));
+                removeInflight(requestId);
+            } else if (inflightStore != null) {
+                // Foreign key pre-check: not in layer 1 or layer 2.
+                // Check the global InflightStore to decide whether to track.
+                InflightItem item = inflightStore.get(String.valueOf(requestId));
+                if (item == null || item.state().isTerminal()) {
+                    // Foreign key (another master) or already terminal — skip
+                    logger.debug("Decode calibrate: running reqId={} not in inflightRequests/engineWork "
+                            + "and not in store (foreign key or terminal), skipping", requestId);
+                    continue;
+                }
+                // Cross-EP failover: estimate KV from TaskInfo input_length
+                long inputLen = task.getInputLength();
+                long kvTokens = inputLen > 0 ? inputLen : config.getDefaultKvTokens();
+                long expectedKv = kvTokens + config.getMaxNewTokens();
+                RequestInflight fallback = new RequestInflight(kvTokens, expectedKv);
+                engineWork.putIfAbsent(requestId,
+                        new EngineTask<>(fallback, EngineTaskPhase.fromDecode(reported), round, statusMs));
+                logger.info("Decode calibrate: cross-EP failover reqId={} estimated kvTokens={} expectedKv={}",
+                        requestId, kvTokens, expectedKv);
+            } else {
+                // No inflightStore (tests) — fall back to (0,0) as before
+                RequestInflight payload = new RequestInflight(0, 0);
+                engineWork.putIfAbsent(requestId,
+                        new EngineTask<>(payload, EngineTaskPhase.fromDecode(reported), round, statusMs));
+            }
         }
     }
 
@@ -244,7 +288,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         for (TaskInfo task : finishedTaskInfo.values()) {
             long requestId = task.getRequestId();
-            boolean removedTask = engineTasks.remove(requestId) != null;
+            boolean removedTask = engineWork.remove(requestId) != null;
             boolean removedInflight = removeInflight(requestId);
             if (task.getErrorCode() != 0 && !removedTask && !removedInflight) {
                 logger.debug("Decode calibrate: finished failed request reqId={} not tracked, error={}",
@@ -254,18 +298,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Staleness step: evict engine tasks that have been absent from both
-     * running and finished reports for {@link #STALE_EVICT_ROUNDS}
+     * Staleness step: evict engineWork entries that have been absent from both
+     * running and finished reports for {@link #staleEvictRounds}
      * consecutive calibrate rounds (lost completion report).
      */
-    private void evictStaleEngineTasks(long round) {
-        for (Map.Entry<Long, EngineTask<RequestInflight>> entry : engineTasks.entrySet()) {
+    private void evictStaleEngineWork(long round) {
+        for (Map.Entry<Long, EngineTask<RequestInflight>> entry : engineWork.entrySet()) {
             EngineTask<RequestInflight> task = entry.getValue();
-            if (round - task.lastSeenRound() < STALE_EVICT_ROUNDS) {
+            if (round - task.lastSeenRound() < staleEvictRounds) {
                 continue;
             }
-            if (engineTasks.remove(entry.getKey(), task)) {
-                logger.warn("Decode calibrate: engine task reqId={} phase={} unseen for {} rounds, evicting as stale",
+            if (engineWork.remove(entry.getKey(), task)) {
+                logger.warn("Decode calibrate: engineWork reqId={} phase={} unseen for {} rounds, evicting as stale",
                         entry.getKey(), task.phase(), round - task.lastSeenRound());
                 // A3: STALE eviction now drives the bound InflightItem to a
                 // terminal state so the client future is settled in seconds,
@@ -313,28 +357,28 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Layer-2 task count: requests the engine has accepted (LOADING/RUNNING). */
-    public int decodeEngineTaskCount() {
-        return engineTasks.size();
+    public int decodeEngineWorkCount() {
+        return engineWork.size();
     }
 
     /** Layer-2 tasks currently in the WAITING phase. */
     public int decodeEngineWaitingCount() {
-        return countEngineTasksInPhase(EngineTaskPhase.WAITING);
+        return countEngineWorkInPhase(EngineTaskPhase.WAITING);
     }
 
     /** Layer-2 tasks currently in the LOADING phase (remote KV loading). */
     public int decodeEngineLoadingCount() {
-        return countEngineTasksInPhase(EngineTaskPhase.LOADING);
+        return countEngineWorkInPhase(EngineTaskPhase.LOADING);
     }
 
     /** Layer-2 tasks currently in the RUNNING phase. */
     public int decodeEngineRunningCount() {
-        return countEngineTasksInPhase(EngineTaskPhase.RUNNING);
+        return countEngineWorkInPhase(EngineTaskPhase.RUNNING);
     }
 
-    private int countEngineTasksInPhase(EngineTaskPhase phase) {
+    private int countEngineWorkInPhase(EngineTaskPhase phase) {
         int count = 0;
-        for (EngineTask<RequestInflight> task : engineTasks.values()) {
+        for (EngineTask<RequestInflight> task : engineWork.values()) {
             if (task.phase() == phase) {
                 count++;
             }
@@ -347,7 +391,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * (confirmedRunningCount + inflight in legacy terms).
      */
     public int decodeTotalLoad() {
-        return engineTasks.size() + inflightRequests.size();
+        return engineWork.size() + inflightRequests.size();
     }
 
     /**
@@ -400,7 +444,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         reporter.reportDecodeEngineRunningCount(getIp(), decodeEngineRunningCount());
         // Two-layer breakdown
         reporter.reportDecodeInflightRequestsCount(getIp(), decodeInflightCount());
-        reporter.reportDecodeEngineTasksCount(getIp(), decodeEngineTaskCount());
+        reporter.reportDecodeEngineWorkCount(getIp(), decodeEngineWorkCount());
     }
 
     // ==================== Eviction ====================
@@ -408,7 +452,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Evict layer-1 inflight requests older than {@code ttlMs} (lost dispatch
      * backstop). Layer 2 has its own wall-clock backstop via
-     * {@link #evictExpiredEngineTasks(long)}.
+     * {@link #evictExpiredEngineWork(long)}.
      *
      * @return number of entries evicted
      */
@@ -417,23 +461,28 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Evict layer-2 engine tasks accepted more than {@code ttlMs} ago.
+     * Evict layer-2 engineWork entries accepted more than {@code ttlMs} ago.
      * Backstop for a worker that stops reporting entirely: calibrate rounds
      * no longer advance, so stale-round eviction cannot fire. Decode tasks
      * legitimately run for a long time (generation), so callers should pass
      * a generous TTL relative to the worst-case generation time.
      *
+     * <p>Called by {@code EndpointRegistry.scheduledEviction()} with the
+     * EP-level TTL ({@code flexlbEpInflightTtlMs}, default 600s) — longer
+     * than the scheduler-level TTL ({@code flexlbInflightTtlMs}, default 300s)
+     * because engine-accepted decode tasks run longer than prefill dispatch.
+     *
      * @return number of entries evicted
      */
-    public int evictExpiredEngineTasks(long ttlMs) {
-        return engineTaskEvictor.evictExpired(ttlMs);
+    public int evictExpiredEngineWork(long ttlMs) {
+        return engineWorkEvictor.evictExpired(ttlMs);
     }
 
     // ==================== test hooks ====================
 
-    /** Package-private test hook: current phase of an engine task, or null. */
-    EngineTaskPhase engineTaskPhase(long requestId) {
-        EngineTask<RequestInflight> task = engineTasks.get(requestId);
+    /** Package-private test hook: current phase of an engineWork entry, or null. */
+    EngineTaskPhase engineWorkPhase(long requestId) {
+        EngineTask<RequestInflight> task = engineWork.get(requestId);
         return task != null ? task.phase() : null;
     }
 }

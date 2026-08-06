@@ -48,7 +48,7 @@ class HttpLoadBalanceServerInflightStatusTest {
 
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         when(prefill.prefillInflightCount()).thenReturn(2);
-        when(prefill.prefillEngineTaskCount()).thenReturn(3);
+        when(prefill.prefillEngineWorkCount()).thenReturn(3);
         when(prefill.prefillEngineWaitingCount()).thenReturn(1);
         when(prefill.prefillEngineRunningCount()).thenReturn(2);
         ConcurrentHashMap<String, PrefillEndpoint> prefillMap = new ConcurrentHashMap<>();
@@ -57,7 +57,7 @@ class HttpLoadBalanceServerInflightStatusTest {
 
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         when(decode.decodeInflightCount()).thenReturn(2);
-        when(decode.decodeEngineTaskCount()).thenReturn(3);
+        when(decode.decodeEngineWorkCount()).thenReturn(3);
         when(decode.decodeTotalLoad()).thenReturn(5);
         when(decode.decodeInflightHardKvReserved()).thenReturn(700L);
         when(decode.decodeInflightExpectedKvReserved()).thenReturn(900L);
@@ -76,13 +76,13 @@ class HttpLoadBalanceServerInflightStatusTest {
                 .jsonPath("$.prefill_endpoints[0].ip_port").isEqualTo("10.0.0.1:8080")
                 .jsonPath("$.prefill_endpoints[0].inflight_batches").isEqualTo(5)
                 .jsonPath("$.prefill_endpoints[0].inflight_entries").isEqualTo(2)
-                .jsonPath("$.prefill_endpoints[0].engine_tasks").isEqualTo(3)
+                .jsonPath("$.prefill_endpoints[0].engine_work").isEqualTo(3)
                 .jsonPath("$.prefill_endpoints[0].engine_waiting").isEqualTo(1)
                 .jsonPath("$.prefill_endpoints[0].engine_running").isEqualTo(2)
                 // Decode: legacy layer-1 + layer-2 + KV reservations
                 .jsonPath("$.decode_endpoints[0].ip_port").isEqualTo("10.0.0.2:8080")
                 .jsonPath("$.decode_endpoints[0].inflight_requests").isEqualTo(2)
-                .jsonPath("$.decode_endpoints[0].engine_tasks").isEqualTo(3)
+                .jsonPath("$.decode_endpoints[0].engine_work").isEqualTo(3)
                 .jsonPath("$.decode_endpoints[0].total_load").isEqualTo(5)
                 .jsonPath("$.decode_endpoints[0].kv_reserved_hard").isEqualTo(700)
                 .jsonPath("$.decode_endpoints[0].kv_reserved_expected").isEqualTo(900);

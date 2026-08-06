@@ -67,7 +67,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         Response ackResponse = future1.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "First request should succeed while worker is online");
         assertTrue(ackResponse.isEnqueuedByMaster(), "Should be enqueued by master");
-        int existingBatches = getPrefillEndpoint().prefillInflightCount() + getPrefillEndpoint().prefillEngineTaskCount();
+        int existingBatches = getPrefillEndpoint().prefillInflightCount() + getPrefillEndpoint().prefillEngineWorkCount();
 
         // 2. Stop the mock prefill worker's gRPC server (simulates worker crash)
         mockPrefillWorker.stop();
@@ -92,7 +92,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
                 "Error message should not be empty");
 
         // 8. Verify: the failed request does not add leaked prefill inflight state.
-        assertEquals(existingBatches, getPrefillEndpoint().prefillInflightCount() + getPrefillEndpoint().prefillEngineTaskCount());
+        assertEquals(existingBatches, getPrefillEndpoint().prefillInflightCount() + getPrefillEndpoint().prefillEngineWorkCount());
 
         // 9. Verify: decode worker never received any enqueue request (PD-separated)
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),

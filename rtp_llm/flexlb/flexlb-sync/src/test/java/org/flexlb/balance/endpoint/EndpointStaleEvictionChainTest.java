@@ -40,12 +40,12 @@ import org.mockito.Mockito;
 import static org.mockito.Mockito.mock;
 
 /**
- * Full evidence-chain tests for the STALE round-based engine-task eviction
+ * Full evidence-chain tests for the stale-round-based engine-work eviction
  * defence path on both {@link DecodeEndpoint} and {@link PrefillEndpoint}
  * (red-team audit: zero triggers in integration tests).
  *
  * <p>Boundary condition (verified against the code): an engine task is
- * evicted when {@code round - lastSeenRound >= STALE_EVICT_ROUNDS} (3);
+ * evicted when {@code round - lastSeenRound >= staleEvictRounds} (3);
  * strictly below the threshold it survives. The exact-boundary tests
  * already exist in {@code DecodeEndpointTest#calibrate_staleEngineTaskEvictedAfterMissingRounds}
  * and {@code PrefillEndpointTest#staleEngineTaskEvictedAfterMissingRounds};
@@ -97,7 +97,7 @@ class EndpointStaleEvictionChainTest {
         decodeStatus.setIp("10.0.0.1");
         decodeStatus.setPort(8080);
         decodeStatus.setGrpcPort(8081);
-        decodeEndpoint = new DecodeEndpoint(decodeStatus, null);
+        decodeEndpoint = new DecodeEndpoint(decodeStatus, new FlexlbConfig(), null);
     }
 
     private void decodeCalibrate(Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
@@ -123,21 +123,21 @@ class EndpointStaleEvictionChainTest {
 
         // round 1: both accepted into layer 2 (KV reservations released)
         decodeCalibrate(Map.of("100", decodeTask(100L), "101", decodeTask(101L)), null);
-        assertEquals(2, decodeEndpoint.decodeEngineTaskCount());
+        assertEquals(2, decodeEndpoint.decodeEngineWorkCount());
         assertEquals(0, decodeEndpoint.decodeInflightHardKvReserved());
         assertEquals(0, decodeEndpoint.decodeInflightExpectedKvReserved());
 
         // rounds 2..3: only 101 keeps being reported — below threshold, both survive
         decodeCalibrate(Map.of("101", decodeTask(101L)), null); // round 2
         decodeCalibrate(Map.of("101", decodeTask(101L)), null); // round 3: 3-1=2 < 3
-        assertEquals(2, decodeEndpoint.decodeEngineTaskCount());
+        assertEquals(2, decodeEndpoint.decodeEngineWorkCount());
         assertEquals(0, warnLogCount("evicting as stale"));
 
         // round 4: 4-1=3 >= 3 — only the absentee is evicted
         decodeCalibrate(Map.of("101", decodeTask(101L)), null);
-        assertEquals(1, decodeEndpoint.decodeEngineTaskCount());
-        assertNull(decodeEndpoint.engineTaskPhase(100L), "absentee must be evicted");
-        assertNotNull(decodeEndpoint.engineTaskPhase(101L), "refreshed task must survive");
+        assertEquals(1, decodeEndpoint.decodeEngineWorkCount());
+        assertNull(decodeEndpoint.engineWorkPhase(100L), "absentee must be evicted");
+        assertNotNull(decodeEndpoint.engineWorkPhase(101L), "refreshed task must survive");
 
         // eviction warn log fired exactly once, naming the absentee
         assertEquals(1, warnLogCount("evicting as stale"));
@@ -164,7 +164,7 @@ class EndpointStaleEvictionChainTest {
         ConfigService configService = mock(ConfigService.class);
         Mockito.lenient().when(configService.loadBalanceConfig()).thenReturn(lbConfig);
         InflightStore store = new InflightStore(mock(BatchSchedulerReporter.class), configService);
-        decodeEndpoint = new DecodeEndpoint(decodeStatus, store);
+        decodeEndpoint = new DecodeEndpoint(decodeStatus, new FlexlbConfig(), store);
 
         try {
             CompletableFuture<Response> future = new CompletableFuture<>();
@@ -182,7 +182,7 @@ class EndpointStaleEvictionChainTest {
             decodeCalibrate(null, null); // round 2
             decodeCalibrate(null, null); // round 3
             decodeCalibrate(null, null); // round 4: evicted as stale
-            assertEquals(0, decodeEndpoint.decodeEngineTaskCount());
+            assertEquals(0, decodeEndpoint.decodeEngineWorkCount());
 
             assertEquals(InflightState.FAILED, item.state(),
                     "STALE eviction must drive the item terminal");
@@ -269,19 +269,19 @@ class EndpointStaleEvictionChainTest {
         bothRunning.put("1", prefillTask(1L, 1L));
         bothRunning.put("2", prefillTask(2L, 2L));
         prefillCalibrate(Map.of(), bothRunning);
-        assertEquals(2, prefillEndpoint.prefillEngineTaskCount());
+        assertEquals(2, prefillEndpoint.prefillEngineWorkCount());
         assertEquals(2, prefillEndpoint.prefillPendingRequestCount());
 
         // rounds 2..3: only batch 2 keeps being reported — both survive
         Map<String, TaskInfo> onlyBatch2 = Map.of("2", prefillTask(2L, 2L));
         prefillCalibrate(Map.of(), onlyBatch2); // round 2
         prefillCalibrate(Map.of(), onlyBatch2); // round 3: 3-1=2 < 3
-        assertEquals(2, prefillEndpoint.prefillEngineTaskCount());
+        assertEquals(2, prefillEndpoint.prefillEngineWorkCount());
         assertEquals(0, warnLogCount("evicting as stale"));
 
         // round 4: 4-1=3 >= 3 — only the absentee batch is evicted
         prefillCalibrate(Map.of(), onlyBatch2);
-        assertEquals(1, prefillEndpoint.prefillEngineTaskCount());
+        assertEquals(1, prefillEndpoint.prefillEngineWorkCount());
 
         // counter linkage: the evicted batch's requestCount is subtracted
         assertEquals(1, prefillEndpoint.prefillPendingRequestCount());

@@ -290,7 +290,7 @@ class PrefillEndpointDispatchTest {
     // ==================== helpers ====================
 
     private int trackedEntryCount() {
-        return endpoint.prefillInflightCount() + endpoint.prefillEngineTaskCount();
+        return endpoint.prefillInflightCount() + endpoint.prefillEngineWorkCount();
     }
 
     private static DispatchMeta meta() {

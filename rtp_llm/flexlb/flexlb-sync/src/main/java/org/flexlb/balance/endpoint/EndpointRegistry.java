@@ -237,7 +237,7 @@ public class EndpointRegistry {
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {
         prepareEndpointMetrics(RoleType.DECODE, status);
-        return new DecodeEndpoint(status, inflightStore);
+        return new DecodeEndpoint(status, configService.loadBalanceConfig(), inflightStore);
     }
 
     private SimpleWorkerEndpoint createSimpleEndpoint(WorkerStatus status, RoleType roleType) {
@@ -283,7 +283,7 @@ public class EndpointRegistry {
         prefillEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
         decodeEndpoints.values().forEach(ep -> {
             ep.evictExpiredRequests(ttlMs);
-            ep.evictExpiredEngineTasks(ttlMs);
+            ep.evictExpiredEngineWork(ttlMs);
         });
         pdFusionEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
     }
@@ -294,10 +294,16 @@ public class EndpointRegistry {
      * This scheduled method provides a safety-net fallback for entries
      * that were not cleaned up by {@code calibrate()} (e.g., engine crash,
      * network partition, status report delay).
+     *
+     * <p>Uses the EP-level TTL ({@code flexlbEpInflightTtlMs}, default 600s),
+     * which is longer than the scheduler-level inflight TTL
+     * ({@code flexlbInflightTtlMs}, default 300s) used by
+     * {@link InflightStore}. Engine-accepted tasks legitimately run longer
+     * (especially decode generation) and should not be prematurely evicted.
      */
     @Scheduled(fixedRate = 60000L)
     public void scheduledEviction() {
-        long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
+        long ttlMs = configService.loadBalanceConfig().getFlexlbEpInflightTtlMs();
         evictExpiredAll(ttlMs);
     }
 }

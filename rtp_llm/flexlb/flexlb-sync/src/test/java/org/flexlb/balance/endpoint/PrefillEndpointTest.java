@@ -301,7 +301,7 @@ class PrefillEndpointTest {
         // Should not throw — batcher handles stopped state
     }
 
-    // ---- two-layer inflight (layer 1: inflightEntries, layer 2: engineTasks) ----
+    // ---- two-layer inflight (layer 1: inflightEntries, layer 2: engineWork) ----
 
     @Test
     void commitRequestCountsSingleRequest() {
@@ -420,7 +420,7 @@ class PrefillEndpointTest {
         running.put("1", task);
         calibrate(Map.of(), running); // round 1: accepted into layer 2
 
-        // Absent from the next STALE_EVICT_ROUNDS (3) reports -> evicted
+        // Absent from the next staleEvictRounds (3) reports -> evicted
         calibrate(Map.of(), Map.of()); // round 2
         calibrate(Map.of(), Map.of()); // round 3
         assertEquals(1, trackedEntryCount());
@@ -489,7 +489,7 @@ class PrefillEndpointTest {
         endpoint.commitRequest(7L, 50);
 
         assertEquals(2, endpoint.prefillInflightCount());
-        assertEquals(0, endpoint.prefillEngineTaskCount());
+        assertEquals(0, endpoint.prefillEngineWorkCount());
         assertEquals(0, endpoint.prefillEngineWaitingCount());
         assertEquals(0, endpoint.prefillEngineRunningCount());
 
@@ -503,7 +503,7 @@ class PrefillEndpointTest {
         calibrate(Map.of(), running);
 
         assertEquals(1, endpoint.prefillInflightCount());
-        assertEquals(1, endpoint.prefillEngineTaskCount());
+        assertEquals(1, endpoint.prefillEngineWorkCount());
         assertEquals(1, endpoint.prefillEngineWaitingCount());
         assertEquals(0, endpoint.prefillEngineRunningCount());
 
@@ -518,7 +518,7 @@ class PrefillEndpointTest {
         calibrate(Map.of(), running2);
 
         assertEquals(0, endpoint.prefillInflightCount());
-        assertEquals(2, endpoint.prefillEngineTaskCount());
+        assertEquals(2, endpoint.prefillEngineWorkCount());
         assertEquals(1, endpoint.prefillEngineWaitingCount());
         assertEquals(1, endpoint.prefillEngineRunningCount());
     }
@@ -541,7 +541,7 @@ class PrefillEndpointTest {
         // migration moves entries between layers without changing the sum
         assertEquals(2, trackedEntryCount());
         assertEquals(1, endpoint.prefillInflightCount());
-        assertEquals(1, endpoint.prefillEngineTaskCount());
+        assertEquals(1, endpoint.prefillEngineWorkCount());
     }
 
     @Test
@@ -600,7 +600,7 @@ class PrefillEndpointTest {
     // ---- helpers ----
 
     private int trackedEntryCount() {
-        return endpoint.prefillInflightCount() + endpoint.prefillEngineTaskCount();
+        return endpoint.prefillInflightCount() + endpoint.prefillEngineWorkCount();
     }
 
     private void calibrate(Map<String, TaskInfo> finished, Map<String, TaskInfo> running) {

@@ -36,7 +36,12 @@ public class ConfigService {
             "flexlbBatchFixedMaxInflightBatches",
             "costFormula",
             "prefillPredictorType",
-            "hysteresisBiasPercent");
+            "hysteresisBiasPercent",
+            "flexlbEpInflightTtlMs",
+            "flexlbTombstoneTtlMs",
+            "flexlbStaleEvictRounds",
+            "defaultKvTokens",
+            "maxNewTokens");
 
     private final FlexlbConfig flexlbConfig;
 

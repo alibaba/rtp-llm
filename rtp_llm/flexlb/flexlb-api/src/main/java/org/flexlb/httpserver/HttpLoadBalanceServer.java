@@ -215,11 +215,11 @@ public class HttpLoadBalanceServer {
                 ep.put("ip_port", entry.getKey());
                 // Legacy two-layer sum, kept for external script compatibility
                 ep.put("inflight_batches", prefill.prefillInflightCount()
-                        + prefill.prefillEngineTaskCount());
+                        + prefill.prefillEngineWorkCount());
                 // Layer 1: dispatched but not yet acknowledged by the engine
                 ep.put("inflight_entries", prefill.prefillInflightCount());
-                // Layer 2: engine-acknowledged tasks, with phase breakdown
-                ep.put("engine_tasks", prefill.prefillEngineTaskCount());
+                // Layer 2: engine-acknowledged work, with phase breakdown
+                ep.put("engine_work", prefill.prefillEngineWorkCount());
                 ep.put("engine_waiting", prefill.prefillEngineWaitingCount());
                 ep.put("engine_running", prefill.prefillEngineRunningCount());
                 prefillList.add(ep);
@@ -233,8 +233,8 @@ public class HttpLoadBalanceServer {
                 ep.put("ip_port", entry.getKey());
                 // Layer 1: dispatched but not yet acknowledged by the engine
                 ep.put("inflight_requests", decode.decodeInflightCount());
-                // Layer 2: engine-acknowledged tasks (LOADING/RUNNING)
-                ep.put("engine_tasks", decode.decodeEngineTaskCount());
+                // Layer 2: engine-acknowledged work (LOADING/RUNNING)
+                ep.put("engine_work", decode.decodeEngineWorkCount());
                 ep.put("total_load", decode.decodeTotalLoad());
                 // Layer-1 KV reservations: hard (seqLen) vs expected (seqLen + maxNewTokens)
                 ep.put("kv_reserved_hard", decode.decodeInflightHardKvReserved());

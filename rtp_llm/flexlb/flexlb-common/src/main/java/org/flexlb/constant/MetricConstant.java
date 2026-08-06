@@ -107,9 +107,9 @@ public class MetricConstant {
 
     /**
      * FlexLB prefill layer-2 engine-acknowledged task count
-     * ({@code PrefillEndpoint#prefillEngineTaskCount}). Prefill/PDFusion roles only.
+     * ({@code PrefillEndpoint#prefillEngineWorkCount}). Prefill/PDFusion roles only.
      */
-    public static final String PREFILL_ENGINE_TASKS_COUNT = "app.flexlb.prefill.engine.tasks.count";
+    public static final String PREFILL_ENGINE_WORK_COUNT = "app.flexlb.prefill.engine.work.count";
 
     /**
      * FlexLB decode layer-1 inflight request count — reserved locally, not yet accepted by the engine
@@ -119,9 +119,9 @@ public class MetricConstant {
 
     /**
      * FlexLB decode layer-2 engine-accepted task count
-     * ({@code DecodeEndpoint#decodeEngineTaskCount}). Decode role only.
+     * ({@code DecodeEndpoint#decodeEngineWorkCount}). Decode role only.
      */
-    public static final String DECODE_ENGINE_TASKS_COUNT = "app.flexlb.decode.engine.tasks.count";
+    public static final String DECODE_ENGINE_WORK_COUNT = "app.flexlb.decode.engine.work.count";
 
     /**
      * FlexLB inflight TTL eviction QPS — count of RUNNING items timed out via

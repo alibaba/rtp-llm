@@ -23,7 +23,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
 import static org.flexlb.constant.MetricConstant.DECODE_ENGINE_LOADING_COUNT;
 import static org.flexlb.constant.MetricConstant.DECODE_ENGINE_RUNNING_COUNT;
-import static org.flexlb.constant.MetricConstant.DECODE_ENGINE_TASKS_COUNT;
+import static org.flexlb.constant.MetricConstant.DECODE_ENGINE_WORK_COUNT;
 import static org.flexlb.constant.MetricConstant.DECODE_ENGINE_WAITING_COUNT;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_HARD_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
@@ -36,7 +36,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.BATCH_QUEUE_WAIT_TIME_MS;
-import static org.flexlb.constant.MetricConstant.PREFILL_ENGINE_TASKS_COUNT;
+import static org.flexlb.constant.MetricConstant.PREFILL_ENGINE_WORK_COUNT;
 import static org.flexlb.constant.MetricConstant.PREFILL_INFLIGHT_ENTRIES_COUNT;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
@@ -104,9 +104,9 @@ public class BatchSchedulerReporter {
 
         // Two-layer breakdown — prefill and decode layer-1 / layer-2 counts
         monitor.register(PREFILL_INFLIGHT_ENTRIES_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(PREFILL_ENGINE_TASKS_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(PREFILL_ENGINE_WORK_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(DECODE_INFLIGHT_REQUESTS_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(DECODE_ENGINE_TASKS_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(DECODE_ENGINE_WORK_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Inflight TTL eviction QPS — reported by InflightStore.evict()
         monitor.register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -365,13 +365,13 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report per-prefill-worker layer-2 engine-acknowledged task count
-     * via {@code app.flexlb.prefill.engine.tasks.count}.
+     * Report per-prefill-worker layer-2 engine-acknowledged work count
+     * via {@code app.flexlb.prefill.engine.work.count}.
      */
-    public void reportPrefillEngineTasksCount(String role, String engineIp, int count) {
+    public void reportPrefillEngineWorkCount(String role, String engineIp, int count) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
-        monitor.report(PREFILL_ENGINE_TASKS_COUNT, tags, count);
+        monitor.report(PREFILL_ENGINE_WORK_COUNT, tags, count);
     }
 
     /**
@@ -385,13 +385,13 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report per-decode-worker layer-2 engine-accepted task count
-     * via {@code app.flexlb.decode.engine.tasks.count}.
+     * Report per-decode-worker layer-2 engine-accepted work count
+     * via {@code app.flexlb.decode.engine.work.count}.
      */
-    public void reportDecodeEngineTasksCount(String engineIp, int count) {
+    public void reportDecodeEngineWorkCount(String engineIp, int count) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", RoleType.DECODE.name());
-        monitor.report(DECODE_ENGINE_TASKS_COUNT, tags, count);
+        monitor.report(DECODE_ENGINE_WORK_COUNT, tags, count);
     }
 
     // ==================== Prediction accuracy metrics ====================

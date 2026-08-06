@@ -109,7 +109,7 @@ class ConcurrencyStressTest {
         status.setGrpcPort(8081);
         status.getAvailableKvCacheTokens().set(1_000_000);
         status.getTotalKvCacheTokens().set(1_000_000);
-        return new DecodeEndpoint(status, store);
+        return new DecodeEndpoint(status, new FlexlbConfig(), store);
     }
 
     private static PrefillEndpoint newPrefillEndpoint() {
@@ -405,7 +405,7 @@ class ConcurrencyStressTest {
      *
      * <p>Setup per round: reserve on a real {@link DecodeEndpoint} (layer 1),
      * then 3 calibrate rounds to migrate to layer 2 and advance the STALE
-     * counter (STALE_EVICT_ROUNDS = 3). The 4th calibrate triggers eviction.
+     * counter (staleEvictRounds = 3). The 4th calibrate triggers eviction.
      *
      * <p>Race window: T1 releases the {@link CyclicBarrier} and calls
      * {@code onWorkerStatusUpdate} (round 4 → STALE eviction), while T2
@@ -440,7 +440,7 @@ class ConcurrencyStressTest {
                 // Reserve → layer 1
                 endpoint.reserve(requestId, 100, 200);
 
-                // Calibrate round 1: migrate to layer 2 (engineTasks)
+                // Calibrate round 1: migrate to layer 2 (engineWork)
                 TaskInfo task = new TaskInfo();
                 task.setRequestId(requestId);
                 task.setPhase(TaskPhase.RUNNING);
@@ -504,8 +504,8 @@ class ConcurrencyStressTest {
 
     /**
      * UT-C5: Concurrent {@code PrefillEndpoint.close()} (drainInflight iterating
-     * {@code engineTasks}) vs {@code onWorkerStatusUpdate} (calibrate writing
-     * to {@code engineTasks}).
+     * {@code engineWork}) vs {@code onWorkerStatusUpdate} (calibrate writing
+     * to {@code engineWork}).
      *
      * <p>{@link java.util.concurrent.ConcurrentHashMap} iterators are weakly
      * consistent and must not throw {@link java.util.ConcurrentModificationException}.
@@ -514,7 +514,7 @@ class ConcurrencyStressTest {
      * <p>Setup per round: commit a single-item batch (puts entry in
      * {@code inflightEntries}), then race {@code close()} vs
      * {@code onWorkerStatusUpdate} (which migrates the entry to
-     * {@code engineTasks}).
+     * {@code engineWork}).
      *
      * <p>Assertions:
      * <ul>

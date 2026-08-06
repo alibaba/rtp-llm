@@ -344,6 +344,47 @@ public class FlexlbConfig {
     private long flexlbInflightTtlMs = 300_000L;
 
     /**
+     * EP-level (layer-2 engineWork) inflight TTL — a separate, longer TTL
+     * for engine-acknowledged entries that have migrated to layer 2.
+     * Defaults to 600s (vs 300s for scheduler-level {@link #flexlbInflightTtlMs}),
+     * because engine-accepted tasks legitimately run longer (decode generation)
+     * and should not be prematurely evicted by the wall-clock backstop.
+     * Environment variable: FLEXLB_EP_INFLIGHT_TTL_MS.
+     */
+    private long flexlbEpInflightTtlMs = 600_000L;
+
+    /**
+     * Tombstone retention period in the {@link org.flexlb.balance.scheduler.InflightStore}.
+     * Terminal items remain as tombstones for this long after termination, so that
+     * late cancel lookups return {@code false} (already terminal) rather than
+     * {@code null} (not found). Environment variable: FLEXLB_TOMBSTONE_TTL_MS.
+     */
+    private long flexlbTombstoneTtlMs = 60_000L;
+
+    /**
+     * Number of consecutive calibrate rounds an engineWork entry can be absent
+     * from both running and finished reports before being evicted as stale
+     * (lost completion report). Environment variable: FLEXLB_STALE_EVICT_ROUNDS.
+     */
+    private int flexlbStaleEvictRounds = 3;
+
+    /**
+     * Default KV token estimate used when a cross-EP failover task is reported
+     * by the engine but has no local reservation (foreign key). Falls back to
+     * this value when the engine-reported {@code input_length} is 0 or missing.
+     * Environment variable: DEFAULT_KV_TOKENS.
+     */
+    private long defaultKvTokens = 2048;
+
+    /**
+     * Maximum new tokens (generation length) added to the prompt's input length
+     * to estimate the total KV demand for cross-EP failover tasks.
+     * {@code expectedKv = inputLength + maxNewTokens}.
+     * Environment variable: MAX_NEW_TOKENS.
+     */
+    private long maxNewTokens = 1024;
+
+    /**
      * Maximum threads in the batch dispatch executor pool.
      */
     private int flexlbBatchDispatchPoolSize = 64;

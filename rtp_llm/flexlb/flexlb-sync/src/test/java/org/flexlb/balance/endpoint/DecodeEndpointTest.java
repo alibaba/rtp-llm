@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -24,7 +25,7 @@ class DecodeEndpointTest {
         status.setIp("10.0.0.1");
         status.setPort(8080);
         status.setGrpcPort(8081);
-        endpoint = new DecodeEndpoint(status, null);
+        endpoint = new DecodeEndpoint(status, new FlexlbConfig(), null);
     }
 
     @Test
@@ -118,7 +119,7 @@ class DecodeEndpointTest {
         assertEquals("10.0.0.1:8080", endpoint.ipPort());
     }
 
-    // ---- two-layer migration & phase mapping (layer 2: engineTasks) ----
+    // ---- two-layer migration & phase mapping (layer 2: engineWork) ----
 
     @Test
     void calibrate_kvAllocatedMigratesToEngineTasksAsLoading() {
@@ -129,8 +130,8 @@ class DecodeEndpointTest {
         updateStatus(Map.of("100", running), null, 10000);
 
         assertEquals(0, endpoint.decodeInflightCount());
-        assertEquals(1, endpoint.decodeEngineTaskCount());
-        assertEquals(EngineTaskPhase.LOADING, endpoint.engineTaskPhase(100L));
+        assertEquals(1, endpoint.decodeEngineWorkCount());
+        assertEquals(EngineTaskPhase.LOADING, endpoint.engineWorkPhase(100L));
         // layer-1 KV reservation released on acceptance
         assertEquals(0, endpoint.decodeInflightHardKvReserved());
         assertEquals(10000, endpoint.decodeRealKvAvailable());
@@ -145,8 +146,8 @@ class DecodeEndpointTest {
         updateStatus(Map.of("100", running), null, 10000);
 
         assertEquals(0, endpoint.decodeInflightCount());
-        assertEquals(1, endpoint.decodeEngineTaskCount());
-        assertEquals(EngineTaskPhase.RUNNING, endpoint.engineTaskPhase(100L));
+        assertEquals(1, endpoint.decodeEngineWorkCount());
+        assertEquals(EngineTaskPhase.RUNNING, endpoint.engineWorkPhase(100L));
     }
 
     @Test
@@ -160,8 +161,8 @@ class DecodeEndpointTest {
         updateStatus(Map.of("100", pending), null, 10000);
 
         assertEquals(0, endpoint.decodeInflightCount());
-        assertEquals(1, endpoint.decodeEngineTaskCount());
-        assertEquals(EngineTaskPhase.WAITING, endpoint.engineTaskPhase(100L));
+        assertEquals(1, endpoint.decodeEngineWorkCount());
+        assertEquals(EngineTaskPhase.WAITING, endpoint.engineWorkPhase(100L));
         // layer-1 KV reservation released on acceptance
         assertEquals(0, endpoint.decodeInflightHardKvReserved());
         assertEquals(10000, endpoint.decodeRealKvAvailable());
@@ -174,8 +175,8 @@ class DecodeEndpointTest {
         updateStatus(Map.of("101", received), null, 10000);
 
         assertEquals(0, endpoint.decodeInflightCount());
-        assertEquals(2, endpoint.decodeEngineTaskCount());
-        assertEquals(EngineTaskPhase.WAITING, endpoint.engineTaskPhase(101L));
+        assertEquals(2, endpoint.decodeEngineWorkCount());
+        assertEquals(EngineTaskPhase.WAITING, endpoint.engineWorkPhase(101L));
     }
 
     @Test
@@ -185,15 +186,15 @@ class DecodeEndpointTest {
         TaskInfo loading = task(100L);
         loading.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("100", loading), null, 10000);
-        assertEquals(EngineTaskPhase.LOADING, endpoint.engineTaskPhase(100L));
+        assertEquals(EngineTaskPhase.LOADING, endpoint.engineWorkPhase(100L));
 
         TaskInfo running = task(100L);
         running.setPhase(TaskPhase.RUNNING);
         updateStatus(Map.of("100", running), null, 10000);
 
         // phase refreshed in place — no duplicate task
-        assertEquals(EngineTaskPhase.RUNNING, endpoint.engineTaskPhase(100L));
-        assertEquals(1, endpoint.decodeEngineTaskCount());
+        assertEquals(EngineTaskPhase.RUNNING, endpoint.engineWorkPhase(100L));
+        assertEquals(1, endpoint.decodeEngineWorkCount());
         assertEquals(0, endpoint.decodeInflightCount());
     }
 
@@ -210,7 +211,7 @@ class DecodeEndpointTest {
         finished.setErrorCode(0);
         updateStatus(null, Map.of("100", finished), 10000);
 
-        assertEquals(0, endpoint.decodeEngineTaskCount());
+        assertEquals(0, endpoint.decodeEngineWorkCount());
         assertEquals(0, endpoint.decodeTotalLoad());
     }
 
@@ -222,12 +223,12 @@ class DecodeEndpointTest {
         running.setPhase(TaskPhase.RUNNING);
         updateStatus(Map.of("100", running), null, 10000); // round 1: accepted
 
-        // Absent from the next STALE_EVICT_ROUNDS (3) reports -> evicted
+        // Absent from the next staleEvictRounds (3) reports -> evicted
         updateStatus(null, null, 10000); // round 2
         updateStatus(null, null, 10000); // round 3
-        assertEquals(1, endpoint.decodeEngineTaskCount());
+        assertEquals(1, endpoint.decodeEngineWorkCount());
         updateStatus(null, null, 10000); // round 4: 4 - 1 >= 3
-        assertEquals(0, endpoint.decodeEngineTaskCount());
+        assertEquals(0, endpoint.decodeEngineWorkCount());
         assertEquals(0, endpoint.decodeTotalLoad());
     }
 
@@ -245,7 +246,7 @@ class DecodeEndpointTest {
             again.setPhase(TaskPhase.RUNNING);
             updateStatus(Map.of("100", again), null, 10000);
         }
-        assertEquals(1, endpoint.decodeEngineTaskCount());
+        assertEquals(1, endpoint.decodeEngineWorkCount());
     }
 
     @Test
@@ -256,7 +257,7 @@ class DecodeEndpointTest {
         foreign.setPhase(TaskPhase.RUNNING);
         updateStatus(Map.of("999", foreign), null, 10000);
 
-        assertEquals(1, endpoint.decodeEngineTaskCount());
+        assertEquals(1, endpoint.decodeEngineWorkCount());
         assertEquals(1, endpoint.decodeTotalLoad());
         // no local reservation — KV counters untouched
         assertEquals(0, endpoint.decodeInflightHardKvReserved());
@@ -272,13 +273,13 @@ class DecodeEndpointTest {
         updateStatus(Map.of("100", running), null, 10000);
 
         endpoint.release(100L);
-        // engineTasks mirror engine reports; release must not drop them
-        assertEquals(1, endpoint.decodeEngineTaskCount());
+        // engineWork mirror engine reports; release must not drop them
+        assertEquals(1, endpoint.decodeEngineWorkCount());
         assertEquals(0, endpoint.decodeInflightCount());
     }
 
     @Test
-    void evictExpiredRequests_sparesEngineTasks() throws InterruptedException {
+    void evictExpiredRequests_sparesEngineWork() throws InterruptedException {
         endpoint.reserve(100L, 500, 500);
         endpoint.reserve(101L, 300, 300);
 
@@ -292,12 +293,12 @@ class DecodeEndpointTest {
         int evicted = endpoint.evictExpiredRequests(1);
         assertEquals(1, evicted);
         assertEquals(0, endpoint.decodeInflightCount());
-        assertEquals(1, endpoint.decodeEngineTaskCount());
+        assertEquals(1, endpoint.decodeEngineWorkCount());
         assertEquals(0, endpoint.decodeInflightHardKvReserved());
     }
 
     @Test
-    void evictExpiredEngineTasks_ttlBackstopWhenRoundsStall() throws InterruptedException {
+    void evictExpiredEngineWork_ttlBackstopWhenRoundsStall() throws InterruptedException {
         endpoint.reserve(100L, 500, 500);
 
         TaskInfo running = task(100L);
@@ -308,12 +309,12 @@ class DecodeEndpointTest {
         // so calibrate rounds never advance and stale-round eviction cannot
         // fire — only the wall-clock TTL backstop can reclaim the task.
         Thread.sleep(10);
-        assertEquals(0, endpoint.evictExpiredEngineTasks(60_000)); // fresh: kept
-        assertEquals(1, endpoint.decodeEngineTaskCount());
+        assertEquals(0, endpoint.evictExpiredEngineWork(60_000)); // fresh: kept
+        assertEquals(1, endpoint.decodeEngineWorkCount());
 
-        int evicted = endpoint.evictExpiredEngineTasks(1);
+        int evicted = endpoint.evictExpiredEngineWork(1);
         assertEquals(1, evicted);
-        assertEquals(0, endpoint.decodeEngineTaskCount());
+        assertEquals(0, endpoint.decodeEngineWorkCount());
         assertEquals(0, endpoint.decodeTotalLoad());
     }
 
@@ -357,7 +358,7 @@ class DecodeEndpointTest {
         Mockito.verify(reporter).reportDecodeEngineRunningCount("10.0.0.1", 0);
         // Two-layer breakdown: 1 inflight, 0 engine tasks
         Mockito.verify(reporter).reportDecodeInflightRequestsCount("10.0.0.1", 1);
-        Mockito.verify(reporter).reportDecodeEngineTasksCount("10.0.0.1", 0);
+        Mockito.verify(reporter).reportDecodeEngineWorkCount("10.0.0.1", 0);
     }
 
     @Test
@@ -379,7 +380,7 @@ class DecodeEndpointTest {
 
         // All migrated to layer 2
         assertEquals(0, endpoint.decodeInflightCount());
-        assertEquals(3, endpoint.decodeEngineTaskCount());
+        assertEquals(3, endpoint.decodeEngineWorkCount());
         assertEquals(1, endpoint.decodeEngineWaitingCount());
         assertEquals(1, endpoint.decodeEngineLoadingCount());
         assertEquals(1, endpoint.decodeEngineRunningCount());
@@ -391,7 +392,7 @@ class DecodeEndpointTest {
         Mockito.verify(reporter).reportDecodeEngineLoadingCount("10.0.0.1", 1);
         Mockito.verify(reporter).reportDecodeEngineRunningCount("10.0.0.1", 1);
         Mockito.verify(reporter).reportDecodeInflightRequestsCount("10.0.0.1", 0);
-        Mockito.verify(reporter).reportDecodeEngineTasksCount("10.0.0.1", 3);
+        Mockito.verify(reporter).reportDecodeEngineWorkCount("10.0.0.1", 3);
     }
 
     private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,

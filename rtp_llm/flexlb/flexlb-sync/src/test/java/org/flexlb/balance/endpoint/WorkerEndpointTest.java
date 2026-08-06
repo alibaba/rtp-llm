@@ -88,7 +88,7 @@ class WorkerEndpointTest {
     }
 
     private int trackedEntryCount() {
-        return endpoint.prefillInflightCount() + endpoint.prefillEngineTaskCount();
+        return endpoint.prefillInflightCount() + endpoint.prefillEngineWorkCount();
     }
 
     @Test

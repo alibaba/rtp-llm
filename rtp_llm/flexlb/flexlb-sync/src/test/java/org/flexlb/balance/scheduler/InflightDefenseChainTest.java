@@ -107,7 +107,7 @@ class InflightDefenseChainTest {
         status.setIp("10.0.0.1");
         status.setPort(8080);
         status.setGrpcPort(8081);
-        return new DecodeEndpoint(status, null);
+        return new DecodeEndpoint(status, new FlexlbConfig(), null);
     }
 
     // ==================== 1. TTL safety-net full chain ====================

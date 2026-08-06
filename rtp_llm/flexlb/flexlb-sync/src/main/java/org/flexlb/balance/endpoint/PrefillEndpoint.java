@@ -65,7 +65,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final ConcurrentHashMap<Long, PrefillInflightEntry> inflightEntries = new ConcurrentHashMap<>();
 
     /** Layer 2: engine-acknowledged tasks with phase state and lastSeenRound. */
-    private final ConcurrentHashMap<Long, EngineTask<PrefillInflightEntry>> engineTasks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, EngineTask<PrefillInflightEntry>> engineWork = new ConcurrentHashMap<>();
 
     /**
      * Total requests tracked across both layers (sum of requestCount per map
@@ -77,19 +77,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final AtomicInteger inflightRequestCount = new AtomicInteger(0);
     private final WorkerBatcher batcher;
     private final InflightEvictor<Long, PrefillInflightEntry> inflightEvictor;
-    private final InflightEvictor<Long, EngineTask<PrefillInflightEntry>> engineTaskEvictor;
+    private final InflightEvictor<Long, EngineTask<PrefillInflightEntry>> engineWorkEvictor;
     private final BatchSchedulerReporter reporter;
 
-    /** Monotonic calibrate round counter driving stale engine-task eviction. */
+    /** Monotonic calibrate round counter driving stale engineWork eviction. */
     private final AtomicLong calibrateRound = new AtomicLong(0);
 
     /**
-     * Evict an engine task absent from both running and finished reports for
-     * this many consecutive calibrate rounds.
-     * TODO(config): couple with the worker-status sync interval once the
-     * config wiring lands with the consumer-migration phase.
+     * Evict an engineWork entry absent from both running and finished reports
+     * for this many consecutive calibrate rounds. Configurable via
+     * {@code flexlbStaleEvictRounds} (default 3).
      */
-    private static final int STALE_EVICT_ROUNDS = 3;
+    private final int staleEvictRounds;
 
     /**
      * Engine-reported waiting queue length from the latest WorkerStatus update.
@@ -113,11 +112,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.globalActiveCount = globalActiveCount;
         this.reporter = reporter;
         this.inflightStore = inflightStore;
+        this.staleEvictRounds = config.getFlexlbStaleEvictRounds();
         this.predictor = createPredictor(config);
         this.batcher = new WorkerBatcher(status.getIpPort(), this, config, reporter);
         this.inflightEvictor = new InflightEvictor<>(inflightEntries,
                 entry -> inflightRequestCount.addAndGet(-entry.requestCount()));
-        this.engineTaskEvictor = new InflightEvictor<>(engineTasks,
+        this.engineWorkEvictor = new InflightEvictor<>(engineWork,
                 task -> inflightRequestCount.addAndGet(-task.entry().requestCount()));
         this.batcher.start();
     }
@@ -151,11 +151,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         for (PrefillInflightEntry entry : inflightEntries.values()) {
             collectEntryItems(entry, toTerminate);
         }
-        for (EngineTask<PrefillInflightEntry> task : engineTasks.values()) {
+        for (EngineTask<PrefillInflightEntry> task : engineWork.values()) {
             collectEntryItems(task.entry(), toTerminate);
         }
         inflightEntries.clear();
-        engineTasks.clear();
+        engineWork.clear();
         inflightRequestCount.set(0);
         for (InflightItem item : toTerminate) {
             if (!item.isTerminated()) {
@@ -232,7 +232,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Remove the tracked entry for {@code batchId} from both inflight layers. */
     public void releaseBatch(long batchId) {
-        EngineTask<PrefillInflightEntry> task = engineTasks.remove(batchId);
+        EngineTask<PrefillInflightEntry> task = engineWork.remove(batchId);
         if (task != null) {
             inflightRequestCount.addAndGet(-task.entry().requestCount());
         }
@@ -262,7 +262,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Works on whichever layer currently tracks the batch.
      */
     public void repackBatch(long batchId, Set<Long> failedRequestIds) {
-        engineTasks.computeIfPresent(batchId, (id, task) -> {
+        engineWork.computeIfPresent(batchId, (id, task) -> {
             PrefillInflightEntry shrunk = shrinkEntry(task.entry(), failedRequestIds);
             if (shrunk == null) {
                 return null; // removes entry from map
@@ -643,7 +643,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      *
      * <ol>
      *   <li>acceptance — a key reported in runningTaskInfo migrates from
-     *       layer 1 (inflightEntries) to layer 2 (engineTasks) with its
+     *       layer 1 (inflightEntries) to layer 2 (engineWork) with its
      *       initial phase; already-migrated tasks get phase/lastSeenRound
      *       refreshed. Migration inserts into layer 2 <b>before</b> removing
      *       from layer 1 (conservative order: transient double-count beats
@@ -651,8 +651,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
      *   <li>completion — finished tasks shrink their entry in whichever
      *       layer tracks it (fast path: finished while still in layer 1);
      *       a batch is removed only when all members have finished.</li>
-     *   <li>staleness — engine tasks absent from reports for
-     *       {@link #STALE_EVICT_ROUNDS} consecutive rounds are evicted.</li>
+     *   <li>staleness — engineWork entries absent from reports for
+     *       {@link #staleEvictRounds} consecutive rounds are evicted.</li>
      * </ol>
      */
     private void calibrate(Map<String, TaskInfo> finishedTaskInfo, Map<String, TaskInfo> runningTaskInfo) {
@@ -661,14 +661,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         int finishedSize = finishedTaskInfo != null ? finishedTaskInfo.size() : 0;
         int runningSize = runningTaskInfo != null ? runningTaskInfo.size() : 0;
-        if (finishedSize > 0 || !inflightEntries.isEmpty() || !engineTasks.isEmpty()) {
-            logger.info("Prefill calibrate: finishedTasks={}, runningTasks={}, inflightEntries={}, engineTasks={}",
-                    finishedSize, runningSize, inflightEntries.size(), engineTasks.size());
+        if (finishedSize > 0 || !inflightEntries.isEmpty() || !engineWork.isEmpty()) {
+            logger.info("Prefill calibrate: finishedTasks={}, runningTasks={}, inflightEntries={}, engineWork={}",
+                    finishedSize, runningSize, inflightEntries.size(), engineWork.size());
         }
 
         observeRunningTasks(runningTaskInfo, round, statusMs);
         processFinishedTasks(finishedTaskInfo);
-        evictStaleEngineTasks(round);
+        evictStaleEngineWork(round);
     }
 
     /**
@@ -692,7 +692,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             long key = observed.getKey();
             EngineTaskPhase phase = observed.getValue();
 
-            EngineTask<PrefillInflightEntry> existing = engineTasks.get(key);
+            EngineTask<PrefillInflightEntry> existing = engineWork.get(key);
             if (existing != null) {
                 existing.observe(phase, round, statusMs);
                 continue;
@@ -700,8 +700,26 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
             PrefillInflightEntry entry = inflightEntries.get(key);
             if (entry == null) {
-                logger.warn("Prefill calibrate: running request(s) {} key={} not tracked in either inflight layer",
-                        reportedRequestIds.get(key), key);
+                // Foreign key pre-check: the key is not in layer 1 or layer 2.
+                // Check the global InflightStore to distinguish between:
+                //   (a) foreign key — requestId belongs to another master (e.g.
+                //       multi-master failover where the engine reports tasks from
+                //       both masters in the same WorkerStatusResponse). These
+                //       should NOT create engineWork entries — they are not ours.
+                //   (b) already terminal — the request has finished/cancelled but
+                //       the engine still reports it as running (stale report).
+                // In both cases we skip. For cross-EP failover (store has it and
+                // RUNNING), we still skip for prefill because we cannot reconstruct
+                // the PrefillInflightEntry (batch members + predictMs) from the
+                // engine report alone — the batch metadata lives only in the
+                // scheduler that originally dispatched it.
+                if (inflightStore != null && !isForeignKey(key, reportedRequestIds.get(key))) {
+                    logger.info("Prefill calibrate: cross-EP failover for key={} requestIds={} — entry lost, skipping (cannot reconstruct batch metadata)",
+                            key, reportedRequestIds.get(key));
+                } else {
+                    logger.debug("Prefill calibrate: running request(s) {} key={} not tracked in either inflight layer (foreign key or terminal), skipping",
+                            reportedRequestIds.get(key), key);
+                }
                 continue;
             }
             // Defense-in-depth: a batch report must carry at least one member
@@ -714,11 +732,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 continue;
             }
 
-            // Migrate: insert into engineTasks first, then remove from
+            // Migrate: insert into engineWork first, then remove from
             // inflightEntries. Counters follow map membership, so the
             // migration window can only over-count (rejection-biased).
             EngineTask<PrefillInflightEntry> accepted = new EngineTask<>(entry, phase, round, statusMs);
-            if (engineTasks.putIfAbsent(key, accepted) == null) {
+            if (engineWork.putIfAbsent(key, accepted) == null) {
                 inflightRequestCount.addAndGet(entry.requestCount());
             }
             PrefillInflightEntry removed = inflightEntries.remove(key);
@@ -735,6 +753,26 @@ public class PrefillEndpoint extends WorkerEndpoint {
             }
         }
         return false;
+    }
+
+    /**
+     * Foreign key check: returns {@code true} if ALL reported requestIds for
+     * this key are absent from the InflightStore or already in a terminal
+     * state (meaning they belong to another master or are finished). Returns
+     * {@code false} if at least one requestId is found in the store and
+     * still RUNNING (cross-EP failover scenario).
+     */
+    private boolean isForeignKey(long key, Set<Long> requestIds) {
+        if (inflightStore == null || requestIds == null || requestIds.isEmpty()) {
+            return true;
+        }
+        for (Long requestId : requestIds) {
+            InflightItem item = inflightStore.get(String.valueOf(requestId));
+            if (item != null && !item.state().isTerminal()) {
+                return false; // found a non-terminal entry — this is our request
+            }
+        }
+        return true; // all absent or terminal — foreign key
     }
 
     /**
@@ -766,14 +804,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private void removeFinishedRequest(TaskInfo task) {
         long requestId = task.getRequestId();
 
-        EngineTask<PrefillInflightEntry> accepted = engineTasks.get(requestId);
+        EngineTask<PrefillInflightEntry> accepted = engineWork.get(requestId);
         if (accepted != null) {
             if (!(accepted.entry() instanceof PrefillInflightRequest)) {
                 logger.warn("Prefill calibrate: finished non-batch reqId={} collides with a tracked batch key, skipping",
                         requestId);
                 return;
             }
-            if (engineTasks.remove(requestId, accepted)) {
+            if (engineWork.remove(requestId, accepted)) {
                 inflightRequestCount.addAndGet(-accepted.entry().requestCount());
             }
             return;
@@ -802,7 +840,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     private void finishBatchMembers(long batchId, List<TaskInfo> finishedTasks,
                                     Map<String, TaskInfo> finishedTaskInfo) {
-        EngineTask<PrefillInflightEntry> accepted = engineTasks.get(batchId);
+        EngineTask<PrefillInflightEntry> accepted = engineWork.get(batchId);
         PrefillInflightEntry tracked = accepted != null ? accepted.entry() : inflightEntries.get(batchId);
         if (tracked == null) {
             logger.debug("Prefill calibrate: finished batchId={} not tracked (already released?)", batchId);
@@ -854,20 +892,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Staleness step: evict engine tasks that have been absent from both
-     * running and finished reports for {@link #STALE_EVICT_ROUNDS}
+     * Staleness step: evict engineWork entries that have been absent from both
+     * running and finished reports for {@link #staleEvictRounds}
      * consecutive calibrate rounds (lost completion report).
      */
-    private void evictStaleEngineTasks(long round) {
+    private void evictStaleEngineWork(long round) {
         List<InflightItem> toTerminate = new ArrayList<>();
-        for (Map.Entry<Long, EngineTask<PrefillInflightEntry>> entry : engineTasks.entrySet()) {
+        for (Map.Entry<Long, EngineTask<PrefillInflightEntry>> entry : engineWork.entrySet()) {
             EngineTask<PrefillInflightEntry> task = entry.getValue();
-            if (round - task.lastSeenRound() < STALE_EVICT_ROUNDS) {
+            if (round - task.lastSeenRound() < staleEvictRounds) {
                 continue;
             }
-            if (engineTasks.remove(entry.getKey(), task)) {
+            if (engineWork.remove(entry.getKey(), task)) {
                 inflightRequestCount.addAndGet(-task.entry().requestCount());
-                logger.warn("Prefill calibrate: engine task key={} phase={} unseen for {} rounds, evicting as stale",
+                logger.warn("Prefill calibrate: engineWork key={} phase={} unseen for {} rounds, evicting as stale",
                         entry.getKey(), task.phase(), round - task.lastSeenRound());
                 // A3: STALE eviction now drives the bound InflightItem to a
                 // terminal state so the client future is settled in seconds,
@@ -890,23 +928,23 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Layer-2 task count: entries the engine has acknowledged. */
-    public int prefillEngineTaskCount() {
-        return engineTasks.size();
+    public int prefillEngineWorkCount() {
+        return engineWork.size();
     }
 
     /** Layer-2 tasks currently in the WAITING phase. */
     public int prefillEngineWaitingCount() {
-        return countEngineTasksInPhase(EngineTaskPhase.WAITING);
+        return countEngineWorkInPhase(EngineTaskPhase.WAITING);
     }
 
     /** Layer-2 tasks currently in the RUNNING phase. */
     public int prefillEngineRunningCount() {
-        return countEngineTasksInPhase(EngineTaskPhase.RUNNING);
+        return countEngineWorkInPhase(EngineTaskPhase.RUNNING);
     }
 
-    private int countEngineTasksInPhase(EngineTaskPhase phase) {
+    private int countEngineWorkInPhase(EngineTaskPhase phase) {
         int count = 0;
-        for (EngineTask<PrefillInflightEntry> task : engineTasks.values()) {
+        for (EngineTask<PrefillInflightEntry> task : engineWork.values()) {
             if (task.phase() == phase) {
                 count++;
             }
@@ -916,7 +954,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Two-layer weighted wait-time estimate:
-     * {@code Σ(inflightEntries.predictMs) + Σ(engineTasks[WAITING].predictMs)
+     * {@code Σ(inflightEntries.predictMs) + Σ(engineWork[WAITING].predictMs)
      * + running remainder}, where a RUNNING task contributes
      * {@code max(predictMs - elapsed since it started running, 0)}.
      *
@@ -930,7 +968,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         for (PrefillInflightEntry entry : inflightEntries.values()) {
             totalMs += Math.max(0, entry.predictMs());
         }
-        for (EngineTask<PrefillInflightEntry> task : engineTasks.values()) {
+        for (EngineTask<PrefillInflightEntry> task : engineWork.values()) {
             long predictMs = Math.max(0, task.entry().predictMs());
             if (task.running()) {
                 long elapsedMs = Math.max(0, nowMs - task.progressBaseMs());
@@ -959,14 +997,30 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Evict entries older than {@code ttlMs} from both inflight layers.
-     * Called periodically by the scheduler to clean up stale prefill entries.
-     * The layer-2 TTL (from engine acceptance) is the backstop for a worker
-     * that stops reporting entirely, where stale-round eviction cannot fire.
+     * Called periodically by {@code EndpointRegistry.scheduledEviction()} with
+     * the EP-level TTL ({@code flexlbEpInflightTtlMs}, default 600s).
+     *
+     * <p>TTL layering design:
+     * <ul>
+     *   <li><b>Scheduler-level</b> ({@code flexlbInflightTtlMs}, default 300s):
+     *       used by {@link InflightStore} for RUNNING item timeout — the safety
+     *       net for requests that never reached a terminal state (lost ACK).</li>
+     *   <li><b>EP-level</b> ({@code flexlbEpInflightTtlMs}, default 600s): used
+     *       here for both inflight layers — longer than scheduler-level because
+     *       engine-accepted tasks legitimately run longer (decode generation)
+     *       and should not be prematurely evicted by the wall-clock backstop.</li>
+     *   <li><b>Tombstone</b> ({@code flexlbTombstoneTtlMs}, default 60s): used by
+     *       {@link InflightStore} for terminal item cleanup — short because
+     *       tombstones only exist to reject duplicate cancels.</li>
+     * </ul>
+     * The EP-level TTL is the backstop for a worker that stops reporting
+     * entirely, where stale-round eviction cannot fire (calibrate rounds
+     * no longer advance without status reports).
      *
      * @return number of entries evicted
      */
     public int evictExpiredBatches(long ttlMs) {
-        return inflightEvictor.evictExpired(ttlMs) + engineTaskEvictor.evictExpired(ttlMs);
+        return inflightEvictor.evictExpired(ttlMs) + engineWorkEvictor.evictExpired(ttlMs);
     }
 
     public PrefillTimePredictor getPredictor() {
@@ -984,11 +1038,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reporter.reportBatcherQueueDepth(RoleType.PREFILL.name(), getIp(), queueSize);
         reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), queueSize);
         reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(),
-                prefillInflightCount() + prefillEngineTaskCount());
+                prefillInflightCount() + prefillEngineWorkCount());
         reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), inflightRequestCount.get());
         // Two-layer breakdown
         reporter.reportPrefillInflightEntriesCount(RoleType.PREFILL.name(), getIp(), prefillInflightCount());
-        reporter.reportPrefillEngineTasksCount(RoleType.PREFILL.name(), getIp(), prefillEngineTaskCount());
+        reporter.reportPrefillEngineWorkCount(RoleType.PREFILL.name(), getIp(), prefillEngineWorkCount());
     }
 
     /**

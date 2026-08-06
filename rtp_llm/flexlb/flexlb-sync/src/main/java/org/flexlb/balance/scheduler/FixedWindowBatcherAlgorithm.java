@@ -218,7 +218,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
     /** Current inflight batch count on the prefill worker, for backpressure. */
     private int currentInflightCount() {
-        return prefillEp.prefillInflightCount() + prefillEp.prefillEngineTaskCount();
+        return prefillEp.prefillInflightCount() + prefillEp.prefillEngineWorkCount();
     }
 
     /** Prefill-time predictor for predictor-based early dispatch. */

@@ -4,7 +4,7 @@ import org.flexlb.enums.TaskPhase;
 
 /**
  * Phase of an engine-accepted task in the second inflight layer
- * ({@code engineTasks}), mapped from the engine-reported {@link TaskPhase}.
+ * ({@code engineWork}), mapped from the engine-reported {@link TaskPhase}.
  *
  * <p>Mapping rules (no new engine-side reporting required):
  * <ul>
