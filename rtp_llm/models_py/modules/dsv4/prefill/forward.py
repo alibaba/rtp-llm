@@ -501,7 +501,9 @@ def forward_layers(
             )
 
     try:
-        with record_range_ctx():
+        from rtp_llm.models_py.modules.dsv4.moe import topk_dump
+
+        with topk_dump.cp_context(cp_ctx), record_range_ctx():
             # Two callable chains intentionally coexist:
             #   * normal ``Block.forward`` keeps debug checks and fallback layouts;
             #   * cached fast callables are validated once for the FP8 production

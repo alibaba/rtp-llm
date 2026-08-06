@@ -508,4 +508,23 @@ def setup_args() -> PyEnvConfigs:
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args()
 
+    # Python hooks run only while a CUDA graph is captured, not for its real
+    # replays. This opt-in diagnostic must therefore use eager decode to dump
+    # the request's live MegaMoE routing tensors instead of fake capture data.
+    topk_dump_enabled = any(
+        os.environ.get(name, "").strip()
+        for name in (
+            "DSV4_MEGA_MOE_TOPK_DUMP_DIR",
+            "DSV4_MEGA_MOE_TOPK_DUMP_PREFILL_DIR",
+            "DSV4_MEGA_MOE_TOPK_DUMP_DECODE_DIR",
+        )
+    )
+    if topk_dump_enabled:
+        if py_env_configs.py_hw_kernel_config.enable_cuda_graph:
+            logging.warning(
+                "MegaMoE topk dumping is enabled; disabling CUDA graph "
+                "so real decode topk_idx tensors can be recorded"
+            )
+        py_env_configs.py_hw_kernel_config.enable_cuda_graph = False
+
     return py_env_configs

@@ -201,6 +201,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
+        .def_readwrite("is_fake_stream", &PyModelInputs::is_fake_stream, "Whether this input belongs to a fake stream")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
 
