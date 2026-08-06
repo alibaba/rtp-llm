@@ -351,6 +351,47 @@ class DecodeEndpointTest {
         Mockito.verify(reporter).reportDecodeTotalLoad("10.0.0.1", 1);
         Mockito.verify(reporter).reportDecodeInflightKvReserved("10.0.0.1", 900L);
         Mockito.verify(reporter).reportDecodeInflightKvReservedHard("10.0.0.1", 500L);
+        // Phase-split: no engine tasks yet — all zero
+        Mockito.verify(reporter).reportDecodeEngineWaitingCount("10.0.0.1", 0);
+        Mockito.verify(reporter).reportDecodeEngineLoadingCount("10.0.0.1", 0);
+        Mockito.verify(reporter).reportDecodeEngineRunningCount("10.0.0.1", 0);
+        // Two-layer breakdown: 1 inflight, 0 engine tasks
+        Mockito.verify(reporter).reportDecodeInflightRequestsCount("10.0.0.1", 1);
+        Mockito.verify(reporter).reportDecodeEngineTasksCount("10.0.0.1", 0);
+    }
+
+    @Test
+    void reportBatchMetrics_reportsPhaseSplitAndLayerCounts() {
+        // Reserve 3 requests (layer 1)
+        endpoint.reserve(100L, 500, 900);
+        endpoint.reserve(101L, 300, 400);
+        endpoint.reserve(102L, 200, 300);
+        updateStatus(null, null, 10000);
+
+        // Accept all 3 into layer 2 with different phases
+        TaskInfo waiting = task(100L);
+        waiting.setPhase(TaskPhase.PENDING);
+        TaskInfo loading = task(101L);
+        loading.setPhase(TaskPhase.KV_ALLOCATED);
+        TaskInfo running = task(102L);
+        running.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("100", waiting, "101", loading, "102", running), null, 10000);
+
+        // All migrated to layer 2
+        assertEquals(0, endpoint.decodeInflightCount());
+        assertEquals(3, endpoint.decodeEngineTaskCount());
+        assertEquals(1, endpoint.decodeEngineWaitingCount());
+        assertEquals(1, endpoint.decodeEngineLoadingCount());
+        assertEquals(1, endpoint.decodeEngineRunningCount());
+
+        BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class);
+        endpoint.reportBatchMetrics(reporter);
+
+        Mockito.verify(reporter).reportDecodeEngineWaitingCount("10.0.0.1", 1);
+        Mockito.verify(reporter).reportDecodeEngineLoadingCount("10.0.0.1", 1);
+        Mockito.verify(reporter).reportDecodeEngineRunningCount("10.0.0.1", 1);
+        Mockito.verify(reporter).reportDecodeInflightRequestsCount("10.0.0.1", 0);
+        Mockito.verify(reporter).reportDecodeEngineTasksCount("10.0.0.1", 3);
     }
 
     private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,

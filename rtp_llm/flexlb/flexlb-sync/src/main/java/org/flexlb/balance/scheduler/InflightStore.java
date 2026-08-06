@@ -128,6 +128,16 @@ public class InflightStore {
     }
 
     /**
+     * Total store size including tombstones (terminal items within TTL).
+     * <p>Unlike {@link #activeCount()} which excludes terminal items, this reflects
+     * the raw map size — useful for detecting tombstone accumulation and unbounded
+     * growth from leaked entries.
+     */
+    public int totalSize() {
+        return store.size();
+    }
+
+    /**
      * Number of non-terminal items registered via {@link #putIfAbsent} by the
      * given scheduler ({@link InflightItem#scheduler()} bucket). Used by
      * per-path admission gates (e.g. {@code flexlbBatchMaxInflight}).
@@ -146,6 +156,7 @@ public class InflightStore {
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportInflightSize() {
         reporter.reportSchedulerInflightSize(activeCount.get());
+        reporter.reportSchedulerInflightTotalSize(totalSize());
     }
 
     /**
@@ -175,6 +186,7 @@ public class InflightStore {
                         && (now - item.createdAtMs()) > inflightTtlMs) {
                     if (item.timeoutWithError()) {
                         Logger.warn("FlexLB inflight TTL expired: request_id={}", reqId);
+                        reporter.reportInflightTtlExpired();
                     }
                 } else if (item.state().isTerminal()
                         && item.getTerminalTime() > 0

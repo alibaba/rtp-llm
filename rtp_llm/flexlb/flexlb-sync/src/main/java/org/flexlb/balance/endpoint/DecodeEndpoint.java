@@ -317,6 +317,31 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return engineTasks.size();
     }
 
+    /** Layer-2 tasks currently in the WAITING phase. */
+    public int decodeEngineWaitingCount() {
+        return countEngineTasksInPhase(EngineTaskPhase.WAITING);
+    }
+
+    /** Layer-2 tasks currently in the LOADING phase (remote KV loading). */
+    public int decodeEngineLoadingCount() {
+        return countEngineTasksInPhase(EngineTaskPhase.LOADING);
+    }
+
+    /** Layer-2 tasks currently in the RUNNING phase. */
+    public int decodeEngineRunningCount() {
+        return countEngineTasksInPhase(EngineTaskPhase.RUNNING);
+    }
+
+    private int countEngineTasksInPhase(EngineTaskPhase phase) {
+        int count = 0;
+        for (EngineTask<RequestInflight> task : engineTasks.values()) {
+            if (task.phase() == phase) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     /**
      * Total active load: engine-accepted tasks + local inflight
      * (confirmedRunningCount + inflight in legacy terms).
@@ -369,6 +394,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         reporter.reportDecodeTotalLoad(getIp(), decodeTotalLoad());
         reporter.reportDecodeInflightKvReserved(getIp(), decodeInflightExpectedKvReserved());
         reporter.reportDecodeInflightKvReservedHard(getIp(), decodeInflightHardKvReserved());
+        // Phase-split layer-2 counts (WAITING / LOADING / RUNNING)
+        reporter.reportDecodeEngineWaitingCount(getIp(), decodeEngineWaitingCount());
+        reporter.reportDecodeEngineLoadingCount(getIp(), decodeEngineLoadingCount());
+        reporter.reportDecodeEngineRunningCount(getIp(), decodeEngineRunningCount());
+        // Two-layer breakdown
+        reporter.reportDecodeInflightRequestsCount(getIp(), decodeInflightCount());
+        reporter.reportDecodeEngineTasksCount(getIp(), decodeEngineTaskCount());
     }
 
     // ==================== Eviction ====================

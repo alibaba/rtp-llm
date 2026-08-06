@@ -82,6 +82,63 @@ public class MetricConstant {
     public static final String DECODE_TOTAL_LOAD = "app.flexlb.decode.total.load";
 
     /**
+     * FlexLB decode engine-accepted tasks currently in the WAITING phase
+     * ({@code DecodeEndpoint#decodeEngineWaitingCount}). Decode role only.
+     */
+    public static final String DECODE_ENGINE_WAITING_COUNT = "app.flexlb.decode.engine.waiting.count";
+
+    /**
+     * FlexLB decode engine-accepted tasks currently in the LOADING phase (remote KV loading)
+     * ({@code DecodeEndpoint#decodeEngineLoadingCount}). Decode role only.
+     */
+    public static final String DECODE_ENGINE_LOADING_COUNT = "app.flexlb.decode.engine.loading.count";
+
+    /**
+     * FlexLB decode engine-accepted tasks currently in the RUNNING phase
+     * ({@code DecodeEndpoint#decodeEngineRunningCount}). Decode role only.
+     */
+    public static final String DECODE_ENGINE_RUNNING_COUNT = "app.flexlb.decode.engine.running.count";
+
+    /**
+     * FlexLB prefill layer-1 inflight entry count — dispatched, not yet acknowledged by the engine
+     * ({@code PrefillEndpoint#prefillInflightCount}). Prefill/PDFusion roles only.
+     */
+    public static final String PREFILL_INFLIGHT_ENTRIES_COUNT = "app.flexlb.prefill.inflight.entries.count";
+
+    /**
+     * FlexLB prefill layer-2 engine-acknowledged task count
+     * ({@code PrefillEndpoint#prefillEngineTaskCount}). Prefill/PDFusion roles only.
+     */
+    public static final String PREFILL_ENGINE_TASKS_COUNT = "app.flexlb.prefill.engine.tasks.count";
+
+    /**
+     * FlexLB decode layer-1 inflight request count — reserved locally, not yet accepted by the engine
+     * ({@code DecodeEndpoint#decodeInflightCount}). Decode role only.
+     */
+    public static final String DECODE_INFLIGHT_REQUESTS_COUNT = "app.flexlb.decode.inflight.requests.count";
+
+    /**
+     * FlexLB decode layer-2 engine-accepted task count
+     * ({@code DecodeEndpoint#decodeEngineTaskCount}). Decode role only.
+     */
+    public static final String DECODE_ENGINE_TASKS_COUNT = "app.flexlb.decode.engine.tasks.count";
+
+    /**
+     * FlexLB inflight TTL eviction QPS — count of RUNNING items timed out via
+     * {@code InflightItem#timeoutWithError()} in the evictor sweep.
+     * Reported by {@link org.flexlb.balance.scheduler.InflightStore#evict()}.
+     */
+    public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
+
+    /**
+     * FlexLB scheduler inflight total size — the store's total entry count
+     * including tombstones (terminal items within TTL). Complements
+     * {@link #SCHEDULER_INFLIGHT_SIZE} which reports only active (non-terminal) items.
+     * <p>Reported by {@link org.flexlb.balance.scheduler.InflightStore#reportInflightSize()}.
+     */
+    public static final String SCHEDULER_INFLIGHT_TOTAL_SIZE = "app.flexlb.scheduler.inflight.total.size";
+
+    /**
      * FlexLB scheduler inflight KV cache reserved tokens per decode worker (local inflight reservation not yet confirmed by the engine)
      */
     public static final String DECODE_INFLIGHT_KV_RESERVED_TOKENS = "app.flexlb.decode.inflight.kv.reserved.tokens";

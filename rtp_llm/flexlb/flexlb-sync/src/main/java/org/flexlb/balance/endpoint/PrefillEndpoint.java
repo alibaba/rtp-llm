@@ -986,6 +986,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(),
                 prefillInflightCount() + prefillEngineTaskCount());
         reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), inflightRequestCount.get());
+        // Two-layer breakdown
+        reporter.reportPrefillInflightEntriesCount(RoleType.PREFILL.name(), getIp(), prefillInflightCount());
+        reporter.reportPrefillEngineTasksCount(RoleType.PREFILL.name(), getIp(), prefillEngineTaskCount());
     }
 
     /**
