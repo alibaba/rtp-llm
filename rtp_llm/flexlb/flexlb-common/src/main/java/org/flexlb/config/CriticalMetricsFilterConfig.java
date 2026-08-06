@@ -10,14 +10,23 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import javax.annotation.PostConstruct;
+import java.util.Arrays;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
- * When {@code flexlb.monitor.mode=critical-only} is active, only a curated set of
- * core link latency metrics are registered/reported, reducing the
- * overhead of metrics collection and exposition across 94+ registered meters.
+ * Metrics whitelist filter for the Micrometer reporting path.
  *
- * <p>This config performs filtering at two layers:
+ * <p>Replaces the former {@code flexlb.monitor.mode=critical-only} toggle +
+ * hardcoded {@code CRITICAL_METRICS} set with a single configurable
+ * whitelist via {@code flexlbMonitorCriticalMetrics}:
+ * <ul>
+ *   <li><b>Empty or {@code "*"}</b> → report all metrics (no filtering)</li>
+ *   <li><b>Comma-separated metric names</b> (without the {@code flexlb.}
+ *       prefix) → only those metrics are registered/reported</li>
+ * </ul>
+ *
+ * <p>Filtering is applied at two layers:
  * <ol>
  *   <li><b>Early-return allowlist</b> — via {@link MicrometerFlexMonitor#setAllowedMetrics(Set)},
  *       non-allowlisted metrics are skipped at register() and report() time before any
@@ -28,44 +37,62 @@ import java.util.Set;
  * </ol>
  *
  * <p>Non-{@code flexlb.} metrics (jvm.*, process.*, http.server.requests, etc.) are always allowed.
+ *
+ * <p>This config is active only when {@code flexlb.monitor.enabled=true} (or missing).
+ * When monitoring is disabled ({@code flexlb.monitor.enabled=false}), {@link MonitorDisableConfig}
+ * provides a deny-all filter instead.
+ *
+ * <p>The KMonitor path is unaffected — production always reports all metrics.
  */
 @Configuration
 @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
-@ConditionalOnProperty(name = "flexlb.monitor.mode", havingValue = "critical-only")
+@ConditionalOnProperty(name = "flexlb.monitor.enabled", havingValue = "true", matchIfMissing = true)
 public class CriticalMetricsFilterConfig {
 
     private static final String METRIC_PREFIX = "flexlb.";
 
-    /**
-     * The curated allowlist of metric names (without the {@code flexlb.} prefix).
-     *
-     * <p>These are the core link latency metrics that must be retained
-     * when operating in critical-only mode:
-     * <ul>
-     *   <li>Client-to-gRPC-server: network delay (network transfer)</li>
-     *   <li>gRPC server processing: server entry to BalanceContext start</li>
-     *   <li>Master decision: route+submit time (decision start to batcher queue placement)</li>
-     *   <li>Queue wait: batcher queue wait time (enqueue to dispatch trigger)</li>
-     *   <li>Dispatch: dispatch-to-ACK time (gRPC dispatch to engine ACK)</li>
-     *   <li>Batch decision: exact dispatch count grouped by trigger reason</li>
-     * </ul>
-     */
-    public static final Set<String> CRITICAL_METRICS = Set.of(
-            // === Core link latency metrics (5 metrics, 4 stages) ===
-            "app.request.network.delay.ms",             // client to gRPC server entry (network transfer)
-            "app.grpc.server.process.ms",              // gRPC server entry to BalanceContext start
-            "app.flexlb.route.submit.time.ms",          // master decision start to batcher queue
-            "app.routing.queue.wait.time.ms",           // batcher queue wait to dispatch
-            "app.flexlb.dispatch.ack.time.ms",          // dispatch gRPC to engine ACK
-            "app.engine.balancing.master.dispatch.reason" // exact batch trigger counters
-    );
+    private final ConfigService configService;
+    private Set<String> allowedMetrics;
+
+    public CriticalMetricsFilterConfig(ConfigService configService) {
+        this.configService = configService;
+    }
+
+    @PostConstruct
+    public void init() {
+        String configValue = configService.loadBalanceConfig().getFlexlbMonitorCriticalMetrics();
+        if (configValue == null || configValue.isBlank() || "*".equals(configValue.trim())) {
+            // Empty or "*" → allow all (no filtering)
+            allowedMetrics = null;
+            MicrometerFlexMonitor.setAllowedMetrics(null);
+        } else {
+            // Comma-separated metric names (without flexlb. prefix) → whitelist
+            allowedMetrics = Arrays.stream(configValue.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .collect(Collectors.toSet());
+            MicrometerFlexMonitor.setAllowedMetrics(allowedMetrics);
+        }
+    }
 
     /**
      * Defensive MeterRegistry filter: allows all non-flexlb metrics, and only allows
-     * flexlb metrics whose unprefixed name is in {@link #CRITICAL_METRICS}.
+     * flexlb metrics whose unprefixed name is in the configured allowlist.
+     * When the allowlist is null (empty or "*" config), all metrics are allowed.
      */
     @Bean
     public MeterFilter criticalMetricsOnlyFilter() {
+        final Set<String> allowed = allowedMetrics;
+        if (allowed == null) {
+            // No whitelist configured — allow all metrics (neutral, so other
+            // filters in the chain can still express opinions).
+            return new MeterFilter() {
+                @Override
+                public MeterFilterReply accept(Meter.Id id) {
+                    return MeterFilterReply.NEUTRAL;
+                }
+            };
+        }
         return new MeterFilter() {
             @Override
             public MeterFilterReply accept(Meter.Id id) {
@@ -74,18 +101,9 @@ public class CriticalMetricsFilterConfig {
                     return MeterFilterReply.NEUTRAL;
                 }
                 String unprefixed = name.substring(METRIC_PREFIX.length());
-                return CRITICAL_METRICS.contains(unprefixed)
+                return allowed.contains(unprefixed)
                         ? MeterFilterReply.NEUTRAL : MeterFilterReply.DENY;
             }
         };
-    }
-
-    /**
-     * Sets the early-return allowlist on {@link MicrometerFlexMonitor} so that
-     * non-critical metrics are skipped before any Micrometer interaction.
-     */
-    @PostConstruct
-    public void init() {
-        MicrometerFlexMonitor.setAllowedMetrics(CRITICAL_METRICS);
     }
 }

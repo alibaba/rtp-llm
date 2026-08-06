@@ -40,8 +40,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
 
     /**
      * When non-null, only metrics whose names are in this set will be registered/reported.
-     * Set by {@link org.flexlb.config.CriticalMetricsFilterConfig} when
-     * {@code flexlb.monitor.mode=critical-only} is active.
+     * Set by {@link org.flexlb.config.CriticalMetricsFilterConfig} based on the
+     * {@code flexlbMonitorCriticalMetrics} config value.
      */
     private static volatile Set<String> ALLOWED_METRICS = null;
 

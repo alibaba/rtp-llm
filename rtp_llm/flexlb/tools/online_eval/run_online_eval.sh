@@ -70,7 +70,7 @@ SLO_BATCH_DRAIN_SECONDS="${SLO_BATCH_DRAIN_SECONDS:-0}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
 FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
-FLEXLB_MONITOR_MODE="${FLEXLB_MONITOR_MODE:-critical-only}"
+FLEXLB_MONITOR_CRITICAL_METRICS="${FLEXLB_MONITOR_CRITICAL_METRICS:-app.request.network.delay.ms,app.grpc.server.process.ms,app.flexlb.route.submit.time.ms,app.routing.queue.wait.time.ms,app.flexlb.dispatch.ack.time.ms,app.engine.balancing.master.dispatch.reason}"
 HIPPO_ROLE="${HIPPO_ROLE:-test}"
 
 if [[ -z "${PYTHON_BIN:-}" ]]; then
@@ -500,7 +500,7 @@ OVERRIDE_ENV_KEYS=(
   FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
   FLEXLB_JVM_HEAP_SIZE
   FLEXLB_MONITOR_ENABLED
-  FLEXLB_MONITOR_MODE
+  FLEXLB_MONITOR_CRITICAL_METRICS
   GRADIENT
   GRADIENT_MAX_SPEED
   GRADIENT_START_SPEED

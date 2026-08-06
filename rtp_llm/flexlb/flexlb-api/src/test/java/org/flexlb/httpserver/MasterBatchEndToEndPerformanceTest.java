@@ -14,8 +14,11 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.resource.DynamicWorkerManager;
+import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.DirectScheduler;
 import org.flexlb.balance.scheduler.InflightStore;
+import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
@@ -23,6 +26,7 @@ import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerStatus;
@@ -39,6 +43,7 @@ import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
@@ -207,16 +212,37 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         getDecodeEndpoint().onWorkerStatusUpdate(
                 getDecodeEndpoint().getStatus(), new WorkerStatusResponse());
 
+        FlexlbMetricHelper batchHelper = new FlexlbMetricHelper(
+                NoOpFlexMonitor.getInstance(), MetricConstant.PATH_BATCH);
+        batchHelper.register();
+        BatchScheduler batchScheduler = new BatchScheduler(
+                configService, (DefaultRouter) router, endpointRegistry,
+                reporter, inflightStore, batchHelper);
+
+        FlexlbMetricHelper queueHelper = new FlexlbMetricHelper(
+                NoOpFlexMonitor.getInstance(), MetricConstant.PATH_QUEUE);
+        queueHelper.register();
+        QueueScheduler queueScheduler = new QueueScheduler(
+                (DefaultRouter) router, configService,
+                mock(RoutingQueueReporter.class, withSettings().stubOnly()),
+                mock(DynamicWorkerManager.class, withSettings().stubOnly()),
+                inflightStore, queueHelper);
+
+        FlexlbMetricHelper directHelper = new FlexlbMetricHelper(
+                NoOpFlexMonitor.getInstance(), MetricConstant.PATH_DIRECT);
+        directHelper.register();
+        DirectScheduler directScheduler = new DirectScheduler(
+                (DefaultRouter) router, inflightStore, directHelper);
+
         RouteService routeService = new RouteService(
                 configService,
-                (DefaultRouter) router,
                 mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()),
-                NoOpFlexMonitor.getInstance(),
                 inflightStore,
                 endpointRegistry,
                 reporter,
-                mock(RoutingQueueReporter.class, withSettings().stubOnly()),
-                mock(DynamicWorkerManager.class, withSettings().stubOnly()));
+                batchScheduler,
+                queueScheduler,
+                directScheduler);
 
         LBStatusConsistencyService consistencyService =
                 mock(LBStatusConsistencyService.class, withSettings().stubOnly());

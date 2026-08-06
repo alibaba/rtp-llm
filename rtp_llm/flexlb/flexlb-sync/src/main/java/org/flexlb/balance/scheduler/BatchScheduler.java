@@ -73,6 +73,19 @@ public class BatchScheduler extends AbstractScheduler {
                 return future;
             }
 
+            // Self-check: BATCH mode requires valid generate input (previously
+            // handled by RouteService, now owned by the scheduler itself).
+            // Invalid input is rejected rather than falling back to DIRECT —
+            // RouteService.route() is now pure dispatch.
+            byte[] inputBytes = ctx.getGenerateInputPbBytes();
+            if (inputBytes == null || inputBytes.length == 0) {
+                Logger.warn("BATCH mode cannot process request id: {} (no generate input), rejecting",
+                        ctx.getRequestId());
+                completeError(future, StrategyErrorType.INVALID_REQUEST,
+                        "BATCH mode requires valid generate input");
+                return future;
+            }
+
             // BATCH-only admission gate: count only items this scheduler
             // registered — DIRECT/QUEUE traffic must not consume the budget.
             int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();

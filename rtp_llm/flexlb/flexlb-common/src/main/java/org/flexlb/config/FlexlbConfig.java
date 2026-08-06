@@ -529,6 +529,30 @@ public class FlexlbConfig {
      */
     private long flexlbBatchPredictThresholdMs = 0;
 
+    // ========== Metrics Reporting Configuration ==========
+
+    /**
+     * Metrics report interval in milliseconds.
+     * Controls the periodic reporting frequency for scheduler-level and
+     * per-endpoint metrics via {@code @Scheduled} throttle.
+     * Environment variable: METRICS_REPORT_INTERVAL_MS.
+     */
+    private long metricsReportIntervalMs = 2000;
+
+    /**
+     * Comma-separated metric-name whitelist for the Micrometer reporting path.
+     * <ul>
+     *   <li>Empty or {@code "*"} → report all metrics (no filtering)</li>
+     *   <li>Comma-separated metric names (without the {@code flexlb.} prefix)
+     *       → only those metrics are registered/reported</li>
+     * </ul>
+     * Replaces the former {@code flexlb.monitor.mode=critical-only} toggle +
+     * hardcoded {@code CriticalMetricsFilterConfig.CRITICAL_METRICS} set.
+     * KMonitor path is unaffected (production always reports all metrics).
+     * Environment variable: FLEXLB_MONITOR_CRITICAL_METRICS.
+     */
+    private String flexlbMonitorCriticalMetrics = "";
+
     // ========== gRPC Configuration ==========
 
     private long prefillLbTimeoutMs = 5000;

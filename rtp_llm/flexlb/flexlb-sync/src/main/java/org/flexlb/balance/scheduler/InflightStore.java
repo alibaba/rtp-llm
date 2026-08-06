@@ -6,6 +6,8 @@ import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
@@ -32,7 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * only catches items whose TTL has expired since termination.
  */
 @Component
-public class InflightStore {
+public class InflightStore implements DiagnosticsProvider {
 
     private final ConcurrentMap<String, InflightItem> store = new ConcurrentHashMap<>();
     private final ScheduledExecutorService evictor;
@@ -79,6 +81,9 @@ public class InflightStore {
 
     /** Evictor runs at this interval. */
     private static final long EVICT_INTERVAL_MS = 10_000;
+
+    /** Last execution timestamp for inflight size report throttle. */
+    private volatile long lastInflightReportTime = 0;
 
     public InflightStore(BatchSchedulerReporter reporter, ConfigService configService) {
         this.reporter = reporter;
@@ -165,13 +170,38 @@ public class InflightStore {
     }
 
     /**
+     * {@inheritDoc}
+     *
+     * <p>Returns the active (non-terminal) inflight count and the total
+     * store size (including tombstones) for the HTTP diagnostic endpoints.
+     */
+    @Override
+    public Map<String, Object> getDiagnostics() {
+        Map<String, Object> diag = new LinkedHashMap<>();
+        diag.put("active_count", activeCount());
+        diag.put("total_size", totalSize());
+        return diag;
+    }
+
+    /**
      * Periodically report the number of active (non-terminal) requests via
      * {@code flexlb.scheduler.inflight.size}. Tombstones within TTL are
      * excluded — external monitors treat this metric as the live inflight
      * count, and the tombstone tail would systematically inflate it.
+     *
+     * <p>Polls every 1s and throttles to {@code metricsReportIntervalMs}
+     * (default 2000ms, configurable via {@code METRICS_REPORT_INTERVAL_MS}
+     * env var). This pattern is used because {@code @Scheduled(fixedRate)}
+     * cannot directly reference a runtime config value.
      */
-    @Scheduled(fixedRateString = "${report.interval.ms:2000}")
+    @Scheduled(fixedRate = 1000)
     public void reportInflightSize() {
+        long intervalMs = configService.loadBalanceConfig().getMetricsReportIntervalMs();
+        long now = System.currentTimeMillis();
+        if (now - lastInflightReportTime < intervalMs) {
+            return;
+        }
+        lastInflightReportTime = now;
         reporter.reportSchedulerInflightSize(activeCount.get());
         reporter.reportSchedulerInflightTotalSize(totalSize());
     }

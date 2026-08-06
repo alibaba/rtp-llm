@@ -2,17 +2,22 @@ package org.flexlb.service;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DynamicWorkerManager;
+import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.DirectScheduler;
 import org.flexlb.balance.scheduler.InflightStore;
+import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -68,11 +73,31 @@ class RouteServiceTest {
         flexlbConfig.setScheduleWorkerSize(1);
         flexlbConfig.setQueueingComponentQueueMaxSize(10);
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
-        routeService = new RouteService(configService, defaultRouter,
-                recentCacheKeyTraceReporter, NoOpFlexMonitor.getInstance(),
-                new InflightStore(batchSchedulerReporter, configService),
-                endpointRegistry, batchSchedulerReporter,
-                routingQueueReporter, dynamicWorkerManager);
+        InflightStore inflightStore = new InflightStore(batchSchedulerReporter, configService);
+
+        FlexlbMetricHelper batchHelper = new FlexlbMetricHelper(
+                NoOpFlexMonitor.getInstance(), MetricConstant.PATH_BATCH);
+        batchHelper.register();
+        BatchScheduler batchScheduler = new BatchScheduler(
+                configService, defaultRouter, endpointRegistry,
+                batchSchedulerReporter, inflightStore, batchHelper);
+
+        FlexlbMetricHelper queueHelper = new FlexlbMetricHelper(
+                NoOpFlexMonitor.getInstance(), MetricConstant.PATH_QUEUE);
+        queueHelper.register();
+        QueueScheduler queueScheduler = new QueueScheduler(
+                defaultRouter, configService, routingQueueReporter,
+                dynamicWorkerManager, inflightStore, queueHelper);
+
+        FlexlbMetricHelper directHelper = new FlexlbMetricHelper(
+                NoOpFlexMonitor.getInstance(), MetricConstant.PATH_DIRECT);
+        directHelper.register();
+        DirectScheduler directScheduler = new DirectScheduler(
+                defaultRouter, inflightStore, directHelper);
+
+        routeService = new RouteService(configService, recentCacheKeyTraceReporter,
+                inflightStore, endpointRegistry, batchSchedulerReporter,
+                batchScheduler, queueScheduler, directScheduler);
     }
 
     @AfterEach

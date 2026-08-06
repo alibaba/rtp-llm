@@ -4,6 +4,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -22,7 +23,7 @@ import java.util.concurrent.CompletableFuture;
  * <p>Subclasses implement {@link #submit(BalanceContext)} to route and
  * dispatch requests.
  */
-public abstract class AbstractScheduler {
+public abstract class AbstractScheduler implements DiagnosticsProvider {
 
     protected final InflightStore globalStore;
     protected final FlexlbMetricHelper metricHelper;
@@ -101,5 +102,41 @@ public abstract class AbstractScheduler {
      */
     public void reportMetrics() {
         // default: no scheduler-specific metrics
+    }
+
+    /**
+     * Start any background resources owned by this scheduler (e.g. worker
+     * pool, queue consumer). Called once at startup by
+     * {@code RouteService.start()}.
+     *
+     * <p>Default implementation is a no-op. Subclasses with background
+     * resources override this (e.g. {@link QueueScheduler} starts its
+     * {@code QueueingComponent} worker pool).
+     */
+    public void start() {
+        // default: no background resources to start
+    }
+
+    /**
+     * Shut down any background resources owned by this scheduler.
+     * Called once at shutdown by {@code RouteService.shutdown()}.
+     *
+     * <p>Default implementation is a no-op. Subclasses with background
+     * resources override this (e.g. {@link QueueScheduler} shuts down its
+     * {@code QueueingComponent} worker pool).
+     */
+    public void shutdown() {
+        // default: no background resources to shut down
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Default implementation returns an empty map. Subclasses with
+     * diagnostics to report (e.g. queue length) override this.
+     */
+    @Override
+    public Map<String, Object> getDiagnostics() {
+        return Map.of();
     }
 }

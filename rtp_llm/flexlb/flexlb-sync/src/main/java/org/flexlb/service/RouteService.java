@@ -3,32 +3,25 @@ package org.flexlb.service;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.balance.scheduler.AbstractScheduler;
 import org.flexlb.balance.scheduler.BatchScheduler;
-import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.DiagnosticsProvider;
 import org.flexlb.balance.scheduler.DirectScheduler;
 import org.flexlb.balance.scheduler.InflightItem;
 import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
-import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.service.monitor.FlexlbMetricHelper;
-import org.flexlb.service.monitor.RoutingQueueReporter;
-import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
-
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 @Component
@@ -46,43 +39,59 @@ public class RouteService {
     private final DirectScheduler directScheduler;
     private final InflightStore globalInflightStore;
 
+    /** Last execution timestamp for metrics report throttle. */
+    private volatile long lastMetricsReportTime = 0;
+
+    /**
+     * All schedulers, used for unified lifecycle management (start/shutdown)
+     * and metrics reporting. Order: BATCH → QUEUE → DIRECT.
+     */
+    private final List<AbstractScheduler> schedulers;
+
+    /**
+     * All diagnostics providers (schedulers + inflightStore + endpointRegistry),
+     * used by {@code HttpLoadBalanceServer} to aggregate diagnostics without
+     * hard-coded QUEUE-specific method calls.
+     */
+    private final List<DiagnosticsProvider> diagnosticsProviders;
+
     public RouteService(ConfigService configService,
-                        DefaultRouter router,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
-                        FlexMonitor flexMonitor,
                         InflightStore globalInflightStore,
                         EndpointRegistry endpointRegistry,
                         BatchSchedulerReporter reporter,
-                        RoutingQueueReporter routingQueueReporter,
-                        DynamicWorkerManager dynamicWorkerManager) {
+                        BatchScheduler batchScheduler,
+                        QueueScheduler queueScheduler,
+                        DirectScheduler directScheduler) {
         this.configService = configService;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
         this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
         this.reporter = reporter;
-
-        FlexlbMetricHelper batchHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_BATCH);
-        batchHelper.register();
-        FlexlbMetricHelper queueHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_QUEUE);
-        queueHelper.register();
-        FlexlbMetricHelper directHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_DIRECT);
-        directHelper.register();
-
-        this.batchScheduler = new BatchScheduler(configService, router, endpointRegistry,
-                reporter, globalInflightStore, batchHelper);
-        this.queueScheduler = new QueueScheduler(router, configService, routingQueueReporter,
-                dynamicWorkerManager, globalInflightStore, queueHelper);
-        this.directScheduler = new DirectScheduler(router, globalInflightStore, directHelper);
-    }
-
-    /** Start the queue consumer worker pool. */
-    @PostConstruct
-    public void start() {
-        queueScheduler.start();
+        this.batchScheduler = batchScheduler;
+        this.queueScheduler = queueScheduler;
+        this.directScheduler = directScheduler;
+        this.schedulers = List.of(batchScheduler, queueScheduler, directScheduler);
+        this.diagnosticsProviders = List.of(batchScheduler, queueScheduler, directScheduler,
+                globalInflightStore, endpointRegistry);
     }
 
     /**
-     * Route request to appropriate workers based on the deployment-level schedule mode.
+     * Start all schedulers' background resources (e.g. QUEUE worker pool).
+     * Each scheduler's {@link AbstractScheduler#start()} is a no-op unless
+     * overridden.
+     */
+    @PostConstruct
+    public void start() {
+        schedulers.forEach(AbstractScheduler::start);
+    }
+
+    /**
+     * Route request to the appropriate worker based on the deployment-level
+     * schedule mode. Pure dispatch — no mode-specific validation logic here;
+     * each scheduler owns its own admission checks (e.g. BatchScheduler
+     * validates generate input).
+     *
      * @param balanceContext Load balancing context
      * @return Routing result
      */
@@ -93,18 +102,11 @@ public class RouteService {
         ScheduleModeEnum mode = flexlbConfig.getDefaultScheduleModeEnum();
         balanceContext.setScheduleMode(mode);
 
-        AbstractScheduler scheduler;
-        if (mode == ScheduleModeEnum.BATCH && !hasValidGenerateInput(balanceContext)) {
-            Logger.warn("BATCH mode cannot process this request, falling back to DIRECT");
-            balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
-            scheduler = directScheduler;
-        } else {
-            scheduler = switch (mode) {
-                case BATCH -> batchScheduler;
-                case QUEUE -> queueScheduler;
-                default -> directScheduler;
-            };
-        }
+        AbstractScheduler scheduler = switch (mode) {
+            case BATCH -> batchScheduler;
+            case QUEUE -> queueScheduler;
+            default -> directScheduler;
+        };
 
         CompletableFuture<Response> resultFuture = scheduler.submit(balanceContext);
 
@@ -117,11 +119,6 @@ public class RouteService {
                 recentCacheKeyTraceReporter.report(balanceContext);
             }
         });
-    }
-
-    private boolean hasValidGenerateInput(BalanceContext ctx) {
-        byte[] bytes = ctx.getGenerateInputPbBytes();
-        return bytes != null && bytes.length > 0;
     }
 
     /**
@@ -165,37 +162,34 @@ public class RouteService {
     }
 
     /**
-     * Current routing queue length (QUEUE path). Exposed for the HTTP
-     * master-info endpoint.
+     * Expose all {@link DiagnosticsProvider} components for HTTP diagnostic
+     * endpoints. {@code HttpLoadBalanceServer} iterates this list to
+     * aggregate diagnostics (queue length, inflight count, EP counts, etc.)
+     * without hard-coded method calls on individual schedulers.
      */
-    public int queueLength() {
-        return queueScheduler.queueSize();
-    }
-
-    /**
-     * Dump the routing queue to a JSON snapshot file (QUEUE path). Exposed
-     * for the HTTP queue-snapshot diagnostic endpoint.
-     */
-    public QueueSnapshotResponse snapshotQueue() {
-        return queueScheduler.snapshotQueue();
+    public List<DiagnosticsProvider> getDiagnosticsProviders() {
+        return diagnosticsProviders;
     }
 
     /**
      * Periodically trigger scheduler-level and per-worker batch metrics
      * reporting.
      *
-     * <p>Runs every {@code report.interval.ms} (default 2000ms).
-     * <ul>
-     *   <li>Path-specific metrics via each scheduler's {@link AbstractScheduler#reportMetrics()}</li>
-     *   <li>Per-prefill-worker batch metrics (inflight batch count, queue depth, etc.)</li>
-     *   <li>Per-decode-worker batch metrics (inflight request count, KV reserved, etc.)</li>
-     * </ul>
+     * <p>Polls every 1s and throttles to {@code metricsReportIntervalMs}
+     * (default 2000ms, configurable via {@code METRICS_REPORT_INTERVAL_MS}
+     * env var). This pattern is used because {@code @Scheduled(fixedRate)}
+     * cannot directly reference a runtime config value.
      */
-    @Scheduled(fixedRateString = "${report.interval.ms:2000}")
+    @Scheduled(fixedRate = 1000)
     public void triggerSchedulerMetrics() {
-        batchScheduler.reportMetrics();
-        queueScheduler.reportMetrics();
-        directScheduler.reportMetrics();
+        long intervalMs = configService.loadBalanceConfig().getMetricsReportIntervalMs();
+        long now = System.currentTimeMillis();
+        if (now - lastMetricsReportTime < intervalMs) {
+            return;
+        }
+        lastMetricsReportTime = now;
+
+        schedulers.forEach(AbstractScheduler::reportMetrics);
 
         for (PrefillEndpoint ep : endpointRegistry.getPrefillEndpoints().values()) {
             ep.reportBatchMetrics(reporter);
@@ -207,7 +201,7 @@ public class RouteService {
 
     @PreDestroy
     public void shutdown() {
-        queueScheduler.shutdown();
+        schedulers.forEach(AbstractScheduler::shutdown);
         globalInflightStore.shutdown();
         endpointRegistry.close();
     }

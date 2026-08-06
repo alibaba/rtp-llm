@@ -56,5 +56,8 @@ flexlb:
     # Set to false to aggregate per-engine metrics (reduces ~139K series to ~250)
     # Default: per-engine tags retained (high cardinality with many engines)
     per-engine-tags: true
-    # Default: critical-only metrics reported. Set FLEXLB_MONITOR_MODE=all to report all metrics.
-    mode: critical-only
+    # Metrics whitelist (Micrometer path only; KMonitor always reports all).
+    # Set FLEXLB_MONITOR_CRITICAL_METRICS env var to a comma-separated list of
+    # metric names (without flexlb. prefix) to only report those metrics.
+    # Empty or "*" → report all metrics.
+    # KMonitor path is unaffected — production always reports all metrics.

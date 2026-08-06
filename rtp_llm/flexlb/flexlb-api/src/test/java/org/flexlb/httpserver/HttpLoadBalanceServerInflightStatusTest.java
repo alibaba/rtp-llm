@@ -3,6 +3,7 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.DiagnosticsProvider;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.service.RouteService;
@@ -10,6 +11,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.mockito.Mockito.mock;
@@ -44,7 +47,9 @@ class HttpLoadBalanceServerInflightStatusTest {
 
     @Test
     void inflightStatus_exposesBothLayersAndKvReservations() {
-        when(routeService.globalInflightSize()).thenReturn(4);
+        DiagnosticsProvider inflightProvider = mock(DiagnosticsProvider.class);
+        when(inflightProvider.getDiagnostics()).thenReturn(Map.of("active_count", 4));
+        when(routeService.getDiagnosticsProviders()).thenReturn(List.of(inflightProvider));
 
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         when(prefill.prefillInflightCount()).thenReturn(2);
@@ -90,7 +95,7 @@ class HttpLoadBalanceServerInflightStatusTest {
 
     @Test
     void inflightStatus_emptyRegistry_keepsLegacyTopLevelFields() {
-        when(routeService.globalInflightSize()).thenReturn(0);
+        when(routeService.getDiagnosticsProviders()).thenReturn(List.of());
         when(endpointRegistry.getPrefillEndpoints()).thenReturn(new ConcurrentHashMap<>());
         when(endpointRegistry.getDecodeEndpoints()).thenReturn(new ConcurrentHashMap<>());
 

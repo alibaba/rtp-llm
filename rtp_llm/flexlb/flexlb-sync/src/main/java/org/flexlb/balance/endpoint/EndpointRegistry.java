@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.BatchIdGenerator;
+import org.flexlb.balance.scheduler.DiagnosticsProvider;
 import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -15,12 +16,13 @@ import org.springframework.stereotype.Component;
 
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 @Component
-public class EndpointRegistry {
+public class EndpointRegistry implements DiagnosticsProvider {
 
     private final ConcurrentHashMap<String, PrefillEndpoint> prefillEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DecodeEndpoint> decodeEndpoints = new ConcurrentHashMap<>();
@@ -305,5 +307,21 @@ public class EndpointRegistry {
     public void scheduledEviction() {
         long ttlMs = configService.loadBalanceConfig().getFlexlbEpInflightTtlMs();
         evictExpiredAll(ttlMs);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Returns the count of registered endpoints by role for the HTTP
+     * diagnostic endpoints.
+     */
+    @Override
+    public Map<String, Object> getDiagnostics() {
+        Map<String, Object> diag = new LinkedHashMap<>();
+        diag.put("prefill_endpoint_count", prefillEndpoints.size());
+        diag.put("decode_endpoint_count", decodeEndpoints.size());
+        diag.put("pd_fusion_endpoint_count", pdFusionEndpoints.size());
+        diag.put("vit_endpoint_count", vitEndpoints.size());
+        return diag;
     }
 }

@@ -3,6 +3,7 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.DiagnosticsProvider;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -134,12 +135,32 @@ public class HttpLoadBalanceServer {
         return summary.isEmpty() ? null : summary;
     }
 
+    /**
+     * Aggregate diagnostics from all {@link DiagnosticsProvider} components
+     * (schedulers, inflightStore, endpointRegistry) registered in
+     * {@link RouteService#getDiagnosticsProviders()}. This replaces
+     * hard-coded calls to {@code queueLength()} / {@code snapshotQueue()}
+     * — the HTTP layer no longer needs to know which scheduler owns which
+     * diagnostic; it just searches the aggregated map by well-known keys.
+     */
+    private Map<String, Object> aggregateDiagnostics() {
+        Map<String, Object> all = new LinkedHashMap<>();
+        for (DiagnosticsProvider provider : routeService.getDiagnosticsProviders()) {
+            all.putAll(provider.getDiagnostics());
+        }
+        return all;
+    }
+
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
-                    result.setQueueLength(routeService.queueLength());
+                    // Aggregate queue length from DiagnosticsProvider instead of
+                    // hard-coded queueLength() call on RouteService.
+                    Map<String, Object> masterDiagnostics = aggregateDiagnostics();
+                    Object ql = masterDiagnostics.get("queue_length");
+                    result.setQueueLength(ql instanceof Integer ? (Integer) ql : 0);
                     result.setCode(200);
                     result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());
@@ -191,7 +212,13 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            QueueSnapshotResponse response = routeService.snapshotQueue();
+            // Extract queue snapshot from DiagnosticsProvider instead of
+            // hard-coded snapshotQueue() call on RouteService.
+            Map<String, Object> snapshotDiagnostics = aggregateDiagnostics();
+            Object qs = snapshotDiagnostics.get("queue_snapshot");
+            QueueSnapshotResponse response = qs instanceof QueueSnapshotResponse
+                    ? (QueueSnapshotResponse) qs
+                    : new QueueSnapshotResponse();
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Mono.just(response), QueueSnapshotResponse.class);
@@ -206,7 +233,11 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", routeService.globalInflightSize());
+            // Aggregate inflight count from DiagnosticsProvider instead of
+            // hard-coded globalInflightSize() call on RouteService.
+            Map<String, Object> inflightDiag = aggregateDiagnostics();
+            Object ac = inflightDiag.get("active_count");
+            result.put("scheduler_inflight", ac instanceof Integer ? (Integer) ac : 0);
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
             for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {

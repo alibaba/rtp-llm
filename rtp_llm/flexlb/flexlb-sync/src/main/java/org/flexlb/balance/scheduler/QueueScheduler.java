@@ -12,6 +12,8 @@ import org.flexlb.util.Logger;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
@@ -64,10 +66,12 @@ public class QueueScheduler extends DirectScheduler {
     // ==================== Lifecycle ====================
 
     /** Start the queue consumer worker pool. */
+    @Override
     public void start() {
         queueing.start();
     }
 
+    @Override
     public void shutdown() {
         queueing.shutdown();
     }
@@ -204,6 +208,20 @@ public class QueueScheduler extends DirectScheduler {
     /** Dump the queued requests to a JSON snapshot file. */
     public QueueSnapshotResponse snapshotQueue() {
         return queueing.snapshot();
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Returns queue length and a full queue snapshot for the HTTP
+     * diagnostic endpoints.
+     */
+    @Override
+    public Map<String, Object> getDiagnostics() {
+        Map<String, Object> diag = new LinkedHashMap<>();
+        diag.put("queue_length", queueSize());
+        diag.put("queue_snapshot", snapshotQueue());
+        return diag;
     }
 
     /**

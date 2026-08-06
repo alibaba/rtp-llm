@@ -38,7 +38,6 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.BATCH_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_ENGINE_WORK_COUNT;
 import static org.flexlb.constant.MetricConstant.PREFILL_INFLIGHT_ENTRIES_COUNT;
-import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_TOTAL_SIZE;
 
@@ -47,7 +46,7 @@ import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_TOTAL_SIZE;
  *
  * <p>Batch-path metrics use independent metric names to avoid tag schema
  * conflicts with the non-batch path:
- * queue (routing.queue.length + flexlb.batch.queue.wait.time.ms),
+ * queue (flexlb.batcher.queue.size + flexlb.batch.queue.wait.time.ms),
  * dispatch reason (engine.balancing.master.dispatch.reason),
  * inflight (flexlb.scheduler.inflight.size).
  */
@@ -70,8 +69,7 @@ public class BatchSchedulerReporter {
     public void init() {
         // Batch queue wait time — batch-path-only TIMER, independent from the
         // non-batch routing.queue.wait.time.ms GAUGE owned by RoutingQueueReporter.
-        // routing.queue.length itself is registered by RoutingQueueReporter;
-        // this reporter only reports to it (type=batchQueue tag).
+        // routing.queue.length is registered and reported solely by RoutingQueueReporter.
         monitor.register(BATCH_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
         // Dispatch reason — independent metric for batch path
@@ -132,16 +130,6 @@ public class BatchSchedulerReporter {
     }
 
     // ==================== Queue metrics ====================
-
-    /**
-     * Report per-worker batcher queue depth via {@code routing.queue.length}.
-     */
-    public void reportBatcherQueueDepth(String role, String engineIp, int depth) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
-                "type", "batchQueue",
-                "role", role);
-        monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
-    }
 
     /**
      * Report per-worker batcher queue size via {@code app.flexlb.batcher.queue.size}.
