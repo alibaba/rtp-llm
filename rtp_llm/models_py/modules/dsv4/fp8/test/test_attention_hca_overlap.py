@@ -21,6 +21,9 @@ without spinning up a real DSV4 layer (no DeepGEMM / no real KV pool):
   * ``_forward_prefill_compressed(_skip_compressor_write=True)`` does NOT
     invoke ``self.compressor`` — the orchestrator already drained it.
 
+  * Workspace and SWA-only attention share one Q-chunk + immediate output-
+    projection path; SWA Q chunks remain views of ``PrefillWorkspace``.
+
   * Process-wide CP streams are cached + reused: serialized compressor/cache
     communication and post-gather local work.
 """
@@ -39,9 +42,11 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     AttentionFP8,
     PrefillMeta,
     PrefillQKV,
+    SwaPrefillMeta,
     WorkspaceMeta,
     _prefill_cp_overlap_enabled,
 )
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 
 def _make_attention_stub(
@@ -341,9 +346,6 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
         layer._attn_fp8_swa_via_kv_full = MagicMock(  # type: ignore[assignment]
             return_value=torch.zeros(2, 8, dtype=torch.bfloat16)
         )
-        layer._prefill_output_proj = MagicMock(  # type: ignore[assignment]
-            return_value=torch.zeros(2, 8, dtype=torch.bfloat16)
-        )
         layer._prefill_output_all_reduce = MagicMock(  # type: ignore[assignment]
             name="_prefill_output_all_reduce"
         )
@@ -367,19 +369,15 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
         layer.compressor.assert_not_called()
         layer.compressor.start_prefill.assert_not_called()
         layer.compressor.finish_prefill.assert_not_called()
-        layer._prefill_output_all_reduce.assert_called_once()
-        self.assertEqual(
-            tuple(layer._prefill_output_all_reduce.call_args.args[0].shape),
-            (2, 8),
-        )
+        # The SWA attention helper now owns chunked output projection + the
+        # single all-reduce. It is mocked in this orchestration test, so the
+        # outer compressed fallback must not repeat either operation.
+        layer._prefill_output_all_reduce.assert_not_called()
         self.assertEqual(tuple(out.shape), (2, 8))
 
     def test_default_skip_false_invokes_compressor(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
         layer._attn_fp8_swa_via_kv_full = MagicMock(  # type: ignore[assignment]
-            return_value=torch.zeros(2, 8, dtype=torch.bfloat16)
-        )
-        layer._prefill_output_proj = MagicMock(  # type: ignore[assignment]
             return_value=torch.zeros(2, 8, dtype=torch.bfloat16)
         )
         layer._prefill_output_all_reduce = MagicMock(  # type: ignore[assignment]
@@ -408,11 +406,7 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
             meta=common.hca_meta.compressor_meta,
             workspace=common.workspace,
         )
-        layer._prefill_output_all_reduce.assert_called_once()
-        self.assertEqual(
-            tuple(layer._prefill_output_all_reduce.call_args.args[0].shape),
-            (2, 8),
-        )
+        layer._prefill_output_all_reduce.assert_not_called()
         self.assertEqual(tuple(out.shape), (2, 8))
 
     def test_workspace_branch_returns_projected_output_without_outer_projection(
@@ -454,6 +448,7 @@ class CompressedSkipCompressorWriteTest(unittest.TestCase):
 class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
     def test_workspace_streams_flash_chunks_into_projected_output(self) -> None:
         layer = _make_attention_stub(compress_ratio=128)
+        layer.n_heads = 1
         layer.head_dim = 2
         layer.dim = 8
         layer.softmax_scale = 1.0
@@ -466,6 +461,17 @@ class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
             name="_prefill_output_all_reduce"
         )
 
+        workspace = PrefillWorkspace(
+            torch.device("cpu"),
+            q_rows=5,
+            q_dim=2,
+            reserve_cp=False,
+            align_bytes=1,
+        )
+        q_from_workspace = workspace.prefill_q(5).view(5, 1, 2)
+        q_from_workspace.copy_(
+            torch.arange(10, dtype=torch.float32).view(5, 1, 2).to(torch.bfloat16)
+        )
         common = PrefillMeta(
             seqlen=5,
             seqlen_full=5,
@@ -479,10 +485,11 @@ class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
             any_cont=False,
             row_seqlens_full=torch.tensor([5], dtype=torch.long),
             batch_size=1,
+            workspace=workspace,
         )
         qkv = PrefillQKV(
             qr=torch.zeros(5, 2, dtype=torch.bfloat16),
-            q=torch.arange(10, dtype=torch.float32).view(5, 1, 2).to(torch.bfloat16),
+            q=q_from_workspace,
             kv_full=torch.arange(10, dtype=torch.float32).view(5, 2),
         )
         workspace_meta = WorkspaceMeta(
@@ -541,9 +548,9 @@ class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
             side_effect=fake_output_proj_into
         )
 
-        with patch.dict(
-            os.environ,
-            {"DSV4_FLASH_MLA_SPARSE_Q_CHUNK": "2"},
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.attention." "_FLASH_MLA_SPARSE_Q_CHUNK",
+            2,
         ), patch.dict(
             "sys.modules",
             {
@@ -582,6 +589,237 @@ class WorkspaceStreamingOutputProjectionTest(unittest.TestCase):
         self.assertTrue(torch.equal(projected_chunks[0][2], common.freqs_cis[0:2]))
         self.assertTrue(torch.equal(projected_chunks[1][2], common.freqs_cis[2:4]))
         self.assertTrue(torch.equal(projected_chunks[2][2], common.freqs_cis[4:5]))
+        self.assertTrue(torch.all(out[0:2] == 1))
+        self.assertTrue(torch.all(out[2:4] == 2))
+        self.assertTrue(torch.all(out[4:5] == 3))
+        layer._prefill_output_all_reduce.assert_called_once_with(out)
+
+
+class SwaStreamingOutputProjectionTest(unittest.TestCase):
+    def test_chunk_helper_rejects_empty_q(self) -> None:
+        layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
+        layer.n_heads = 1
+        layer.head_dim = 2
+        workspace = PrefillWorkspace(
+            torch.device("cpu"),
+            q_rows=1,
+            q_dim=2,
+            reserve_cp=False,
+            align_bytes=1,
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "requires at least one Q row",
+        ):
+            layer._flash_mla_sparse_fwd_chunked_projected(
+                q=workspace.prefill_q(0).view(0, 1, 2),
+                kv=torch.zeros(0, 1, 2, dtype=torch.bfloat16),
+                indices=torch.zeros(0, 1, 1, dtype=torch.int32),
+                topk_length=torch.zeros(0, dtype=torch.int32),
+                freqs_cis=torch.zeros(0, 1, dtype=torch.float32),
+                prefill_workspace=workspace,
+                profile_name="test",
+            )
+
+    def test_chunk_helper_rejects_prefill_workspace_overflow(self) -> None:
+        layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
+        layer.n_heads = 1
+        layer.head_dim = 2
+        workspace = PrefillWorkspace(
+            torch.device("cpu"),
+            q_rows=4,
+            q_dim=2,
+            reserve_cp=False,
+            align_bytes=1,
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "prefill_q overflow: num_tokens=5",
+        ):
+            layer._flash_mla_sparse_fwd_chunked_projected(
+                q=torch.zeros(5, 1, 2, dtype=torch.bfloat16),
+                kv=torch.zeros(5, 1, 2, dtype=torch.bfloat16),
+                indices=torch.zeros(5, 1, 1, dtype=torch.int32),
+                topk_length=torch.ones(5, dtype=torch.int32),
+                freqs_cis=torch.zeros(5, 1, dtype=torch.float32),
+                prefill_workspace=workspace,
+                profile_name="test",
+            )
+
+    def test_chunk_helper_rejects_q_outside_prefill_workspace(self) -> None:
+        layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
+        layer.n_heads = 1
+        layer.head_dim = 2
+        workspace = PrefillWorkspace(
+            torch.device("cpu"),
+            q_rows=5,
+            q_dim=2,
+            reserve_cp=False,
+            align_bytes=1,
+        )
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "prefill Q must reuse PrefillWorkspace storage",
+        ):
+            layer._flash_mla_sparse_fwd_chunked_projected(
+                q=torch.zeros(5, 1, 2, dtype=torch.bfloat16),
+                kv=torch.zeros(5, 1, 2, dtype=torch.bfloat16),
+                indices=torch.zeros(5, 1, 1, dtype=torch.int32),
+                topk_length=torch.ones(5, dtype=torch.int32),
+                freqs_cis=torch.zeros(5, 1, dtype=torch.float32),
+                prefill_workspace=workspace,
+                profile_name="test",
+            )
+
+    def test_swa_forward_does_not_project_chunked_result_twice(self) -> None:
+        layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
+        layer._kv_cache = None
+        qkv = _make_qkv(torch.device("cpu"))
+        common = _make_common(cp_on=False)
+        projected = torch.zeros(2, 8, dtype=torch.bfloat16)
+        layer._materialize_prefill_q = MagicMock(  # type: ignore[assignment]
+            return_value=qkv
+        )
+        layer._attn_fp8_swa_via_kv_full = MagicMock(  # type: ignore[assignment]
+            return_value=projected
+        )
+        layer._prefill_output_proj = MagicMock(  # type: ignore[assignment]
+            name="_prefill_output_proj"
+        )
+        layer._prefill_output_all_reduce = MagicMock(  # type: ignore[assignment]
+            name="_prefill_output_all_reduce"
+        )
+
+        out = layer._forward_prefill_swa_only(qkv, common)
+
+        self.assertIs(out, projected)
+        layer._attn_fp8_swa_via_kv_full.assert_called_once_with(qkv, common)
+        layer._prefill_output_proj.assert_not_called()
+        layer._prefill_output_all_reduce.assert_not_called()
+
+    def test_swa_chunks_workspace_q_into_projected_output(self) -> None:
+        layer = _make_attention_stub(compress_ratio=0, has_compressor=False)
+        layer.n_heads = 1
+        layer.head_dim = 2
+        layer.dim = 8
+        layer.softmax_scale = 1.0
+        layer.attn_sink = None
+        layer._prefill_output_all_reduce = MagicMock(  # type: ignore[assignment]
+            name="_prefill_output_all_reduce"
+        )
+
+        workspace = PrefillWorkspace(
+            torch.device("cpu"),
+            q_rows=5,
+            q_dim=2,
+            reserve_cp=False,
+            align_bytes=1,
+        )
+        q_from_workspace = workspace.prefill_q(5).view(5, 1, 2)
+        q_from_workspace.copy_(
+            torch.arange(10, dtype=torch.float32).view(5, 1, 2).to(torch.bfloat16)
+        )
+        workspace_storage_ptr = workspace._union.untyped_storage().data_ptr()
+
+        swa_meta = SwaPrefillMeta(
+            slot_mapping=None,
+            query_start_loc=None,
+            combined_seq_lens=None,
+            topk_length_kv_full=torch.tensor([1, 2, 2, 2, 2], dtype=torch.int32),
+            combined_gather_lens=None,
+            combined_gather_len_max=0,
+            M=0,
+            cache_seq_lens=None,
+            cache_gather_lens=None,
+            prefix_len_max=0,
+            combined_indices=None,
+            combined_lens=None,
+            slot_in_flat=None,
+        )
+        common = PrefillMeta(
+            seqlen=5,
+            seqlen_full=5,
+            rd=0,
+            device=torch.device("cpu"),
+            cp_ctx=None,
+            cp_on=False,
+            freqs_cis=torch.arange(10, dtype=torch.float32).view(5, 2),
+            topk_idxs=torch.zeros(5, 2, dtype=torch.int32),
+            sp_int=0,
+            any_cont=False,
+            row_seqlens_full=torch.tensor([5], dtype=torch.long),
+            swa_meta=swa_meta,
+            workspace=workspace,
+        )
+        qkv = PrefillQKV(
+            qr=torch.zeros(5, 2, dtype=torch.bfloat16),
+            q=q_from_workspace,
+            kv_full=torch.arange(10, dtype=torch.float32).view(5, 2).to(torch.bfloat16),
+        )
+
+        flash_q_shapes = []
+        flash_q_storage_ptrs = []
+
+        def fake_flash_mla_sparse_fwd(q, kv, indices, sm_scale, attn_sink, topk_length):
+            flash_q_shapes.append(tuple(q.shape))
+            flash_q_storage_ptrs.append(q.untyped_storage().data_ptr())
+            self.assertEqual(int(indices.shape[0]), int(q.shape[0]))
+            self.assertEqual(int(topk_length.shape[0]), int(q.shape[0]))
+            return (
+                torch.full(
+                    (q.shape[0], 1, 2),
+                    float(len(flash_q_shapes)),
+                    dtype=torch.bfloat16,
+                ),
+                None,
+                None,
+            )
+
+        projected_chunks = []
+
+        def fake_output_proj_into(o, freqs_cis, *, out):
+            projected_chunks.append(
+                (tuple(o.shape), freqs_cis.clone(), tuple(out.shape))
+            )
+            out.fill_(len(projected_chunks))
+
+        layer._prefill_output_proj_into = MagicMock(  # type: ignore[assignment]
+            side_effect=fake_output_proj_into
+        )
+
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.attention." "_FLASH_MLA_SPARSE_Q_CHUNK",
+            2,
+        ), patch.dict(
+            "sys.modules",
+            {
+                "flash_mla": SimpleNamespace(
+                    flash_mla_sparse_fwd=fake_flash_mla_sparse_fwd
+                )
+            },
+        ):
+            out = layer._attn_fp8_swa_via_kv_full(qkv, common)
+
+        self.assertEqual(tuple(out.shape), (5, 8))
+        self.assertEqual(flash_q_shapes, [(2, 1, 2), (2, 1, 2), (1, 1, 2)])
+        self.assertEqual(
+            flash_q_storage_ptrs,
+            [workspace_storage_ptr, workspace_storage_ptr, workspace_storage_ptr],
+        )
+        self.assertEqual(
+            [chunk[0] for chunk in projected_chunks],
+            [(2, 1, 2), (2, 1, 2), (1, 1, 2)],
+        )
+        self.assertEqual(
+            [chunk[2] for chunk in projected_chunks],
+            [(2, 8), (2, 8), (1, 8)],
+        )
+        self.assertTrue(torch.equal(projected_chunks[0][1], common.freqs_cis[0:2]))
+        self.assertTrue(torch.equal(projected_chunks[1][1], common.freqs_cis[2:4]))
+        self.assertTrue(torch.equal(projected_chunks[2][1], common.freqs_cis[4:5]))
         self.assertTrue(torch.all(out[0:2] == 1))
         self.assertTrue(torch.all(out[2:4] == 2))
         self.assertTrue(torch.all(out[4:5] == 3))

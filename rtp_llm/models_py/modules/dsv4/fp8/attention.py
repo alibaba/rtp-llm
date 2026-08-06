@@ -39,6 +39,7 @@ from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
     rmsnorm_fp8_quant_ue8m0,
 )
+
 # Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
 # Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
 # (no-RoPE) RMSNorm sites (``_rmsnorm_weighted``) use the framework C++
@@ -316,6 +317,19 @@ _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 _DSV4_FP8_KV_ENTRY_BYTES = 584
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
+
+# Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
+# validate the environment once at module import instead of parsing it in the
+# per-layer forward hot path.
+_FLASH_MLA_SPARSE_Q_CHUNK = dsv4_chunk_tokens_from_env(
+    "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
+    min_value=0,
+)
+if _FLASH_MLA_SPARSE_Q_CHUNK <= 0:
+    raise ValueError(
+        "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for streaming "
+        "attention output projection"
+    )
 
 
 def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
@@ -2712,21 +2726,20 @@ class AttentionFP8(nn.Module):
         """SWA-only path (compress_ratio == 0). Skips kv_cat + sparse_attn.
         Cold/warmup attends over BF16 ``kv_full`` directly; continuation
         builds ``[prefix_tail | new_K_bf16]`` in a workspace and runs
-        ``flash_mla_sparse_fwd`` over it. ``any_cont`` is varlen-aware
-        (set from ``prefix_lengths.any()`` under varlen, ``sp_int > 0``
-        otherwise) so a B>1 batch with any continuation request takes the
-        workspace path."""
+        chunked ``flash_mla_sparse_fwd`` over it. Each attention chunk is
+        output-projected immediately, so the full ``[T, H, D]`` attention
+        output is never materialized alongside Q. ``any_cont`` is
+        varlen-aware (set from ``prefix_lengths.any()`` under varlen,
+        ``sp_int > 0`` otherwise) so a B>1 batch with any continuation
+        request takes the workspace path."""
         # No compressor on this path → Q's union slice is free; materialize now.
         qkv = self._materialize_prefill_q(qkv, common)
         if not common.any_cont or self._kv_cache is None:
             with record_function_range("dsv4.fp8.attn.swa.via_kv_full"):
-                o = self._attn_fp8_swa_via_kv_full(qkv, common)
+                out = self._attn_fp8_swa_via_kv_full(qkv, common)
         else:
             with record_function_range("dsv4.fp8.attn.swa.via_concat"):
-                o = self._attn_fp8_swa_via_concat(qkv, common)
-        with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-            out = self._prefill_output_proj(o, common.freqs_cis)
-        self._prefill_output_all_reduce(out)
+                out = self._attn_fp8_swa_via_concat(qkv, common)
         return out
 
     def _forward_prefill_csa(
@@ -3043,10 +3056,7 @@ class AttentionFP8(nn.Module):
             # Warmup forward: pool not bound. Fall back to BF16 ``kv_full``
             # SWA-only attention so framework shape inference still runs.
             with record_function_range("dsv4.fp8.attn.compressed.warmup_attn"):
-                o = self._attn_fp8_swa_via_kv_full(qkv, common)
-            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                out = self._prefill_output_proj(o, common.freqs_cis)
-            self._prefill_output_all_reduce(out)
+                out = self._attn_fp8_swa_via_kv_full(qkv, common)
         else:
             with record_function_range("dsv4.fp8.attn.compressed.workspace_attn"):
                 out = self._attn_via_workspace(
@@ -3093,7 +3103,6 @@ class AttentionFP8(nn.Module):
         ``arange(N_max)`` per token) is used instead.
         """
         assert qkv.q is not None, "_attn_via_workspace: prefill Q not materialized"
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
 
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
@@ -3299,24 +3308,17 @@ class AttentionFP8(nn.Module):
                 )
                 cmp_topk = cmp_topk_runtime
 
-            # Prepare FlashMLA's chunk/output objects before combine_topk. The
+            # Prepare FlashMLA's KV view before combine_topk. The
             # combine kernel is queued behind the overlay writes on the same
             # stream, so moving pure CPU/view/allocation work here lets it run
             # while the GPU drains the pre-combine dependency chain.
             kv_view = workspace.view(B * wm.M, 1, D)
-            q_chunk = dsv4_chunk_tokens_from_env(
-                "DSV4_FLASH_MLA_SPARSE_Q_CHUNK",
-                min_value=0,
+            projected_out = torch.empty(
+                qkv.q.shape[0],
+                self.dim,
+                dtype=torch.bfloat16,
+                device=qkv.q.device,
             )
-            s_q = qkv.q.shape[0]
-            out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=qkv.q.device)
-            if q_chunk <= 0:
-                raise ValueError(
-                    "DSV4_FLASH_MLA_SPARSE_Q_CHUNK must be positive for workspace "
-                    "streaming output projection"
-                )
-            chunk_rows = min(q_chunk, s_q)
-            freqs_all = common.freqs_cis
 
             if common.cp_on:
                 # Phase F2/Phase-2: kernel ``combine_topk_swa_indices`` derives
@@ -3417,56 +3419,16 @@ class AttentionFP8(nn.Module):
                     )
                 swa_prefix_pending = None
 
-            # flash_mla_sparse_fwd is chunked along Q so each launch stays
-            # below ``DSV4_FLASH_MLA_SPARSE_Q_CHUNK`` rows. Sparse attention
-            # has no cross-Q dependency so chunking is bit-equal. Each chunk is
-            # immediately output-projected into the final contiguous [T, dim]
-            # buffer, avoiding the previous full [T, H, D] o3 allocation and copy.
-            # Disallow the historical "0 disables chunking" escape hatch here:
-            # this path's purpose is to avoid materializing full [T, H, D] attention.
-            indices_3d = combined_indices
-            if chunk_rows >= s_q:
-                with record_function_range(
-                    "dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"
-                ):
-                    o_part, _, _ = flash_mla_sparse_fwd(
-                        q=qkv.q,
-                        kv=kv_view,
-                        indices=indices_3d,
-                        sm_scale=self.softmax_scale,
-                        attn_sink=self.attn_sink,
-                        topk_length=combined_lens,
-                    )
-                with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                    self._prefill_output_proj_into(
-                        o_part,
-                        freqs_all,
-                        out=out,
-                    )
-                dispose_tensor(o_part)
-            else:
-                for start in range(0, s_q, chunk_rows):
-                    end = min(start + chunk_rows, s_q)
-                    with record_function_range(
-                        "dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"
-                    ):
-                        o_part, _, _ = flash_mla_sparse_fwd(
-                            q=qkv.q[start:end],
-                            kv=kv_view,
-                            indices=indices_3d[start:end],
-                            sm_scale=self.softmax_scale,
-                            attn_sink=self.attn_sink,
-                            topk_length=combined_lens[start:end],
-                        )
-                    with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                        self._prefill_output_proj_into(
-                            o_part,
-                            freqs_all[start:end],
-                            out=out[start:end, :],
-                        )
-                    dispose_tensor(o_part)
-            self._prefill_output_all_reduce(out)
-            return out
+            return self._flash_mla_sparse_fwd_chunked_projected(
+                q=qkv.q,
+                kv=kv_view,
+                indices=combined_indices,
+                topk_length=combined_lens,
+                freqs_cis=common.freqs_cis,
+                prefill_workspace=common.workspace,
+                profile_name="dsv4.fp8.attn.workspace.flash_mla_sparse_fwd",
+                out=projected_out,
+            )
         finally:
             if cmp_pending is not None and cmp_reader_for_pending is not None:
                 cmp_reader_for_pending.discard_fill_async(cmp_pending)
@@ -5230,12 +5192,109 @@ class AttentionFP8(nn.Module):
             else:
                 _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
 
+    def _flash_mla_sparse_fwd_chunked_projected(
+        self,
+        *,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        indices: torch.Tensor,
+        topk_length: torch.Tensor,
+        freqs_cis: torch.Tensor,
+        prefill_workspace: Optional[PrefillWorkspace],
+        profile_name: str,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run sparse prefill attention in Q chunks and project immediately.
+
+        ``q`` is the live view of the per-forward ``PrefillWorkspace`` Q
+        region. Keeping the chunking here (instead of copying Q into another
+        scratch buffer) preserves that storage reuse while bounding the only
+        large attention temporary to ``[q_chunk, n_heads, head_dim]``. Sparse
+        prefill has no dependency across Q rows, so slicing Q, indices,
+        topk-length and RoPE frequencies on the same boundaries is equivalent
+        to a full launch.
+
+        The projected result is written directly into the final contiguous
+        ``[T, dim]`` tensor. The unprojected full ``[T, H, D]`` output is never
+        allocated. A caller may preallocate ``out`` to overlap its allocation
+        with preceding GPU work; the same tensor is returned after an in-place
+        all-reduce. The caller must keep ``kv`` alive until this method returns.
+        """
+        assert prefill_workspace is not None, "prefill workspace not bound"
+        s_q = int(q.shape[0])
+        assert s_q > 0, "streaming FlashMLA prefill requires at least one Q row"
+        q_workspace = prefill_workspace.prefill_q(s_q)
+        assert q.dtype == torch.bfloat16, f"prefill Q must be bf16, got {q.dtype}"
+        assert q.is_contiguous(), "prefill Q workspace view must be contiguous"
+        assert tuple(q.shape[1:]) == (self.n_heads, self.head_dim), (
+            "prefill Q shape mismatch: expected "
+            f"[T, {self.n_heads}, {self.head_dim}], got {tuple(q.shape)}"
+        )
+        assert q.numel() == q_workspace.numel(), (
+            "prefill workspace Q shape mismatch: "
+            f"q.numel={q.numel()} != workspace.numel={q_workspace.numel()}"
+        )
+        assert q.data_ptr() == q_workspace.data_ptr(), (
+            "prefill Q must reuse PrefillWorkspace storage; got different "
+            "base pointers"
+        )
+        assert (
+            int(indices.shape[0]) == s_q
+        ), f"indices rows ({indices.shape[0]}) != Q rows ({s_q})"
+        assert topk_length.ndim == 1 and int(topk_length.shape[0]) == s_q, (
+            "topk_length must be one-dimensional with one entry per Q row; "
+            f"got shape {tuple(topk_length.shape)} for {s_q} Q rows"
+        )
+        assert (
+            int(freqs_cis.shape[0]) == s_q
+        ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
+
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
+        if out is None:
+            out = torch.empty(s_q, self.dim, dtype=torch.bfloat16, device=q.device)
+        else:
+            assert (
+                out.dtype == torch.bfloat16
+            ), f"projected output must be bf16, got {out.dtype}"
+            assert (
+                out.device == q.device
+            ), f"projected output device ({out.device}) != Q device ({q.device})"
+            assert out.is_contiguous(), "projected output must be contiguous"
+            assert tuple(out.shape) == (s_q, self.dim), (
+                "projected output shape mismatch: expected "
+                f"({s_q}, {self.dim}), got {tuple(out.shape)}"
+            )
+
+        for start in range(0, s_q, chunk_rows):
+            end = min(start + chunk_rows, s_q)
+            with record_function_range(profile_name):
+                o_part, _, _ = flash_mla_sparse_fwd(
+                    q=q[start:end],
+                    kv=kv,
+                    indices=indices[start:end],
+                    sm_scale=self.softmax_scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=topk_length[start:end],
+                )
+            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                self._prefill_output_proj_into(
+                    o_part,
+                    freqs_cis[start:end],
+                    out=out[start:end, :],
+                )
+            dispose_tensor(o_part)
+
+        self._prefill_output_all_reduce(out)
+        return out
+
     def _attn_fp8_swa_via_kv_full(
         self,
         qkv: PrefillQKV,
         common: PrefillMeta,
     ) -> torch.Tensor:
-        """sparse_fwd over BF16 ``kv_full`` directly — no FP8 round-trip.
+        """Chunked sparse_fwd over BF16 ``kv_full`` — no FP8 round-trip.
 
         Used by:
           * cold prefill (``sp == 0``) — pool capacity (``2 * eb``)
@@ -5244,16 +5303,15 @@ class AttentionFP8(nn.Module):
           * warmup forward (``self._kv_cache is None``) — pool not yet
             allocated; needed for the framework's dry-run shape inference.
 
-        Caller is responsible for pre-writing the new K to the FP8 SWA
-        pool (via ``_prefill_write_swa_fp8_paged``) for future decode
-        reads — write order doesn't matter here since this path doesn't
-        read from the pool.
+        Each Q chunk is output-projected into the final ``[T, dim]`` result
+        before the next chunk starts. Caller is responsible for pre-writing
+        the new K to the FP8 SWA pool (via
+        ``_prefill_write_swa_fp8_paged``) for future decode reads — write
+        order doesn't matter here since this path doesn't read from the pool.
         """
         assert (
             qkv.q is not None
         ), "_attn_fp8_swa_via_kv_full: prefill Q not materialized"
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         meta = common.swa_meta
         assert meta is not None and meta.topk_length_kv_full is not None, (
             "FP8 SWA prefill requires common.swa_meta.topk_length_kv_full; "
@@ -5281,18 +5339,18 @@ class AttentionFP8(nn.Module):
             ti = ti.squeeze(0)
         indices = ti.unsqueeze(1).to(torch.int32)
 
-        with record_function_range("dsv4.fp8.attn.swa.flash_mla_kv_full"):
-            o3, _, _ = flash_mla_sparse_fwd(
-                q=qkv.q,
-                kv=qkv.kv_full.unsqueeze(1),
-                indices=indices,
-                sm_scale=self.softmax_scale,
-                attn_sink=self.attn_sink,
-                topk_length=meta.topk_length_kv_full,
-            )
-        # kv_full has no remaining consumer after flash_mla_sparse_fwd.
+        out = self._flash_mla_sparse_fwd_chunked_projected(
+            q=qkv.q,
+            kv=qkv.kv_full.unsqueeze(1),
+            indices=indices,
+            topk_length=meta.topk_length_kv_full,
+            freqs_cis=common.freqs_cis,
+            prefill_workspace=common.workspace,
+            profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
+        )
+        # kv_full has no remaining consumer after all attention chunks drain.
         dispose_tensor(qkv.kv_full)
-        return o3.unsqueeze(0)
+        return out
 
     def _attn_fp8_swa_via_concat(
         self,
@@ -5310,14 +5368,14 @@ class AttentionFP8(nn.Module):
              ``cache_seq_lens`` / ``cache_gather_lens`` ``[B]`` tensors.
           2. Vectorized scatter places the freshly computed new K into
              ``workspace[b, P_b:P_b+S_b, :]`` — no per-request Python loop.
-          3. ``flash_mla_sparse_fwd`` over ``workspace.view(B*M, 1, D)``;
-             ``combined_indices`` already carries ``M*batch_idx + slot``
-             from ``combine_topk_swa_indices``.
+          3. Chunked ``flash_mla_sparse_fwd`` over
+             ``workspace.view(B*M, 1, D)``; ``combined_indices`` already
+             carries ``M*batch_idx + slot`` from
+             ``combine_topk_swa_indices``. Each chunk is immediately output-
+             projected into the final ``[T, dim]`` result.
 
         """
         assert qkv.q is not None, "_attn_fp8_swa_via_concat: prefill Q not materialized"
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 
@@ -5396,17 +5454,16 @@ class AttentionFP8(nn.Module):
         dispose_tensor(kv_bf16)
         dispose_tensor(qkv.kv_full)
 
-        # 3. flash_mla_sparse_fwd over the [B*M] flat KV view.
-        with record_function_range("dsv4.fp8.attn.swa_concat.flash_mla"):
-            o3, _, _ = flash_mla_sparse_fwd(
-                q=qkv.q,
-                kv=workspace.view(B * meta.M, 1, D),
-                indices=meta.combined_indices.unsqueeze(1),
-                sm_scale=self.softmax_scale,
-                attn_sink=self.attn_sink,
-                topk_length=meta.combined_lens,
-            )
-        return o3.unsqueeze(0)
+        # 3. Chunked flash_mla_sparse_fwd over the [B*M] flat KV view.
+        return self._flash_mla_sparse_fwd_chunked_projected(
+            q=qkv.q,
+            kv=workspace.view(B * meta.M, 1, D),
+            indices=meta.combined_indices.unsqueeze(1),
+            topk_length=meta.combined_lens,
+            freqs_cis=common.freqs_cis,
+            prefill_workspace=common.workspace,
+            profile_name="dsv4.fp8.attn.swa_concat.flash_mla",
+        )
 
     # ------------------------------------------------------------------
     # Output projection: inv-RoPE + wo_a + wo_b
