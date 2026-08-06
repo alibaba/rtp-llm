@@ -64,9 +64,6 @@ public:
     }
 
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, EmptyPB* response) override {
-        if (!readyForRegularRpc()) {
-            return notReadyStatus("Cancel");
-        }
         return local_server_->Cancel(context, request, response);
     }
 
