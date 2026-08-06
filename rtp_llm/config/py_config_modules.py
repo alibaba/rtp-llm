@@ -180,12 +180,14 @@ class LoadConfig:
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
         self.loader_recycle_handles: bool = True
+        self.moe_pure_tp_preshard: bool = True
 
     def to_string(self):
         return (
             f"load_method: {self.load_method}\n"
             f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
-            f"loader_recycle_handles: {self.loader_recycle_handles}"
+            f"loader_recycle_handles: {self.loader_recycle_handles}\n"
+            f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}"
         )
 
 

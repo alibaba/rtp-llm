@@ -230,6 +230,23 @@ class HandleRecyclingTest(unittest.TestCase):
                 os.path.join(tmp, f"model-{layer}.safetensors"),
             )
 
+    def test_production_gate_matches_build(self):
+        # Unpatched on purpose: every other assertion here patches ROCM_COPY_OUT,
+        # so hard-coding the constant either way would otherwise stay green.
+        self.assertEqual(ckpt_file_info.ROCM_COPY_OUT, torch.version.hip is not None)
+
+    def test_recycling_enabled_on_real_rocm_build(self):
+        # The only assertion that gives ckpt_database_test_rocm its own signal:
+        # no ROCM_COPY_OUT patch, so the production gate is pinned end to end.
+        # Unreachable skip on the rocm target -- setUpClass already asserts hip.
+        if torch.version.hip is None:
+            self.skipTest("requires a ROCm build")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_shards(tmp)
+            db = CkptDatabase(tmp, recycle_handles=True)
+            self.assertTrue(db._recycle_handles)
+            self.assertIsNone(self._read_layers_0_and_2(db)._st_handle)
+
     def test_consumed_shard_closes_and_reopens(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._write_shards(tmp)

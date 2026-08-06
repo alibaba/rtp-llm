@@ -1,6 +1,5 @@
 import functools
 import logging
-import os
 import traceback
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
@@ -22,9 +21,6 @@ from rtp_llm.model_loader.weight_module import (
 )
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import MOE_PURE_TP_LAYOUTS, CkptWeightInfo, W, identity
-
-# Ops rollback lever for the sliced-read fast path; the legacy split is untouched.
-_PURE_TP_PRESHARD = os.getenv("MOE_PURE_TP_PRESHARD", "1") != "0"
 
 
 class FfnConfig(BaseModel):
@@ -482,7 +478,7 @@ class MoeAtomicWeight(AtomicWeight):
         load_config: LoadConfig,
     ) -> Optional[torch.Tensor]:
         supported = (
-            _PURE_TP_PRESHARD
+            load_config.moe_pure_tp_preshard
             and self.enable_pure_tp_preshard
             and load_config.moe_pure_tp_mode
             and not load_config.merge_lora

@@ -58,6 +58,7 @@ class BaseModel(object):
         device_resource_config: Optional[DeviceResourceConfig],
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = True,
+        moe_pure_tp_preshard: bool = True,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -85,6 +86,7 @@ class BaseModel(object):
         self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
         self.loader_recycle_handles = loader_recycle_handles
+        self.moe_pure_tp_preshard = moe_pure_tp_preshard
         self.weight = None
         self.weight_manager = None
 
@@ -237,6 +239,7 @@ class BaseModel(object):
         force_cpu_load_weights: bool = False,
         skip_python_model: bool = False,
         loader_recycle_handles: bool = True,
+        moe_pure_tp_preshard: bool = True,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -266,6 +269,7 @@ class BaseModel(object):
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
+            moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
 
         import os
@@ -348,4 +352,5 @@ class BaseModel(object):
             database,
             load_method=self.load_method,
             force_cpu_load_weights=self.force_cpu_load_weights,
+            moe_pure_tp_preshard=self.moe_pure_tp_preshard,
         )

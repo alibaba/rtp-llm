@@ -10,7 +10,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_loader import per_block_fp8_quant_weight as pbq
-from rtp_llm.model_loader.ffn_weight import MoeConfig
+from rtp_llm.model_loader.ffn_weight import MoeConfig, PreShardedTensor
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
 from rtp_llm.models.qwen3_next import qwen3_next_weight as qwen
@@ -55,6 +55,8 @@ def _config(rank=0, **overrides):
     values = dict(tp_size=2, tp_rank=rank, ep_size=1, ep_rank=0, dp_size=1, dp_rank=0)
     values.update(ffn_tp_size=1, ffn_tp_rank=0, hidden_size=8, head_num=1)
     values.update(head_num_kv=1, size_per_head=8, moe_pure_tp_mode=True)
+    # Fail-closed on LoadConfig, so parity cases must opt in explicitly.
+    values.update(moe_pure_tp_preshard=True)
     values.update(compute_dtype=torch.float32, exported_device=_DEVICE, **overrides)
     return LoadConfig.model_construct(**values)
 
@@ -135,11 +137,32 @@ class PureTpPreshardTest(unittest.TestCase):
                     self.assertEqual(last, [slice(None)] * len(last))
                 db.pretrain_file_list[0].close_safetensor_handle()
 
+    def test_fast_path_marks_output_so_split_is_skipped(self):
+        # The fast path already returns rank-local data, so _split has to pass it
+        # through: splitting twice would silently drop 1/tp_size of every expert.
+        # Exclusivity with _load_raw_tensor_gpu_preallocate is not assertable on
+        # CPU -- that path is gated on a cuda target device.
+        weight = _weights(False)[0]
+        config = _config(rank=1)
+        reference = _database(weight)
+        with tempfile.TemporaryDirectory() as tmp:
+            save_file(reference.tensors, os.path.join(tmp, "m.safetensors"))
+            db = CkptDatabase(tmp, recycle_handles=True)
+            raw = weight._load_raw_tensor(DatabaseTensorSource(db), 0, "cpu", config)
+            marker = raw[weight.name]
+            self.assertIsInstance(marker, PreShardedTensor)
+            self.assertIs(weight._split(raw, config)[weight.name], marker.tensor)
+            db.pretrain_file_list[0].close_safetensor_handle()
+
     def test_unsafe_scopes_skip_sliced_reads(self):
         weight = _weights(False)[0]
         db = _database(weight)
         source = DatabaseTensorSource(db)
-        for key, value in (("moe_pure_tp_mode", False), ("merge_lora", True)):
+        for key, value in (
+            ("moe_pure_tp_preshard", False),
+            ("moe_pure_tp_mode", False),
+            ("merge_lora", True),
+        ):
             with self.subTest(scope=key):
                 self.assertIsNone(
                     weight._load_pure_tp(source, 0, "cpu", _config(**{key: value}))
