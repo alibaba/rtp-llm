@@ -12,6 +12,15 @@ py_test (
 )
 
 py_test (
+    name = "per_token_group_quant_8bit_sm12x_test",
+    main = "per_token_group_quant_8bit_test.py",
+    srcs = ["per_token_group_quant_8bit_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip", "RTX_5000_PRO"],
+    exec_properties = {'gpu':'RTX_5000_PRO'},
+)
+
+py_test (
     name = "cutlass_fp8_grouped_gemm_test",
     srcs = ["cutlass_fp8_grouped_gemm_test.py"],
     deps = py_test_deps,
@@ -69,4 +78,3 @@ py_test(
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
-

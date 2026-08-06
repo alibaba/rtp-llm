@@ -35,6 +35,9 @@ class Bert(BaseModel):
         config.has_pre_decoder_layernorm = True
         config.layernorm_type = "post_layernorm"
         config.attn_config.is_causal = False
+        # BERT's packed QKV is consumed directly by its cacheless attention path.
+        # All BERT-family subclasses use packed QKV through this cacheless path;
+        # rope-less non-BERT models may still require the split/transpose kernel.
         config.attn_config.need_rope_kv_cache = False
         # hugggingface
         config_path = os.path.join(ckpt_path, "config.json")

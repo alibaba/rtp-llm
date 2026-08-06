@@ -51,6 +51,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
 
         resolver = MoeConfigResolver()
         checker.check(has_deep_gemm())
+        checker.check(get_sm()[0] != 12)
         checker.check(resolver.is_bf16(config))
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method in [None, "FP8_PER_BLOCK"])

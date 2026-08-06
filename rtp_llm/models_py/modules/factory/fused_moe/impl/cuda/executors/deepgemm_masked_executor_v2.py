@@ -38,6 +38,7 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
+        checker.check(get_sm()[0] != 12)
         checker.check(get_sm()[0] >= 9)
 
     def __init__(

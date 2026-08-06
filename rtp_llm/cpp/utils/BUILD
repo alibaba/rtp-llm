@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
@@ -15,6 +15,17 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_test_wrapper(
+    name = "fallback_log_utils_test",
+    srcs = ["FallbackLogUtilsTest.cc"],
+    copts = copts(),
+    deps = [
+        ":core_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 # New modular targets
 cc_library(
     name = "core_utils",
@@ -24,6 +35,7 @@ cc_library(
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
+        "FallbackLogUtils.h",
         "utils.h"
     ],
     srcs = [

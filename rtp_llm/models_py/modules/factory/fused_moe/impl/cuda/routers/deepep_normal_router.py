@@ -43,8 +43,11 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if DeepepNormalRouter can handle the configuration"""
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
         resolver = MoeConfigResolver()
         checker.check(get_sm()[0] >= 9)
+        checker.check(not is_sm12x())
         checker.check(resolver.is_ep_enabled(config))
         checker.check(not resolver.use_low_latency(config))
         checker.check(DeepEPWrapper.supported())

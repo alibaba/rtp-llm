@@ -73,6 +73,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         checker.check(quant_method == "FP8_PER_BLOCK")
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm())
+        checker.check(get_sm()[0] != 12)
         checker.check(get_sm()[0] >= 9)
         checker.check(not config.enable_cuda_graph)
 

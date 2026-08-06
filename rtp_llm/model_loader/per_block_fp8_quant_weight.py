@@ -53,6 +53,21 @@ QS_SUFFIX = ".weight_scale_inv"
 APPEND_SUFFIX = "_scale_inv"
 
 
+def use_e8m0_scale_layout(
+    *,
+    is_sm12x_device: bool,
+    is_sm120_device: bool,
+    deep_gemm_e8m0_enabled: bool,
+) -> bool:
+    """Resolve the FP8 scale layout before mutating loaded tensors."""
+    check_with_info(
+        not (is_sm12x_device and not is_sm120_device),
+        "FP8_PER_BLOCK is unsupported on SM12x devices other than exact sm_120; "
+        "use another quantization method or a supported device architecture",
+    )
+    return deep_gemm_e8m0_enabled and not is_sm120_device
+
+
 def dequant_weight_split_k(
     ts: List[torch.Tensor],
     block_size: int,
@@ -771,10 +786,27 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             is_deep_gemm_e8m0_used,
         )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+        from rtp_llm.models_py.utils.arch import is_sm12x, is_sm120
+
+        # SM12x weights must keep float scales because DeepGEMM does not
+        # support that family. For dense 2-D weights, the reshape below stores
+        # physical (N, K) data behind the loader's logical (K, N) shape; MoE
+        # weights remain in their native 3-D expert layout for grouped GEMM.
+        # Weight conversion may intentionally run on the host before the
+        # tensors are copied to CUDA.  The layout, however, is consumed by the
+        # runtime GPU, so use that device whenever CUDA is available.
+        layout_device = None if torch.cuda.is_available() else torch.device(device)
+        is_sm12x_device = is_sm12x(layout_device)
+        is_sm120_device = is_sm120(layout_device)
+        use_e8m0 = use_e8m0_scale_layout(
+            is_sm12x_device=is_sm12x_device,
+            is_sm120_device=is_sm120_device,
+            deep_gemm_e8m0_enabled=is_deep_gemm_e8m0_used(),
+        )
 
         # e8m0 not reshape, weight scale need be non contiguous
         # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
+        if not use_e8m0:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)
                 if kernel_weight.dim() == 2
@@ -783,7 +815,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         processed_res[self.kernel.name] = kernel_weight
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
-            if not is_deep_gemm_e8m0_used():
+            if not use_e8m0:
                 scale_weight = (
                     scale_weight.reshape(scale_weight.shape[-1], -1)
                     if scale_weight.dim() == 2
@@ -797,7 +829,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            if is_deep_gemm_e8m0_used():
+            if use_e8m0:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )

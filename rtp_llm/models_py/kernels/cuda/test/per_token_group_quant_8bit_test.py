@@ -5,9 +5,8 @@ from unittest import SkipTest, TestCase, main
 import torch
 import triton
 import triton.language as tl
-from torch import dtype as _dtype
-from torch.profiler import ProfilerActivity, profile, record_function
 
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
@@ -17,6 +16,32 @@ from rtp_llm.ops.compute_ops import (
 _is_hip = is_hip()
 
 fp8_type_ = torch.float8_e4m3fnuz if _is_hip else torch.float8_e4m3fn
+
+
+def _allocate_scale_tensor(
+    x: torch.Tensor,
+    group_size: int,
+    column_major_scales: bool,
+    scale_tma_aligned: bool,
+) -> torch.Tensor:
+    if not column_major_scales:
+        return torch.empty(
+            x.shape[:-1] + (x.shape[-1] // group_size,),
+            device=x.device,
+            dtype=torch.float32,
+        )
+    if scale_tma_aligned:
+        aligned_size = (x.shape[-2] + 3) // 4 * 4
+        return torch.empty(
+            x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
+            device=x.device,
+            dtype=torch.float32,
+        ).permute(-1, -2)[: x.shape[-2], :]
+    return torch.empty(
+        (x.shape[-1] // group_size,) + x.shape[:-1],
+        device=x.device,
+        dtype=torch.float32,
+    ).permute(-1, -2)
 
 
 @triton.jit
@@ -155,27 +180,7 @@ def triton_per_token_group_quant_8bit(
     x_q = torch.empty_like(x, device=x.device, dtype=dtype)
     M = x.numel() // group_size
     N = group_size
-    if column_major_scales:
-        if scale_tma_aligned:
-            # aligned to 4 * sizeof(float)
-            aligned_size = (x.shape[-2] + 3) // 4 * 4
-            x_s = torch.empty(
-                x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
-                device=x.device,
-                dtype=torch.float32,
-            ).permute(-1, -2)[: x.shape[-2], :]
-        else:
-            x_s = torch.empty(
-                (x.shape[-1] // group_size,) + x.shape[:-1],
-                device=x.device,
-                dtype=torch.float32,
-            ).permute(-1, -2)
-    else:
-        x_s = torch.empty(
-            x.shape[:-1] + (x.shape[-1] // group_size,),
-            device=x.device,
-            dtype=torch.float32,
-        )
+    x_s = _allocate_scale_tensor(x, group_size, column_major_scales, scale_tma_aligned)
 
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
@@ -230,27 +235,7 @@ def sglang_per_token_group_quant_8bit(
     x_q = torch.empty_like(x, device=x.device, dtype=dtype)
     M = x.numel() // group_size
     N = group_size
-    if column_major_scales:
-        if scale_tma_aligned:
-            # aligned to 4 * sizeof(float)
-            aligned_size = (x.shape[-2] + 3) // 4 * 4
-            x_s = torch.empty(
-                x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
-                device=x.device,
-                dtype=torch.float32,
-            ).permute(-1, -2)[: x.shape[-2], :]
-        else:
-            x_s = torch.empty(
-                (x.shape[-1] // group_size,) + x.shape[:-1],
-                device=x.device,
-                dtype=torch.float32,
-            ).permute(-1, -2)
-    else:
-        x_s = torch.empty(
-            x.shape[:-1] + (x.shape[-1] // group_size,),
-            device=x.device,
-            dtype=torch.float32,
-        )
+    x_s = _allocate_scale_tensor(x, group_size, column_major_scales, scale_tma_aligned)
 
     if dtype == torch.int8:
         iinfo = torch.iinfo(dtype)
@@ -269,18 +254,48 @@ def sglang_per_token_group_quant_8bit(
 
 
 class PerTokenGroupQuantTest(TestCase):
-    # NUM_TOKENS = [127, 128, 512, 1024, 4096, 8192]
-    # HIDDEN_DIMS = [256, 512, 1024, 2048, 4096]
-    # GROUP_SIZES = [8, 16, 32, 64, 128]
-    # DST_DTYPES = [torch.int8, fp8_type_]
-    # COLUMN_MAJOR_SCALES = [False, True]
-    # SCALE_TMA_ALIGNED = [False, True]
-    NUM_TOKENS = [127]
+
+    def test_ue8m0_activation_quant_matches_power_of_two_reference(self):
+        if _is_hip or not torch.cuda.is_available():
+            self.skipTest("UE8M0 activation quantization requires CUDA")
+        torch.manual_seed(0)
+        # Four rows and four groups avoid layout padding; each int32 stores
+        # the four K-group UE8M0 exponent bytes for one row.
+        x = torch.randn(4, 512, dtype=torch.bfloat16, device="cuda") * 3.0
+        output_q, packed_scales = sgl_per_token_group_quant_fp8(
+            x,
+            group_size=128,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        grouped = x.float().reshape(4, 4, 128)
+        ref_scale = torch.pow(
+            2.0, torch.ceil(torch.log2(grouped.abs().amax(dim=-1) / 448.0))
+        )
+        ref_q = torch.clamp(grouped / ref_scale.unsqueeze(-1), -448.0, 448.0).to(
+            torch.float8_e4m3fn
+        )
+        self.assertTrue(torch.equal(output_q.reshape_as(ref_q), ref_q))
+
+        packed_exponents = packed_scales.reshape(-1).view(torch.uint8).reshape(4, 4)
+        ref_exponents = (torch.log2(ref_scale).to(torch.int32) + 127).to(torch.uint8)
+        self.assertTrue(torch.equal(packed_exponents, ref_exponents))
+
+    # 8x256/64 yields 32 groups and covers the groups_per_block=16 launch;
+    # group_size=8 covers the single-vector-lane reduction boundary.
+    NUM_TOKENS = [7, 8]
     HIDDEN_DIMS = [256]
-    GROUP_SIZES = [8]
-    DST_DTYPES = [fp8_type_]
-    COLUMN_MAJOR_SCALES = [False]
-    SCALE_TMA_ALIGNED = [False]
+    # 64 covers a group where only half the lanes load an input vector while
+    # all 16 lanes still participate in the fixed half-warp reduction.
+    GROUP_SIZES = [8, 64, 128, 256]
+    INPUT_DTYPES = [torch.float16, torch.bfloat16]
+    DST_DTYPES = [torch.int8, fp8_type_]
+    SCALE_LAYOUTS = [
+        (False, False),
+        (True, False),
+        (True, True),
+    ]
 
     def setUp(self):
         if not torch.cuda.is_available():
@@ -292,18 +307,14 @@ class PerTokenGroupQuantTest(TestCase):
         num_tokens,
         hidden_dim,
         group_size,
+        input_dtype,
         dst_dtype,
         column_major_scales,
         scale_tma_aligned,
     ):
-        if not column_major_scales and scale_tma_aligned:
-            self.skipTest(
-                "Invalid flag: scale_tma_aligned=True but column_major_scales=False"
-            )
         torch.manual_seed(0)
-        x = torch.randn(num_tokens, hidden_dim, device="cuda", dtype=torch.float16)
+        x = torch.randn(num_tokens, hidden_dim, device="cuda", dtype=input_dtype)
 
-        # 调用triton和sglang的量化算子
         x_q_triton, x_s_triton = triton_per_token_group_quant_8bit(
             x,
             group_size,
@@ -321,29 +332,95 @@ class PerTokenGroupQuantTest(TestCase):
             column_major_scales=column_major_scales,
             scale_tma_aligned=scale_tma_aligned,
         )
-        print(f"x_q_triton = {x_q_triton}")
-        print(f"x_s_triton = {x_s_triton}")
-        print(f"x_q_sglang = {x_q_sglang}")
-        print(f"x_s_sglang = {x_s_sglang}")
+
+        torch.testing.assert_close(x_s_sglang, x_s_triton, rtol=1e-5, atol=1e-6)
+        if dst_dtype == torch.int8:
+            # BF16-to-int8 rounding and the historical -127/-128 clamp-floor
+            # difference between the CUDA and Triton references can differ by one.
+            torch.testing.assert_close(x_q_sglang, x_q_triton, rtol=0, atol=1)
+        else:
+            if input_dtype == torch.float16:
+                self.assertTrue(
+                    torch.equal(x_q_sglang, x_q_triton),
+                    "FP16 quantized values differ from the Triton reference",
+                )
+            else:
+                # BF16 scale rounding can move boundary values by one adjacent
+                # E4M3 code. Keep this bounded to one representable FP8 step.
+                code_diff = (
+                    x_q_sglang.view(torch.uint8).to(torch.int16)
+                    - x_q_triton.view(torch.uint8).to(torch.int16)
+                ).abs()
+                self.assertLessEqual(code_diff.max().item(), 1)
+        self.assertEqual(x_s_sglang.shape, x_s_triton.shape)
+        self.assertEqual(x_s_sglang.stride(), x_s_triton.stride())
 
     def test_per_token_group_quant(self):
         for params in itertools.product(
             self.NUM_TOKENS,
             self.HIDDEN_DIMS,
             self.GROUP_SIZES,
+            self.INPUT_DTYPES,
             self.DST_DTYPES,
-            self.COLUMN_MAJOR_SCALES,
-            self.SCALE_TMA_ALIGNED,
+            self.SCALE_LAYOUTS,
         ):
+            column_major_scales, scale_tma_aligned = params[5]
             with self.subTest(
                 num_tokens=params[0],
                 hidden_dim=params[1],
                 group_size=params[2],
-                dst_dtype=params[3],
-                column_major_scales=params[4],
-                scale_tma_aligned=params[5],
+                input_dtype=params[3],
+                dst_dtype=params[4],
+                column_major_scales=column_major_scales,
+                scale_tma_aligned=scale_tma_aligned,
             ):
-                self._run_quant_test(*params)
+                self._run_quant_test(
+                    *params[:5], column_major_scales, scale_tma_aligned
+                )
+
+    def test_reject_ue8m0_with_row_major_scales(self):
+        x = torch.randn(2, 128, dtype=torch.bfloat16, device="cuda")
+        output_q = torch.empty_like(x, dtype=fp8_type_)
+        output_s = torch.empty(2, 1, dtype=torch.int32, device="cuda")
+
+        with self.assertRaisesRegex(
+            RuntimeError, "scale_ue8m0 requires column-major output scales"
+        ):
+            per_token_group_quant_fp8(
+                x, output_q, output_s, 128, 1e-10, -448.0, 448.0, True
+            )
+
+    def test_rejects_unsupported_output_dtype(self):
+        x = torch.randn(1, 128, dtype=torch.bfloat16, device="cuda")
+        output_q = torch.empty_like(x, dtype=torch.float16)
+        output_s = torch.empty(1, 1, dtype=torch.float32, device="cuda")
+
+        with self.assertRaisesRegex(RuntimeError, "dtype must be int8 or float8"):
+            per_token_group_quant_fp8(
+                x, output_q, output_s, 128, 1e-10, -448.0, 448.0, False
+            )
+
+    def test_empty_input_is_noop(self):
+        x = torch.empty(0, 128, dtype=torch.bfloat16, device="cuda")
+        output_q = torch.empty_like(x, dtype=fp8_type_)
+        output_s = torch.empty(0, 1, dtype=torch.float32, device="cuda")
+
+        per_token_group_quant_fp8(
+            x, output_q, output_s, 128, 1e-10, -448.0, 448.0, False
+        )
+        self.assertEqual(output_q.numel(), 0)
+
+    def test_empty_input_still_validates_ue8m0_layout(self):
+        x = torch.empty(0, 128, dtype=torch.bfloat16, device="cuda")
+        output_q = torch.empty_like(x, dtype=fp8_type_)
+        output_s = torch.empty(0, 1, dtype=torch.int32, device="cuda")
+
+        with self.assertRaisesRegex(
+            RuntimeError, "scale_ue8m0 requires column-major output scales"
+        ):
+            per_token_group_quant_fp8(
+                x, output_q, output_s, 128, 1e-10, -448.0, 448.0, True
+            )
 
 
 if __name__ == "__main__":
