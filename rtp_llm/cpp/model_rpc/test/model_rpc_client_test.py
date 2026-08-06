@@ -52,6 +52,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
     _engine_reported_finished,
+    _record_client_span_latency,
     _record_client_span_usage,
     _request_completed_normally,
     trans_input,
@@ -689,15 +690,28 @@ class ModelRpcClientTest(TestCase):
 
 
 class _FakeAux:
-    def __init__(self, input_len, output_len):
+    def __init__(
+        self, input_len, output_len, first_token_cost_time=8.5, cost_time=20.0
+    ):
         self.input_len = input_len
         self.output_len = output_len
+        self.first_token_cost_time = first_token_cost_time
+        self.cost_time = cost_time
 
 
 class _FakeOut:
-    def __init__(self, finished, input_len=8, output_len=3):
+    def __init__(
+        self,
+        finished,
+        input_len=8,
+        output_len=3,
+        first_token_cost_time=8.5,
+        cost_time=20.0,
+    ):
         self.finished = finished
-        self.aux_info = _FakeAux(input_len, output_len)
+        self.aux_info = _FakeAux(
+            input_len, output_len, first_token_cost_time, cost_time
+        )
 
 
 class _AsyncReturn:
@@ -942,6 +956,91 @@ class ClientSpanSettlementTest(TestCase):
                 outputs.generate_outputs = choices
                 _record_client_span_usage(span, outputs)
                 self.assertEqual(span.attributes, {})
+
+    def test_engine_latency_attributes_from_single_sequence_stream(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(
+                True,
+                output_len=5,
+                first_token_cost_time=8.5,
+                cost_time=20.0,
+            )
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertEqual(
+            span.attributes["rtp_llm.engine.time_per_output_token_ms"], 2.875
+        )
+
+    def test_engine_latency_attributes_require_coherent_aux_info(self):
+        cases = (
+            _FakeOut(True, output_len=0),
+            _FakeOut(True, output_len=1),
+            _FakeOut(True, output_len=5, first_token_cost_time=0),
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=8.0),
+        )
+        for output in cases:
+            with self.subTest(output=output):
+                span = _FakeClientSpan()
+                outputs = GenerateOutputs(generate_outputs=[output])
+                _record_client_span_latency(span, outputs)
+                if output.aux_info.output_len == 1:
+                    self.assertEqual(
+                        span.attributes["rtp_llm.engine.time_to_first_token_ms"],
+                        8.5,
+                    )
+                elif output.aux_info.cost_time < output.aux_info.first_token_cost_time:
+                    self.assertEqual(
+                        span.attributes["rtp_llm.engine.time_to_first_token_ms"],
+                        8.5,
+                    )
+                else:
+                    self.assertEqual(span.attributes, {})
+                self.assertNotIn(
+                    "rtp_llm.engine.time_per_output_token_ms", span.attributes
+                )
+
+    def test_multi_return_shares_ttft_but_omits_ambiguous_tpot(self):
+        """n>1 rides one physical stream: TPOT per sequence is not a span value."""
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=7, first_token_cost_time=8.5, cost_time=26.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
+
+    def test_multi_return_disagreeing_on_first_token_omits_latency(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=5, first_token_cost_time=9.5, cost_time=20.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes, {})
+
+    def test_multi_return_with_one_empty_sequence_omits_latency(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=0, first_token_cost_time=8.5, cost_time=20.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes, {})
 
     def test_consumer_break_after_finished_keeps_span_ok(self):
         """The final frame is withheld until the physical RPC reaches OK.

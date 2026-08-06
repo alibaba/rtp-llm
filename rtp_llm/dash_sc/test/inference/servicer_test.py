@@ -3853,10 +3853,12 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.attributes["gen_ai.span.kind"], "LLM")
         self.assertEqual(server.attributes["gen_ai.operation.name"], "chat")
         self.assertEqual(server.attributes["gen_ai.system"], "rtp_llm")
-        self.assertEqual(server.attributes["gen_ai.response.time_to_first_token"], 12.5)
-        self.assertEqual(
-            server.attributes["rtp_llm.engine.time_per_output_token_ms"], 10.0
+        self.assertGreaterEqual(
+            server.attributes["gen_ai.response.time_to_first_token"], 0.0
         )
+        self.assertNotIn("rtp_llm.frontend.time_per_output_token_ms", server.attributes)
+        self.assertNotIn("rtp_llm.engine.time_to_first_token_ms", server.attributes)
+        self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", server.attributes)
         self.assertEqual(server.attributes["rpc.system"], "grpc")
         self.assertEqual(
             server.attributes["rpc.method"],
@@ -3870,30 +3872,7 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.status.status_code.name, "OK")
         self.assertEqual(client.status.status_code.name, "OK")
 
-    async def test_two_phase_engine_tpot_combines_both_streams(self) -> None:
-        record = GrpcAccessRecord(
-            method="ModelStreamInfer",
-            stream_type="bidi_stream",
-            peer="test-peer",
-            start_ts=10.0,
-        )
-        record.record_engine_token_latency(
-            phase="phase1",
-            cost_time_ms=42.5,
-            first_token_cost_time_ms=12.5,
-            output_len=4,
-        )
-        record.record_engine_token_latency(
-            phase="phase2",
-            cost_time_ms=20.0,
-            first_token_cost_time_ms=5.0,
-            output_len=2,
-        )
-
-        self.assertEqual(record.engine_ttft_ms, 12.5)
-        self.assertEqual(record.engine_tpot_ms, 10.0)
-
-    async def test_unavailable_engine_token_latencies_are_omitted(self) -> None:
+    async def test_no_visible_tokens_omit_frontend_token_latencies(self) -> None:
         state = tracing.start_server_span("dash_sc.ModelStreamInfer", {})
         self.assertIsNotNone(state)
         record = GrpcAccessRecord(
@@ -3907,6 +3886,8 @@ class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
 
         span = self._finished_spans()[-1]
         self.assertNotIn("gen_ai.response.time_to_first_token", span.attributes)
+        self.assertNotIn("rtp_llm.frontend.time_per_output_token_ms", span.attributes)
+        self.assertNotIn("rtp_llm.engine.time_to_first_token_ms", span.attributes)
         self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
 
     async def test_no_parent_bad_request_and_no_frame_statuses(self) -> None:

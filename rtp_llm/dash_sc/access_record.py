@@ -31,7 +31,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-import math
 import re
 import time
 from typing import Any, Optional, Sequence
@@ -420,24 +419,6 @@ class GrpcAccessRecord:
     finished: Optional[bool] = None
     terminal_seen: bool = False
     prompt_cached_token_num: Optional[int] = None
-    # Engine stream begin -> first committed token, copied from AuxInfo. This is
-    # distinct from the client-observed first_token_ts recorded at RPC ingress.
-    engine_ttft_ms: Optional[float] = None
-    # Engine decode time per output token after the first token, copied from
-    # the latest usable AuxInfo snapshot(s).
-    engine_tpot_ms: Optional[float] = None
-    _engine_phase1_cost_ms: Optional[float] = dataclasses.field(
-        default=None, init=False, repr=False
-    )
-    _engine_phase1_output_len: int = dataclasses.field(
-        default=0, init=False, repr=False
-    )
-    _engine_phase2_cost_ms: Optional[float] = dataclasses.field(
-        default=None, init=False, repr=False
-    )
-    _engine_phase2_output_len: int = dataclasses.field(
-        default=0, init=False, repr=False
-    )
     # Protocol-level backend error channel (predict_v2.proto: empty means
     # success). Kept here so a successful gRPC status can still be classified as
     # a backend failure when the payload says so.
@@ -542,65 +523,6 @@ class GrpcAccessRecord:
         if aux_info is None or (not overwrite and self.aux_info is not None):
             return
         self.aux_info = aux_info
-
-    def record_engine_token_latency(
-        self,
-        *,
-        phase: str,
-        cost_time_ms: object,
-        first_token_cost_time_ms: object,
-        output_len: object,
-    ) -> None:
-        """Record the latest cumulative engine latency snapshot for a phase.
-
-        Dash two-phase reasoning creates two independent engine streams. Engine
-        TTFT is the first phase's first-token latency. Logical-request TPOT sums
-        engine-active time after that token across both phases, excluding the
-        Python handoff gap between streams.
-        """
-        if phase not in ("phase1", "phase2"):
-            return
-        if any(
-            isinstance(value, bool)
-            for value in (cost_time_ms, first_token_cost_time_ms, output_len)
-        ):
-            return
-        try:
-            cost_ms = float(cost_time_ms)
-            first_token_ms = float(first_token_cost_time_ms)
-            output_tokens = int(output_len)
-        except (TypeError, ValueError, OverflowError):
-            return
-        if not (math.isfinite(cost_ms) and math.isfinite(first_token_ms)):
-            return
-
-        if phase == "phase1" and self.engine_ttft_ms is None and first_token_ms > 0:
-            self.engine_ttft_ms = first_token_ms
-
-        if cost_ms < 0 or output_tokens < 1:
-            return
-        if phase == "phase1":
-            if self.engine_ttft_ms is None or cost_ms < self.engine_ttft_ms:
-                return
-            self._engine_phase1_cost_ms = cost_ms
-            self._engine_phase1_output_len = output_tokens
-        else:
-            self._engine_phase2_cost_ms = cost_ms
-            self._engine_phase2_output_len = output_tokens
-
-        if self.engine_ttft_ms is None or self._engine_phase1_cost_ms is None:
-            return
-        total_output_len = (
-            self._engine_phase1_output_len + self._engine_phase2_output_len
-        )
-        if total_output_len <= 1:
-            return
-        post_first_token_ms = self._engine_phase1_cost_ms - self.engine_ttft_ms
-        if self._engine_phase2_cost_ms is not None:
-            post_first_token_ms += self._engine_phase2_cost_ms
-        if post_first_token_ms >= 0:
-            self.engine_tpot_ms = post_first_token_ms / (total_output_len - 1)
-
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())
 

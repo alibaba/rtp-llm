@@ -42,6 +42,92 @@ from rtp_llm.utils.util import check_with_info
 USAGE_HEADER = "USAGE"
 
 
+def _field(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _has_payload(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value)
+    if isinstance(value, dict):
+        return any(_has_payload(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_payload(item) for item in value)
+    if hasattr(value, "model_dump"):
+        try:
+            return _has_payload(value.model_dump(exclude_none=True))
+        except Exception:
+            return False
+    return bool(value)
+
+
+def _visible_output_count(response: Any) -> int:
+    """Counts visible payload lanes in one streaming response object."""
+    choices = _field(response, "choices")
+    if isinstance(choices, (list, tuple)):
+        count = 0
+        for choice in choices:
+            delta = _field(choice, "delta")
+            if delta is None:
+                continue
+            if any(
+                _has_payload(_field(delta, name))
+                for name in (
+                    "content",
+                    "reasoning_content",
+                    "function_call",
+                    "tool_calls",
+                )
+            ):
+                count += 1
+        return count
+
+    response_batch = _field(response, "response_batch")
+    if isinstance(response_batch, (list, tuple)):
+        return sum(_visible_output_count(item) for item in response_batch)
+
+    payload = _field(response, "response")
+    if isinstance(payload, (list, tuple)):
+        return sum(1 for item in payload if _has_payload(item))
+    return 1 if _has_payload(payload) else 0
+
+
+def _output_token_total(response: Any) -> int | None:
+    """Returns a cumulative output-token count when the response exposes one."""
+    usage = _field(response, "usage")
+    completion_tokens = _field(usage, "completion_tokens")
+    if (
+        isinstance(completion_tokens, int)
+        and not isinstance(completion_tokens, bool)
+        and completion_tokens >= 0
+    ):
+        return completion_tokens
+
+    response_batch = _field(response, "response_batch")
+    if isinstance(response_batch, (list, tuple)):
+        totals = [_output_token_total(item) for item in response_batch]
+        if totals and all(total is not None for total in totals):
+            return sum(total for total in totals if total is not None)
+
+    aux_info = _field(response, "aux_info")
+    aux_items = aux_info if isinstance(aux_info, (list, tuple)) else [aux_info]
+    totals = []
+    for item in aux_items:
+        output_len = _field(item, "output_len")
+        if (
+            not isinstance(output_len, int)
+            or isinstance(output_len, bool)
+            or output_len < 0
+        ):
+            return None
+        totals.append(output_len)
+    return sum(totals) if totals else None
+
+
 def _record_http_status(trace_state, status_code: int) -> None:
     # Dual-write both semconv generations: platform views disagree on which key
     # wins, and the HTTP-error counter only reads the legacy http.status_code.
@@ -515,6 +601,7 @@ class FrontendServer(object):
         async def __gen_response_with_report(start_time: float, response_generator):
             last_iterate_time = current_time_ms()
             first_response = True
+            last_observed_output_tokens = 0
             iter_count = 0
             async for response in response_generator:
                 end_time = current_time_ms()
@@ -555,6 +642,21 @@ class FrontendServer(object):
                         "server_id": self.server_id,
                     },
                 )
+                if trace_state is not None and is_streaming:
+                    output_tokens = _output_token_total(response)
+                    observed_token_delta = 0
+                    if (
+                        output_tokens is not None
+                        and output_tokens >= last_observed_output_tokens
+                    ):
+                        observed_token_delta = (
+                            output_tokens - last_observed_output_tokens
+                        )
+                        last_observed_output_tokens = output_tokens
+                    visible_outputs = _visible_output_count(response)
+                    if visible_outputs > 0:
+                        visible_tokens = observed_token_delta or visible_outputs
+                        trace_state.record_frontend_output_tokens(visible_tokens)
                 last_iterate_time = end_time
                 iter_count += 1
                 yield response

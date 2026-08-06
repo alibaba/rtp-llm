@@ -703,9 +703,19 @@ class RequestTraceState:
     - Attributes must be written before finish(); writes after are dropped.
     """
 
-    def __init__(self, server_span: Any = None, server_context: Any = None):
+    def __init__(
+        self,
+        server_span: Any = None,
+        server_context: Any = None,
+        request_start_ns: Optional[int] = None,
+    ):
         self.server_span = server_span
         self._server_context = server_context
+        self._request_start_ns = (
+            request_start_ns if request_start_ns is not None else time.monotonic_ns()
+        )
+        self._first_visible_token_ns: Optional[int] = None
+        self._visible_output_tokens = 0
         self._finished = False
         self._settled_ok: Optional[bool] = None
         self._renderer_completed = False
@@ -760,6 +770,65 @@ class RequestTraceState:
             with self._lock:
                 if self.server_span is not None and not self._finished:
                     self.server_span.add_event(name, attributes=attributes)
+        except Exception:  # noqa: BLE001 - fail-open
+            pass
+
+    def record_frontend_output_tokens(
+        self, token_count: int, observed_time_ns: Optional[int] = None
+    ) -> None:
+        """Records caller-visible streaming tokens on the entry SERVER span.
+
+        HTTP and Dash classify visible output at their protocol boundaries and
+        call this immediately before yielding the response. Empty, role-only,
+        finish-only, and internal control frames never reach this method.
+
+        TPOT needs two distinct delivery instants to be an observation rather
+        than an assumption. A single frame carrying N>1 tokens exposes no
+        inter-token send boundary, so TPOT stays absent instead of being
+        reported as 0.0, which a dashboard would read as instant decoding.
+        """
+        if (
+            not isinstance(token_count, int)
+            or isinstance(token_count, bool)
+            or token_count <= 0
+        ):
+            return
+        try:
+            observed_ns = (
+                observed_time_ns
+                if observed_time_ns is not None
+                else time.monotonic_ns()
+            )
+            if not isinstance(observed_ns, int) or isinstance(observed_ns, bool):
+                return
+            with self._lock:
+                if self.server_span is None or self._finished:
+                    return
+                if observed_ns < self._request_start_ns:
+                    return
+                if self._first_visible_token_ns is None:
+                    self._first_visible_token_ns = observed_ns
+                    ttft_ms = (observed_ns - self._request_start_ns) / 1e6
+                    self.server_span.set_attribute(
+                        trace_attrs.GEN_AI_TIME_TO_FIRST_TOKEN, ttft_ms
+                    )
+                elif observed_ns < self._first_visible_token_ns:
+                    return
+
+                self._visible_output_tokens += token_count
+                if (
+                    self._visible_output_tokens > 1
+                    and observed_ns > self._first_visible_token_ns
+                ):
+                    tpot_ms = (
+                        (observed_ns - self._first_visible_token_ns)
+                        / 1e6
+                        / (self._visible_output_tokens - 1)
+                    )
+                    self.server_span.set_attribute(
+                        trace_attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS,
+                        tpot_ms,
+                    )
         except Exception:  # noqa: BLE001 - fail-open
             pass
 
@@ -958,6 +1027,7 @@ def start_server_span(
         if tracer is None:
             return None
         remote_context = extract_context_from_headers(headers)
+        request_start_ns = time.monotonic_ns()
         span = tracer.start_span(
             span_name,
             context=remote_context,
@@ -970,7 +1040,11 @@ def start_server_span(
             except Exception:  # noqa: BLE001 - fail-open
                 pass
         server_context = trace.set_span_in_context(span)
-        state = RequestTraceState(server_span=span, server_context=server_context)
+        state = RequestTraceState(
+            server_span=span,
+            server_context=server_context,
+            request_start_ns=request_start_ns,
+        )
         CURRENT_TRACE_STATE.set(state)
         return state
     except Exception:  # noqa: BLE001 - fail-open
@@ -1005,36 +1079,9 @@ def _extract_finish_reasons(choices: Any) -> List[str]:
 
 
 def _record_aux_attributes(state: "RequestTraceState", aux: Dict[str, Any]) -> None:
-    # AuxInfo.first_token_cost_time is Engine TTFT: engine stream begin to the
-    # first valid token commit. It includes engine queueing and prefill, but not
-    # frontend/client end-to-end latency. AuxInfo latency fields are already
-    # milliseconds on the Python side (model_rpc_client divides the *_us
-    # protobuf fields by 1000). Keep this per-trace Unitrace compatibility
-    # attribute distinct from the OTel gen_ai.server.time_to_first_token
-    # Histogram metric, whose unit is seconds.
-    ttft_ms = aux.get("first_token_cost_time")
-    if (
-        isinstance(ttft_ms, (int, float))
-        and not isinstance(ttft_ms, bool)
-        and ttft_ms > 0
-    ):
-        state.set_attribute(trace_attrs.GEN_AI_TIME_TO_FIRST_TOKEN, float(ttft_ms))
-    cost_ms = aux.get("cost_time")
-    output_len = aux.get("output_len")
-    if (
-        isinstance(cost_ms, (int, float))
-        and not isinstance(cost_ms, bool)
-        and isinstance(ttft_ms, (int, float))
-        and not isinstance(ttft_ms, bool)
-        and isinstance(output_len, int)
-        and not isinstance(output_len, bool)
-        and output_len > 1
-        and cost_ms >= ttft_ms > 0
-    ):
-        state.set_attribute(
-            trace_attrs.RTP_LLM_ENGINE_TIME_PER_OUTPUT_TOKEN_MS,
-            float(cost_ms - ttft_ms) / (output_len - 1),
-        )
+    # Engine TTFT/TPOT live on each generate_stream_call CLIENT span. The root
+    # SERVER span keeps topology-independent request/cache/phase attributes;
+    # streaming delivery latency is recorded in real time by the entry server.
     _record_phase_latency_attributes(state, aux)
     pd_sep = aux.get("pd_sep")
     if isinstance(pd_sep, bool):
