@@ -77,9 +77,12 @@ std::string kvMemoryStateToString(KvMemoryState state);
 
 // Options passed in via SleepServing RPC (proto SleepRequestPB).
 struct SleepOptions {
-    // vLLM-compatible level. level=0 is defined as state-preserving sleep
-    // (restore weights/device KV/cuda graph on wake_up), but is not implemented
-    // in the current MVP. Only level=1 is advertised in supported_levels.
+    // Sleep level, fixed per process at startup by sleep_mode_level: 1 (host
+    // backup) or 2 (discard weights, reload from the model loader on wake). A
+    // request's level must match the configured level; supported_levels
+    // advertises exactly that one value (see status()). level=0
+    // (state-preserving sleep) is defined by the vLLM-compatible protocol but
+    // not implemented, and is rejected with UNIMPLEMENTED.
     int32_t                  level      = 1;
     std::string              mode       = "wait";  // "wait" (default) | "abort"; "keep" is unsupported.
     int64_t                  timeout_ms = 0;

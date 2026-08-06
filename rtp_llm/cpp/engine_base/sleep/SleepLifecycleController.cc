@@ -394,6 +394,10 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             }
         }
         engine_quiesced_.store(false, std::memory_order_release);
+        // Sleep aborted before any commit: clear the level captured at
+        // RUNNING->DRAINING so a stale value is not observable via
+        // activeSleepLevel() until the next sleep re-stamps it.
+        active_sleep_level_.store(0, std::memory_order_release);
         if (!transitionLocked(SleepState::DRAINING, SleepState::RUNNING)) {
             return SleepResult::failedPrecondition(lastError());
         }

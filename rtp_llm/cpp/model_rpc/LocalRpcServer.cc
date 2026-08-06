@@ -548,15 +548,22 @@ void LocalRpcServer::installSleepHooks() {
         if (ok && engine->sleepController().activeSleepLevel() == 2) {
             if (weight_manager_.is_none()) {
                 RTP_LLM_LOG_WARNING("level-2 wake: weight_manager unavailable, cannot reload weights");
-                return false;
+                ok = false;
+            } else {
+                try {
+                    py::gil_scoped_acquire acquire;
+                    weight_manager_.attr("reload_weights_from_loader")();
+                } catch (const py::error_already_set& e) {
+                    RTP_LLM_LOG_WARNING("level-2 wake: reload_weights_from_loader failed: %s", e.what());
+                    ok = false;
+                }
             }
-            try {
-                py::gil_scoped_acquire acquire;
-                weight_manager_.attr("reload_weights_from_loader")();
-            } catch (const py::error_already_set& e) {
-                RTP_LLM_LOG_WARNING("level-2 wake: reload_weights_from_loader failed: %s", e.what());
-                return false;
-            }
+        }
+        if (!ok && memory_cache_restore_future_.valid()) {
+            // Weight restore failed -> wake_up transitions to ERROR and
+            // restoreKvMemoryBackingAndResetMetadata (which normally joins this future) will not
+            // run. Join here so the background host memory-cache rebuild does not outlive this hook.
+            memory_cache_restore_future_.wait();
         }
         // Weights (level-1 host restore / level-2 loader reload) + cuda_graph GPU memory back.
         logSleepMemorySnapshot("wake/after_weights_restore", local_rank);
