@@ -8,6 +8,7 @@ from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
@@ -16,7 +17,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
-from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -29,7 +30,6 @@ from rtp_llm.openai.api_datatype import (
     FunctionCall,
     ModelCard,
     ModelList,
-    ResponseFormat,
     RoleEnum,
     ToolCall,
     UsageInfo,
@@ -193,12 +193,18 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
+        if request.extra_configs is not None and (
+            config.response_format is not None
+            or GrammarConstraint.collect_from_config(config)
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "structured output must use top-level response_format, not extra_configs",
+            )
         if request.response_format is not None:
-            # OpenAI response_format takes precedence over grammar fields from
-            # extra_configs. ResponseFormatBuilder projects it before RPC.
             config.response_format = request.response_format
-        if request.json_format is not None:
-            config.json_format = request.json_format
+        elif request.json_format:
+            config.response_format = ResponseFormat(type="json_object")
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -283,12 +289,11 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
-        reasoning_format = self.chat_renderer.get_reasoning_format()
         config.add_thinking_params(
             self.tokenizer,
             self.generate_env_config,
             enable_thinking=enable_thinking,
-            reasoning_format=reasoning_format,
+            reasoning_format=self.chat_renderer.get_reasoning_format(),
         )
         if request.debug_info:
             config.return_output_ids = True
@@ -661,9 +666,10 @@ class OpenaiEndpoint(object):
 
         prompt_logits_data = None
         if generate_config.return_prompt_logits:
-            output_generator, prompt_logits_data = (
-                await renderer._extract_prompt_logits(output_generator)
-            )
+            (
+                output_generator,
+                prompt_logits_data,
+            ) = await renderer._extract_prompt_logits(output_generator)
 
         merged_gen = await renderer._merge_non_streaming_outputs(output_generator)
         choice_generator = renderer.render_response_stream(

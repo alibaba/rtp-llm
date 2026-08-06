@@ -235,7 +235,7 @@ TEST_F(TreeLogitsProcessorTest, testProcess) {
         ASSERT_EQ(logits_hosts[64000], 1);
         ASSERT_EQ(logits_hosts[64003], 0);
         ASSERT_EQ(logits_hosts[64011], 0);
-        ASSERT_FLOAT_EQ(logits_hosts[64001], BaseLogitsProcessor::neg_inf);
+        ASSERT_TRUE(logits_hosts[64001] == -INFINITY);
     }
 }
 

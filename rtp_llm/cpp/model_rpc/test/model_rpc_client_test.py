@@ -1,4 +1,5 @@
 import asyncio
+import json
 import struct
 import sys
 from unittest.mock import MagicMock
@@ -27,6 +28,7 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.log_config import setup_logging
+from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
@@ -46,7 +48,6 @@ from rtp_llm.utils.base_model_datatypes import (
 
 
 class FakeStub:
-
     async def GenerateStreamCall(self, input: GenerateInputPB, timeout=None):
         # 1. 第一个响应：包含第一个生成的 token
         outputs_pb1 = GenerateOutputsPB()
@@ -87,7 +88,6 @@ class FakeStub:
 
 
 class FakeModelRpcClient(ModelRpcClient):
-
     def __init__(self):
         # Call parent __init__ with minimal required parameters
         super().__init__(
@@ -109,7 +109,6 @@ class FakeModelRpcClient(ModelRpcClient):
 
 
 class ModelRpcClientTest(TestCase):
-
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         # self.client = FakeModelRpcClient()
@@ -176,7 +175,7 @@ class ModelRpcClientTest(TestCase):
         cases = [
             (
                 "json_schema",
-                '{"type":"object"}',
+                {"type": "object"},
                 '{"type":"object"}',
                 lambda pb: pb.json_schema,
             ),
@@ -184,7 +183,10 @@ class ModelRpcClientTest(TestCase):
             ("ebnf", 'root ::= "a"', 'root ::= "a"', lambda pb: pb.ebnf),
             (
                 "structural_tag",
-                '{"type":"structural_tag","format":{"type":"regex","pattern":"a"}}',
+                {
+                    "type": "structural_tag",
+                    "format": {"type": "regex", "pattern": "a"},
+                },
                 '{"type":"structural_tag","format":{"type":"regex","pattern":"a"}}',
                 lambda pb: pb.structural_tag,
             ),
@@ -211,18 +213,26 @@ class ModelRpcClientTest(TestCase):
                     if other_field != field:
                         self.assertFalse(input_pb.generate_config.HasField(other_field))
 
-    def test_trans_input_validate_finalizes_legacy_json_format(self):
-        config = GenerateConfig(json_format=True, response_format={})
+    def test_trans_input_does_not_reapply_reasoning_envelope(self):
+        config = GenerateConfig(
+            response_format={"type": "json_object"},
+            in_think_mode=True,
+            end_think_token_ids=[7],
+            max_thinking_tokens=16,
+        )
+        config.finalize_response_format(
+            reasoning_format=ReasoningFormat(tag_begin="", tag_end="</think>")
+        )
+        config_before_rpc = config.model_dump()
 
         input_pb = trans_input(self._make_generate_input(config))
 
-        self.assertFalse(config.json_format)
-        self.assertIsNone(config.response_format)
-        self.assertEqual(config.json_schema, '{"type":"object"}')
-        self.assertEqual(
-            input_pb.generate_config.json_schema.value,
-            '{"type":"object"}',
-        )
+        self.assertEqual(config.model_dump(), config_before_rpc)
+        structural_tag = json.loads(input_pb.generate_config.structural_tag.value)
+        elements = structural_tag["format"]["elements"]
+        self.assertEqual(len(elements), 2)
+        self.assertEqual(elements[0]["type"], "tag")
+        self.assertEqual(elements[1]["type"], "json_schema")
 
     @unittest.skip("need fix")
     def test_generate_stream(self):

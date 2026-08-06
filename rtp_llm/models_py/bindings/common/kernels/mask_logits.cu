@@ -39,6 +39,21 @@ namespace rtp_llm {
 #define CUDART_INF_BF16 HIP_INF_BF16
 #endif
 
+template<typename T>
+__device__ T NegativeInfinity() {
+    return -INFINITY;
+}
+
+template<>
+__device__ __half NegativeInfinity<__half>() {
+    return -CUDART_INF_FP16;
+}
+
+template<>
+__device__ __nv_bfloat16 NegativeInfinity<__nv_bfloat16>() {
+    return -CUDART_INF_BF16;
+}
+
 // Match BaseLogitsProcessor::neg_inf after conversion to the logits dtype.
 template<typename T>
 __device__ T MaskedLogitValue() {
@@ -47,12 +62,12 @@ __device__ T MaskedLogitValue() {
 
 template<>
 __device__ __half MaskedLogitValue<__half>() {
-    return -CUDART_INF_FP16;
+    return NegativeInfinity<__half>();
 }
 
 template<>
 __device__ __nv_bfloat16 MaskedLogitValue<__nv_bfloat16>() {
-    return -CUDART_INF_BF16;
+    return NegativeInfinity<__nv_bfloat16>();
 }
 
 // Batch version kernel for processing multiple beams
@@ -65,7 +80,7 @@ mask_logits(const int batch_size, const int vocab_size, T* logits_batch, const u
     if (batch_idx < batch_size && vocab_idx < vocab_size) {
         int global_idx = batch_idx * vocab_size + vocab_idx;
         if (mask_batch[global_idx]) {
-            logits_batch[global_idx] = MaskedLogitValue<T>();
+            logits_batch[global_idx] = NegativeInfinity<T>();
         }
     }
 }

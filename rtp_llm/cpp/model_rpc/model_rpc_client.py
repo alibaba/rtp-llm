@@ -9,6 +9,7 @@ from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
+from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
@@ -40,7 +41,7 @@ from rtp_llm.utils.grpc_util import (
 )
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
-JsonableOption = Optional[Union[str, Dict[str, Any]]]
+JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 
 
 class StreamState:
@@ -61,21 +62,32 @@ def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
         return RoleAddrPB.RoleType.FRONTEND
 
 
-def _trans_jsonable_option(option_pb: StringValue, value: JsonableOption) -> None:
+def _trans_jsonable_option(
+    option_pb: StringValue, name: str, value: JsonableOption
+) -> None:
+    """Serialize structured config exactly once at the protobuf boundary."""
     if value is None:
         return
     if not isinstance(value, str):
-        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        try:
+            value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError) as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                f"{name} must be serializable as JSON: {str(e)}",
+            ) from e
     option_pb.value = value
 
 
 def _trans_jsonable_options(
     config_pb: GenerateConfigPB, config: GenerateConfig
 ) -> None:
-    _trans_jsonable_option(config_pb.json_schema, config.json_schema)
-    _trans_jsonable_option(config_pb.regex, config.regex)
-    _trans_jsonable_option(config_pb.ebnf, config.ebnf)
-    _trans_jsonable_option(config_pb.structural_tag, config.structural_tag)
+    _trans_jsonable_option(config_pb.json_schema, "json_schema", config.json_schema)
+    _trans_jsonable_option(config_pb.regex, "regex", config.regex)
+    _trans_jsonable_option(config_pb.ebnf, "ebnf", config.ebnf)
+    _trans_jsonable_option(
+        config_pb.structural_tag, "structural_tag", config.structural_tag
+    )
 
 
 def trans_input(input_py: GenerateInput):
@@ -104,9 +116,10 @@ def trans_input(input_py: GenerateInput):
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
-    # GenerateConfig owns validation and response-format finalization before the
-    # request crosses the RPC boundary.
+    # Preserve main's regular GenerateConfig validation at the RPC boundary,
+    # then assert (without mutating) that the request entrypoint prepared grammar.
     input_py.generate_config.validate()
+    validate_engine_ready(input_py.generate_config)
 
     generate_config_pb = input_pb.generate_config
     generate_config_pb.max_new_tokens = input_py.generate_config.max_new_tokens

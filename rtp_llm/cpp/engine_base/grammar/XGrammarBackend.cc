@@ -4,6 +4,7 @@
 #include <chrono>
 #include <exception>
 #include <new>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -61,7 +62,7 @@ void logCompileResult(const GrammarKeyCpp&                                      
 }  // namespace
 
 std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&   tokenizer_info_json,
-                                                         const GrammarConfig& cfg) noexcept {
+                                                         const GrammarConfig& cfg) {
     try {
         if (tokenizer_info_json.empty()) {
             RTP_LLM_LOG_INFO("XGrammarBackend::create: structured output disabled (TokenizerInfo empty)");
@@ -70,9 +71,9 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&   to
         Options opts   = optionsFromConfig(cfg);
         auto    result = xgrammar::TokenizerInfo::DeserializeJSON(tokenizer_info_json);
         if (std::holds_alternative<xgrammar::SerializationError>(result)) {
-            RTP_LLM_LOG_ERROR("XGrammarBackend::create: tokenizer info deserialize failed (%s); disabling grammar",
-                              serializationErrorToString(std::get<xgrammar::SerializationError>(result)).c_str());
-            return nullptr;
+            throw std::runtime_error(
+                "tokenizer info deserialize failed: "
+                + serializationErrorToString(std::get<xgrammar::SerializationError>(result)));
         }
         const auto& serialized_tokenizer_info = std::get<xgrammar::TokenizerInfo>(result);
         // xgrammar derives its token-id lookup in the constructor but does not serialize it.
@@ -84,8 +85,7 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&   to
                                                      serialized_tokenizer_info.GetStopTokenIds(),
                                                      serialized_tokenizer_info.GetAddPrefixSpace());
         if (tokenizer_info.GetVocabSize() <= 0) {
-            RTP_LLM_LOG_ERROR("XGrammarBackend::create: tokenizer vocab is empty; disabling grammar");
-            return nullptr;
+            throw std::runtime_error("tokenizer vocab is empty");
         }
         auto backend = std::shared_ptr<XGrammarBackend>(new XGrammarBackend(tokenizer_info, opts));
         RTP_LLM_LOG_INFO("XGrammarBackend::create: ready with serialized TokenizerInfo "
@@ -94,8 +94,11 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&   to
                          opts.max_compiler_threads);
         return backend;
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("XGrammarBackend::create: build threw (%s); disabling grammar", e.what());
-        return nullptr;
+        RTP_LLM_LOG_ERROR("XGrammarBackend::create: initialization failed (%s); aborting startup", e.what());
+        throw;
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("XGrammarBackend::create: initialization failed (unknown); aborting startup");
+        throw;
     }
 }
 

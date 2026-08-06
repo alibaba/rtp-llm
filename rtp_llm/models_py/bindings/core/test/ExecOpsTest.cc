@@ -348,13 +348,21 @@ TEST_F(ExecOpsTest, testGetGpuExecStatus) {
 }
 
 TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
-    auto logits = torch::randn({2, 8}, torch::kCUDA);
+    auto logits = torch::ones({2, 8}, torch::kCUDA);
     auto mask   = torch::zeros({2, 8}, torch::TensorOptions(torch::kBool).device(torch::kCUDA));
     mask[0][0]  = true;
     mask[1][3]  = true;
 
     ASSERT_NO_THROW(runtimeMaskLogits(logits, mask));
     runtimeSyncAndCheck();
+
+    auto result = logits.cpu();
+    EXPECT_TRUE(std::isinf(result[0][0].item<float>()));
+    EXPECT_LT(result[0][0].item<float>(), 0.0f);
+    EXPECT_TRUE(std::isinf(result[1][3].item<float>()));
+    EXPECT_LT(result[1][3].item<float>(), 0.0f);
+    EXPECT_FLOAT_EQ(result[0][1].item<float>(), 1.0f);
+    EXPECT_FLOAT_EQ(result[1][2].item<float>(), 1.0f);
 }
 
 TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsUsesCompactRowMapping) {

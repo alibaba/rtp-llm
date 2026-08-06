@@ -425,18 +425,36 @@ class ServerArgsGrammarConfigTest(TestCase):
         Regression guard for the wiring in init_grammar_group_args."""
         py_env_configs = self._setup()
         g = py_env_configs.grammar_config
-        expected = type(g)()
 
-        self.assertEqual(
-            g.constrained_json_disable_any_whitespace,
-            expected.constrained_json_disable_any_whitespace,
+        self.assertEqual(g.constrained_json_disable_any_whitespace, False)
+        self.assertEqual(g.terminate_without_stop_token, False)
+        self.assertEqual(g.num_workers, 8)
+        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+
+    def test_grammar_parser_defaults_override_config_initial_values(self):
+        """The CLI declaration is the source of truth for grammar defaults."""
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.grammar_group_args import (
+            init_grammar_group_args,
         )
-        self.assertEqual(
-            g.terminate_without_stop_token,
-            expected.terminate_without_stop_token,
-        )
-        self.assertEqual(g.num_workers, expected.num_workers)
-        self.assertEqual(g.compiler_cache_bytes, expected.compiler_cache_bytes)
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        cfgs = PyEnvConfigs()
+        g = cfgs.grammar_config
+        g.constrained_json_disable_any_whitespace = True
+        g.terminate_without_stop_token = True
+        g.num_workers = 17
+        g.compiler_cache_bytes = 1
+
+        parser = EnvArgumentParser()
+        parser.set_root_config(cfgs)
+        init_grammar_group_args(parser, g)
+        parser.parse_args([])
+
+        self.assertEqual(g.constrained_json_disable_any_whitespace, False)
+        self.assertEqual(g.terminate_without_stop_token, False)
+        self.assertEqual(g.num_workers, 8)
+        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
 
     def test_grammar_cmd_args(self):
         """Every CLI flag binds to the right config field, with correct types."""

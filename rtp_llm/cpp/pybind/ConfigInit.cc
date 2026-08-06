@@ -1326,7 +1326,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
         .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
-        .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
         .def("to_string", &GrammarConfig::to_string)
         .def("__repr__",
              [](const GrammarConfig& c) {
@@ -1342,7 +1341,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return py::make_tuple(self.constrained_json_disable_any_whitespace,
                                       self.num_workers,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens,
                                       self.compiler_cache_bytes,
                                       self.terminate_without_stop_token);
             },
@@ -1359,18 +1357,31 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
                         c.num_workers                             = t[2].cast<int>();
                         c.tokenizer_info_json                     = t[3].cast<std::string>();
-                        c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
+                        // override_stop_tokens was removed; validate and discard the legacy value.
+                        static_cast<void>(t[4].cast<std::vector<int32_t>>());
                     } else {
-                        // Previous/current layouts:
-                        // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
-                        //  compiler_cache_bytes[, terminate_without_stop_token]).
                         c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
                         c.num_workers                             = t[1].cast<int>();
                         c.tokenizer_info_json                     = t[2].cast<std::string>();
-                        c.override_stop_tokens                    = t[3].cast<std::vector<int32_t>>();
-                        c.compiler_cache_bytes                    = t[4].cast<int64_t>();
                         if (t.size() == 6) {
+                            // Previous layout:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
+                            //  compiler_cache_bytes, terminate_without_stop_token).
+                            static_cast<void>(t[3].cast<std::vector<int32_t>>());
+                            c.compiler_cache_bytes         = t[4].cast<int64_t>();
                             c.terminate_without_stop_token = t[5].cast<bool>();
+                        } else if (py::isinstance<py::int_>(t[3])) {
+                            // Current layout:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json,
+                            //  compiler_cache_bytes, terminate_without_stop_token).
+                            c.compiler_cache_bytes         = t[3].cast<int64_t>();
+                            c.terminate_without_stop_token = t[4].cast<bool>();
+                        } else {
+                            // Older layout without terminate_without_stop_token:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json,
+                            //  override_stop_tokens, compiler_cache_bytes).
+                            static_cast<void>(t[3].cast<std::vector<int32_t>>());
+                            c.compiler_cache_bytes = t[4].cast<int64_t>();
                         }
                     }
                 } catch (const std::exception& e) {

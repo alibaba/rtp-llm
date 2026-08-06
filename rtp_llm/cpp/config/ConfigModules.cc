@@ -390,8 +390,7 @@ std::string GrammarConfig::to_string() const {
         << "terminate_without_stop_token: " << terminate_without_stop_token << "\n"
         << "num_workers: " << num_workers << "\n"
         << "compiler_cache_bytes: " << compiler_cache_bytes << "\n"
-        << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"
-        << "override_stop_tokens_size: " << override_stop_tokens.size();
+        << "tokenizer_info_json_size: " << tokenizer_info_json.size();
     return oss.str();
 }
 

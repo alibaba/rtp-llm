@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <variant>
@@ -59,6 +60,14 @@ TEST(XGrammarBackendTest, CreateFromSerializedTokenizerInfo) {
     auto matcher_or = backend->createMatcherFromKey({"json", R"({"type":"object"})"});
     ASSERT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
     EXPECT_EQ(matcher_or.value()->numAcceptedTokens(), 0);
+}
+
+TEST(XGrammarBackendTest, EmptyTokenizerInfoIntentionallyDisablesBackend) {
+    EXPECT_EQ(XGrammarBackend::create("", grammarConfig()), nullptr);
+}
+
+TEST(XGrammarBackendTest, NonEmptyMalformedTokenizerInfoFailsFast) {
+    EXPECT_THROW(XGrammarBackend::create("not-json", grammarConfig()), std::runtime_error);
 }
 
 TEST(XGrammarTokenizerInfoTest, SerializesTokenizerInfoFromPreparedHFData) {

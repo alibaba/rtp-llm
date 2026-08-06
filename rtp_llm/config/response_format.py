@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, Literal, Optional, TypeAlias, Union
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -17,10 +17,12 @@ def normalize_think_tag(value: str) -> str:
 
 
 class ResponseFormatJSONSchema(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     name: Optional[str] = None
+    description: Optional[str] = None
     schema_: Optional[Dict[str, Any]] = Field(default=None, alias="schema")
+    strict: Optional[bool] = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: SerializerFunctionWrapHandler) -> Dict[str, Any]:
@@ -32,6 +34,8 @@ class ResponseFormatJSONSchema(BaseModel):
 
 
 class ResponseFormat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     type: Literal[
         "text", "json_schema", "json_object", "regex", "ebnf", "structural_tag"
     ]
@@ -42,6 +46,17 @@ class ResponseFormat(BaseModel):
 
     @model_validator(mode="after")
     def _check_payload(self) -> "ResponseFormat":
+        payload_field = {
+            "json_schema": "json_schema",
+            "regex": "pattern",
+            "ebnf": "grammar",
+            "structural_tag": "structural_tag",
+        }.get(self.type)
+        for field_name in ("json_schema", "pattern", "grammar", "structural_tag"):
+            if field_name != payload_field and getattr(self, field_name) is not None:
+                raise ValueError(
+                    f"response_format.type={self.type} does not allow {field_name}"
+                )
         if self.type == "json_schema":
             if self.json_schema is None or self.json_schema.schema_ is None:
                 raise ValueError(
@@ -54,38 +69,32 @@ class ResponseFormat(BaseModel):
             if not self.grammar:
                 raise ValueError("response_format.type=ebnf requires grammar")
         elif self.type == "structural_tag":
-            if not self.structural_tag:
+            if (
+                not isinstance(self.structural_tag, dict)
+                or self.structural_tag.get("type") != "structural_tag"
+                or not isinstance(self.structural_tag.get("format"), dict)
+            ):
                 raise ValueError(
-                    "response_format.type=structural_tag requires structural_tag"
+                    "response_format.type=structural_tag requires "
+                    "structural_tag.type='structural_tag' and a format object"
                 )
         return self
 
 
 def parse_response_format(value: Any) -> Optional[ResponseFormat]:
-    """Parse loose request payloads into a validated ResponseFormat envelope."""
-    if value is None:
-        return None
-    if isinstance(value, ResponseFormat):
+    """Normalize legacy wire shapes to the canonical response-format model."""
+    if value is None or isinstance(value, ResponseFormat):
         return value
-    if isinstance(value, BaseModel):
-        # The OpenAI request layer owns a wire-model ResponseFormat class that
-        # is intentionally separate from this canonical config model. Convert
-        # any validated Pydantic envelope back to its wire shape before
-        # canonical validation instead of coupling the config layer to the
-        # OpenAI module.
-        value = value.model_dump(exclude_none=True)
     if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        if stripped == "text":
-            return ResponseFormat(type="text")
-        value = json.loads(stripped)
-    if isinstance(value, dict):
+        value = value.strip()
         if not value:
             return None
-        return ResponseFormat(**value)
-    raise TypeError(f"response_format has unsupported type {type(value).__name__}")
-
-
-ResponseFormatInput: TypeAlias = Union[ResponseFormat, Dict[str, Any], str]
+        if value == "text":
+            return ResponseFormat(type="text")
+        try:
+            value = json.loads(value)
+        except RecursionError as e:
+            raise ValueError(
+                "response_format exceeds the supported JSON nesting depth"
+            ) from e
+    return ResponseFormat.model_validate(value)

@@ -35,9 +35,11 @@ public:
     XGrammarBackend(XGrammarBackend&&)                 = delete;
     XGrammarBackend& operator=(XGrammarBackend&&)      = delete;
 
-    // Returns nullptr (not throw) when tokenizer info is empty / invalid / build fails.
+    // Empty tokenizer info intentionally disables structured output. Non-empty
+    // tokenizer info is a startup compatibility contract: deserialization or
+    // backend construction failures must propagate and abort engine startup.
     static std::shared_ptr<XGrammarBackend> create(const std::string&   tokenizer_info_json,
-                                                   const GrammarConfig& cfg) noexcept;
+                                                   const GrammarConfig& cfg);
 
     // Creates a fresh per-stream matcher from a grammar key. The compiled grammar is
     // cached by compile(); matcher state itself is never shared across streams.

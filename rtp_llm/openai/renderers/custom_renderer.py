@@ -12,7 +12,7 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.config.response_format import normalize_think_tag
-from rtp_llm.config.response_format_builder import ReasoningFormat
+from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,

@@ -18,18 +18,8 @@ GRAMMAR_FIELD_NAMES = cast(
 )
 
 
-def dump_compact_json(value: Any) -> str:
-    try:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    except RecursionError as e:
-        raise FtRuntimeException(
-            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-            "JSON value exceeds the supported nesting depth",
-        ) from e
-
-
 def load_json_field(name: str, value: Any) -> Any:
-    if isinstance(value, dict):
+    if not isinstance(value, (str, bytes, bytearray)):
         return value
     try:
         return json.loads(value)
@@ -38,23 +28,51 @@ def load_json_field(name: str, value: Any) -> Any:
             ExceptionType.ERROR_INPUT_FORMAT_ERROR,
             f"{name} exceeds the supported JSON nesting depth",
         ) from e
-    except (json.JSONDecodeError, TypeError) as e:
+    except (json.JSONDecodeError, TypeError, UnicodeDecodeError) as e:
         raise FtRuntimeException(
             ExceptionType.ERROR_INPUT_FORMAT_ERROR,
             f"{name} must be valid JSON: {str(e)}",
         ) from e
 
 
+def parse_json_grammar_value(name: GrammarFieldName, value: Any) -> Any:
+    """Parse one JSON-valued grammar field into its canonical Python type."""
+    if value is None:
+        return None
+
+    value = load_json_field(name, value)
+    if name == "json_schema":
+        if isinstance(value, (dict, bool)):
+            return value
+        expected = "a JSON object or boolean"
+    elif name == "structural_tag":
+        if isinstance(value, dict):
+            return value
+        expected = "a JSON object"
+    else:
+        raise ValueError(f"{name} is not a JSON-valued grammar field")
+
+    raise FtRuntimeException(
+        ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+        f"{name} must be {expected}",
+    )
+
+
 def normalize_grammar_value(name: GrammarFieldName, value: Any) -> Any:
+    if name in ("json_schema", "structural_tag"):
+        value = parse_json_grammar_value(name, value)
     if name == "structural_tag":
-        value = load_json_field(name, value)
-        if isinstance(value, dict) and "type" not in value and (
-            "format" in value
-            or ("structures" in value and "triggers" in value)
+        if (
+            isinstance(value, dict)
+            and "type" not in value
+            and ("format" in value or ("structures" in value and "triggers" in value))
         ):
             value = {"type": "structural_tag", **value}
-    if name in ("json_schema", "structural_tag") and isinstance(value, dict):
-        return dump_compact_json(value)
+    elif name in ("regex", "ebnf") and not isinstance(value, str):
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            f"{name} must be a string",
+        )
     return value
 
 
@@ -160,7 +178,7 @@ class GrammarConstraint:
             )
 
     def _json_schema_format_node(self) -> Dict[str, Any]:
-        schema = load_json_field("json_schema", self.value)
+        schema = self.value
         if not isinstance(schema, (dict, bool)):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
@@ -169,7 +187,7 @@ class GrammarConstraint:
         return {"type": "json_schema", "json_schema": schema, "style": "json"}
 
     def _structural_tag_format_node(self) -> Dict[str, Any]:
-        structural_tag = load_json_field("structural_tag", self.value)
+        structural_tag = self.value
         if not isinstance(structural_tag, dict):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,

@@ -36,9 +36,9 @@ from rtp_llm.config.exceptions import (
 )
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.response_format import normalize_think_tag
-from rtp_llm.config.response_format_builder import (
+from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
-    ResponseFormatBuilder,
+    restore_final_constraint,
 )
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
@@ -635,8 +635,6 @@ async def iter_real_model_stream_infer(
         begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
         if begin_think_tokens:
             generate_config.begin_think_token_ids = begin_think_tokens
-        if runtime.eos_tokens and not generate_config.end_think_token_ids:
-            generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_dash_sc_controls_to_generate_config(
             generate_config, sampling, request_controls, runtime
         )
@@ -649,28 +647,6 @@ async def iter_real_model_stream_infer(
                 generate_env_config,
                 prompt_end_with_think=bool(matched_think_bos_ids),
             )
-        final_constraint = None
-        if generate_env_config is not None:
-            try:
-                final_constraint = generate_config.add_thinking_params(
-                    _hf_tokenizer(tokenizer),
-                    generate_env_config,
-                    enable_thinking=generate_config.in_think_mode,
-                    reasoning_format=reasoning_format,
-                )
-            except Exception as e:
-                logging.warning(
-                    "[DashScGrpc] [%s] add_thinking_params failed: %s", tag, e
-                )
-                final_constraint = generate_config.finalize_response_format(
-                    reasoning_format=reasoning_format,
-                )
-                generate_config.validate()
-        else:
-            final_constraint = generate_config.finalize_response_format()
-            generate_config.validate()
-        if runtime.eos_tokens and not generate_config.end_think_token_ids:
-            generate_config.end_think_token_ids = list(runtime.eos_tokens)
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -686,6 +662,17 @@ async def iter_real_model_stream_infer(
                 # any future engine-side mutation request-local; inner lists are
                 # shared (snapshot is read-only by contract).
                 generate_config.stop_words_list = list(extra_stop_word_ids)
+        if generate_env_config is None:
+            final_constraint = generate_config.finalize_response_format()
+        else:
+            final_constraint = generate_config.add_thinking_params(
+                _hf_tokenizer(tokenizer),
+                generate_env_config,
+                enable_thinking=generate_config.in_think_mode,
+                reasoning_format=reasoning_format,
+            )
+        if runtime.eos_tokens and not generate_config.end_think_token_ids:
+            generate_config.end_think_token_ids = list(runtime.eos_tokens)
         # All these are pre-resolved at servicer init via ``build_think_runtime``;
         # reading them here is O(1) and avoids per-request tokenizer.encode.
         eos_id = runtime.eos_token_id
@@ -988,9 +975,7 @@ async def iter_real_model_stream_infer(
         if phase2_needed:
             phase2_config = _clone_generate_config(generate_config)
             phase2_config.in_think_mode = False
-            ResponseFormatBuilder.restore_final_constraint(
-                phase2_config, final_constraint
-            )
+            restore_final_constraint(phase2_config, final_constraint)
             if sampling.max_new_tokens_from_completion_alias:
                 phase2_config.max_new_tokens = (
                     _phase2_max_new_tokens_for_completion_alias(

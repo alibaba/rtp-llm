@@ -545,7 +545,6 @@ class GrammarConfig:
     compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
     num_workers: int
-    override_stop_tokens: list[int]
     tokenizer_info_json: str
     def __getstate__(self) -> tuple:
         ...

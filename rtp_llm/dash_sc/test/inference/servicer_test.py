@@ -562,32 +562,26 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gc.max_thinking_tokens, 2_147_483_647)
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
 
-    async def test_budget_zero_disables_thinking_even_if_add_thinking_params_fails(
-        self,
-    ) -> None:
+    async def test_budget_zero_disables_thinking(self) -> None:
         """Request-level zero budget must still produce a full think mask config."""
         req = self._minimal_request()
         visitor = _FakeVisitor(_FakeAsyncStream([]))
         tok = _dsv4_tokenizer()
         env_cfg = _GenerateEnvCfg()
 
-        with patch(
-            "rtp_llm.config.generate_config.GenerateConfig.add_thinking_params",
-            side_effect=RuntimeError("boom"),
-        ):
-            await _drain(
-                iter_real_model_stream_infer(
-                    req,
-                    [1, 2],
-                    SamplingParams(max_new_think_tokens=0),
-                    DashScRequestControls(),
-                    visitor,
-                    rtp_llm_request_id=1,
-                    tokenizer=tok,
-                    generate_env_config=env_cfg,
-                    think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
-                )
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(max_new_think_tokens=0),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                tokenizer=tok,
+                generate_env_config=env_cfg,
+                think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
             )
+        )
 
         gc = visitor.last_generate_input.generate_config
         self.assertFalse(gc.in_think_mode)
@@ -739,7 +733,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(phase1_config.structural_tag)
         self.assertIsNone(phase2_config.response_format)
         self.assertIsNone(phase2_config.structural_tag)
-        self.assertEqual(phase2_config.json_schema, '{"type":"object"}')
+        self.assertEqual(phase2_config.json_schema, {"type": "object"})
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
         self.assertEqual(len(visitor.generate_inputs[0].generate_config.role_addrs), 1)
         self.assertEqual(visitor.generate_inputs[1].generate_config.role_addrs, [])
@@ -2107,7 +2101,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(config.response_format)
         self.assertIsNone(config.json_schema)
         self.assertIsNotNone(config.structural_tag)
-        structural_tag = json.loads(config.structural_tag)
+        structural_tag = config.structural_tag
         elements = structural_tag["format"]["elements"]
         self.assertEqual(elements[0]["begin"], "<think>\n")
         self.assertEqual(elements[0]["end"], "</think>\n\n")
@@ -2138,7 +2132,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         config = visitor.last_generate_input.generate_config
-        structural_tag = json.loads(config.structural_tag)
+        structural_tag = config.structural_tag
         reasoning_tag = structural_tag["format"]["elements"][0]
         self.assertEqual(reasoning_tag["begin"], "")
         self.assertEqual(reasoning_tag["end"], "</think>\n\n")
@@ -2198,7 +2192,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         config = visitor.last_generate_input.generate_config
         self.assertIsNone(config.response_format)
         self.assertIsNone(config.json_schema)
-        structural_tag = json.loads(config.structural_tag)
+        structural_tag = config.structural_tag
         final_format = structural_tag["format"]["elements"][-1]
         self.assertEqual(final_format["type"], "json_schema")
         self.assertEqual(final_format["json_schema"], schema)
@@ -2238,7 +2232,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         config = visitor.last_generate_input.generate_config
         self.assertIsNone(config.response_format)
-        canonical_tag = json.loads(config.structural_tag)
+        canonical_tag = config.structural_tag
         self.assertEqual(canonical_tag["type"], "structural_tag")
         self.assertEqual(canonical_tag["format"], tag["format"])
 
@@ -2281,7 +2275,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         config = visitor.last_generate_input.generate_config
-        canonical_tag = json.loads(config.structural_tag)
+        canonical_tag = config.structural_tag
         elements = canonical_tag["format"]["elements"]
         self.assertEqual(elements[0]["begin"], "<think>\n")
         self.assertEqual(elements[0]["end"], "</think>\n\n")
