@@ -8,7 +8,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -242,6 +242,87 @@ class V4Transformer(nn.Module):
         #   main / indexer — back-to-back on the compressor side stream.
         self._prefill_ws_main_w = 0
         self._prefill_ws_idx_w = 0
+
+        # DSpARK target-feature export. The target model config fills this
+        # with 0-based layer ids (V4-Flash uses 40/41/42); the empty tuple is
+        # the no-auxiliary-tensor default for ordinary inference and MTP.
+        self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
+
+    def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
+        """Configure target residual-stream layers exported to DSpARK.
+
+        Each selected layer is reduced over the mHC axis *after* that layer,
+        matching the reference model's ``h.mean(dim=-2)`` semantics. Capture
+        order follows ``layer_ids`` rather than model traversal order.
+        """
+        capture_ids = tuple(int(layer_id) for layer_id in layer_ids)
+        if len(set(capture_ids)) != len(capture_ids):
+            raise ValueError(
+                "DSpARK auxiliary hidden capture layer ids must be unique, "
+                f"got {capture_ids}"
+            )
+        invalid_ids = [
+            layer_id
+            for layer_id in capture_ids
+            if layer_id < 0 or layer_id >= len(self.layers)
+        ]
+        if invalid_ids:
+            raise ValueError(
+                "DSpARK auxiliary hidden capture layer ids are out of range: "
+                f"invalid={invalid_ids}, num_layers={len(self.layers)}"
+            )
+        self.capture_aux_hidden_layer_ids = capture_ids
+
+    def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
+        """Write one selected layer's mean-pooled hidden into the shared
+        runtime buffer.
+
+        In DSpARK mode the buffer rows are ``[T, len(capture_ids)*dim]``;
+        the segment index is the layer's position in
+        ``capture_aux_hidden_layer_ids`` (capture order follows the
+        configured ids, not model traversal order). ``hidden`` is
+        ``[T, hc, H]`` in prefill and ``[B, S, hc, H]`` in decode/verify; the
+        mHC lane is mean-reduced and token rows are flattened. The ``copy_``
+        into the fixed-address registered buffer keeps the write inside a
+        captured CUDA graph, mirroring ``_write_mtp_hidden_buffer``. In CP
+        prefill the rows intentionally stay rank-local zigzag order — the
+        same semantics as the MTP pre-hc rows in this buffer.
+        """
+        try:
+            segment = self.capture_aux_hidden_layer_ids.index(layer_id)
+        except ValueError:
+            return
+        buf = self._mtp_hidden_buffer
+        assert buf is not None, (
+            "DSpARK aux capture requires the shared MTP hidden buffer; "
+            "the target model must request it before binding runtime buffers"
+        )
+        pooled = hidden.mean(dim=-2)
+        flat = pooled.reshape(-1, pooled.size(-1))
+        rows, dim = flat.shape
+        assert (segment + 1) * dim <= buf.size(1), (
+            f"aux segment overflow: segment={segment} dim={dim} "
+            f"row_width={buf.size(1)}"
+        )
+        assert rows <= buf.size(
+            0
+        ), f"_mtp_hidden_buffer overflow: T={rows} > cap={buf.size(0)}"
+        buf[:rows, segment * dim : (segment + 1) * dim].copy_(flat)
+
+    def _note_aux_hidden_rows(self, rows: int, is_cuda_graph: bool) -> None:
+        """Row accounting for the per-layer aux writes of one forward.
+
+        Same contract as ``_write_mtp_hidden_buffer``: the Python-side valid
+        count is only advanced outside CUDA graph capture/replay; graphed
+        readers pass an explicit row count instead.
+        """
+        assert self._mtp_hidden_buffer is not None
+        assert rows <= self._mtp_hidden_buffer.size(0), (
+            f"_mtp_hidden_buffer overflow: T={rows} > "
+            f"cap={self._mtp_hidden_buffer.size(0)}"
+        )
+        if not is_cuda_graph:
+            self._mtp_hidden_valid_tokens = int(rows)
 
     def _bind_runtime_buffers(
         self,

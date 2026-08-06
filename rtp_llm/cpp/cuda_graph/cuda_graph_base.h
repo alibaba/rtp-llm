@@ -18,15 +18,18 @@ struct CudaGraphState {
 };
 
 struct GraphParams {
-    bool                 enable_cuda_graph            = false;
-    bool                 enable_cuda_graph_debug_mode = false;
-    bool                 is_prefill_cuda_graph_mode   = false;
-    bool                 is_target_verify             = false;
-    int                  max_seq_len                  = 0;
-    int                  tokens_per_block             = 0;  // physical kv block size
-    int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
-    int                  num_tokens_per_bs = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
-    int                  sp_steps          = 0;
+    bool enable_cuda_graph            = false;
+    bool enable_cuda_graph_debug_mode = false;
+    bool is_prefill_cuda_graph_mode   = false;
+    bool is_target_verify             = false;
+    int  max_seq_len                  = 0;
+    int  tokens_per_block             = 0;  // physical kv block size
+    int  kernel_tokens_per_block      = 0;  // must be explicitly configured
+    int  num_tokens_per_bs            = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    int  sp_steps                     = 0;
+    // Fixed-width DSpARK draft graph: captures the propose call, which
+    // carries no feature rows (input_hiddens is a 0-row tensor).
+    bool                 is_dspark_draft        = false;
     size_t               max_context_batch_size = 128;
     std::size_t          hidden_size            = 0;
     c10::ScalarType      model_data_type        = c10::ScalarType::Float;
@@ -38,7 +41,7 @@ struct GraphParams {
     // CudaGraphRunner allocates input_hiddens with hidden_size * hc_mult so
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
     // produced by the target's getMtpTargetHiddenStates accessor.
-    int64_t              hc_mult            = 1;
+    int64_t hc_mult = 1;
 };
 
 class GraphBase {

@@ -105,6 +105,7 @@ from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context,
     cp_gather_last_by_request,
+    publish_dspark_commit_cp_ctx,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
@@ -387,6 +388,12 @@ def forward_layers(
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
+    capture_aux = bool(getattr(v4, "capture_aux_hidden_layer_ids", ()))
+    if capture_aux and cp_ctx is not None:
+        # The DSpark draft commit that follows this forward receives the
+        # rank-local aux rows; hand it the row -> (request, position) map.
+        publish_dspark_commit_cp_ctx(cp_ctx)
+
     prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
     use_prefill_fast_path = _prefill_fast_path_enabled(
         v4, prepare_hidden_fn, prefill_fast_layer_calls
@@ -521,6 +528,8 @@ def forward_layers(
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                 )  # [T, hc, dim]
+                if capture_aux:
+                    v4.capture_aux_hidden(layer_idx, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                 if write_cache_store_impl is not None:
@@ -569,11 +578,16 @@ def forward_layers(
             clear_prefill_meta_shared_fp8(v4)
 
     if v4._mtp_hidden_buffer is not None:
-        _pre_hc_flat = h.flatten(-2)
-        v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
-        if v4._mtp_last_hidden_buffer is not None:
-            _last_pre_hc = _last_hidden_by_request(_pre_hc_flat, cu_seqlens, cp_ctx)
-            v4._write_mtp_last_hidden_buffer(_last_pre_hc)
+        if capture_aux:
+            # DSpARK mode: the buffer already holds this forward's aux rows
+            # (written per selected layer above); only account for them.
+            v4._note_aux_hidden_rows(h.size(0), is_cuda_graph=False)
+        else:
+            _pre_hc_flat = h.flatten(-2)
+            v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
+            if v4._mtp_last_hidden_buffer is not None:
+                _last_pre_hc = _last_hidden_by_request(_pre_hc_flat, cu_seqlens, cp_ctx)
+                v4._write_mtp_last_hidden_buffer(_last_pre_hc)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.

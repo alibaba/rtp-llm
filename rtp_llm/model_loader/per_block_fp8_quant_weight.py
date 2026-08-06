@@ -185,6 +185,8 @@ def gemm_block_fp8_gpt_style_tp_strategy():
         W.v4_mtp_e_proj_s: sp_id,
         W.v4_mtp_h_proj_w: sp_id,
         W.v4_mtp_h_proj_s: sp_id,
+        W.v4_dspark_main_proj_w: sp_id,
+        W.v4_dspark_main_proj_s: sp_id,
     }
     tp_strategy = copy.deepcopy(W.gpt_style_tp_strategy)
     tp_strategy.update(gemm_block_fp8_weight_tp_strategy)
@@ -930,6 +932,7 @@ _V4_FP8_WEIGHT_LIST: Dict[str, str] = {
     W.v4_shared_w13_w: W.v4_shared_w13_s,
     W.v4_mtp_e_proj_w: W.v4_mtp_e_proj_s,
     W.v4_mtp_h_proj_w: W.v4_mtp_h_proj_s,
+    W.v4_dspark_main_proj_w: W.v4_dspark_main_proj_s,
 }
 
 # Register V4 names into the base class whitelist so support() and the

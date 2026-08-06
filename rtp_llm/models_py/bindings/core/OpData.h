@@ -111,6 +111,12 @@ struct GptModelOutputs {
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
 
+    // Optional in-model DSpARK proposal: [batch, gamma] tokens. The
+    // rejection-sampling q is reconstructed engine-side as a point mass
+    // (dsparkPointMassDraftProbs) — no per-vocab probabilities cross this
+    // boundary.
+    torch::Tensor draft_tokens;
+
     std::vector<torch::Tensor> moe_gating;
 };
 

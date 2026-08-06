@@ -24,11 +24,11 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(const LayerIdsType& layer_ids,
-                 KVCacheSpecPtr      kvcache_spec,
-                 BlockPoolPtr        block_pool,
-                 int                 group_id,
-                 SharedBlockCache*   shared_cache = nullptr,
+    KVCacheGroup(const LayerIdsType&                 layer_ids,
+                 KVCacheSpecPtr                      kvcache_spec,
+                 BlockPoolPtr                        block_pool,
+                 int                                 group_id,
+                 SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         layer_ids_(layer_ids),
         kvcache_spec_(std::move(kvcache_spec)),
@@ -42,7 +42,11 @@ public:
 
     bool init();
     // Allocate blocks for `seq_len` tokens; appends new IDs to `block_ids` via BlockIds::add().
-    virtual bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    virtual bool malloc(BlockIds& block_ids,
+                        int       seq_len,
+                        bool      enable_reuse_cache = false,
+                        int       reserve_step       = 0,
+                        int*      need_blocks        = nullptr) = 0;
     // TODO, match的时候热度不增加，最终匹配成功的时候再去增加热度。
     virtual MatchResult match(const CacheKeysType& cache_keys)                                                   = 0;
     virtual void        free(const BlockIndicesType& block_indices)                                              = 0;
@@ -66,12 +70,12 @@ public:
     int    group_id() const;
 
 protected:
-    LayerIdsType      layer_ids_;
-    KVCacheSpecPtr    kvcache_spec_;
-    BlockPoolPtr      block_pool_;
-    SharedBlockCache* shared_cache_ = nullptr;
+    LayerIdsType                 layer_ids_;
+    KVCacheSpecPtr               kvcache_spec_;
+    BlockPoolPtr                 block_pool_;
+    SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
-    int               group_id_     = 0;
+    int                          group_id_         = 0;
 
     int                                    seq_size_per_block_;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;

@@ -7,6 +7,7 @@
 #include <torch/version.h>
 
 #include <string>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -21,6 +22,10 @@ public:
     void setHiddenStates(at::Tensor hidden_states) {
         decoder_layer_hidden_states_ = hidden_states;
     };
+
+    void setOptionalOutputs(at::Tensor draft_tokens) {
+        draft_tokens_ = std::move(draft_tokens);
+    }
 
     CaptureMemoryHold() {}
 
@@ -62,6 +67,7 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
+    at::Tensor               draft_tokens_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

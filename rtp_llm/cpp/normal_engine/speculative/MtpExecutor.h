@@ -76,7 +76,8 @@ public:
                                                        const ModelConfig&     model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
-                                                       int                    vocab_size);
+                                                       int                    vocab_size,
+                                                       bool                   is_dspark = false);
 
 protected:
     struct AcceptLenMetricsSnapshot {
@@ -145,6 +146,11 @@ protected:
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
     // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
     // carrier. The source returns the full buffer; consumers slice as needed.
+    // Fill the DSpARK propose-call input after the commit forward. Ranks
+    // without the anchors (non-root, fake streams) build placeholder shapes
+    // for the subsequent broadcast/sync to fill.
+    torch::Tensor dsparkPointMassDraftProbs(const torch::Tensor& draft_tokens) const;
+
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                               ModelBase&      source,
                                               bool            request_actual_rows = false);
@@ -195,9 +201,12 @@ private:
     size_t                                                                                     vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
+    DataType data_type_;
+    size_t   hidden_size_;
+    size_t   propose_step_;
+    // Fixed-width block diffusion: one draft forward emits gamma proposals;
+    // unlike MTP there is no autoregressive draft loop or hidden-state chain.
+    bool                                             is_dspark_ = false;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
@@ -228,10 +237,11 @@ private:
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
 
-    AsyncRunner                             target_verify_prepare_runner_;
-    AsyncRunner                             draft_prefill_prepare_runner_;
-    AsyncRunner                             spec_logits_verify_async_runner_;
+    AsyncRunner target_verify_prepare_runner_;
+    AsyncRunner draft_prefill_prepare_runner_;
+    // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
+    AsyncRunner                             spec_logits_verify_async_runner_;
 
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.

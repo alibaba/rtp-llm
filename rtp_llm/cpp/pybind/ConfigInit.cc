@@ -462,9 +462,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_dsv4_state_block_independent_eviction);
             },
             [](py::tuple t) {
-                const bool has_disk_fields =
-                    t.size() >= 50 && py::isinstance<py::str>(t[9]);
-                const size_t min_size = has_disk_fields ? 50u : 45u;
+                const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
+                const size_t min_size        = has_disk_fields ? 50u : 45u;
                 if (t.size() < min_size)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
@@ -486,43 +485,43 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.memory_cache_disk_sync_timeout_ms = t[12].cast<int64_t>();
                         offset                              = 5;
                     }
-                    c.linear_step                          = t[8 + offset].cast<int>();
-                    c.int8_kv_cache                        = t[9 + offset].cast<int>();
-                    c.fp8_kv_cache                         = t[10 + offset].cast<int>();
-                    c.kv_cache_mem_mb                      = t[11 + offset].cast<int64_t>();
-                    c.seq_size_per_block                   = t[12 + offset].cast<int>();
-                    c.kernel_seq_size_per_block            = t[13 + offset].cast<int>();
-                    c.test_block_num                       = t[14 + offset].cast<int>();
-                    c.use_block_cache                      = t[15 + offset].cast<int>();
-                    c.enable_device_cache                  = t[16 + offset].cast<bool>();
-                    c.enable_memory_cache                  = t[17 + offset].cast<bool>();
-                    c.enable_memory_cache_sm_copy          = t[18 + offset].cast<bool>();
-                    c.enable_remote_cache                  = t[19 + offset].cast<bool>();
-                    c.write_cache_sync                     = t[20 + offset].cast<bool>();
-                    c.enable_tiered_memory_cache           = t[21 + offset].cast<bool>();
-                    c.device_cache_min_free_blocks         = t[22 + offset].cast<int64_t>();
-                    c.reco_enable_vipserver                = t[23 + offset].cast<bool>();
-                    c.reco_vipserver_domain                = t[24 + offset].cast<std::string>();
-                    c.reco_server_address                  = t[25 + offset].cast<std::string>();
-                    c.reco_instance_group                  = t[26 + offset].cast<std::string>();
-                    c.reco_meta_channel_retry_time         = t[27 + offset].cast<uint32_t>();
-                    c.reco_meta_channel_connection_timeout = t[28 + offset].cast<uint32_t>();
-                    c.reco_meta_channel_call_timeout       = t[29 + offset].cast<uint32_t>();
-                    c.reco_storage_thread_num              = t[30 + offset].cast<uint32_t>();
-                    c.reco_storage_queue_size              = t[31 + offset].cast<uint32_t>();
-                    c.reco_put_timeout_ms                  = t[32 + offset].cast<int>();
-                    c.reco_get_timeout_ms                  = t[33 + offset].cast<int>();
-                    c.reco_model_sdk_config                = t[34 + offset].cast<std::string>();
-                    c.reco_model_user_data                 = t[35 + offset].cast<std::string>();
-                    c.reco_model_extra_info                = t[36 + offset].cast<std::string>();
-                    c.reco_instance_id_salt                = t[37 + offset].cast<std::string>();
-                    c.reco_asyncwrapper_thread_num         = t[38 + offset].cast<size_t>();
-                    c.reco_asyncwrapper_queue_size         = t[39 + offset].cast<size_t>();
-                    c.reco_get_broadcast_timeout           = t[40 + offset].cast<int>();
-                    c.reco_put_broadcast_timeout           = t[41 + offset].cast<int>();
-                    c.reco_client_config                   = t[42 + offset].cast<std::string>();
-                    c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
-                    c.dsv4_fixed_pool_blocks               = t[44 + offset].cast<uint32_t>();
+                    c.linear_step                                = t[8 + offset].cast<int>();
+                    c.int8_kv_cache                              = t[9 + offset].cast<int>();
+                    c.fp8_kv_cache                               = t[10 + offset].cast<int>();
+                    c.kv_cache_mem_mb                            = t[11 + offset].cast<int64_t>();
+                    c.seq_size_per_block                         = t[12 + offset].cast<int>();
+                    c.kernel_seq_size_per_block                  = t[13 + offset].cast<int>();
+                    c.test_block_num                             = t[14 + offset].cast<int>();
+                    c.use_block_cache                            = t[15 + offset].cast<int>();
+                    c.enable_device_cache                        = t[16 + offset].cast<bool>();
+                    c.enable_memory_cache                        = t[17 + offset].cast<bool>();
+                    c.enable_memory_cache_sm_copy                = t[18 + offset].cast<bool>();
+                    c.enable_remote_cache                        = t[19 + offset].cast<bool>();
+                    c.write_cache_sync                           = t[20 + offset].cast<bool>();
+                    c.enable_tiered_memory_cache                 = t[21 + offset].cast<bool>();
+                    c.device_cache_min_free_blocks               = t[22 + offset].cast<int64_t>();
+                    c.reco_enable_vipserver                      = t[23 + offset].cast<bool>();
+                    c.reco_vipserver_domain                      = t[24 + offset].cast<std::string>();
+                    c.reco_server_address                        = t[25 + offset].cast<std::string>();
+                    c.reco_instance_group                        = t[26 + offset].cast<std::string>();
+                    c.reco_meta_channel_retry_time               = t[27 + offset].cast<uint32_t>();
+                    c.reco_meta_channel_connection_timeout       = t[28 + offset].cast<uint32_t>();
+                    c.reco_meta_channel_call_timeout             = t[29 + offset].cast<uint32_t>();
+                    c.reco_storage_thread_num                    = t[30 + offset].cast<uint32_t>();
+                    c.reco_storage_queue_size                    = t[31 + offset].cast<uint32_t>();
+                    c.reco_put_timeout_ms                        = t[32 + offset].cast<int>();
+                    c.reco_get_timeout_ms                        = t[33 + offset].cast<int>();
+                    c.reco_model_sdk_config                      = t[34 + offset].cast<std::string>();
+                    c.reco_model_user_data                       = t[35 + offset].cast<std::string>();
+                    c.reco_model_extra_info                      = t[36 + offset].cast<std::string>();
+                    c.reco_instance_id_salt                      = t[37 + offset].cast<std::string>();
+                    c.reco_asyncwrapper_thread_num               = t[38 + offset].cast<size_t>();
+                    c.reco_asyncwrapper_queue_size               = t[39 + offset].cast<size_t>();
+                    c.reco_get_broadcast_timeout                 = t[40 + offset].cast<int>();
+                    c.reco_put_broadcast_timeout                 = t[41 + offset].cast<int>();
+                    c.reco_client_config                         = t[42 + offset].cast<std::string>();
+                    c.ssm_state_dtype                            = t[43 + offset].cast<std::string>();
+                    c.dsv4_fixed_pool_blocks                     = t[44 + offset].cast<uint32_t>();
                     const size_t expected_with_fixed_pool_memory = (has_disk_fields ? 51u : 46u);
                     if (t.size() >= expected_with_fixed_pool_memory) {
                         c.dsv4_fixed_pool_use_memory = t[45 + offset].cast<bool>();
@@ -542,9 +541,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();
                             c.enable_legacy_memory_connector_fallback = t[extra_start + 3].cast<bool>();
                             if (extra_count >= 6) {
-                                c.prefix_tree_memory_state_swa_pool_ratio = t[extra_start + 4].cast<int64_t>();
-                                c.enable_dsv4_state_block_independent_eviction =
-                                    t[extra_start + 5].cast<bool>();
+                                c.prefix_tree_memory_state_swa_pool_ratio      = t[extra_start + 4].cast<int64_t>();
+                                c.enable_dsv4_state_block_independent_eviction = t[extra_start + 5].cast<bool>();
                             }
                         }
                     }
@@ -813,7 +811,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MTP", SP_TYPE_MTP)
         .value("EAGLE3", SP_TYPE_EAGLE3)
         .value("EAGLE", SP_TYPE_EAGLE)
-        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC);
+        .value("DETERMINISTIC", SP_TYPE_DETERMINISTIC)
+        .value("DSPARK", SP_TYPE_DSPARK);
 
     // Register SpeculativeExecutionConfig
     py::class_<SpeculativeExecutionConfig>(m, "SpeculativeExecutionConfig")
@@ -839,6 +838,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention)
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
         .def_readwrite("checkpoint_path", &SpeculativeExecutionConfig::checkpoint_path)
+        .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -851,10 +851,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.force_stream_sample,
                                       self.force_score_context_attention,
                                       self.quantization,
-                                      self.checkpoint_path);
+                                      self.checkpoint_path,
+                                      self.sp_dspark_mask_token_id);
             },
             [](py::tuple t) {
-                if (t.size() != 10)
+                if (t.size() != 10 && t.size() != 11)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -868,6 +869,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.force_score_context_attention = t[7].cast<bool>();
                     c.quantization                  = t[8].cast<std::string>();
                     c.checkpoint_path               = t[9].cast<std::string>();
+                    if (t.size() == 11) {
+                        c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
                 }
@@ -1216,9 +1220,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
-                    c.max_context_batch_size       = t[0].cast<int64_t>();
-                    c.max_batch_tokens_size        = t[1].cast<int64_t>();
-                    c.cp_force_single_prefill      = t.size() >= 3 ? t[2].cast<bool>() : true;
+                    c.max_context_batch_size      = t[0].cast<int64_t>();
+                    c.max_batch_tokens_size       = t[1].cast<int64_t>();
+                    c.cp_force_single_prefill     = t.size() >= 3 ? t[2].cast<bool>() : true;
                     c.max_inited_kv_cache_streams = t.size() >= 4 ? t[3].cast<int64_t>() : 0;
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());

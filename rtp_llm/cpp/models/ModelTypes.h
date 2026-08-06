@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include <array>
 #include <string>
 #include <utility>
 #include <memory>
@@ -85,11 +86,16 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    // last_hidden_states can have a different row count from combo_tokens for
+    // DSpARK prefill seeding, so transmit its leading dimension explicitly.
+    mtpHiddenStatesRows,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
     gptModelInputLength,
 };
+
+using GptModelInputShapeHints = std::array<int64_t, GptModelInputIndex::gptModelInputLength>;
 
 // Bit positions for `tensorDeviceMap`. Only fields that participate in the
 // MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
@@ -100,6 +106,10 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitPrefixLengths   = 1u << 3,
     kDeviceBitLmOutputIndexes = 1u << 4,
 };
+
+GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
+torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
+std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
@@ -138,6 +148,10 @@ public:
     //
     // The producer writes the buffer in verify (req-major) layout
     // ``[r0_v0, r0_v1, …, r0_v_ps, r1_v0, …]``: each request occupies
+    // ``propose_step + 1`` consecutive rows. ``num_tokens >= 0`` returns that
+    // many leading rows; ``num_tokens < 0`` asks the producer for its last
+    // written row count (CP prefill keeps rank-local rows in the buffer, so
+    // the count cannot be derived from the global token count).
     virtual torch::Tensor getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
     }

@@ -175,17 +175,17 @@ struct KVCacheConfig {
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy  = false;
-    bool    enable_remote_cache          = false;
-    bool    write_cache_sync             = false;
-    bool    enable_tiered_memory_cache   = false;
-    bool    enable_gpu_prefix_tree       = true;
-    bool    enable_prefix_tree_memory_cache = true;
-    bool    enable_legacy_memory_connector_fallback = true;
-    int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
+    bool    enable_memory_cache_sm_copy                  = false;
+    bool    enable_remote_cache                          = false;
+    bool    write_cache_sync                             = false;
+    bool    enable_tiered_memory_cache                   = false;
+    bool    enable_gpu_prefix_tree                       = true;
+    bool    enable_prefix_tree_memory_cache              = true;
+    bool    enable_legacy_memory_connector_fallback      = true;
+    int64_t prefix_tree_memory_state_swa_pool_ratio      = 0;
     bool    enable_dsv4_state_block_independent_eviction = false;
-    int64_t device_cache_min_free_blocks = 0;
-    int     load_cache_retry_times       = 1;  // Maximum retry attempts for load cache transfer failures
+    int64_t device_cache_min_free_blocks                 = 0;
+    int     load_cache_retry_times = 1;  // Maximum retry attempts for load cache transfer failures
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
@@ -308,7 +308,8 @@ enum SpeculativeType {
     SP_TYPE_MTP           = 2,  // Multi-token prediction (DeepSeek-V3)
     SP_TYPE_EAGLE3        = 3,  // EAGLE-3
     SP_TYPE_EAGLE         = 4,  // EAGLE
-    SP_TYPE_DETERMINISTIC = 5   // Deterministic (Prompt-Lookup)
+    SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
+    SP_TYPE_DSPARK        = 6   // DSpARK block-diffusion draft
 };
 
 struct SpeculativeExecutionConfig {
@@ -322,7 +323,10 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
-    std::string     to_string() const;
+    // DSpARK noise/mask token used to build each fixed-width draft block.
+    // Filled from the draft checkpoint by ModelFactory.
+    int64_t     sp_dspark_mask_token_id = -1;
+    std::string to_string() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -371,9 +375,9 @@ struct BatchDecodeSchedulerConfig {
 };
 
 struct FIFOSchedulerConfig {
-    int64_t     max_context_batch_size       = 1;
-    int64_t     max_batch_tokens_size        = 0;
-    bool        cp_force_single_prefill      = true;
+    int64_t     max_context_batch_size      = 1;
+    int64_t     max_batch_tokens_size       = 0;
+    bool        cp_force_single_prefill     = true;
     int64_t     max_inited_kv_cache_streams = 0;
     std::string to_string() const;
 };

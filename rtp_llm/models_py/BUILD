@@ -138,7 +138,8 @@ py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",
-        "model_desc/cuda_graph/*.py"
+        "model_desc/cuda_graph/*.py",
+        "speculative/*.py",
     ]),
     deps = [
         ":utils",

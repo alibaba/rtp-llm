@@ -1442,6 +1442,16 @@ class W:
     v4_mtp_hc_head_base = "v4.mtp.hc_head_base"
     v4_mtp_hc_head_scale = "v4.mtp.hc_head_scale"
 
+    # DSV4 DSpARK-only globals.  The three decoder stages continue to use
+    # the regular v4_* per-layer tags with ``mtp.{i}`` checkpoint prefixes.
+    # These tensors form the target-feature combiner and the sequential
+    # Markov correction head around that shared V4 backbone.
+    v4_dspark_main_norm = "v4.dspark.main_norm.weight"
+    v4_dspark_main_proj_w = "v4.dspark.main_proj.weight"
+    v4_dspark_main_proj_s = "v4.dspark.main_proj.scale"
+    v4_dspark_markov_w1 = "v4.dspark.markov_w1.weight"
+    v4_dspark_markov_w2 = "v4.dspark.markov_w2.weight"
+
     gpt_style_tp_strategy: Dict[str, Any] = {
         embedding: sp_neg1,
         lm_head: sp_0_pad8,
@@ -1624,6 +1634,11 @@ class W:
         v4_mtp_hc_head_fn: sp_id,
         v4_mtp_hc_head_base: sp_id,
         v4_mtp_hc_head_scale: sp_id,
+        v4_dspark_main_norm: sp_id,
+        v4_dspark_main_proj_w: sp_id,
+        v4_dspark_main_proj_s: sp_id,
+        v4_dspark_markov_w1: sp_id,
+        v4_dspark_markov_w2: sp_id,
     }
 
     weights_list = [

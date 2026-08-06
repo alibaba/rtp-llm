@@ -54,8 +54,18 @@ public:
                    bool                               is_prefill_cuda_graph_mode = false,
                    bool                               use_spec_decoding          = false,
                    const std::vector<int>&            kv_cache_layer_to_group    = {},
-                   std::shared_ptr<ModelInputsLogger> model_inputs_logger        = nullptr);
+                   std::shared_ptr<ModelInputsLogger> model_inputs_logger        = nullptr,
+                   bool                               is_dspark_draft            = false);
     ~PyWrappedModel();
+
+    // Context parallelism is a model-input policy, not merely a process-group
+    // property. DSpARK's draft model must keep the complete fixed-width query
+    // block on every CP/EP rank because its attention is deliberately
+    // non-causal across all gamma positions. The target model still uses the
+    // ordinary CP split/gather path.
+    static constexpr bool shouldEnablePrefillContextParallel(bool configured, bool bypass) {
+        return configured && !bypass;
+    }
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
@@ -104,6 +114,8 @@ private:
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
+    const bool                               enable_prefill_cp_;
+    const bool                               is_dspark_draft_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
@@ -144,8 +156,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                       bool                               is_prefill_cuda_graph_mode,
                                       bool                               use_spec_decoding,
                                       const std::vector<int>&            kv_cache_layer_to_group,
-                                      std::shared_ptr<ModelInputsLogger> model_inputs_logger):
+                                      std::shared_ptr<ModelInputsLogger> model_inputs_logger,
+                                      bool                               is_dspark_draft):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
+    enable_prefill_cp_(shouldEnablePrefillContextParallel(device_props_.enable_prefill_cp, is_dspark_draft)),
+    is_dspark_draft_(is_dspark_draft),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
@@ -258,7 +273,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         throw;
     }
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
-    if (enable_cuda_graph_ && py_model_class_name == "DeepSeekV4Model" && !params.kv_cache_layer_layout.has_value()) {
+    const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
+                                             || py_model_class_name == "DeepSeekV4MtpModel"
+                                             || py_model_class_name == "DeepSeekV4DSparkModel";
+    if (enable_cuda_graph_ && is_deepseek_v4_python_model && !params.kv_cache_layer_layout.has_value()) {
         RTP_LLM_LOG_WARNING(
             "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
             "CacheManager is initialized.");
@@ -294,6 +312,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
 
+        // The graphed DSpARK call is the fixed-width propose block, which
+        // carries no feature input — commit calls (feature rows in
+        // input_hiddens) stay eager, so no aux-specific graph geometry is
+        // needed.
+        graph_params.is_dspark_draft = params.sp_config.type == SP_TYPE_DSPARK && params.model_id != 0;
+
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
         } else {
@@ -316,6 +340,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
+        } else if (is_dspark_draft) {
+            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
                    && (!params.model_id || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill
@@ -360,8 +386,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         try {
-            syncCudaGraphCaptureRanks(params.parallelism_config, "before_initCapture");
             py_init_result = py_initialize_method(init_resources);
+            // Python initialization/JIT can take a different amount of time on
+            // each EP/TP rank. Synchronize immediately before capture so every
+            // rank enters graph-held collectives in the same order.
+            syncCudaGraphCaptureRanks(params.parallelism_config, "after_initialize_before_initCapture");
             graph_runner_->initCapture();
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
@@ -376,10 +405,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
 
     cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
 
-    if (device_props_.enable_prefill_cp) {
+    if (enable_prefill_cp_) {
         context_parallel_processor_ =
             ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");
+    } else if (device_props_.enable_prefill_cp && is_dspark_draft) {
+        RTP_LLM_LOG_INFO("Context parallel input splitting bypassed for fixed-block draft model.");
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");
