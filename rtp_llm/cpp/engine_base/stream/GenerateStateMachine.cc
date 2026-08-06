@@ -64,7 +64,10 @@ void GenerateStateMachine::handleWaiting() {
         }
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!result.ok()) {
-            if (absl::IsUnavailable(result)) {
+            const auto role_type              = stream_cache_resource_->resourceContext().role_type;
+            const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
+                                                && stream_cache_resource_->isContextStream();
+            if (absl::IsUnavailable(result) && retryable_prefill_init) {
                 return;
             }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
