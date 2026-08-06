@@ -259,6 +259,11 @@ public final class JavaMockEngineCluster {
         private final ConcurrentLinkedQueue<VersionedTask> completions = new ConcurrentLinkedQueue<>();
         private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks = new ConcurrentHashMap<>();
 
+        // ---- acceptance instrumentation (defaults keep behavior unchanged) ----
+        private final ConcurrentLinkedQueue<CancelRecord> cancelRecords = new ConcurrentLinkedQueue<>();
+        private final Map<Long, EngineRpcService.GenerateInputPB> capturedInputs = new ConcurrentHashMap<>();
+        private volatile boolean captureInputs;
+
         FastRpcService(String roleName,
                        EngineRpcService.RoleTypePB roleType,
                        int grpcPort,
@@ -287,6 +292,9 @@ public final class JavaMockEngineCluster {
                 List<MockPerformanceModel.RequestShape> shapes = new ArrayList<>(slot.getRequestsCount());
                 for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
                     stats.enqueuedRequests.increment();
+                    if (captureInputs) {
+                        capturedInputs.put(input.getInput().getRequestId(), input.getInput());
+                    }
                     response.addSuccessesBuilder().setRequestId(input.getInput().getRequestId());
                     shapes.add(performance.shape(input.getInput(), cache));
                 }
@@ -379,7 +387,11 @@ public final class JavaMockEngineCluster {
             long delayNanos = Math.max(0, finishNanos - now);
             scheduler.schedule(() -> {
                 for (MockPerformanceModel.RequestShape shape : shapes) {
-                    runningTasks.remove(shape.input().getRequestId());
+                    // Settle exactly once: a concurrent cancel() may have already
+                    // claimed the task by removing it from runningTasks.
+                    if (runningTasks.remove(shape.input().getRequestId()) == null) {
+                        continue;
+                    }
                     recordCompletion(shape, batchId, executionMs, dpRank);
                     startDecode(shape, batchId);
                     if (cache.admit(shape.blockKeys())) {
@@ -396,8 +408,9 @@ public final class JavaMockEngineCluster {
                                        int dpRank) {
             activePrefillBatches.incrementAndGet();
             for (MockPerformanceModel.RequestShape shape : shapes) {
-                runningTasks.put(shape.input().getRequestId(),
-                        task(shape, batchId, dpRank, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
+                // computeIfPresent: a task cancelled while waiting must not resurrect.
+                runningTasks.computeIfPresent(shape.input().getRequestId(),
+                        (id, ignored) -> task(shape, batchId, dpRank, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
             }
         }
 
@@ -423,7 +436,11 @@ public final class JavaMockEngineCluster {
                     task(shape, batchId, 0, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
             long executionMs = performance.decodeMs(shape.outputLen(), activeBatch);
             scheduler.schedule(() -> {
-                runningTasks.remove(shape.input().getRequestId());
+                // Settle exactly once: cancel() may have already claimed the task
+                // and released the decode counters.
+                if (runningTasks.remove(shape.input().getRequestId()) == null) {
+                    return;
+                }
                 activeDecodeRequests.decrementAndGet();
                 activeKvTokens.addAndGet(-shape.inputLen());
                 pendingRequests.decrementAndGet();
@@ -497,10 +514,62 @@ public final class JavaMockEngineCluster {
         public void cancel(EngineRpcService.CancelRequestPB request,
                            StreamObserver<EngineRpcService.EmptyPB> observer) {
             long requestId = request.getRequestId();
-            runningTasks.remove(requestId);
+            // Settle exactly once: removing from runningTasks claims the task
+            // against the scheduled completion callback.
+            EngineRpcService.TaskInfoPB task = runningTasks.remove(requestId);
+            cancelRecords.add(new CancelRecord(
+                    requestId, CancelRecord.REASON_UNSPECIFIED,
+                    System.currentTimeMillis(), task != null));
+            if (task != null) {
+                if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                    // Release per-request decode accounting reserved in
+                    // scheduleDecodeCompletion. Prefill counters are batch-level
+                    // and settle when the batch completion callback fires.
+                    activeDecodeRequests.decrementAndGet();
+                    activeKvTokens.addAndGet(-task.getInputLength());
+                    pendingRequests.decrementAndGet();
+                }
+                recordCancelledFinish(task);
+            }
             statusVersion.incrementAndGet();
             observer.onNext(EngineRpcService.EmptyPB.newBuilder().build());
             observer.onCompleted();
+        }
+
+        /** Publish a finished record for a cancelled task so WorkerStatus reflects the release. */
+        private void recordCancelledFinish(EngineRpcService.TaskInfoPB task) {
+            long version = completionVersion.incrementAndGet();
+            EngineRpcService.TaskInfoPB finished = task.toBuilder()
+                    .setEndTimeMs(System.currentTimeMillis())
+                    .setExecutionTimeMs(0)
+                    .build();
+            completions.add(new VersionedTask(version, finished));
+        }
+
+        // ---- instrumentation accessors (test-only) ----
+
+        /** Enable capture of enqueued {@code GenerateInputPB}s. Off by default. */
+        void enableInputCapture() {
+            this.captureInputs = true;
+        }
+
+        /** Captured input for the given request, or null if not captured. */
+        EngineRpcService.GenerateInputPB capturedInput(long requestId) {
+            return capturedInputs.get(requestId);
+        }
+
+        /** Snapshot of all Cancel RPCs received, in arrival order. */
+        List<CancelRecord> cancelRecords() {
+            return List.copyOf(cancelRecords);
+        }
+
+        /**
+         * One received Cancel RPC. {@code reason} is a slot for the wire-level
+         * cancel reason — the engine proto does not carry one yet, so it is
+         * always {@link #REASON_UNSPECIFIED} until the protocol change lands.
+         */
+        record CancelRecord(long requestId, String reason, long receivedAtMs, boolean foundRunning) {
+            static final String REASON_UNSPECIFIED = "CANCEL_REASON_UNSPECIFIED";
         }
 
         private record VersionedTask(long version, EngineRpcService.TaskInfoPB task) {

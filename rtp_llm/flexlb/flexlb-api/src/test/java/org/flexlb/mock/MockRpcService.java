@@ -36,6 +36,9 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     /** All EnqueueBatch requests received, in arrival order. */
     final CopyOnWriteArrayList<EngineRpcService.EnqueueBatchRequestPB> enqueuedRequests = new CopyOnWriteArrayList<>();
 
+    /** All Cancel requests received, in arrival order. */
+    final CopyOnWriteArrayList<EngineRpcService.CancelRequestPB> cancelledRequests = new CopyOnWriteArrayList<>();
+
     /** Counter for GetWorkerStatus calls. */
     final AtomicLong workerStatusCallCount = new AtomicLong(0);
 
@@ -70,6 +73,14 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return enqueuedRequests.size();
     }
 
+    public List<EngineRpcService.CancelRequestPB> getCancelledRequests() {
+        return List.copyOf(cancelledRequests);
+    }
+
+    public int getCancelCount() {
+        return cancelledRequests.size();
+    }
+
     public long getWorkerStatusCallCount() {
         return workerStatusCallCount.get();
     }
@@ -85,6 +96,7 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     /** Clear all call records (useful between test cases sharing a worker). */
     public void resetRecords() {
         enqueuedRequests.clear();
+        cancelledRequests.clear();
         workerStatusCallCount.set(0);
         cacheStatusCallCount.set(0);
         healthCheckCount.set(0);
@@ -186,6 +198,15 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         responseObserver.onNext(EngineRpcService.CheckHealthResponsePB.newBuilder()
                 .setHealth("ok")
                 .build());
+        responseObserver.onCompleted();
+    }
+
+    @Override
+    public void cancel(EngineRpcService.CancelRequestPB request,
+                       StreamObserver<EngineRpcService.EmptyPB> responseObserver) {
+        cancelledRequests.add(request);
+        log.info("MockRpcService cancel: request_id={}", request.getRequestId());
+        responseObserver.onNext(EngineRpcService.EmptyPB.newBuilder().build());
         responseObserver.onCompleted();
     }
 }

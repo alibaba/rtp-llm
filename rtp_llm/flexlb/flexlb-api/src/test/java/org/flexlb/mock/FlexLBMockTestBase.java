@@ -323,6 +323,44 @@ public abstract class FlexLBMockTestBase {
         endpointRegistry.scheduledEviction();
     }
 
+    /**
+     * Simulate the engine's worker-status report marking every request that
+     * reached the mock prefill worker as finished, driving
+     * {@link PrefillEndpoint#onWorkerStatusUpdate} → calibrate → releaseBatch.
+     *
+     * <p>In production the batch entry committed at dispatch time is released
+     * only when {@link org.flexlb.sync.runner.GrpcWorkerStatusRunner} feeds the
+     * engine's finished-task report back into the endpoint (see
+     * {@code WorkerStatusSyncTest#applyWorkerStatus}). The mock harness has no
+     * sync runner, so leak-canary tests call this once all futures have
+     * settled, before asserting quiescence. Entries already released through
+     * the failure/cancel repack paths are skipped by calibrate as
+     * "not tracked".
+     */
+    protected void simulatePrefillFinishedReport() {
+        java.util.Map<String, org.flexlb.dao.master.TaskInfo> finished = new java.util.HashMap<>();
+        for (EngineRpcService.EnqueueBatchRequestPB batch
+                : mockPrefillWorker.getRpcService().getEnqueuedRequests()) {
+            for (EngineRpcService.EnqueueBatchDpSlotPB slot : batch.getDpSlotsList()) {
+                for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
+                    long requestId = ext.getInput().getRequestId();
+                    org.flexlb.dao.master.TaskInfo task = new org.flexlb.dao.master.TaskInfo();
+                    task.setRequestId(requestId);
+                    task.setBatchId(batch.getBatchId());
+                    finished.put(String.valueOf(requestId), task);
+                }
+            }
+        }
+        if (finished.isEmpty()) {
+            return;
+        }
+        WorkerStatusResponse response = new WorkerStatusResponse();
+        response.setRole(RoleType.PREFILL);
+        response.setFinishedTaskInfo(finished);
+        PrefillEndpoint prefillEp = getPrefillEndpoint();
+        prefillEp.onWorkerStatusUpdate(prefillEp.getStatus(), response);
+    }
+
     // ==================== Helper: endpoint accessors ====================
 
     protected PrefillEndpoint getPrefillEndpoint() {

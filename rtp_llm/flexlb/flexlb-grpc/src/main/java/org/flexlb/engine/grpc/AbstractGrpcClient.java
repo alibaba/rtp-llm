@@ -350,7 +350,8 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         CACHE_STATUS("cache", "GetCacheStatus"),
         MULTIMODAL_WORKER_STATUS("multimodal_worker", "GetWorkerStatus"),
         MULTIMODAL_CACHE_STATUS("multimodal_cache", "GetCacheStatus"),
-        BATCH_ENQUEUE("batch_enqueue", "EnqueueBatch");
+        BATCH_ENQUEUE("batch_enqueue", "EnqueueBatch"),
+        CANCEL("cancel", "Cancel");
 
         @Getter
         private final String suffix;
