@@ -189,9 +189,8 @@ public class KvcmGrpcClient {
             throw new KvcmQueryException("KVCM leader is unavailable");
         }
 
-        String traceId = IdUtils.fastUuid();
         GetHostCacheStateRequest request = GetHostCacheStateRequest.newBuilder()
-                .setTraceId(traceId)
+                .setTraceId(requestId)
                 // KVCM exposes the cache namespace as instance_id in its protocol.
                 .setInstanceId(namespace)
                 .setQueryType(queryType)
@@ -200,9 +199,9 @@ public class KvcmGrpcClient {
 
         try {
             if (log.isDebugEnabled()) {
-                log.debug("KVCM GetHostCacheState request: requestId={}, traceId={}, namespace={}, "
+                log.debug("KVCM GetHostCacheState request: requestId={}, namespace={}, "
                                 + "leader={}, role={}, group={}, queryType={}, blockCount={}, blockCacheKeys={}",
-                        requestId, traceId, namespace, currentLeader, roleType, group, queryType,
+                        requestId, namespace, currentLeader, roleType, group, queryType,
                         blockCacheKeys.size(), blockCacheKeys);
             }
             long startTime = System.nanoTime() / 1000;
@@ -219,8 +218,7 @@ public class KvcmGrpcClient {
             }
             Map<String, org.flexlb.dao.cache.HostCacheMatch> matches = toMatchesByHost(response.getHostsList());
             if (log.isDebugEnabled()) {
-                log.debug("KVCM GetHostCacheState response: requestId={}, traceId={}, matches={}",
-                        requestId, traceId, matches);
+                log.debug("KVCM GetHostCacheState response: requestId={}, matches={}", requestId, matches);
             }
             return matches;
         } catch (StatusRuntimeException e) {
