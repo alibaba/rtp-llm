@@ -6,6 +6,8 @@ test_copts = [
 ] + copts()
 
 exec_ops_test_deps = [
+    "//rtp_llm/cpp/cache:cache_config",
+    "//rtp_llm/models_py/bindings:op_defs",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/models_py/bindings/common:common",
     "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
@@ -80,10 +82,28 @@ cc_test(
 cc_test_wrapper(
     name = "cache_store_async_writer_test",
     srcs = ["CacheStoreAsyncWriterTest.cpp"],
+    # Own dep list rather than exec_ops_test_deps: that one is unconditionally
+    # CUDA-only. cache_store_async_writer is deliberately under-linked, so each
+    # platform has to supply the provider for its runtime* symbols.
     deps = [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ],
-    copts = copts(),
+    ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        ],
+        "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
+        "//conditions:default": [],
+    }),
+    copts = test_copts,
+    exec_properties = select({
+        "@//:using_cuda": {"gpu": "H20"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {},
+    }),
 )
