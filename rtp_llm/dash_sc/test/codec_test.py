@@ -12,8 +12,8 @@ from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DashErrorSpec,
     DashScParameterError,
-    LLMFinishReason,
     DashScRequestControls,
+    LLMFinishReason,
     SamplingParams,
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
@@ -191,15 +191,16 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
         self.assertEqual(
-            json.loads(sp.to_generate_config().response_format), {"type": "json_object"}
+            sp.to_generate_config().response_format.model_dump(exclude_none=True),
+            {"type": "json_object"},
         )
 
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["json_format"].bool_param = True
         config = parse_sampling_params(req).to_generate_config()
-        self.assertTrue(config.json_format)
-        config.validate()
-        self.assertEqual(config.json_schema, '{"type":"object"}')
+        self.assertEqual(config.response_format.type, "json_object")
+        config.finalize_response_format()
+        self.assertEqual(config.json_schema, {"type": "object"})
 
     def test_build_model_infer_request_carries_response_format(self) -> None:
         req = build_model_infer_request(
@@ -216,7 +217,8 @@ class DashScGrpcRequestTest(TestCase):
 
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
         self.assertEqual(
-            json.loads(sp.to_generate_config().response_format), {"type": "json_object"}
+            sp.to_generate_config().response_format.model_dump(exclude_none=True),
+            {"type": "json_object"},
         )
 
     def test_build_model_infer_request_carries_structural_tag_response_format(
@@ -250,7 +252,7 @@ class DashScGrpcRequestTest(TestCase):
             {"format": normalized_response_format["format"]},
         )
         self.assertEqual(
-            json.loads(config.structural_tag),
+            config.structural_tag,
             {"format": normalized_response_format["format"]},
         )
 
@@ -311,7 +313,7 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self._assert_guided_json_response_format(sp.response_format, schema)
-        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertEqual(config.response_format.json_schema.schema_, schema)
         self.assertIsNone(config.json_schema)
 
     def test_parse_sampling_guided_json_list_string_sets_response_format_json_schema(
@@ -331,7 +333,7 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self._assert_guided_json_response_format(sp.response_format, schema)
-        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertEqual(config.response_format.json_schema.schema_, schema)
         self.assertIsNone(config.json_schema)
 
     def test_parse_sampling_guided_json_overrides_response_format(self) -> None:
@@ -346,7 +348,7 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self._assert_guided_json_response_format(sp.response_format, schema)
-        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertEqual(config.response_format.json_schema.schema_, schema)
         self.assertIsNone(config.json_schema)
 
     def test_parse_sampling_guided_json_from_nested_dash_parameters(self) -> None:
@@ -360,7 +362,7 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self._assert_guided_json_response_format(sp.response_format, schema)
-        self._assert_guided_json_response_format(config.response_format, schema)
+        self.assertEqual(config.response_format.json_schema.schema_, schema)
         self.assertIsNone(config.json_schema)
 
     def test_parse_sampling_response_format_from_nested_dash_parameters(self) -> None:
@@ -410,9 +412,8 @@ class DashScGrpcRequestTest(TestCase):
         config = sp.to_generate_config()
 
         self.assertEqual(json.loads(sp.structural_tag), tag)
-        self.assertEqual(json.loads(config.structural_tag), tag)
+        self.assertEqual(config.structural_tag, tag)
         self.assertIsNone(config.response_format)
-        self.assertFalse(config.json_format)
 
     def test_parse_sampling_normalizes_dashscope_sequence_structural_tag(self) -> None:
         tag = _dashscope_sequence_tool_call_structural_tag()
@@ -425,7 +426,7 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
 
         self.assertEqual(json.loads(sp.structural_tag), normalized)
-        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), normalized)
+        self.assertEqual(sp.to_generate_config().structural_tag, normalized)
 
     def test_parse_sampling_tool_call_structural_tag_unwraps_dashscope_list(
         self,
@@ -556,7 +557,7 @@ class DashScGrpcRequestTest(TestCase):
             tag, ensure_ascii=False
         )
         sp = parse_sampling_params(req)
-        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), tag)
+        self.assertEqual(sp.to_generate_config().structural_tag, tag)
 
     def test_build_model_infer_request_carries_tool_call_structural_tag(self) -> None:
         tag = _tool_call_structural_tag()
@@ -573,7 +574,7 @@ class DashScGrpcRequestTest(TestCase):
         self.assertIn("tool_call_structural_tag", req.parameters)
         sp = parse_sampling_params(req)
         self.assertEqual(json.loads(sp.structural_tag), tag)
-        self.assertEqual(json.loads(sp.to_generate_config().structural_tag), tag)
+        self.assertEqual(sp.to_generate_config().structural_tag, tag)
 
     def test_parse_sampling_max_completion_tokens_parameter_alias_wins(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -671,9 +672,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -690,9 +689,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -705,9 +702,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)

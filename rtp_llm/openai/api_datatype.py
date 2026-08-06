@@ -2,9 +2,11 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
+from rtp_llm.config.response_format import ResponseFormat, parse_response_format
 from rtp_llm.utils.base_model_datatypes import AuxInfo
 
 
@@ -152,19 +154,6 @@ def get_tool_choice_function_name(tool_choice: Optional[ToolChoice]) -> Optional
     return name
 
 
-class ResponseFormatJSONSchema(BaseModel):
-    name: Optional[str] = None
-    schema: Optional[Dict[str, Any]] = None
-    strict: Optional[bool] = None
-
-
-class ResponseFormat(BaseModel):
-    type: Literal["text", "json_schema", "json_object", "regex", "ebnf"]
-    json_schema: Optional[ResponseFormatJSONSchema] = None
-    pattern: Optional[str] = None
-    grammar: Optional[str] = None
-
-
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
@@ -187,7 +176,7 @@ class ChatCompletionRequest(BaseModel):
     logprobs_mode: Optional[Literal["original", "default"]] = None
     top_logprobs: Optional[int] = None
     prompt_logprobs: Optional[int] = None
-    response_format: Optional[Union[ResponseFormat, str, Dict[str, Any]]] = None
+    response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
 
     # ---- These functions are not implemented yet.
@@ -210,6 +199,27 @@ class ChatCompletionRequest(BaseModel):
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     enable_thinking: Optional[bool] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_nested_structured_output_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        extra_configs = data.get("extra_configs")
+        if isinstance(extra_configs, dict):
+            forbidden = ("response_format", "json_format", *GRAMMAR_FIELD_NAMES)
+            present = [name for name in forbidden if name in extra_configs]
+            if present:
+                raise ValueError(
+                    "structured output must use top-level response_format; "
+                    f"extra_configs contains: {', '.join(present)}"
+                )
+        return data
+
+    @field_validator("response_format", mode="before")
+    @classmethod
+    def _parse_response_format(cls, value):
+        return parse_response_format(value)
 
     @model_validator(mode="after")
     def _check_tool_choice(self) -> "ChatCompletionRequest":
@@ -247,6 +257,18 @@ class ChatCompletionRequest(BaseModel):
             chat_template_kwargs is not None
             and chat_template_kwargs.get("enable_thinking") is True
         )
+
+    def get_enable_thinking(self, default: Optional[bool] = None) -> Optional[bool]:
+        chat_template_kwargs = self.get_chat_template_kwargs()
+        if (
+            chat_template_kwargs is None
+            or "enable_thinking" not in chat_template_kwargs
+        ):
+            return default
+        enable_thinking = chat_template_kwargs["enable_thinking"]
+        if enable_thinking is True or enable_thinking is False:
+            return enable_thinking
+        raise ValueError("chat_template_kwargs.enable_thinking must be a boolean")
 
     def disable_thinking(self):
         if self.thinking_budget == 0:

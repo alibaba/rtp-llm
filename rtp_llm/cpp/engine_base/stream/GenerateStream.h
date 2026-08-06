@@ -13,11 +13,13 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
-#include <iterator>
 #include <condition_variable>
-#include <type_traits>
+#include <cstdint>
+#include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 namespace rtp_llm {
@@ -40,6 +42,7 @@ struct StreamUpdateInfo {
     bool                force_update_info      = false;
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
+    std::optional<ErrorInfo>          error_info;
 };
 
 struct StreamSpecUpdateInfo {
@@ -50,8 +53,9 @@ struct StreamSpecUpdateInfo {
     const torch::Tensor draft_hidden_states;
     const torch::Tensor draft_token_probs;
 
-    bool update_remote_generate = true;
-    bool force_update_info      = false;
+    bool                     update_remote_generate = true;
+    bool                     force_update_info      = false;
+    std::optional<ErrorInfo> error_info;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -474,7 +478,7 @@ public:
         return generate_input_->begin_time_us;
     }
 
-    std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
+    const std::vector<BaseLogitsProcessorPtr>& getAllLogitsProcessorPtr() const {
         return logits_processor_list_;
     }
 
@@ -575,11 +579,14 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
-    void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
-    void fillSubGenerateStatus(StreamState state);
-    void resizeSubGenerateStatus(size_t new_size);
+    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
+    void                     updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
+    std::optional<ErrorInfo> validateLogitsProcessorState();
+    void                     fillSubGenerateStatus(StreamState state);
+    void                     resizeSubGenerateStatus(size_t new_size);
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
