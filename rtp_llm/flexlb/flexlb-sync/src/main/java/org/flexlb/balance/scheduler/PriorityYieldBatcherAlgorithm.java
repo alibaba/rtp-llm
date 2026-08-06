@@ -84,6 +84,31 @@ public class PriorityYieldBatcherAlgorithm implements BatcherAlgorithm {
                         "elapsed_ms=" + elapsedMs + " deadline_ms=" + queueDeadlineMs);
             }
 
+            // 1.5 Yielded-item deadline: lower-priority items parked behind a
+            // higher-priority head never reach index 0 while high traffic is
+            // sustained, so the head-only deadline check above can never
+            // clear them. Evict them here (one per cycle) once expired —
+            // settled as NO_AVAILABLE_WORKER (8400) with the yield reason by
+            // RejectionPolicy, so yielding can never starve a request. Runs
+            // before the backpressure park: eviction frees no engine
+            // capacity and must proceed even while dispatch is parked.
+            if (queueDeadlineMs > 0) {
+                int headPriorityForYield = head.priority();
+                for (int i = 1; i < queue.size(); i++) {
+                    BatchItem item = queue.get(i);
+                    if (item.priority() < headPriorityForYield
+                            && now - item.enqueuedAtMs() > queueDeadlineMs) {
+                        queue.remove(i);
+                        return new BatchDecision.Drop(item,
+                                BatchDecision.DropCause.YIELDED_QUEUE_DEADLINE,
+                                "elapsed_ms=" + (now - item.enqueuedAtMs())
+                                        + " deadline_ms=" + queueDeadlineMs
+                                        + " head_priority=" + headPriorityForYield,
+                                headPriorityForYield);
+                    }
+                }
+            }
+
             // 2. Engine backpressure: park if too many inflight batches
             int maxInflightBatches = cfg.getFlexlbBatchFixedMaxInflightBatches();
             if (maxInflightBatches > 0 && currentInflightCount() >= maxInflightBatches) {

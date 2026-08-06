@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.autotpm.RejectionPolicy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.route.RoleType;
@@ -169,6 +170,11 @@ public class WorkerBatcher {
                 Logger.warn("flexlb_batch_drop request_id={} reason=queue_deadline_exceeded {}",
                         d.item().requestId(), d.detail());
                 d.item().failExpired();
+            }
+            case YIELDED_QUEUE_DEADLINE -> {
+                Logger.warn("flexlb_batch_drop request_id={} reason=yielded_queue_deadline {}",
+                        d.item().requestId(), d.detail());
+                RejectionPolicy.rejectYielded(d.item(), d.yieldedForPriority());
             }
             case EXCEEDS_BATCH_TOKEN_CAPACITY ->
                     d.item().failOffer(new IllegalArgumentException(

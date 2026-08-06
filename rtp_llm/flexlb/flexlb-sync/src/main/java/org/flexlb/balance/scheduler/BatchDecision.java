@@ -33,18 +33,34 @@ public sealed interface BatchDecision {
     /**
      * Head item must be dropped (expired or impossible to batch).
      *
-     * @param item   the head item to remove and settle
-     * @param cause  why the item is dropped
-     * @param detail human-readable detail for logging
+     * @param item               the item to remove and settle
+     * @param cause              why the item is dropped
+     * @param detail             human-readable detail for logging
+     * @param yieldedForPriority for {@link DropCause#YIELDED_QUEUE_DEADLINE}
+     *                           only: the priority of the head item the
+     *                           dropped item yielded to (0 otherwise)
      */
     record Drop(BatchItem item,
                 DropCause cause,
-                String detail) implements BatchDecision {
+                String detail,
+                int yieldedForPriority) implements BatchDecision {
+
+        /** Convenience constructor for the non-yield drop causes. */
+        Drop(BatchItem item, DropCause cause, String detail) {
+            this(item, cause, detail, 0);
+        }
     }
 
-    /** Why the head item was dropped. */
+    /** Why the item was dropped. */
     enum DropCause {
         QUEUE_DEADLINE_EXCEEDED,
-        EXCEEDS_BATCH_TOKEN_CAPACITY
+        EXCEEDS_BATCH_TOKEN_CAPACITY,
+        /**
+         * A lower-priority item was yielded behind a higher-priority head
+         * past the queue deadline (Auto-TPM): settled as
+         * {@code NO_AVAILABLE_WORKER} (8400) with the yield reason, never
+         * left to starve in the queue.
+         */
+        YIELDED_QUEUE_DEADLINE
     }
 }
