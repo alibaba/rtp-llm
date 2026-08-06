@@ -1,5 +1,6 @@
 import functools
 import logging
+import os
 import traceback
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
@@ -19,7 +20,11 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import MOE_PURE_TP_LAYOUTS, CkptWeightInfo, W, identity
+
+# Ops rollback lever for the sliced-read fast path; the legacy split is untouched.
+_PURE_TP_PRESHARD = os.getenv("MOE_PURE_TP_PRESHARD", "1") != "0"
 
 
 class FfnConfig(BaseModel):
@@ -300,6 +305,10 @@ class PreShardedTensor(NamedTuple):
 
 
 class MoeAtomicWeight(AtomicWeight):
+    # A pre-sharded tensor reaching an online-quant clone crashes the load;
+    # capable clones opt back in (see per_block_fp8_quant_weight).
+    _CLONE_EXCLUDED = frozenset({"enable_pure_tp_preshard"})
+
     def __init__(
         self,
         name: str,
@@ -473,11 +482,13 @@ class MoeAtomicWeight(AtomicWeight):
         load_config: LoadConfig,
     ) -> Optional[torch.Tensor]:
         supported = (
-            self.enable_pure_tp_preshard
+            _PURE_TP_PRESHARD
+            and self.enable_pure_tp_preshard
             and load_config.moe_pure_tp_mode
             and not load_config.merge_lora
             and layer_id is not None
             and isinstance(tensor_source, DatabaseTensorSource)
+            and isinstance(tensor_source.get_database(), CkptDatabase)
             and tensor_source.get_database().is_safetensor
             and all(weight.merge_fun is identity for weight in self.weights)
         )
@@ -503,34 +514,33 @@ class MoeAtomicWeight(AtomicWeight):
         database = tensor_source.get_database()
         expert_dims = slice(1, None) if is_stacked else slice(None)
 
-        def shape_of(weight, expert):
+        def shape_of(weight: CkptWeightInfo, expert: int) -> List[int]:
             name = self._ckpt_name(weight, layer_id, expert)
             return list(database.get_tensor_shape(name))[expert_dims]
 
-        # First and last expert: keeps legacy's shape fail-fast on the fast path.
-        ends = (experts[0], experts[-1])
-        shapes = [shape_of(w, e) for w in self.weights for e in ends]
+        # Metadata-only reads: keep legacy's every-expert shape fail-fast.
+        shapes = [shape_of(w, e) for w in self.weights for e in experts]
         expert_shape = shapes[0]
         if any(shape != expert_shape for shape in shapes) or len(expert_shape) != 2:
             return None
-        if expert_shape[split_dim] % (len(segments) * load_config.tp_size):
+        divisor = len(segments) * load_config.tp_size
+        if expert_shape[split_dim] % divisor:
             logging.warning(
-                f"{self.name} layer {layer_id}: shape {expert_shape} is not divisible "
-                f"by tp_size {load_config.tp_size}, falling back to legacy split "
-                f"(which floor-splits and drops the remainder)"
+                f"{self.name} layer {layer_id}: {expert_shape}[{split_dim}] is not"
+                f" divisible by {divisor} (tp_size x segments), falling back to legacy"
+                f" split (which floor-splits and drops the remainder)"
             )
             return None
+        if layer_id == 0:
+            logging.info(f"{self.name}: pure-TP pre-shard (tp={load_config.tp_size})")
 
         segment_size = expert_shape[split_dim] // len(segments)
         shard_size = segment_size // load_config.tp_size
         output_shape = expert_shape.copy()
         output_shape[split_dim] = shard_size * len(segments) * len(self.weights)
-        dtype = (
-            self.data_type if self.data_type is not None else load_config.compute_dtype
-        )
+        dtype = self.data_type or load_config.compute_dtype
         output = torch.empty((len(experts), *output_shape), dtype=dtype, device=device)
-        # Slicing the last dim is a strided read in safetensors, so read the whole
-        # expert into scratch and slice from there instead.
+        # Slicing the last dim is a strided safetensors read: stage via scratch.
         read_full_expert = split_dim == 1
         scratch = (
             torch.empty(expert_shape, dtype=dtype, device=device)
@@ -538,25 +548,21 @@ class MoeAtomicWeight(AtomicWeight):
             else None
         )
         dst = 0
+        full = (slice(None), slice(None))
         for weight in self.weights:
             for segment in segments:
                 start = segment * segment_size + load_config.tp_rank * shard_size
-                shard_slice = [slice(None), slice(None)]
-                shard_slice[split_dim] = slice(start, start + shard_size)
-                shard_slice = tuple(shard_slice)
-                read_slice = (
-                    (slice(None), slice(None)) if read_full_expert else shard_slice
-                )
-                for local_expert, expert in enumerate(experts):
+                cut = slice(start, start + shard_size)
+                shard_slice = (slice(None), cut) if split_dim else (cut, slice(None))
+                read_slice = full if read_full_expert else shard_slice
+                for slot, expert in enumerate(experts):
                     name = self._ckpt_name(weight, layer_id, expert)
                     where = (*((expert,) if is_stacked else ()), *read_slice)
                     loaded = database.load_tensor_slice(name, where, dtype)
                     if read_full_expert:
                         scratch.copy_(loaded)
                         loaded = scratch[shard_slice]
-                    output[local_expert].narrow(split_dim, dst, shard_size).copy_(
-                        loaded
-                    )
+                    output[slot].narrow(split_dim, dst, shard_size).copy_(loaded)
                 dst += shard_size
         return output
 

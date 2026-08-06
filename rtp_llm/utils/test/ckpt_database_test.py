@@ -251,29 +251,34 @@ class HandleRecyclingTest(unittest.TestCase):
                 torch.testing.assert_close(reread, expected_slice)
                 self.assertIsNotNone(first._st_handle)
 
+    def _read_layers_0_and_2(self, db):
+        first = db._tensor_index["model.layers.0.weight"]
+        db.load_tensor("model.layers.0.weight")
+        db.load_tensor("model.layers.2.weight")
+        return first
+
     def test_switch_and_checkpoint_format_gate_recycling(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._write_shards(tmp)
-            db = CkptDatabase(tmp, recycle_handles=False)
-            first = db._tensor_index["model.layers.0.weight"]
-            db.load_tensor("model.layers.0.weight")
-            db.load_tensor("model.layers.2.weight")
-            self.assertIsNotNone(first._st_handle)
+            # Either gate off must disable recycling and keep shard handles open.
+            for copy_out, asked in ((True, False), (False, True)):
+                with patch.object(ckpt_file_info, "ROCM_COPY_OUT", copy_out):
+                    db = CkptDatabase(tmp, recycle_handles=asked)
+                    self.assertFalse(db._recycle_handles)
+                    self.assertIsNotNone(self._read_layers_0_and_2(db)._st_handle)
 
         with tempfile.TemporaryDirectory() as tmp:
-            torch.save(
-                {"model.layers.0.weight": torch.ones(1)},
-                os.path.join(tmp, "pytorch_model.bin"),
-            )
-            db = CkptDatabase(tmp, recycle_handles=True)
-            self.assertFalse(db._recycle_handles)
+            torch.save({"w": torch.ones(1)}, os.path.join(tmp, "pytorch_model.bin"))
+            with patch.object(ckpt_file_info, "ROCM_COPY_OUT", True):
+                db = CkptDatabase(tmp, recycle_handles=True)
+                self.assertFalse(db._recycle_handles)
 
     def test_layer_name_matching_is_bounded(self):
         for name in ("model.layers.3.w", "h.3.w", "model.blocks.3.w", "layer.3.w"):
             self.assertEqual(database._LAYER_RE.search(name).group(1), "3", name)
         # No layer number anywhere means recycling stays off for that checkpoint.
-        self.assertIsNone(database._LAYER_RE.search("model.embed_tokens.weight"))
-        self.assertIsNone(database._LAYER_RE.search("model.sublayers.3.w"))
+        for name in ("model.embed_tokens.weight", "model.sublayers.3.w"):
+            self.assertIsNone(database._LAYER_RE.search(name), name)
 
 
 if __name__ == "__main__":

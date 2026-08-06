@@ -57,7 +57,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
         force_cpu_load_weights: bool = False,
-        loader_recycle_handles: bool = False,
+        loader_recycle_handles: bool = True,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -236,7 +236,7 @@ class BaseModel(object):
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
         skip_python_model: bool = False,
-        loader_recycle_handles: bool = False,
+        loader_recycle_handles: bool = True,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 

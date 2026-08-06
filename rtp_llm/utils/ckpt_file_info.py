@@ -12,8 +12,7 @@ from safetensors import safe_open
 import rtp_llm.utils.meta_pickler as meta_pickler
 from rtp_llm.utils.time_util import Timer
 
-# ROCm DMA pinning can COW MAP_PRIVATE checkpoint pages into anonymous memory.
-# Copying out keeps safetensors pages file-backed and reclaimable.
+# ROCm DMA pinning COWs MAP_PRIVATE pages; copying out keeps them file-backed.
 ROCM_COPY_OUT = torch.version.hip is not None
 
 

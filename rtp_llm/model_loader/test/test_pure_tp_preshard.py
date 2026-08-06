@@ -10,21 +10,21 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_loader import per_block_fp8_quant_weight as pbq
+from rtp_llm.model_loader.ffn_weight import MoeConfig
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
 from rtp_llm.models.qwen3_next import qwen3_next_weight as qwen
-from rtp_llm.utils.database import BaseDatabase, CkptDatabase
+from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W
 
-# Identity stubs: _assert_parity's legacy equivalence relies on them, so real
-# device post-processing is never exercised here.
+# Identity device stubs: parity vs legacy relies on no real post-processing here.
 _DEVICE = SimpleNamespace(
     shuffle_moe_weight=lambda tensor, *_: tensor,
     maybe_rewrite_weight_by_key=lambda _, tensor: tensor,
 )
 
 
-class _Database(BaseDatabase):
+class _Database(CkptDatabase):
     """Fake for gating cases only; parity cases use a real CkptDatabase."""
 
     def __init__(self, tensors):
@@ -51,26 +51,11 @@ class _Database(BaseDatabase):
 
 
 def _config(rank=0, **overrides):
-    # model_construct keeps the real defaults and the real get_selected_experts
-    # while skipping the required fields this path never reads.
-    values = dict(
-        tp_size=2,
-        tp_rank=rank,
-        ep_size=1,
-        ep_rank=0,
-        dp_size=1,
-        dp_rank=0,
-        ffn_tp_size=1,
-        ffn_tp_rank=0,
-        hidden_size=8,
-        head_num=1,
-        head_num_kv=1,
-        size_per_head=8,
-        moe_pure_tp_mode=True,
-        compute_dtype=torch.float32,
-        exported_device=_DEVICE,
-    )
-    values.update(overrides)
+    # model_construct keeps real defaults/methods but skips unread required fields.
+    values = dict(tp_size=2, tp_rank=rank, ep_size=1, ep_rank=0, dp_size=1, dp_rank=0)
+    values.update(ffn_tp_size=1, ffn_tp_rank=0, hidden_size=8, head_num=1)
+    values.update(head_num_kv=1, size_per_head=8, moe_pure_tp_mode=True)
+    values.update(compute_dtype=torch.float32, exported_device=_DEVICE, **overrides)
     return LoadConfig.model_construct(**values)
 
 
@@ -80,7 +65,7 @@ def _weights(stacked):
         if stacked
         else qwen.Qwen3NextBaseWeight._create_moe_expert_weights
     )
-    return factory(SimpleNamespace(prefix="model."), SimpleNamespace(expert_num=2))
+    return factory(SimpleNamespace(prefix="model."), MoeConfig(expert_num=2))
 
 
 def _name(weight, expert, stacked):
@@ -145,8 +130,7 @@ class PureTpPreshardTest(unittest.TestCase):
                             self._assert_parity(weight, db, rank, reference)
                     self.assertTrue(sliced.called)
                     self.assertFalse(full.called)
-                    # Slicing the last dim is a strided safetensors read, so every
-                    # sliced read must keep it whole (W2 stages via scratch).
+                    # Last-dim slicing is strided in safetensors: must stay whole.
                     last = [c.args[1][-1] for c in sliced.call_args_list]
                     self.assertEqual(last, [slice(None)] * len(last))
                 db.pretrain_file_list[0].close_safetensor_handle()
@@ -167,27 +151,28 @@ class PureTpPreshardTest(unittest.TestCase):
         self.assertIsNone(weight._load_pure_tp(source, 0, "cpu", _config()))
         self.assertFalse(db.slices)
 
-    def test_quant_clones_do_not_inherit_preshard(self):
-        source = _weights(False)[1]
-        self.assertTrue(source.enable_pure_tp_preshard)
-        # Offline per-block quant opts in explicitly; online quant clones must not.
-        offline = pbq.PerBlockFp8Weight(
-            source, Fp8BlockWiseQuantConfig(is_quanted=True), name=source.name
-        )
-        self.assertTrue(offline.kernel.enable_pure_tp_preshard)
-        online = pbq.LoadQuantPerBlockFp8Weight(
-            source, Fp8BlockWiseQuantConfig(is_quanted=False), name=source.name
-        )
-        self.assertFalse(online.kernel.enable_pure_tp_preshard)
-        self.assertFalse(online.scale.enable_pure_tp_preshard)
-
     def test_per_block_weights_and_scales_preshard_or_fall_back(self):
         for source in _weights(False):
+            self.assertTrue(source.enable_pure_tp_preshard)
             offline = pbq.PerBlockFp8Weight(
                 source, Fp8BlockWiseQuantConfig(is_quanted=True), name=source.name
             )
+            online = pbq.LoadQuantPerBlockFp8Weight(
+                source, Fp8BlockWiseQuantConfig(is_quanted=False), name=source.name
+            )
+            # Offline per-block quant opts in explicitly; online quant clones must
+            # not inherit the flag, or pre-sharded tensors would reach online quant.
+            self.assertTrue(offline.kernel.enable_pure_tp_preshard)
+            self.assertFalse(online.kernel.enable_pure_tp_preshard)
+            self.assertFalse(online.scale.enable_pure_tp_preshard)
             with self.subTest(source.name, divisible=True):
-                self._assert_parity(offline.kernel, _database(offline.kernel), rank=1)
+                # fp8 kernel parity runs the real safetensors boundary, not the fake.
+                reference = _database(offline.kernel)
+                with tempfile.TemporaryDirectory() as tmp:
+                    save_file(reference.tensors, os.path.join(tmp, "m.safetensors"))
+                    real = CkptDatabase(tmp, recycle_handles=True)
+                    self._assert_parity(offline.kernel, real, 1, reference)
+                    real.pretrain_file_list[0].close_safetensor_handle()
                 db = _database(offline.scale)
                 self._assert_parity(offline.scale, db, rank=1)
                 self.assertTrue(db.slices)

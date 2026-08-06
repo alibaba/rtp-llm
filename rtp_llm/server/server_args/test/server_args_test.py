@@ -148,8 +148,7 @@ class ServerArgsSetTest(TestCase):
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
 
-        # Neither env nor argv sets it here: pins the shipped default (env=false
-        # is covered by test_env_vars_set_to_py_env_configs).
+        # Pins the shipped default: neither env nor argv sets the flag here.
         self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args

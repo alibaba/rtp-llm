@@ -115,8 +115,7 @@ class CkptDatabase(BaseDatabase):
         )
 
     def _recycle_consumed_shards(self, name: str) -> None:
-        """Close handles of shards fully below the previous layer; the one-layer
-        slack keeps in-flight tensors valid until their layer is consumed."""
+        """Close shards fully below the previous layer (one-layer in-flight slack)."""
         match = _LAYER_RE.search(name) if self._recycle_handles else None
         if match is None:
             return

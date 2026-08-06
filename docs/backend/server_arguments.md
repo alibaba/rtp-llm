@@ -204,5 +204,6 @@ RTP-LLM deployments are released as versioned, immutable container images, with 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
 | `--load_method` | Specify the weight loading method.<br>Options: auto, fastsafetensors, scratch | auto |
-| `--force_cpu_load_weights` | Load weights on CPU, for hosts short on device memory | False |
-| `--loader_recycle_handles` | ROCm + safetensors only: close consumed shard handles while loading the main model to release mmap memory; handles reopen lazily if read again. Needs layer-numbered ckpt tensor names; no effect on fastsafetensors main-body loading, multimodal ViT or EPLB weight libraries. Set false (or `LOADER_RECYCLE_HANDLES=false`) to keep handles open. | True |
+| `--force_cpu_load_weights` | Load weights on CPU, for hosts short on device memory (`FORCE_CPU_LOAD_WEIGHTS`) | False |
+| `--loader_recycle_handles` | ROCm + safetensors only: close consumed shard handles while loading the main model to release mmap memory; handles reopen lazily if read again. Needs layer-numbered ckpt tensor names; no effect on fastsafetensors main-body loading, multimodal ViT or EPLB weight libraries. Set false (or `LOADER_RECYCLE_HANDLES=false`) to keep handles open. This is the requested value — the effective gating is logged at startup by `CkptDatabase recycle_handles=...`. Note: on ROCm builds checkpoint reads always copy out of the mmap; this switch does not roll that back. | True |
+| `MOE_PURE_TP_PRESHARD` (env only) | Set `0` to disable the pure-TP pre-sharded MoE read (Qwen3-Next / Qwen3.5) and fall back to full-tensor reads plus legacy splitting | 1 |

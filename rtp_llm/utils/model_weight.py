@@ -1,7 +1,7 @@
 import logging
 import math
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -1575,9 +1575,10 @@ FP8_E4M3_MAX = 448.0
 FP8_E4M3_MIN = -352.0
 
 
-# Keyed by (weight name, process fun object, ckpt tensor count) -> (split_dim, segments,
-# requires_stacked, split func). Identity-keyed: a partial silently disables the path.
-MOE_PURE_TP_LAYOUTS = {
+# (split_dim, segments, requires_stacked, split_func), keyed by (weight name, process
+# fun object, ckpt tensor count). Identity-keyed: a partial silently disables the path.
+MoePureTpLayout = Tuple[int, Tuple[int, ...], bool, Callable[..., torch.Tensor]]
+MOE_PURE_TP_LAYOUTS: Dict[Tuple[str, Callable[..., Any], int], MoePureTpLayout] = {
     (W.moe_w2, stack_, 1): (1, (0,), False, sp_moe_neg1),
     (W.moe_s2, stack_, 1): (1, (0,), False, sp_moe_neg1),
     (W.moe_w1, stack_moe_w1, 2): (0, (0,), False, sp_moe_w1),

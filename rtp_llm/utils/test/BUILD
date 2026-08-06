@@ -25,8 +25,7 @@ py_test(
 )
 
 py_test(
-    # Verifies load_tensor_slice / copy-out on a real ROCm build; the filter keeps
-    # the platform-independent cases off the scarce accelerator.
+    # Verifies load_tensor_slice / copy-out on a real ROCm build (hip asserted).
     name = "ckpt_database_test_rocm",
     srcs = ["ckpt_database_test.py"],
     main = "ckpt_database_test.py",

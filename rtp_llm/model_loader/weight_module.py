@@ -96,9 +96,8 @@ class WeightModule(ABC):
     def from_params(cls, params):
         return cls(**params)
 
-    # Quant clones must not inherit these: a pre-sharded tensor reaching online
-    # quant crashes the load; capable clones opt in (see per_block_fp8_quant_weight).
-    _CLONE_EXCLUDED = {"enable_pure_tp_preshard"}
+    # Constructor params a subclass forbids copying onto clones (see MoeAtomicWeight).
+    _CLONE_EXCLUDED: frozenset = frozenset()
 
     @classmethod
     def extract_params(
@@ -126,7 +125,7 @@ class WeightModule(ABC):
                 params["src_weight_info"] = weight_info
                 continue
 
-            if param.name in cls._CLONE_EXCLUDED:
+            if param.name in weight_info._CLONE_EXCLUDED:
                 continue  # Clone falls back to the constructor default.
 
             if hasattr(weight_info, param.name):
@@ -145,7 +144,7 @@ class WeightModule(ABC):
 
         if need_var_key:
             for k, v in weight_info.__dict__.items():
-                if k in cls._CLONE_EXCLUDED:
+                if k in weight_info._CLONE_EXCLUDED:
                     continue
                 if isinstance(v, WeightModule):
                     continue
