@@ -12,13 +12,14 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
                                                     const std::vector<std::string>&  peer_addrs,
                                                     const std::vector<CacheKeyType>& cache_keys,
                                                     const GroupBlockIds&             block_ids_by_group,
-                                                    int32_t                          prefill_cp_size) {
+                                                    int32_t                          prefill_cp_size,
+                                                    int64_t                          reuse_block_size = 0) {
     return {/*request_id=*/42,
             request_key,
             peer_addrs,
             cache_keys,
             block_ids_by_group,
-            /*reuse_block_size=*/0,
+            reuse_block_size,
             /*timeout_ms=*/1000,
             /*partition_count=*/1,
             /*partition_id=*/0,
@@ -75,13 +76,15 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
     const std::vector<CacheKeyType> cache_keys  = {101, 102};
     const GroupBlockIds             block_ids_by_group;
-    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2);
+    const auto                      load_context =
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequest(load_context, /*index=*/0, peer_addrs);
 
     EXPECT_EQ(request.prefill_cp_size(), 2);
     EXPECT_EQ(request.partition_count(), 1);
     EXPECT_EQ(request.partition_id(), 0);
+    EXPECT_EQ(request.reuse_block_size(), 3);
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
@@ -98,13 +101,15 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
     const std::vector<CacheKeyType> cache_keys  = {101};
     const GroupBlockIds             block_ids_by_group;
-    const auto load_context = makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2);
+    const auto                      load_context =
+        makeLoadContext(request_key, peer_addrs, cache_keys, block_ids_by_group, /*cp_size=*/2, /*reuse=*/3);
 
     const auto request = server.constructRemoteLoadRequestForMla(load_context, /*index=*/1, peer_addrs);
 
     EXPECT_EQ(request.prefill_cp_size(), 2);
     EXPECT_EQ(request.partition_count(), 1);
     EXPECT_EQ(request.partition_id(), 0);
+    EXPECT_EQ(request.reuse_block_size(), 3);
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
