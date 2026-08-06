@@ -41,3 +41,16 @@ py_test(
     tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )
+
+py_test(
+    name = "test_aiter_decode_triton_noasm",
+    srcs = ["test_aiter_decode_triton_noasm.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "eternal",
+    tags = ["manual", "rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
