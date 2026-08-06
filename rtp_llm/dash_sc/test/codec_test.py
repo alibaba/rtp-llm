@@ -571,6 +571,7 @@ class DashScGrpcRequestTest(TestCase):
     def _set_force_at_least_one_env(self, value: str | None) -> None:
         """Idempotent env toggle with auto-cleanup so subTest variants stay isolated."""
         import os
+
         from rtp_llm.dash_sc.codec import _FORCE_AT_LEAST_ONE_ENV_KEY
 
         prev = os.environ.get(_FORCE_AT_LEAST_ONE_ENV_KEY)
@@ -610,9 +611,7 @@ class DashScGrpcRequestTest(TestCase):
         )
 
         sp = parse_sampling_params(req)
-        self.assertEqual(
-            json.loads(sp.structural_tag)["format"]["at_least_one"], False
-        )
+        self.assertEqual(json.loads(sp.structural_tag)["format"]["at_least_one"], False)
 
     def test_force_at_least_one_no_op_on_format_without_at_least_one_slot(
         self,
@@ -625,7 +624,10 @@ class DashScGrpcRequestTest(TestCase):
         tag = {
             "format": {
                 "type": "json_schema",
-                "json_schema": {"type": "object", "properties": {"a": {"type": "string"}}},
+                "json_schema": {
+                    "type": "object",
+                    "properties": {"a": {"type": "string"}},
+                },
             }
         }
         req = predict_v2_pb2.ModelInferRequest()
@@ -934,13 +936,27 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
         op = parse_other_params(req)
         self.assertFalse(op.return_input_ids)
-        self.assertIs(op.enable_thinking, False)
+        self.assertIsNone(op.enable_thinking)
         self.assertEqual(op.max_new_think_tokens, 0)
         self.assertEqual(op.timeout_ms, 1_800_000)
         self.assertEqual(op.traffic_reject_priority, 10)
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def test_parse_other_params_enable_thinking_only_from_parameter(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-ds-llm-thinking": "false",
+                "parameters": {"enable_thinking": False},
+            }
+        )
+
+        op = parse_other_params(req)
+
+        self.assertIs(op.enable_thinking, True)
 
     def test_parse_other_params_thinking_mode(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
