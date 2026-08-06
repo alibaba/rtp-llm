@@ -106,28 +106,27 @@ void preallocateTorchCudaPoolForPrefill(RoleType role_type, int device_id) {
     }
 
     c10::cuda::CUDAGuard device_guard(device_id);
-    size_t              cuda_free  = 0;
-    size_t              cuda_total = 0;
+    size_t               cuda_free  = 0;
+    size_t               cuda_total = 0;
     RTP_LLM_CHECK_WITH_INFO(cudaMemGetInfo(&cuda_free, &cuda_total) == cudaSuccess, "cudaMemGetInfo failed");
 
     // Match large_segment_size_mb=1024: never let allocator rounding consume the safety margin.
     constexpr int64_t allocation_granularity_mb = 1024;
-    int64_t target_mb = std::max<int64_t>(0, static_cast<int64_t>(cuda_free / kMiB) - safety_mb);
+    int64_t           target_mb = std::max<int64_t>(0, static_cast<int64_t>(cuda_free / kMiB) - safety_mb);
     if (max_mb > 0) {
         target_mb = std::min(target_mb, max_mb);
     }
     target_mb = target_mb / allocation_granularity_mb * allocation_granularity_mb;
     if (target_mb == 0) {
-        RTP_LLM_LOG_WARNING("skip Torch CUDA pool preallocation: free=%zu MiB safety=%ld MiB",
-                            cuda_free / kMiB,
-                            safety_mb);
+        RTP_LLM_LOG_WARNING(
+            "skip Torch CUDA pool preallocation: free=%zu MiB safety=%ld MiB", cuda_free / kMiB, safety_mb);
         return;
     }
 
     const int64_t target_bytes = target_mb * static_cast<int64_t>(kMiB);
     {
-        auto buffer = torch::empty(
-            {target_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, device_id));
+        auto buffer =
+            torch::empty({target_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA, device_id));
     }
 
     const auto stats        = c10::cuda::CUDACachingAllocator::getDeviceStats(device_id);
@@ -222,12 +221,15 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(params,
-                                        propose_params,
-                                        resource_context_.cache_manager,
-                                        mla_ops_type_,
-                                        kv_cache_group_num_,
-                                        kv_cache_layer_to_group_));
+        executor_.reset(new MtpExecutor(
+            params,
+            propose_params,
+            resource_context_.cache_manager,
+            mla_ops_type_,
+            kv_cache_group_num_,
+            kv_cache_layer_to_group_,
+            /*warm_up=*/false,
+            [this](const std::list<GenerateStreamPtr>& streams) { maybeRefreshCacheStatusSnapshot(streams); }));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -679,6 +681,14 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
     return scheduler_->batchEnqueue(streams);
 }
 
+void NormalEngine::maybeRefreshCacheStatusSnapshot(const std::list<GenerateStreamPtr>& streams) {
+    if (!resource_context_.cache_manager || !shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams)) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
+    resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+}
+
 absl::Status NormalEngine::step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     if (!running_ || stop_started_) {
@@ -722,12 +732,11 @@ absl::Status NormalEngine::step() {
     }
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
-        const bool refresh_cache_status_snapshot =
-            resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
         status = executor_->process(streams, tps_schedule_time_us);
-        if (status.ok() && refresh_cache_status_snapshot) {
-            RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
-            resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+        // MTP refreshes immediately after the target model has finished CPU dispatch, while its GPU
+        // work is still outstanding. The normal executor keeps the original post-process placement.
+        if (status.ok() && !propose_params_) {
+            maybeRefreshCacheStatusSnapshot(streams);
         }
     }
 
