@@ -76,6 +76,7 @@ public class ExpirationCleaner {
             // 2. Check if tasks within worker need cleanup: lost tasks and long-timeout tasks
             ConcurrentHashMap<String, TaskInfo> localTaskMap = workerStatus.getLocalTaskMap();
             Iterator<Map.Entry<String, TaskInfo>> taskIterator = localTaskMap.entrySet().iterator();
+            boolean pendingQueueChanged = false;
             while (taskIterator.hasNext()) {
                 Map.Entry<String, TaskInfo> entry = taskIterator.next();
                 String requestId = entry.getKey();
@@ -101,7 +102,11 @@ public class ExpirationCleaner {
                 if (shouldRemove) {
                     decrementQueueTime(workerStatus.getRunningQueueTime(), task, workerStatus.getRole());
                     taskIterator.remove();
+                    pendingQueueChanged = true;
                 }
+            }
+            if (pendingQueueChanged) {
+                workerStatus.refreshInTransitAndWaitingStats();
             }
         }
     }

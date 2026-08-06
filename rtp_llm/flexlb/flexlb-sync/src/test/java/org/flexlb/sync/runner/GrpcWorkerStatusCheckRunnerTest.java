@@ -8,6 +8,7 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -81,6 +82,34 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertEquals(1, workerStatus.getBlockHashLookaheadTokens());
         assertEquals(1, workerStatus.getCacheMatchRollbackBlocks());
         assertEquals(KvCacheGroupMode.WITH_MAMBA, workerStatus.getKvCacheGroupMode());
+    }
+
+    @Test
+    void shouldReportTimeoutFailureLatency_whenWorkerStatusGrpcTimesOut() {
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenThrow(new RuntimeException("DEADLINE_EXCEEDED"));
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        verify(engineHealthReporter).reportStatusCheckerFail(
+                "test-model", BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, "127.0.0.1", RoleType.PREFILL);
+        assertTrue(Mockito.mockingDetails(engineHealthReporter).getInvocations().stream().anyMatch(invocation -> {
+            Object[] arguments = invocation.getArguments();
+            return invocation.getMethod().getName().equals("reportStatusCheckFailureLatency")
+                    && arguments.length == 5
+                    && "test-model".equals(arguments[0])
+                    && BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT.equals(arguments[1])
+                    && "127.0.0.1".equals(arguments[2])
+                    && RoleType.PREFILL.equals(arguments[3])
+                    && (long) arguments[4] >= 0;
+        }));
     }
 
     @Test
@@ -249,6 +278,57 @@ class GrpcWorkerStatusCheckRunnerTest {
                 })
                 .count();
         assertEquals(1, waitingToRunningReportCount);
+    }
+
+    @Test
+    void shouldRefreshPendingQueueSnapshot_whenStatusVersionIsUnchanged() {
+        String requestId = "request-1";
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+
+        TaskInfo localTask = new TaskInfo();
+        localTask.setRequestId(requestId);
+        localTask.setInputLength(64_000);
+        localTask.setPredictedPrefixLength(48_000);
+        workerStatus.putLocalTask(requestId, localTask);
+
+        EngineRpcService.TaskInfoPB waitingTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .setInputLength(64_000)
+                .setIsWaiting(true)
+                .build();
+        EngineRpcService.WorkerStatusPB waitingStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(100)
+                .setAlive(true)
+                .addRunningTaskInfo(waitingTask)
+                .build();
+        EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .setInputLength(64_000)
+                .build();
+        EngineRpcService.WorkerStatusPB runningStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(100)
+                .setAlive(true)
+                .addRunningTaskInfo(runningTask)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(waitingStatusPB, runningStatusPB);
+
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService);
+        runner.run();
+        assertEquals(1, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(16_000, workerStatus.getInTransitAndWaitingUncachedTokens());
+
+        runner.run();
+
+        assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
     }
 
     @Test

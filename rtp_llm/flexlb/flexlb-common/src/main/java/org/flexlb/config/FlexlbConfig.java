@@ -80,6 +80,17 @@ public class FlexlbConfig {
     private long prefillQueueSizeThreshold = 3;
 
     /**
+     * Engine max batched tokens used to bound Prefill waiting work.
+     * A non-positive value disables token-based Prefill capacity control.
+     */
+    private long prefillMaxBatchTokens = 0;
+
+    /**
+     * Number of engine-sized Prefill batches to keep queued as uncached work.
+     */
+    private int prefillWaitingUncachedTokenBatchCount = 2;
+
+    /**
      * Reduction applied to estimated prefill work for each cache-hit token.
      * A value of 1 means cache-hit tokens contribute no prefill work.
      */

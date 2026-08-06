@@ -341,6 +341,88 @@ class WorkerStatusTest {
         }
     }
 
+    @Test
+    @DisplayName("In-transit and waiting stats include local tasks but exclude running tasks")
+    void inTransitAndWaitingStats_includeInTransitAndConfirmed_excludeRunning() {
+        TaskInfo inTransitTask = pendingTask("in-transit", 48_000, 16_000);
+        TaskInfo waitingTask = pendingTask("waiting", 20_000, 5_000);
+        TaskInfo runningTask = pendingTask("running", 30_000, 0);
+        workerStatus.putLocalTask("in-transit", inTransitTask);
+        workerStatus.putLocalTask("waiting", waitingTask);
+        workerStatus.putLocalTask("running", runningTask);
+
+        TaskInfo engineWaitingTask = new TaskInfo();
+        engineWaitingTask.setRequestId("waiting");
+        engineWaitingTask.setInputLength(20_000);
+        engineWaitingTask.setPrefixLengthValid(false);
+        TaskInfo engineRunningTask = new TaskInfo();
+        engineRunningTask.setRequestId("running");
+        engineRunningTask.setInputLength(30_000);
+
+        workerStatus.updateTaskStates(
+                Map.of("waiting", engineWaitingTask),
+                Map.of("running", engineRunningTask),
+                Map.of());
+
+        assertEquals(2, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(47_000, workerStatus.getInTransitAndWaitingUncachedTokens());
+    }
+
+    @Test
+    @DisplayName("In-transit and waiting stats use only local task count and tokens")
+    void inTransitAndWaitingStats_useOnlyLocalTaskCountAndTokens() {
+        TaskInfo engineTaskOne = pendingTask("engine-one", 4_000, 0);
+        engineTaskOne.setPrefixLengthValid(true);
+        TaskInfo engineTaskTwo = pendingTask("engine-two", 64_000, 0);
+        engineTaskTwo.setPrefixLengthValid(true);
+        TaskInfo engineTaskThree = pendingTask("engine-three", 64_000, 0);
+        engineTaskThree.setPrefixLengthValid(true);
+        TaskInfo overlappingLocalTask = pendingTask("engine-one", 4_000, 0);
+        TaskInfo largeLocalTask = pendingTask("local-large", 48_000, 0);
+        workerStatus.putLocalTask("engine-one", overlappingLocalTask);
+        workerStatus.putLocalTask("local-large", largeLocalTask);
+        workerStatus.updateTaskStates(Map.of(
+                "engine-one", engineTaskOne,
+                "engine-two", engineTaskTwo,
+                "engine-three", engineTaskThree), Map.of(), Map.of());
+
+        assertEquals(2, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(52_000, workerStatus.getInTransitAndWaitingUncachedTokens());
+    }
+
+    @Test
+    @DisplayName("Pending queue uses local prediction until engine hit is valid and removes engine-running task")
+    void inTransitAndWaitingStats_fallBackToPredictionAndExcludeEngineRunning() {
+        TaskInfo localTask = pendingTask("request", 64_000, 48_000);
+        workerStatus.putLocalTask("request", localTask);
+
+        TaskInfo engineWaitingTask = new TaskInfo();
+        engineWaitingTask.setRequestId("request");
+        engineWaitingTask.setInputLength(64_000);
+        engineWaitingTask.setPrefixLengthValid(false);
+        workerStatus.updateTaskStates(Map.of("request", engineWaitingTask), Map.of(), Map.of());
+
+        assertEquals(1, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(16_000, workerStatus.getInTransitAndWaitingUncachedTokens());
+
+        TaskInfo engineRunningTask = new TaskInfo();
+        engineRunningTask.setRequestId("request");
+        workerStatus.updateTaskStates(Map.of(), Map.of("request", engineRunningTask), Map.of());
+
+        assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
+    }
+
+    private static TaskInfo pendingTask(String requestId, long inputLength, long predictedPrefixLength) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setInputLength(inputLength);
+        task.setPrefixLength(predictedPrefixLength);
+        task.setPredictedPrefixLength(predictedPrefixLength);
+        task.setPrefixLengthValid(false);
+        return task;
+    }
+
     @Nested
     @DisplayName("updateTaskStates - waiting task handling")
     class UpdateTaskStatesTests {

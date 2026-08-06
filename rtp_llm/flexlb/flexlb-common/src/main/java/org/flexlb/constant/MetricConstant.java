@@ -40,9 +40,24 @@ public class MetricConstant {
     public static final String ENGINE_STATUS_VISITOR_SUCCESS_QPS = "app.engine.health.check.visitor.qps";
 
     /**
-     * Engine status check failure information
+     * Per-window engine status check failure QPS. Kept for compatibility with
+     * existing consumers; use {@link #ENGINE_STATUS_CHECK_FAIL_TOTAL} for a
+     * durable failure count.
      */
     public static final String ENGINE_STATUS_CHECK_FAIL = "app.engine.health.check.fail";
+
+    /**
+     * Cumulative engine status check failure count. This remains monotonic
+     * within a process lifetime so monitoring retains failure evidence even
+     * when a one-second QPS sample is not scraped.
+     */
+    public static final String ENGINE_STATUS_CHECK_FAIL_TOTAL = "app.engine.health.check.fail.total";
+
+    /**
+     * Failed WorkerStatus gRPC check latency in microseconds. Successful and
+     * failed check latencies are intentionally reported to separate metrics.
+     */
+    public static final String ENGINE_STATUS_CHECK_FAIL_RT = "app.engine.health.check.fail.rt";
 
     /**
      * Master load balancing service total QPS

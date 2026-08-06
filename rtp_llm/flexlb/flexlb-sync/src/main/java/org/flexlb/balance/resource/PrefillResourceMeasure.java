@@ -19,10 +19,14 @@ import java.util.Map;
 @Component
 public class PrefillResourceMeasure implements ResourceMeasure {
     private final long queueSizeThreshold;
+    private final long maxBatchTokens;
+    private final int waitingUncachedTokenBatchCount;
 
     public PrefillResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
         this.queueSizeThreshold = config.getPrefillQueueSizeThreshold();
+        this.maxBatchTokens = config.getPrefillMaxBatchTokens();
+        this.waitingUncachedTokenBatchCount = config.getPrefillWaitingUncachedTokenBatchCount();
     }
 
     @Override
@@ -31,8 +35,11 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        long queueSize = effectiveQueueSize(workerStatus);
-        return queueSize < queueSizeThreshold;
+        if (workerStatus.getInTransitAndWaitingTaskCount() >= queueSizeThreshold) {
+            return false;
+        }
+        return !isWaitingUncachedTokenLimitEnabled()
+                || workerStatus.getInTransitAndWaitingUncachedTokens() < waitingUncachedTokenThreshold();
     }
 
     @Override
@@ -64,25 +71,30 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        long queueSize = effectiveQueueSize(workerStatus);
-
-        if (queueSize <= 0) {
-            return 0.0;
-        } else if (queueSize >= queueSizeThreshold) {
-            return 100.0;
-        } else {
-            return (queueSize * 100.0) / queueSizeThreshold;
+        double queueWaterLevel = waterLevel(workerStatus.getInTransitAndWaitingTaskCount(), queueSizeThreshold);
+        if (!isWaitingUncachedTokenLimitEnabled()) {
+            return queueWaterLevel;
         }
+        return Math.max(queueWaterLevel,
+                waterLevel(workerStatus.getInTransitAndWaitingUncachedTokens(), waitingUncachedTokenThreshold()));
     }
 
-    private long effectiveQueueSize(WorkerStatus workerStatus) {
-        long engineWaitingTaskCount = workerStatus.getWaitingTaskList() == null
-                ? 0 : workerStatus.getWaitingTaskList().size();
-        long localOutstandingTaskCount = workerStatus.getLocalTaskMap() == null
-                ? 0 : workerStatus.getLocalTaskMap().size();
-
-        // The two collections overlap, so use the larger count instead of double-counting tasks.
-        // Local tasks are recorded immediately and cover gaps between engine status snapshots.
-        return Math.max(engineWaitingTaskCount, localOutstandingTaskCount);
+    private long waitingUncachedTokenThreshold() {
+        return maxBatchTokens * waitingUncachedTokenBatchCount;
     }
+
+    private boolean isWaitingUncachedTokenLimitEnabled() {
+        return maxBatchTokens > 0 && waitingUncachedTokenBatchCount > 0;
+    }
+
+    private double waterLevel(long value, long threshold) {
+        if (value <= 0) {
+            return 0.0;
+        }
+        if (threshold <= 0 || value >= threshold) {
+            return 100.0;
+        }
+        return (value * 100.0) / threshold;
+    }
+
 }

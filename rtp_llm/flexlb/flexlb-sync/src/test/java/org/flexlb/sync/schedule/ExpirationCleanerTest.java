@@ -59,6 +59,8 @@ class ExpirationCleanerTest {
         assertFalse(workerStatus.getLocalTaskMap().containsKey("request-1"));
         assertEquals(TaskStateEnum.CLEANED, task.getTaskState());
         assertEquals(0, workerStatus.getRunningQueueTime().get());
+        assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
         assertEquals(1, pvEvents.list.size());
         String pvEvent = pvEvents.list.getFirst().getFormattedMessage();
         assertTrue(pvEvent.contains("\"eventType\":\"task_confirmation_timeout\""));

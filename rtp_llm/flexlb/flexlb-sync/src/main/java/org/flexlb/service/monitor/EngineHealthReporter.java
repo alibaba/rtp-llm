@@ -74,6 +74,8 @@ import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_QUEUE_TIME;
 import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_AVAILABLE_CONCURRENCY;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
+import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT;
+import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_SUCCESS_QPS;
@@ -140,6 +142,8 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_DECODE_WORKER_NUMBER, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, FlexMetricType.GAUGE);
         this.monitor.register(ENGINE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_STATUS_CHECK_FAIL_TOTAL, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_STATUS_CHECK_FAIL_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_THREAD_POOL_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_FINISHED_TASK_LIST_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -304,13 +308,34 @@ public class EngineHealthReporter {
     }
 
     public void reportStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum, String ip, RoleType role) {
-        FlexMetricTags metricTags = FlexMetricTags.of(
+        FlexMetricTags metricTags = statusCheckFailureTags(modelName, errorEnum, ip, role);
+        monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
+        monitor.report(ENGINE_STATUS_CHECK_FAIL_TOTAL, metricTags, 1.0);
+    }
+
+    /**
+     * Reports only WorkerStatus RPC attempts that failed before a successful
+     * response was available. Keeping it separate from visitor RT prevents
+     * timeout latency from being hidden by successful probes.
+     */
+    public void reportStatusCheckFailureLatency(String modelName,
+                                                BalanceStatusEnum errorEnum,
+                                                String ip,
+                                                RoleType role,
+                                                long latencyUs) {
+        FlexMetricTags metricTags = statusCheckFailureTags(modelName, errorEnum, ip, role);
+        monitor.report(ENGINE_STATUS_CHECK_FAIL_RT, metricTags, latencyUs);
+    }
+
+    private FlexMetricTags statusCheckFailureTags(String modelName,
+                                                   BalanceStatusEnum errorEnum,
+                                                   String ip,
+                                                   RoleType role) {
+        return FlexMetricTags.of(
                 "model", modelName,
                 "code", String.valueOf(errorEnum.getCode()),
                 "engineIp", ip == null ? "" : ip,
-                "role", role == null ? "" : role.getCode()
-        );
-        monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
+                "role", role == null ? "" : role.getCode());
     }
 
     public void reportCacheStatusCheckerFail(String modelName, String engineIp, BalanceStatusEnum errorEnum) {

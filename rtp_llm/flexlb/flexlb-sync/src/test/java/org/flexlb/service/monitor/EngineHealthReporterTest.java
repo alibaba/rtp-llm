@@ -13,6 +13,7 @@ import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexStatisticsType;
@@ -80,6 +81,34 @@ class EngineHealthReporterTest {
         verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.ratio",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.local.standby.block.size", FlexMetricType.GAUGE);
+    }
+
+    @Test
+    void shouldRegisterStatusCheckFailureMetrics() {
+        reporter.init();
+
+        verify(monitor).register("app.engine.health.check.fail.total",
+                FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.engine.health.check.fail.rt",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void shouldReportStatusCheckFailureCountAndLatencyWithSameTags() {
+        BalanceStatusEnum failure = BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT;
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "code", String.valueOf(failure.getCode()),
+                "engineIp", "10.0.0.1",
+                "role", RoleType.PREFILL.getCode());
+
+        reporter.reportStatusCheckerFail("test-model", failure, "10.0.0.1", RoleType.PREFILL);
+        reporter.reportStatusCheckFailureLatency(
+                "test-model", failure, "10.0.0.1", RoleType.PREFILL, 201_234);
+
+        verify(monitor).report("app.engine.health.check.fail", expectedTags, 1.0);
+        verify(monitor).report("app.engine.health.check.fail.total", expectedTags, 1.0);
+        verify(monitor).report("app.engine.health.check.fail.rt", expectedTags, 201_234.0);
     }
 
     @Test

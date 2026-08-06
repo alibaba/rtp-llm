@@ -74,19 +74,22 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
 
-            WorkerStatusResponse response = launchGrpcStatusCheck(ip, workerStatusPort, latestFinishedTaskVersion);
+            WorkerStatusResponse response = launchGrpcStatusCheck(ip, workerStatusPort, latestFinishedTaskVersion, startTime);
             handleStatusResponse(response, startTime);
         } finally {
             workerStatus.getStatusCheckInProgress().set(false);
         }
     }
 
-    private WorkerStatusResponse launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
+    private WorkerStatusResponse launchGrpcStatusCheck(String ip,
+                                                       int grpcPort,
+                                                       long latestFinishedTaskVersion,
+                                                       long startTime) {
         try {
             EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs, roleType);
             return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
         } catch (Throwable throwable) {
-            handleException(throwable);
+            handleException(throwable, startTime);
             WorkerStatusResponse errorResponse = new WorkerStatusResponse();
             errorResponse.setMessage("Worker status gRPC call failed: " + throwable.getMessage());
             return errorResponse;
@@ -97,7 +100,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         try {
             if (newWorkerStatus == null) {
                 logger.info("query engine worker status via gRPC, response body is null");
-                engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.RESPONSE_NULL, ip, roleType);
+                reportStatusCheckFailure(BalanceStatusEnum.RESPONSE_NULL, startTime);
                 return;
             }
 
@@ -264,15 +267,25 @@ public class GrpcWorkerStatusRunner implements Runnable {
         workerStatus.setKvCacheGroupMode(mode);
     }
 
-    private void handleException(Throwable ex) {
+    private void handleException(Throwable ex, long startTime) {
         log("gRPC worker status check failed, msg=" + ex.getMessage());
         // Report specific error based on exception type
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             logger.info("gRPC worker status check timeout, msg={}, ipPort: {}, rt_us: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, ip, roleType);
+            reportStatusCheckFailure(BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, startTime);
         } else {
-            engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, ip, roleType);
+            reportStatusCheckFailure(BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, startTime);
         }
+    }
+
+    private void reportStatusCheckFailure(BalanceStatusEnum errorEnum, long startTime) {
+        engineHealthReporter.reportStatusCheckerFail(modelName, errorEnum, ip, roleType);
+        engineHealthReporter.reportStatusCheckFailureLatency(
+                modelName,
+                errorEnum,
+                ip,
+                roleType,
+                System.nanoTime() / 1000 - startTime);
     }
 
     private void log(String msg) {

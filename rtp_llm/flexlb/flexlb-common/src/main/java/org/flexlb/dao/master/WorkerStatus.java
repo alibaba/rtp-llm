@@ -40,6 +40,8 @@ public class WorkerStatus {
     private AtomicLong latestFinishedTaskVersion = new AtomicLong(-1L);
 
     private ConcurrentHashMap<String/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
+    private volatile long inTransitAndWaitingTaskCount;
+    private volatile long inTransitAndWaitingUncachedTokens;
     private double stepLatencyMs;
     private long iterateCount;
     private long dpSize;
@@ -74,6 +76,7 @@ public class WorkerStatus {
         this.addKvCacheUsed(needNewKvCacheLen);
 
         lastSelectedTime.set(System.nanoTime() / 1000);
+        refreshInTransitAndWaitingStats();
         Logger.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
     }
 
@@ -89,6 +92,7 @@ public class WorkerStatus {
             decKvCacheFree(-needNewKvCacheLen);
             addKvCacheUsed(-needNewKvCacheLen);
             localTaskMap.remove(requestId);
+            refreshInTransitAndWaitingStats();
         }
     }
 
@@ -253,6 +257,7 @@ public class WorkerStatus {
                 logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
             }
         }
+        refreshInTransitAndWaitingStats();
         return TaskStateUpdateResult.from(
                 cacheHitFeedbacks,
                 decisionToWaitingObservedLatenciesMs,
@@ -322,6 +327,42 @@ public class WorkerStatus {
         runningQueueTime.accumulateAndGet(
                 correction,
                 (current, change) -> Math.max(0, current + change));
+    }
+
+    public void refreshInTransitAndWaitingStats() {
+        long inTransitAndWaitingTaskCount = 0;
+        long inTransitAndWaitingTokens = 0;
+
+        // Local tasks keep the routing prediction and are corrected with the actual prefix on status update.
+        for (TaskInfo task : localTaskMap.values()) {
+            if (!isInTransitOrWaiting(task)) {
+                continue;
+            }
+            inTransitAndWaitingTaskCount++;
+            inTransitAndWaitingTokens += uncachedTokens(task);
+        }
+
+        this.inTransitAndWaitingTaskCount = inTransitAndWaitingTaskCount;
+        this.inTransitAndWaitingUncachedTokens = inTransitAndWaitingTokens;
+    }
+
+    private boolean isInTransitOrWaiting(TaskInfo task) {
+        // CONFIRMED is the local state after the task appears in the engine waiting queue.
+        return task != null && (task.getTaskState() == TaskStateEnum.IN_TRANSIT
+                || task.getTaskState() == TaskStateEnum.CONFIRMED);
+    }
+
+    private long uncachedTokens(TaskInfo task) {
+        long inputTokens = task.getInputLength();
+        if (inputTokens <= 0) {
+            return 0;
+        }
+
+        long cacheHitTokens = task.isPrefixLengthValid()
+                ? task.getPrefixLength()
+                : task.getPredictedPrefixLength();
+        cacheHitTokens = Math.max(0, Math.min(inputTokens, cacheHitTokens));
+        return inputTokens - cacheHitTokens;
     }
 
     /**
