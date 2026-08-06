@@ -5,6 +5,7 @@ The FastAPI app registers only the lightweight sleep routes, and the gRPC client
 is replaced by an AsyncMock, so no backend process is required.
 """
 
+import asyncio
 import unittest
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -473,6 +474,39 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         defaults.update(kwargs)
         return pb2.SleepStatusResponsePB(**defaults)
 
+    async def test_health_check_failure_preserves_lifecycle_channels(self):
+        # Regression: a routine health probe timing out during a sleep/wake
+        # drain must NOT tear down the shared lifecycle _dp_channels. Closing a
+        # channel under a genuinely in-flight SleepServing/WakeUpServing call
+        # raises asyncio.CancelledError into that RPC (a BaseException that
+        # bypasses every ``except Exception``), cancelling the operation and
+        # returning HTTP 500 while the backend keeps transitioning -- a
+        # control-plane split brain. health_check may only reset its own
+        # channel.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, _ = self._build_wrapper(control_addresses=addresses)
+        wrapper.channel = MagicMock()
+        wrapper.channel.close = AsyncMock()
+        wrapper.stub = MagicMock()
+        wrapper.stub.CheckHealth = AsyncMock(
+            side_effect=self._aio_error(
+                grpc.StatusCode.DEADLINE_EXCEEDED, "backend draining"
+            )
+        )
+        dp_channels_before = dict(wrapper._dp_channels)
+        dp_stubs_before = dict(wrapper._dp_stubs)
+
+        result = await wrapper.health_check()
+
+        self.assertEqual(result["status"], "error")
+        # Only the health channel is reset; lifecycle channels stay intact.
+        self.assertIsNone(wrapper.channel)
+        self.assertIsNone(wrapper.stub)
+        self.assertEqual(wrapper._dp_channels, dp_channels_before)
+        self.assertEqual(wrapper._dp_stubs, dp_stubs_before)
+        for address in addresses:
+            self.assertFalse(wrapper._dp_channels[address].close.called)
+
     async def test_control_plane_sleep_wake_up_smoke_flow(self):
         addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
         wrapper, pb2 = self._build_wrapper(
@@ -584,6 +618,143 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
         for address in addresses:
             self.assertEqual(wrapper._dp_stubs[address].SleepServing.await_count, 2)
             self.assertEqual(wrapper._dp_stubs[address].WakeUpServing.await_count, 2)
+
+    async def test_sleep_commit_cancellation_is_absorbed_and_reaches_sleeping(self):
+        # Regression: once commit starts the device-memory release is
+        # irreversible. If the driving request is cancelled mid-commit (a stray
+        # channel teardown, a client disconnect, a worker recycle) we must NOT
+        # abandon the transition half-committed -- that leaves the instance with
+        # part of its GPU memory freed and no owner. The commit must be driven
+        # uninterruptibly to the terminal SLEEPING state and still report ok.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(
+            control_addresses=addresses,
+            expected_control_address_count=len(addresses),
+        )
+        rank_statuses: Dict[str, Dict[str, Any]] = {
+            address: {
+                "state": "RUNNING",
+                "sleep_epoch": 0,
+                "kv_memory_state": "ACTIVE",
+                "device_kv_cache_valid": True,
+                "active_request_count": 0,
+                "active_cache_transfer_count": 0,
+                "gpu_resource_state": "ACTIVE",
+            }
+            for address in addresses
+        }
+        commit_entered = asyncio.Event()
+        release_commit = asyncio.Event()
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def sleep_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    rank_statuses[address].update(state="DRAINING", sleep_epoch=1)
+                elif request.commit_only:
+                    # Block inside the irreversible commit so the test can cancel
+                    # the driving task while the transition is in flight.
+                    commit_entered.set()
+                    await release_commit.wait()
+                    rank_statuses[address].update(
+                        state="SLEEPING",
+                        kv_memory_state="PAUSED",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RELEASED",
+                    )
+                return pb2.EmptyPB()
+
+            wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            wrapper._dp_stubs[address].SleepServing = AsyncMock(side_effect=sleep_rpc)
+
+        task = asyncio.ensure_future(
+            wrapper.sleep_serving(
+                {"level": 1, "mode": "wait", "timeout_ms": 1000, "reason": "cancel"}
+            )
+        )
+        await asyncio.wait_for(commit_entered.wait(), timeout=5)
+        # Cancel while the irreversible commit is in flight, then let it finish.
+        task.cancel()
+        await asyncio.sleep(0)
+        release_commit.set()
+
+        result = await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(result, {"status": "ok"})
+        self.assertFalse(task.cancelled())
+        sleeping_status = await wrapper.get_sleep_status()
+        self.assertEqual(sleeping_status["state"], "SLEEPING")
+        self.assertEqual(sleeping_status["gpu_resource_state"], "RELEASED")
+
+    async def test_sleep_prepare_cancellation_rolls_back_to_running(self):
+        # Regression: prepare only closes admission and drains -- no device
+        # memory is freed, so it is reversible. A cancellation here must roll the
+        # drain back to RUNNING (via a WakeUpServing abort) so the instance keeps
+        # serving, then honor the cancellation.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        wrapper, pb2 = self._build_wrapper(
+            control_addresses=addresses,
+            expected_control_address_count=len(addresses),
+        )
+        rank_statuses: Dict[str, Dict[str, Any]] = {
+            address: {
+                "state": "RUNNING",
+                "sleep_epoch": 0,
+                "kv_memory_state": "ACTIVE",
+                "device_kv_cache_valid": True,
+                "active_request_count": 0,
+                "active_cache_transfer_count": 0,
+                "gpu_resource_state": "ACTIVE",
+            }
+            for address in addresses
+        }
+        prepare_entered = asyncio.Event()
+        release_prepare = asyncio.Event()
+        wake_calls = {"n": 0}
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def sleep_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    rank_statuses[address].update(state="DRAINING", sleep_epoch=1)
+                    # Block mid-drain so the test can cancel before commit.
+                    prepare_entered.set()
+                    await release_prepare.wait()
+                return pb2.EmptyPB()
+
+            async def wake_rpc(request, *args, address=address, **kwargs):
+                wake_calls["n"] += 1
+                rank_statuses[address].update(
+                    state="RUNNING", gpu_resource_state="ACTIVE"
+                )
+                return pb2.EmptyPB()
+
+            wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            wrapper._dp_stubs[address].SleepServing = AsyncMock(side_effect=sleep_rpc)
+            wrapper._dp_stubs[address].WakeUpServing = AsyncMock(side_effect=wake_rpc)
+
+        task = asyncio.ensure_future(
+            wrapper.sleep_serving(
+                {"level": 1, "mode": "wait", "timeout_ms": 1000, "reason": "cancel"}
+            )
+        )
+        await asyncio.wait_for(prepare_entered.wait(), timeout=5)
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        self.assertTrue(task.cancelled())
+        # The reversible drain was rolled back on every control rank.
+        self.assertEqual(wake_calls["n"], len(addresses))
 
     async def test_get_sleep_status_exposes_in_progress_states_for_control_plane(self):
         cases = [

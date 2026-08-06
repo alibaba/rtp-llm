@@ -186,6 +186,26 @@ class GrpcClientWrapper:
         self._dp_channels.clear()
         self._dp_stubs.clear()
 
+    async def _reset_main_channel(self) -> None:
+        """Tear down ONLY the health/status channel so the next probe reconnects.
+
+        Deliberately does not touch self._dp_channels: those carry in-flight
+        sleep/wake lifecycle RPCs. Closing a channel while one of its calls is
+        genuinely in-flight (server-accepted, still processing) raises
+        asyncio.CancelledError into the awaiting coroutine -- a BaseException
+        that bypasses every ``except Exception`` on the lifecycle path. A
+        routine health-probe timeout during a sleep/wake drain would otherwise
+        cancel the unrelated lifecycle operation and surface HTTP 500 while the
+        backend keeps transitioning to SLEEPING -- a control-plane split brain.
+        """
+        if self.channel:
+            try:
+                await self.channel.close()
+            except Exception as e:
+                logging.warning(f"Failed to close health channel: {e}")
+        self.channel = None
+        self.stub = None
+
     async def health_check(self) -> Dict[str, Any]:
         """Check server health"""
         try:
@@ -195,7 +215,10 @@ class GrpcClientWrapper:
             await self.stub.CheckHealth(request, timeout=1)
             return {"status": "ok"}
         except Exception as e:
-            await self.close()
+            # Reset only the health channel. Never close the shared lifecycle
+            # (_dp_channels) here: see _reset_main_channel -- doing so would
+            # cancel an in-flight sleep/wake RPC that shares this wrapper.
+            await self._reset_main_channel()
             return {
                 "status": "error",
                 "message": e,
@@ -435,6 +458,50 @@ class GrpcClientWrapper:
             "details": details,
         }
 
+    async def _drive_to_terminal(self, coro: Any) -> Any:
+        """Run an irreversible lifecycle transition to completion even if the
+        driving request coroutine is cancelled.
+
+        Once the commit phase has started running the GPU-release / GPU-restore
+        hooks there is no consistent rollback: freed device memory (or a level-2
+        disk dump/reload) cannot be un-done, so the only valid terminal states
+        are the two endpoints of the transition -- every rank RUNNING or every
+        rank SLEEPING. If the frontend request task is cancelled midway (a
+        concurrent /health probe tearing down a shared channel, a worker
+        recycle, a client disconnect) we must NOT abandon the transition
+        half-committed and release the lifecycle lease -- that is the
+        control-plane split brain that leaves the instance with half its device
+        memory freed and no owner driving it to a consistent state.
+
+        So we absorb the cancellation and keep awaiting until the backend
+        converges, then report the true terminal state to whoever is left. The
+        underlying `_converge_commit` is itself bounded (COMMIT_MAX_ATTEMPTS x
+        per-attempt timeout), so this cannot hang indefinitely.
+        """
+        task = asyncio.ensure_future(coro)
+        absorbed_cancel = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.done():
+                    # The transition already finished; honor its result and let
+                    # the cancellation die here (the irreversible work is done).
+                    result = task.result()
+                    break
+                # Still committing an irreversible transition -- swallow the
+                # cancellation and keep waiting for the backend to converge.
+                absorbed_cancel = True
+                continue
+        if absorbed_cancel:
+            logging.warning(
+                "lifecycle commit was driven to its terminal state despite "
+                "request cancellation; absorbed the cancel to avoid a "
+                "half-committed instance"
+            )
+        return result
+
     async def _converge_commit(
         self,
         operation: str,
@@ -593,7 +660,14 @@ class GrpcClientWrapper:
                 }
             try:
                 level = int(req.get("level", 1))
-                timeout_ms = int(req.get("timeout_ms", 0))
+                # Default drain timeout when the caller omits timeout_ms: 60 minutes.
+                # The sleep prepare phase blocks on draining in-flight requests up to
+                # this long before giving up and rolling back to RUNNING (graceful
+                # drain never force-aborts in-flight work -- see SleepLifecycleController).
+                # A large default means an online instance told to sleep waits out even
+                # very long in-flight generations instead of rolling back; callers can
+                # still override per request (or pass mode="abort" to cancel in-flight).
+                timeout_ms = int(req.get("timeout_ms", 60 * 60 * 1000))
             except (TypeError, ValueError):
                 return {
                     "error": "sleep level and timeout_ms must be integers",
@@ -665,9 +739,26 @@ class GrpcClientWrapper:
             # Only after every rank is drained do we send commit, avoiding a
             # partially sleeping instance when one rank times out.
             timeout_s = max(60.0, timeout_ms / 1000.0 + 30.0)
-            prepare_results = await self._broadcast_control_rpc(
-                "SleepServing", prepare_request, timeout_s
-            )
+            try:
+                prepare_results = await self._broadcast_control_rpc(
+                    "SleepServing", prepare_request, timeout_s
+                )
+            except asyncio.CancelledError:
+                # Prepare only closes admission and drains in-flight work -- no
+                # device memory has been released yet, so this phase is fully
+                # reversible. Roll every rank that may have entered DRAINING
+                # back to RUNNING (uninterruptibly, so the rollback itself
+                # completes) before honoring the cancellation. Without this the
+                # instance would be stuck admission-closed with no owner.
+                logging.warning(
+                    "sleep prepare cancelled; rolling back drain to RUNNING"
+                )
+                await self._drive_to_terminal(
+                    self._broadcast_control_rpc(
+                        "WakeUpServing", pb2.WakeUpRequestPB(), timeout_s=60
+                    )
+                )
+                raise
             failures = [result for result in prepare_results if "error" in result]
             if failures:
                 abort_results = await self._broadcast_control_rpc(
@@ -699,14 +790,18 @@ class GrpcClientWrapper:
             # commit runs the GPU-release hooks; for level-2 that includes dumping
             # the ~weights-sized raw backup to disk, which can take far longer than
             # a level-1 tms pause. Reuse the drain-derived headroom so a slow dump
-            # does not spuriously trip the commit deadline.
-            return await self._converge_commit(
-                operation="commit sleep",
-                rpc_name="SleepServing",
-                commit_request=commit_request,
-                timeout_s=timeout_s,
-                transitional_state="DRAINING",
-                final_state="SLEEPING",
+            # does not spuriously trip the commit deadline. Once commit starts the
+            # device memory release is irreversible, so drive it to the terminal
+            # SLEEPING state even if this request is cancelled.
+            return await self._drive_to_terminal(
+                self._converge_commit(
+                    operation="commit sleep",
+                    rpc_name="SleepServing",
+                    commit_request=commit_request,
+                    timeout_s=timeout_s,
+                    transitional_state="DRAINING",
+                    final_state="SLEEPING",
+                )
             )
         except grpc.aio.AioRpcError as e:
             logging.error(f"Sleep serving failed: {e.details()}")
@@ -787,13 +882,17 @@ class GrpcClientWrapper:
             # the ~weights-sized raw backup from disk (read + H2D copy), which can
             # take far longer than a level-1 tms resume. Give it the same headroom
             # as wake prepare so a slow restore does not trip the commit deadline.
-            return await self._converge_commit(
-                operation="commit wake_up",
-                rpc_name="WakeUpServing",
-                commit_request=commit_request,
-                timeout_s=600,
-                transitional_state="WAKING_UP",
-                final_state="RUNNING",
+            # Restoring device memory / reloading weights is irreversible, so drive
+            # it to the terminal RUNNING state even if this request is cancelled.
+            return await self._drive_to_terminal(
+                self._converge_commit(
+                    operation="commit wake_up",
+                    rpc_name="WakeUpServing",
+                    commit_request=commit_request,
+                    timeout_s=600,
+                    transitional_state="WAKING_UP",
+                    final_state="RUNNING",
+                )
             )
         except grpc.aio.AioRpcError as e:
             logging.error(f"Wake_up serving failed: {e.details()}")
