@@ -207,13 +207,12 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
 
         if (payload->propose_tokens.size() >= 2) {
             auto propose_tokens_gpu =
-                sp_output_buffer->tokens
-                    .narrow(1, 1, static_cast<int64_t>(payload->propose_tokens.size() - 1))
+                sp_output_buffer->tokens.narrow(1, 1, static_cast<int64_t>(payload->propose_tokens.size() - 1))
                     .to(cuda_i32, /*non_blocking=*/true);
-            auto accept_len         = torch::ones({1}, cuda_i32);
-            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
-            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
-            auto next_seq_len       = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
+            auto accept_len     = torch::ones({1}, cuda_i32);
+            auto accept_tokens  = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
+            accept_tokens[0][0] = sp_output_buffer->tokens[0][0];
+            auto next_seq_len   = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
 
             stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
                 .epoch                  = 0,
@@ -397,7 +396,22 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
-        return absl::InternalError("malloc failed");
+        switch (result.status) {
+            case MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED:
+                return absl::UnavailableError("kv cache is temporarily unavailable");
+            case MallocStatus::PERMANENT_RESOURCE_EXHAUSTED:
+                return absl::ResourceExhaustedError("request exceeds usable kv cache capacity");
+            case MallocStatus::INTERNAL_ERROR:
+                return absl::InternalError("malloc failed");
+            case MallocStatus::NONE:
+                RTP_LLM_LOG_ERROR("malloc returned failure without an error status, request_id=%ld",
+                                  malloc_info.request_id);
+                return absl::InternalError("malloc failed without an error status");
+        }
+        RTP_LLM_LOG_ERROR("malloc returned failure with unknown status=%d, request_id=%ld",
+                          static_cast<int>(result.status),
+                          malloc_info.request_id);
+        return absl::InternalError("malloc failed with unknown status");
     }
 
     if (result.reuse_len > 0) {

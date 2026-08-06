@@ -89,9 +89,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto&       block_ids_0        = kv_resource->mutableBlockIds(0);
     int64_t     match_cost_time_us = 0;
 
-    const size_t reserve_blocks   = reserveBlockNum();
-    const int    estimated_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
-    int          reuse_blocks     = 0;
+    int reuse_blocks = 0;
 
     // drop the last cache key of the partial block to avoid reuse it for two reasons:
     // 1. if the last block is partial, it actually cannot be reused, because only full blocks will be inserted into the
@@ -124,24 +122,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         full_kv_cache_group_->reference(block_ids_0, match_result.block_indices);
     }
 
-    // Check if available blocks are enough for the request.
-    if (reserve_blocks > 0 && estimated_blocks > 0) {
-        const size_t available_blocks = availableBlocksNum();
-        const int    actual_blocks    = std::max(estimated_blocks - reuse_blocks, 0);
-        if (actual_blocks > 0 && available_blocks < static_cast<size_t>(actual_blocks) + reserve_blocks) {
-            if (malloc_info.verbose) {
-                RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initMalloc rejected by reserve blocks: request_id=%ld "
-                                 "need_blocks=%d reuse_blocks=%d adjusted_need_blocks=%d available_blocks=%zu "
-                                 "reserve_blocks=%zu",
-                                 malloc_info.request_id,
-                                 estimated_blocks,
-                                 reuse_blocks,
-                                 actual_blocks,
-                                 available_blocks,
-                                 reserve_blocks);
-            }
-            return {false, 0};
-        }
+    const auto capacity_status =
+        evaluateInitCapacity(malloc_info, reserveBlockNum(), InitCapacityMode::TOTAL_AND_AVAILABLE);
+    if (capacity_status != MallocStatus::NONE) {
+        return {false, 0, match_cost_time_us, capacity_status};
     }
 
     if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len)) {
@@ -239,11 +223,11 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         // Under CP sharding, use the same last-rank-key namespace as match()
         // (see initMallocForCommonLen) so the device cache stays consistent
         // across ranks without any cross-rank coordination.
-        CacheKeysType insert_keys;
+        CacheKeysType                 insert_keys;
         SharedBlockCache::NamespaceId namespace_id = SharedBlockCache::kGpuLogicalNamespace;
         if (insert_info.cp_slot_mapper && insert_info.cp_slot_mapper->isSharded()) {
-            int cp_size = insert_info.cp_slot_mapper->cpSize();
-            insert_keys = kv_resource->cacheResource(batch_id).localCacheKeys(cp_size - 1, cp_size);
+            int cp_size  = insert_info.cp_slot_mapper->cpSize();
+            insert_keys  = kv_resource->cacheResource(batch_id).localCacheKeys(cp_size - 1, cp_size);
             namespace_id = SharedBlockCache::kGpuCpCanonicalNamespace;
         } else {
             insert_keys = kv_resource->cacheKeys(batch_id);
@@ -342,21 +326,21 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
     selected_resource->initGroups(
         1, config_.layer_all_num, config_.layer_to_group_id, config_.kernelBlocksPerKvBlock());
 
-    CacheKeysType          selected_cache_keys;
-    BlockDependenciesType  selected_dependencies;
-    BlockIndicesType       selected_blocks;
-    BlockIndicesType       referenced_blocks;
+    CacheKeysType         selected_cache_keys;
+    BlockDependenciesType selected_dependencies;
+    BlockIndicesType      selected_blocks;
+    BlockIndicesType      referenced_blocks;
 
-    const auto& src_blocks           = kvcache_resource.blocks(0);
-    const auto& source_dependencies  = kvcache_resource.blockDependencies();
+    const auto& src_blocks          = kvcache_resource.blocks(0);
+    const auto& source_dependencies = kvcache_resource.blockDependencies();
 
     for (auto key : cache_keys) {
         auto it = key_to_pos.find(key);
         if (it == key_to_pos.end()) {
             continue;
         }
-        const size_t pos = it->second;
-        const bool preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
+        const size_t pos                     = it->second;
+        const bool   preserve_connector_tail = is_connector && !kvcache_resource.lastBlockAligned()
                                              && pos + 1 == resource_keys.size() && !selected_cache_keys.empty();
         if (pos >= src_blocks.size() && !preserve_connector_tail) {
             continue;

@@ -39,6 +39,8 @@ public:
                 singleBatchNeedBlocks,
                 (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step),
                 (const, override));
+    MOCK_METHOD(size_t, availableBlocksNum, (), (const, override));
+    MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
 
 protected:
     MOCK_METHOD(bool, doInit, (), (override));

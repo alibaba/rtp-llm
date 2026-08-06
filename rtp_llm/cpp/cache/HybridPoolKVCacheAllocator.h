@@ -55,6 +55,9 @@ public:
 private:
     bool doInit() override;
 
+    MallocStatus
+    evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;
+
     void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
@@ -65,8 +68,8 @@ private:
                           bool              incremental,
                           int               failed_need_blocks) const override;
 
-    int groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
-    int defaultGroupIdForLayer(int layer_id) const;
+    int    groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
+    int    defaultGroupIdForLayer(int layer_id) const;
     size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
 
     std::vector<BlockPoolPtr> group_block_pools_;
