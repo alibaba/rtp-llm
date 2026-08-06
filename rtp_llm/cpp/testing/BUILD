@@ -27,16 +27,9 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-    ] + select({
-        "@//:using_rocm": [
-            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
-        ],
-        "//conditions:default": [
-            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-            "//:rtp_compute_ops",
-        ],
-    }),
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
+        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
+    ],
     visibility = ["//visibility:public"],
     copts = copts(),
 )
@@ -68,7 +61,7 @@ cc_library(
     ],
     deps = [
         ":device_test_utils",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/models:sampling_ops",
         "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
         "//rtp_llm/cpp/models:models",
     ],
@@ -82,6 +75,7 @@ cc_library(
         "RejectionSamplingOpTest.hpp",
     ],
     deps = [
+        "//rtp_llm/cpp/models:sampling_ops",
         "//rtp_llm/models_py/bindings/core:op_data",
         "//rtp_llm/models_py/bindings/core:rejection_sampling_ops_test_lib",
         "@com_google_googletest//:gtest",

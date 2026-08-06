@@ -95,32 +95,6 @@ cc_library(
 # --- Bindings targets (original models_py/bindings/cuda targets) ---
 
 cc_library(
-    name = "split_kv_cache_copy",
-    srcs = ["SplitKvCacheCopy.cc"],
-    hdrs = ["SplitKvCacheCopy.h"],
-    copts = copts(),
-    deps = torch_deps() + [
-        "//rtp_llm/models_py/bindings/common/kernels:sm_copy_kernel",
-        ":cuda_host_utils",
-    ],
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "no_block_copy",
-    srcs = ["NoBlockCopy.cc"],
-    copts = copts(),
-    deps = [
-        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
-        "//rtp_llm/cpp/utils:core_utils",
-        ":split_kv_cache_copy",
-        ":cuda_host_utils",
-    ] + torch_deps(),
-    visibility = ["//visibility:public"],
-    alwayslink = 1,
-)
-
-cc_library(
     name = "bf16_gemm_op",
     srcs = [
         "Bf16GemmOp.cc",

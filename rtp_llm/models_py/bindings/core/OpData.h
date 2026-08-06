@@ -1,4 +1,8 @@
 #pragma once
+#include "rtp_llm/cpp/cache/CacheStoreTypes.h"
+#include "rtp_llm/cpp/comm/CollectiveTypes.h"
+#include "rtp_llm/cpp/core/CopyTypes.h"
+#include "rtp_llm/cpp/models/SamplingTypes.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
@@ -13,19 +17,9 @@
 #include <memory>
 #include <torch/extension.h>
 #include <torch/python.h>
-#include <ATen/Generator.h>
 #include <type_traits>
 
 namespace rtp_llm {
-
-enum class ParallelMode {
-    TP        = 0,
-    DP        = 1,
-    DP_AND_TP = 2,
-    FFN_TP    = 3,
-    EP        = 4,
-    EPLB      = 5,
-};
 
 // A batch includes two parts: context batch and decoder batch.
 // context batch is request for initial word, decoder batch is request for incremental word.
@@ -35,15 +29,12 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;             // [cumulated_seq_len]
-    torch::Tensor         input_lengths;            // [batch_size]
-    torch::Tensor         sequence_lengths;         // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;        // selected output rows
-    // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
-    // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor         lm_output_lengths;        // [total_batch_size]
-    torch::Tensor         prefix_lengths;           // [context_batch_size]
-    torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
+    torch::Tensor         input_lengths;      // [batch_size]
+    torch::Tensor         sequence_lengths;   // [decoder_batch_size]
+    torch::Tensor         lm_output_indexes;  // [sum(lm_output_lengths)]
+    torch::Tensor         lm_output_lengths;  // [total_batch_size]
+    torch::Tensor         prefix_lengths;     // [context_batch_size]
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -113,69 +104,6 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
-};
-
-struct CopyParams {
-    const torch::Tensor& dst;
-    const torch::Tensor& src;
-    bool                 overlapped = false;
-    bool                 async      = true;
-
-    void check() const {
-        RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == dst.scalar_type(), "copy dst and src need has same type.");
-        RTP_LLM_CHECK_WITH_INFO(
-            src.nbytes() == dst.nbytes(), "src and dst copy size mismatch: %zu vs %zu", src.nbytes(), dst.nbytes());
-    }
-};
-
-struct MultiMergeCopyParams {
-    void*               dst_ptr;
-    std::vector<void*>  src_ptrs;
-    std::vector<size_t> copy_size;
-    std::vector<size_t> dst_offsets;
-};
-
-struct BatchCopyParams {
-    enum CopyType : uint32_t {
-        D2H = 0,
-        H2D = 1,
-        D2D = 2,
-        H2H = 3,
-
-        // dummy enum indicating number of copy types
-        TYPE_SIZE
-    };
-
-    struct BatchCopyBuffers {
-        std::vector<void*>       dst_ptr;
-        std::vector<const void*> src_ptr;
-        std::vector<uint64_t>    sizes;
-    };
-
-    BatchCopyBuffers copy_buffers[TYPE_SIZE];
-
-    bool overlapped = false;
-
-    BatchCopyParams& set_overlapped(bool overlapped) {
-        this->overlapped = overlapped;
-        return *this;
-    }
-
-    static CopyType  get_copy_type(MemoryType dst_type, MemoryType src_type);
-    BatchCopyParams& reserve(CopyType copy_type, size_t size);
-    BatchCopyParams& add(void* dst, const void* src, size_t size, CopyType copy_type);
-};
-
-struct KvCacheInfo {
-    int           layer_num;
-    torch::Tensor kv_cache_block_id;  // [batch_size, block_nums], kv cache block offset
-    // only meaningful for hybrid cache, per-group block tables, each is [batch_size, block_nums]
-    std::vector<torch::Tensor> kv_cache_block_ids_by_group;
-    // Base buffer for kv cache blocks. For current cache layout, this represents the base (K) address of kv blocks.
-    // V address can be derived by offset/stride when needed.
-    torch::Tensor kv_cache_buffer;
-    // Optional scale buffer for kv cache quantization (int8/fp8). If set, it should match kv_cache_buffer layout.
-    torch::Tensor kv_scale_buffer;
 };
 
 struct AttentionCommonInputs {
@@ -248,121 +176,6 @@ struct MoeConfigs {
 struct FfnConfigs {
     ActivationType            activation_type;
     std::optional<MoeConfigs> moe_configs = std::nullopt;
-};
-
-struct GreedySamplingBuffers {
-    torch::Tensor seed_host;
-    torch::Tensor offset_host;
-    torch::Tensor output_ids_ptrs_host;
-    size_t        max_batch_size = 0;
-};
-
-struct GreedyParams {
-    torch::Tensor logits;            // [batch_size, vocab_size_padded], mutable for in-place penalty
-    torch::Tensor input_lengths;     // [batch_size]
-    torch::Tensor sequence_lengths;  // [batch_size]
-    torch::Tensor token_ids;         // [batch_size, max_input_length + 1]
-    size_t        step;
-
-    torch::Tensor top_k;
-    torch::Tensor top_p;
-    torch::Tensor temperature;
-
-    std::optional<torch::Tensor> repetition_penalty;
-    std::optional<torch::Tensor> no_repeat_ngram_size;
-
-    std::optional<torch::Tensor> cum_log_probs;
-    std::optional<torch::Tensor> output_log_probs;
-
-    bool return_original_all_probs = false;
-
-    std::optional<torch::Tensor> output_all_probs;
-    std::optional<torch::Tensor> presence_penalty;
-    std::optional<torch::Tensor> frequency_penalty;
-    std::optional<torch::Tensor> do_sample;
-
-    std::vector<at::Generator> generator;
-    GreedySamplingBuffers*     sampling_buffers = nullptr;
-};
-
-struct GreedyOutput {
-    torch::Tensor success;
-};
-
-struct BeamSearchParams {
-    // logits is modified inplace to save memory — callers must not reuse it after the call.
-    torch::Tensor logits;            // [batch_size, num_beams_in, vocab_size]
-    torch::Tensor token_ids;         // [batch_size, num_beams_in, max_seq_len]
-    torch::Tensor input_lengths;     // [batch_size, num_beams_in]
-    torch::Tensor sequence_lengths;  // [batch_size, num_beams_in]
-    torch::Tensor cum_log_probs;     // [batch_size, num_beams_in]
-    size_t        num_beams_out = 0;
-};
-
-struct BeamSearchOutput {
-    torch::Tensor token_ids;         // [batch_size, num_beams_out, max_seq_len]
-    torch::Tensor input_lengths;     // [batch_size, num_beams_out]
-    torch::Tensor sequence_lengths;  // [batch_size, num_beams_out]
-    torch::Tensor cum_log_probs;     // [batch_size, num_beams_out]
-    torch::Tensor beam_indices;      // [batch_size, num_beams_out]
-};
-
-struct BroadcastParams {
-    const std::vector<torch::Tensor>& buffers;
-    const int64_t                     root;
-    ParallelMode                      mode       = ParallelMode::TP;
-    bool                              overlapped = false;
-};
-
-enum class ReduceOp {
-    Sum  = 0,
-    Prod = 1,
-    Max  = 2,
-    Min  = 3,
-    Avg  = 4,
-};
-
-struct AllReduceParams {
-    torch::Tensor  buffer;
-    const ReduceOp op;
-    bool           overlapped = false;
-    ParallelMode   mode       = ParallelMode::TP;
-    torch::Tensor  dest;  // undefined = no separate dest
-};
-
-struct AllReduceOutput {
-    torch::Tensor buffer;
-};
-
-struct AllGatherParams {
-    const std::vector<torch::Tensor>& recv_buffers;
-    ParallelMode                      mode = ParallelMode::TP;
-    std::vector<torch::Tensor>        send_buffers;
-    bool                              inplace    = true;
-    bool                              overlapped = false;
-};
-
-struct RejectionSamplingParams {
-    torch::Tensor draft_probs_d;
-    torch::Tensor draft_token_ids_d;
-    torch::Tensor uniform_samples_d;
-    torch::Tensor target_probs_d;
-    torch::Tensor target_token_ids_d;
-    torch::Tensor output_token_ids_d;
-    torch::Tensor output_accepted_token_num_d;
-    torch::Tensor do_sample_d;
-    // True when draft_probs_d is a degenerate point mass on draft_token_ids_d
-    // (in-model proposers such as DSpARK emit tokens, not per-vocab probs).
-    // The kernel then treats q(draft) == 1 instead of reading draft_probs_d.
-    bool draft_probs_point_mass = false;
-};
-
-struct MappingDraft2TargetParams {
-    torch::Tensor tokens;
-    torch::Tensor d2t_map;
-    int           batch_size;
-    int           token_offset;
-    int           token_stride;
 };
 
 }  // namespace rtp_llm

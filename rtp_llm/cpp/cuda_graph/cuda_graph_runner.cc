@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/core/CopyOps.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #endif

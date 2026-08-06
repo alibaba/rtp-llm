@@ -9,6 +9,7 @@ cc_library(
         "cuda_shims.h",
         "amd_bfloat16.h",
     ],
+    deps = ["//rtp_llm/cpp/runtime:rocm_compat"],
     visibility = ["//visibility:public"],
 )
 

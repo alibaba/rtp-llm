@@ -5,13 +5,9 @@
 #include <string>
 #include <unordered_map>
 
-namespace rtp_llm {
+#include "rtp_llm/cpp/core/MemoryTypes.h"
 
-typedef enum memorytype_enum {
-    MEMORY_CPU,
-    MEMORY_CPU_PINNED,
-    MEMORY_GPU
-} MemoryType;
+namespace rtp_llm {
 
 enum class AllocationType {
     HOST   = 0,

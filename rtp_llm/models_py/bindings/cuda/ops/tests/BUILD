@@ -45,6 +45,7 @@ cc_test(
     data = [],
     copts = copts(),
     deps = test_deps + [
+        "//rtp_llm/cpp/core:copy_ops_hdrs",
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
     ],
     exec_properties = {'gpu':'H20'},
@@ -59,6 +60,7 @@ cc_test(
     copts = copts(),
     deps = test_deps + [
         "//3rdparty/flashinfer:flashinfer",
+        "//rtp_llm/cpp/models:sampling_ops",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
     ],
     exec_properties = {'gpu':'H20'},

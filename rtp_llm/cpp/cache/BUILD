@@ -25,6 +25,44 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_store_types",
+    hdrs = ["CacheStoreTypes.h"],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cache_store_writer_hdrs",
+    hdrs = ["CacheStoreWriter.h"],
+    deps = torch_deps(),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "cache_store_writer_impl",
+    srcs = ["CacheStoreWriter.cc"],
+    deps = [
+        ":cache_store_writer_hdrs",
+        ":cache_config",
+        ":cache_group_type",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
+        "//rtp_llm/models_py/bindings:op_defs",
+    ] + torch_deps(),
+    copts = copts(),
+    visibility = [
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
+    ],
+    alwayslink = True,
+)
+
+cc_library(
     name = "block_info",
     hdrs = [
         "BlockInfo.h",
@@ -271,8 +309,8 @@ cc_library(
         ":cp_slot_mapper",
         ":kv_cache_allocator_hdr",
         ":kv_cache_group",
+        "//rtp_llm/cpp/core:copy_ops_hdrs",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
 )
 
@@ -319,7 +357,7 @@ cc_library(
         ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/metrics",
@@ -372,7 +410,9 @@ cc_library(
         ":cp_slot_mapper",
         ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/cache/connector",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/comm:collective_backend_hdrs",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
+        "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
 )

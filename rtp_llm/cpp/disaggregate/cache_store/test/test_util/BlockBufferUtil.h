@@ -1,3 +1,5 @@
+#pragma once
+
 #include <vector>
 
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"

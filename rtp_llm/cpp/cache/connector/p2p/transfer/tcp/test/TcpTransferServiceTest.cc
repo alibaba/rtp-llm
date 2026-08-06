@@ -14,7 +14,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpTransferService.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto/tcp_service.pb.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
@@ -116,7 +116,7 @@ public:
                     /*trace_memory=*/false,
                     /*enable_comm_overlap=*/false,
                     MlaOpsType::AUTO);
-        device_initialized_ = isRuntimeInitialized();
+        ASSERT_TRUE(isRuntimeInitialized());
     }
 
 protected:
@@ -151,13 +151,10 @@ protected:
         return closure;
     }
 
-    static bool                         device_initialized_;
     MockRpcController                   ctrl_;
     std::shared_ptr<TransferTaskStore>  task_store_;
     std::shared_ptr<TcpTransferService> service_;
 };
-
-bool TcpTransferServiceTest::device_initialized_ = false;
 
 static constexpr auto kWait = std::chrono::seconds(5);
 
@@ -167,10 +164,6 @@ static constexpr auto kWait = std::chrono::seconds(5);
 
 // A1: Receiver registers task first, then Sender transfer arrives.
 TEST_F(TcpTransferServiceTest, A1_NormalTransfer_RecvFirst_Success) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
-
     constexpr size_t  size = 64;
     const std::string content(size, 'A');
     auto              gpu_buf = allocDevice(size);
@@ -192,10 +185,6 @@ TEST_F(TcpTransferServiceTest, A1_NormalTransfer_RecvFirst_Success) {
 
 // A2: Sender transfer arrives first; Receiver registers task afterwards.
 TEST_F(TcpTransferServiceTest, A2_NormalTransfer_TransferFirst_RecvLater_Success) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
-
     constexpr size_t  size = 64;
     const std::string content(size, 'B');
     auto              gpu_buf = allocDevice(size);
@@ -348,10 +337,6 @@ TEST_F(TcpTransferServiceTest, E2_BufferMismatch_ReceiverKeyMissingInSender) {
 // E2b: Sender sends an extra cache_key not registered by receiver; it is
 //      silently ignored and the transfer succeeds.
 TEST_F(TcpTransferServiceTest, E2b_ExtraKeyInSender_IgnoredOnSuccess) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
-
     constexpr size_t  size = 64;
     const std::string content(size, 'V');
     auto              gpu_buf = allocDevice(size);
@@ -398,10 +383,6 @@ TEST_F(TcpTransferServiceTest, E3_BufferMismatch_SubBlockOutOfRange) {
 //     same task; startTransfer() has no exclusive lock, so both proceed.
 //     Both closures must fire and the task must end up in a consistent state.
 TEST_F(TcpTransferServiceTest, G3_ConcurrentTransfers_SameKey_BothComplete) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
-
     constexpr size_t  size = 64;
     const std::string content(size, 'G');
     auto              gpu_buf = allocDevice(size);

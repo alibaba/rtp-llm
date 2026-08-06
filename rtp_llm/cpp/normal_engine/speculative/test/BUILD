@@ -28,10 +28,6 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/normal_engine:normal_engine",
-        # FastTopKSampler::forward calls execMappingDraft2Target (draft-to-target
-        # vocab mapping); pair exec_ops_test_lib with cuda_impl like models/test.
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),

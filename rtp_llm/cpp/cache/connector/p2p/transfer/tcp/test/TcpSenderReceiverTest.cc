@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpKVCacheSender.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/NetUtil.h"
 #include <torch/torch.h>
@@ -68,7 +68,7 @@ public:
                     /*trace_memory=*/false,
                     /*enable_comm_overlap=*/false,
                     MlaOpsType::AUTO);
-        device_initialized_ = isRuntimeInitialized();
+        ASSERT_TRUE(isRuntimeInitialized());
     }
 
 protected:
@@ -78,12 +78,9 @@ protected:
         ASSERT_TRUE(sender_->init(2));
     }
 
-    static bool                       device_initialized_;
     std::unique_ptr<TcpKVCacheSender> sender_;
     uint32_t                          unused_port_ = 0;
 };
-
-bool TcpSenderOnlyTest::device_initialized_ = false;
 
 // ---------------------------------------------------------------------------
 // Fixture: Sender + Receiver on localhost
@@ -96,7 +93,7 @@ public:
                     /*trace_memory=*/false,
                     /*enable_comm_overlap=*/false,
                     MlaOpsType::AUTO);
-        device_initialized_ = isRuntimeInitialized();
+        ASSERT_TRUE(isRuntimeInitialized());
     }
 
 protected:
@@ -127,13 +124,10 @@ protected:
         return std::memcmp(cpu_tensor.data_ptr(), expected.data(), size) == 0;
     }
 
-    static bool                         device_initialized_;
     std::unique_ptr<TcpKVCacheSender>   sender_;
     std::unique_ptr<TcpKVCacheReceiver> receiver_;
     uint32_t                            test_port_ = 0;
 };
-
-bool TcpSenderReceiverTest::device_initialized_ = false;
 
 // ===========================================================================
 // F. Build request failures (Sender only, no network)
@@ -159,9 +153,6 @@ TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
 // D1/D3: Receiver is not running; arpc returns a channel object regardless, so
 //        the RPC is sent but times out → RPC_FAILED (controller->Failed()=true).
 TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
     auto        gpu_buf = torch::empty({64}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     SendRequest req;
     req.ip          = "127.0.0.1";
@@ -183,9 +174,6 @@ TEST_F(TcpSenderOnlyTest, D1_ConnectionFailed_ReceiverNotRunning) {
 // B1: Receiver is running but has not called recv(); the RPC enters wait_tasks_
 //     and times out after the deadline.
 TEST_F(TcpSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
     auto        gpu_buf = allocDevice(64);
     SendRequest req;
     req.ip          = "127.0.0.1";
@@ -205,9 +193,6 @@ TEST_F(TcpSenderReceiverTest, B1_SenderTimeout_ReceiverHasNoMatchingTask) {
 // C1: Receiver registers a task then immediately cancels it; the RPC arrives,
 //     waitCheckProc finds the already-done task and responds CANCELLED.
 TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
     auto gpu_buf_recv = allocDevice(64);
     auto gpu_buf_send = allocDevice(64);
 
@@ -239,10 +224,6 @@ TEST_F(TcpSenderReceiverTest, C1_RecvCancelledBeforeRpcArrives_Integration) {
 // A1: Full end-to-end transfer: Receiver registers GPU buffer, Sender copies
 //     data over TCP, GPU content is verified.
 TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
-
     constexpr size_t  size = 64;
     const std::string content(size, 'E');
     auto              gpu_buf = allocDevice(size);
@@ -285,10 +266,6 @@ TEST_F(TcpSenderReceiverTest, A1_NormalTransfer_EndToEnd_Success) {
 //     Sends are issued sequentially to avoid concurrent GPU-copy races,
 //     while still exercising the multi-key routing path in TcpTransferService.
 TEST_F(TcpSenderReceiverTest, G2_MultipleSenders_ConcurrentKeys) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device";
-    }
-
     constexpr int    N    = 3;
     constexpr size_t size = 64;
 

@@ -8,6 +8,7 @@ cc_library(
         "Dispatch.h",
     ],
     deps = [
+        "//rtp_llm/cpp/core:memory_types",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
@@ -49,6 +50,7 @@ cc_library(
     hdrs = [
         "CommonDefines.h",
     ],
+    deps = ["//rtp_llm/cpp/core:op_status"],
     copts = copts(),
     visibility = ["//visibility:public"],
 )
@@ -72,6 +74,10 @@ cc_library(
         "OpData.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_store_types",
+        "//rtp_llm/cpp/comm:collective_types",
+        "//rtp_llm/cpp/core:copy_types",
+        "//rtp_llm/cpp/models:sampling_types",
         ":type_convert",
         ":common_defines",
         ":tensor_holder",
@@ -88,80 +94,49 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-# ExecOps — unified public header for runtime operations.
-# Replaces the former ExecutionContext.h (now deleted).
+# Stub weight preprocess declarations; safe to link into every .so.
 cc_library(
-    name = "exec_ops_hdr",
-    hdrs = [
-        "ExecOps.h",
-    ],
-    deps = [
-        ":op_data",
-        ":device_data",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/models:stats",
-        "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
-    ] + torch_deps() + select({
-        "@//:using_rocm": ["@local_config_rocm//rocm:rocm_headers"],
-        "//conditions:default": [],
-    }),
+    name = "weight_preprocess_hdrs",
+    hdrs = ["WeightPreprocess.h"],
+    deps = torch_deps(),
     copts = copts(),
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "exec_ops_srcs",
-    srcs = [
-        "ExecOps.cc",
-    ],
-    visibility = ["//visibility:public"],
+# Stateless compatibility implementation. Keep it in librtp_compute_ops.so.
+cc_library(
+    name = "weight_preprocess_impl",
+    srcs = ["WeightPreprocess.cc"],
+    deps = [":weight_preprocess_hdrs"] + torch_deps(),
+    copts = copts(),
+    alwayslink = True,
+    visibility = ["//rtp_llm/cpp/pybind:__pkg__"],
 )
 
-# Test-only library for ExecOps.cc.
-# Use this for tests that already link cuda_impl.
 cc_library(
-    name = "exec_ops_test_lib",
-    hdrs = [
-        "ExecOps.h",
-    ],
-    srcs = [
-        "ExecOps.cc",
-    ],
+    name = "runtime_ops_test_impls",
     deps = [
-        ":device_data",
-        ":op_data",
-        ":type_convert",
-        ":types_hdr",
-        ":common_defines",
-        "//rtp_llm/cpp/cache:cache_config",
-        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
-        "//rtp_llm/cpp/utils:signal_utils",
-        "//rtp_llm/cpp/utils:kv_cache_utils",
-        "//rtp_llm/cpp/utils:debug_utils",
-        "//rtp_llm/cpp/config:static_config",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/models:stats",
-        "//rtp_llm/cpp/models/models_weight:weights_define",
-        "//rtp_llm/cpp/cache:cache_group_type",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/pybind:th_utils",
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
-        "@havenask//aios/autil:stack_tracer",
-        "@havenask//aios/autil:string_helper",
-        "@havenask//aios/autil:scope",
-    ] + torch_deps() + select({
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
-        ],
-        "//conditions:default": [],
-    }),
+        "//rtp_llm/cpp/cache:cache_store_writer_impl",
+        "//rtp_llm/cpp/comm:collective_backend_impl",
+        "//rtp_llm/cpp/core:copy_ops_impl",
+        "//rtp_llm/cpp/models:stats_impl",
+        "//rtp_llm/cpp/runtime:cuda_runtime_impl",
+        ":weight_preprocess_impl",
+    ],
     copts = copts(),
-    visibility = ["//visibility:public"],
-    alwayslink = 1,
+    visibility = [
+        "//rtp_llm/cpp/cache/connector/memory/test:__pkg__",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp/test:__pkg__",
+        "//rtp_llm/cpp/cache/connector/remote_connector/test:__pkg__",
+        "//rtp_llm/cpp/cache/connector/test:__pkg__",
+        "//rtp_llm/cpp/cache/test:__pkg__",
+        "//rtp_llm/cpp/disaggregate/cache_store/test:__pkg__",
+        "//rtp_llm/cpp/models/logits_processor/test:__pkg__",
+        "//rtp_llm/cpp/models/test:__pkg__",
+        "//rtp_llm/cpp/testing:__pkg__",
+        "//rtp_llm/models_py/bindings/core/test:__pkg__",
+        "//rtp_llm/models_py/bindings/rocm/ops/tests:__pkg__",
+    ],
 )
 
 # DeviceData.h - standalone header for DeviceInitParams, DeviceType, etc.
@@ -172,6 +147,7 @@ cc_library(
     ],
     deps = [
         ":common_defines",
+        "//rtp_llm/cpp/runtime:device_status",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:config_modules",
@@ -182,88 +158,18 @@ cc_library(
 
 
 filegroup(
-    name = "exec_ctx_impl_srcs",
+    name = "sampling_ops_impl_srcs",
     srcs = [
-        "CudaOps.cc",
         "CudaSampleOp.cc",
         "CudaBeamSearchOp.cc",
     ],
     visibility = ["//visibility:public"],
 )
 
-# Split into two targets so that the process-wide global state
-# lives in exactly ONE .so.
-#
-# exec_ctx_state: ExecOps.cc
-#   Defines the non-inline globalRuntime() singleton + comm op callbacks.
-#   Linked ONLY into librtp_compute_ops.so (via th_compute_lib).
-#
-# exec_ctx_ops: CudaOps.cc + sample ops
-#   Platform op implementations that do NOT directly touch global state.
-#   Linked into both .so files; calls to state accessors are resolved
-#   at load-time from librtp_compute_ops.so.
-
 cc_library(
-    name = "exec_ctx_state",
-    hdrs = [
-        "ExecOps.h",
-    ],
-    srcs = [
-        "ExecOps.cc",
-    ],
+    name = "sampling_ops_impl",
+    srcs = [":sampling_ops_impl_srcs"],
     deps = [
-        ":device_data",
-        ":op_data",
-        ":type_convert",
-        ":types_hdr",
-        ":common_defines",
-        "//rtp_llm/cpp/cache:cache_config",
-        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
-        "//rtp_llm/cpp/utils:signal_utils",
-        "//rtp_llm/cpp/utils:kv_cache_utils",
-        "//rtp_llm/cpp/utils:debug_utils",
-        "//rtp_llm/cpp/config:static_config",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/models:stats",
-        "//rtp_llm/cpp/models/models_weight:weights_define",
-        "//rtp_llm/cpp/cache:cache_group_type",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/pybind:th_utils",
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
-        "@havenask//aios/autil:stack_tracer",
-        "@havenask//aios/autil:string_helper",
-        "@havenask//aios/autil:scope",
-    ] + torch_deps() + select({
-        "@//:using_rocm": [
-            "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
-            "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
-            "@local_config_rocm//rocm:rocm_headers",
-            "@local_config_rocm//rocm:rocm",
-        ],
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
-            "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
-        ],
-        "//conditions:default": [],
-    }),
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    alwayslink = 1,
-)
-
-cc_library(
-    name = "exec_ctx_ops",
-    srcs = [
-        "CudaOps.cc",
-        "CudaSampleOp.cc",
-        "CudaBeamSearchOp.cc",
-    ],
-    deps = [
-        ":exec_ops_hdr",
         ":device_data",
         ":op_data",
         ":type_convert",
@@ -276,6 +182,7 @@ cc_library(
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/cpp/models:sampling_ops",
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/cpp/cache:cache_group_type",
@@ -316,6 +223,7 @@ cc_library(
     deps = [
         ":common_defines",
         ":op_data",
+        "//rtp_llm/cpp/models:sampling_ops",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
@@ -339,28 +247,15 @@ cc_library(
     alwayslink = 1,
 )
 
-# Combined target for backward compatibility — pulls in both state + ops.
-cc_library(
-    name = "exec_ctx_rocm",
-    hdrs = [
-        "ExecOps.h",
-    ],
-    deps = [
-        ":exec_ctx_state",
-        ":exec_ctx_ops",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-)
-
 cc_library(
     name = "cache_store_async_writer",
     hdrs = ["CacheStoreAsyncWriter.h"],
     srcs = ["CacheStoreAsyncWriter.cc"],
     deps = [
-        ":exec_ops_hdr",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cache_store_writer_hdrs",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/models_py/bindings:op_defs",

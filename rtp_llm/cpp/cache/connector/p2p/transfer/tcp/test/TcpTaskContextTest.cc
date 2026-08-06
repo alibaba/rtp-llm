@@ -13,7 +13,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/TcpTaskContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/tcp/proto/tcp_service.pb.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/runtime/CudaRuntime.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <torch/torch.h>
 #include <c10/cuda/CUDAStream.h>
@@ -82,14 +82,13 @@ static void addRequestBlock(::tcp_transfer::TcpLayerBlockTransferRequest&       
 
 class TcpTaskContextTest: public ::testing::Test {
 public:
-    /// Initialize the device once for the whole test suite.
-    /// GPU tests are skipped when no device is available.
+    /// Initialize the required GPU runtime once for the whole test suite.
     static void SetUpTestSuite() {
         initRuntime(/*device_id=*/0,
                     /*trace_memory=*/false,
                     /*enable_comm_overlap=*/false,
                     MlaOpsType::AUTO);
-        device_initialized_ = isRuntimeInitialized();
+        ASSERT_TRUE(isRuntimeInitialized());
     }
 
 protected:
@@ -151,11 +150,8 @@ protected:
         return std::memcmp(cpu_tensor.data_ptr(), expected.data(), size) == 0;
     }
 
-    static bool       device_initialized_;
     MockRpcController controller_;
 };
-
-bool TcpTaskContextTest::device_initialized_ = false;
 
 // ===========================================================================
 // Group 1: startTransfer()
@@ -295,10 +291,6 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_AllBlocksEmpty_ReturnsFalse) {
 // ===========================================================================
 
 TEST_F(TcpTaskContextTest, ExecuteCopy_ValidData_DataCopiedToDevice) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device available";
-    }
-
     constexpr int64_t key       = 1;
     constexpr size_t  data_size = 64;
     const std::string content(data_size, 'X');
@@ -317,10 +309,6 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_ValidData_DataCopiedToDevice) {
 }
 
 TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_SkipsNullAddrBlocks) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device available";
-    }
-
     constexpr int64_t key       = 1;
     constexpr size_t  data_size = 32;
     const std::string content(data_size, 'Y');

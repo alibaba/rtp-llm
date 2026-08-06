@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import gc
 import logging
 import os
@@ -36,6 +37,7 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
+_comm_ops_atexit_registered: bool = False
 
 
 def _get_rocm_rccl():
@@ -296,6 +298,8 @@ def _create_process_groups(
 
 def _register_process_groups_to_cpp():
     """Register Python comm op callbacks for C++ to call back into."""
+    global _comm_ops_atexit_registered
+
     try:
         import librtp_compute_ops
 
@@ -485,6 +489,11 @@ def _register_process_groups_to_cpp():
                 recv_buf.copy_(gpu_recv)
 
     librtp_compute_ops.register_comm_ops(cpp_broadcast, cpp_allreduce, cpp_allgather)
+    if not _comm_ops_atexit_registered and hasattr(
+        librtp_compute_ops, "clear_comm_ops"
+    ):
+        atexit.register(librtp_compute_ops.clear_comm_ops)
+        _comm_ops_atexit_registered = True
     logging.info(
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )

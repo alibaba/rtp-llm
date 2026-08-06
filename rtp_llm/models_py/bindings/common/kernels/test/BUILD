@@ -20,7 +20,7 @@ cc_test(
     srcs = ["fuse_copy_kernel_test.cc"],
     copts = any_cuda_copts(),
     deps = any_cuda_deps + [
-        "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_kernel",
+        "//rtp_llm/cpp/kernels:fused_copy_kernel",
         "@com_google_googletest//:gtest",
     ],
     exec_properties = {"gpu": "H20"},

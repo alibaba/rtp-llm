@@ -67,6 +67,7 @@ py_test(
 
 cc_library(
     name = "pywrapped_model_cache_store_integration_test_lib",
+    testonly = True,
     srcs = ["PyWrappedModelCacheStoreIntegrationTest.cc"],
     alwayslink = True,
     copts = test_copts,
@@ -74,10 +75,11 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
         "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
     ] + torch_deps(),
@@ -85,6 +87,7 @@ cc_library(
 
 cc_binary(
     name = "th_pywrapped_model_cache_store_integration_test",
+    testonly = True,
     deps = [":pywrapped_model_cache_store_integration_test_lib"],
     linkshared = 1,
 )

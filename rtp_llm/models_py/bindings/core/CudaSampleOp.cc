@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/models/SamplingTypes.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 

@@ -38,14 +38,13 @@ cc_library(
     srcs = [
         "sampling_penalty_kernels.cu",
         "banRepeatNgram.cu",
-        "mask_logits.cu",
     ],
     hdrs = [
         "sampling_penalty_kernels.h",
         "banRepeatNgram.h",
-        "mask_logits.h",
     ],
     deps = any_cuda_deps + [
+        "//rtp_llm/cpp/kernels:mask_logits_kernel",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:math_utils",
         "//rtp_llm/models_py/bindings/cuda:cuda_utils_cu",
@@ -163,13 +162,9 @@ cc_library(
 cc_library(
     name = "kernels_copy",
     srcs = [
-        "batch_copy.cu",
-        "copy_utils.cu",
         "cuda_graph_copy_kernel.cu",
     ],
     hdrs = [
-        "batch_copy.h",
-        "copy_utils.h",
         "cuda_graph_copy_kernel.h",
     ],
     deps = any_cuda_deps + [
@@ -193,49 +188,6 @@ cc_library(
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
     ] + torch_deps(),
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "sm_copy_kernel",
-    srcs = ["sm_copy_kernel.cu"],
-    hdrs = ["sm_copy_kernel.h"],
-    copts = any_cuda_copts(),
-    deps = select({
-        "@//:using_cuda": [
-            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
-            "@local_config_cuda//cuda:cuda_headers",
-            "@local_config_cuda//cuda:cudart",
-        ],
-        "//conditions:default": [],
-    }) + torch_deps(),
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "fuse_copy_util",
-    hdrs = [
-        "fuse_copy_util.h",
-    ],
-    deps = any_cuda_deps,
-    copts = any_cuda_copts(),
-    include_prefix = "src",
-    visibility = ["//visibility:public"],
-)
-
-cc_library(
-    name = "fuse_copy_kernel",
-    srcs = [
-        "fuse_copy_kernel.cu",
-    ],
-    hdrs = [
-        "fuse_copy_kernel.h",
-    ],
-    deps = any_cuda_deps + [
-        ":fuse_copy_util",
-    ],
     copts = any_cuda_copts(),
     include_prefix = "src",
     visibility = ["//visibility:public"],

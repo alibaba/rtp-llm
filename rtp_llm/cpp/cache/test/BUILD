@@ -20,11 +20,12 @@ test_copts = [
 ] + copts()
 
 test_deps = [
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
+    "//rtp_llm/cpp/core:copy_ops_hdrs",
+    "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
     "//rtp_llm/cpp/cache",
+    "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
     "//rtp_llm/cpp/utils:core_utils",
     ":cache_config_test_utils",
     "@com_google_googletest//:gtest",
@@ -35,11 +36,10 @@ test_deps = [
 
 block_cache_test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
-    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/config:model_config",
     "//rtp_llm/cpp/cache",
+    "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",

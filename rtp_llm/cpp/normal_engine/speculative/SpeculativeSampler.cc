@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include <algorithm>
 #include <vector>
-#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/models/SamplingOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 

@@ -1,8 +1,6 @@
 load("//:def.bzl", "copts")
 
 load("@arch_config//:arch_select.bzl", "torch_deps")
-load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
-
 test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -18,13 +16,14 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_task_context",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
         "//rtp_llm/cpp/metrics:metrics",
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
-    ] + device_impl_target() + torch_deps(),
+    ] + torch_deps(),
 )
 
 cc_test(
@@ -38,13 +37,14 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_transfer_service",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
         "//rtp_llm/cpp/metrics:metrics",
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
-    ] + device_impl_target() + torch_deps(),
+    ] + torch_deps(),
 )
 
 cc_test(
@@ -58,11 +58,12 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
         "//rtp_llm/cpp/metrics:metrics",
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
-    ] + device_impl_target() + torch_deps(),
+    ] + torch_deps(),
 )
