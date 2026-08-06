@@ -35,6 +35,11 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.config.response_format_compiler import (
+    ReasoningFormat,
+    restore_final_constraint,
+)
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -228,12 +233,12 @@ class _BackendVisitor(Protocol):
 
 
 def _decode_env_tag(value: str) -> str:
-    """Unescape literal ``\\n`` etc. from a configured think tag.
+    """Normalize literal newlines from a configured think tag.
 
     No literal default here — ``GenerateEnvConfig`` is the single source of truth
     for tag defaults. Empty value returns "".
     """
-    return (value or "").encode("utf-8").decode("unicode_escape")
+    return normalize_think_tag(value or "")
 
 
 def _encode_tag(tokenizer: BaseTokenizer | None, text: str) -> list[int]:
@@ -264,6 +269,35 @@ def _matched_echo_prefix_ids(
     if len(prefix_ids) > 1 and input_ids_list[-1:] == prefix_ids[:1]:
         return prefix_ids[:1]
     return []
+
+
+def _dash_sc_reasoning_format(
+    generate_env_config: GenerateEnvConfig,
+    *,
+    prompt_end_with_think: bool,
+) -> ReasoningFormat:
+    """Build the Dash-SC-local reasoning grammar envelope.
+
+    Dash SC receives tokenized input, so it owns the decision whether the
+    grammar must generate the think begin tag. The shared OpenAI path keeps its
+    existing ``begin=""`` behavior through
+    :meth:`ReasoningFormat.from_generate_env_config`.
+    """
+    base_format = ReasoningFormat.from_generate_env_config(generate_env_config)
+    tag_begin = ""
+    if not prompt_end_with_think:
+        tag_begin = _decode_env_tag(generate_env_config.think_start_tag)
+        if not tag_begin:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "think_start_tag is required when thinking is enabled and "
+                "input_ids do not end with the think begin tokens",
+            )
+    return ReasoningFormat(
+        tag_begin=tag_begin,
+        tag_end=base_format.tag_end,
+        suffix=base_format.suffix,
+    )
 
 
 @dataclass(frozen=True)
@@ -488,12 +522,7 @@ def _apply_dash_sc_controls_to_generate_config(
     request_controls: DashScRequestControls,
     runtime: _ThinkRuntime,
 ) -> None:
-    """Apply dash-sc request-level controls after env defaults.
-
-    ``GenerateConfig.add_thinking_params`` seeds the config from process-level
-    environment. DashScope-serving still sends per-request thinking, timeout,
-    and priority controls; those explicit controls must win before enqueue.
-    """
+    """Apply DashSC request-level controls over process defaults."""
     request_max_think = sampling.max_new_think_tokens
     if request_max_think is None:
         request_max_think = request_controls.max_new_think_tokens
@@ -602,27 +631,22 @@ async def iter_real_model_stream_infer(
         generate_config = sampling.to_generate_config(request_controls=request_controls)
         generate_config.trace_id = trace_str
         if generate_env_config is not None:
-            try:
-                hf_tok = _hf_tokenizer(tokenizer)
-                if hf_tok is None and generate_env_config.think_end_token_id == -1:
-                    logging.warning(
-                        "[DashScGrpc] [%s] skip add_thinking_params: tokenizer missing",
-                        tag,
-                    )
-                else:
-                    generate_config.add_thinking_params(hf_tok, generate_env_config)
-            except Exception as e:
-                logging.warning(
-                    "[DashScGrpc] [%s] add_thinking_params failed: %s", tag, e
-                )
+            generate_config.in_think_mode = bool(generate_env_config.think_mode)
         begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
         if begin_think_tokens:
             generate_config.begin_think_token_ids = begin_think_tokens
-        if runtime.eos_tokens and not generate_config.end_think_token_ids:
-            generate_config.end_think_token_ids = list(runtime.eos_tokens)
         _apply_dash_sc_controls_to_generate_config(
             generate_config, sampling, request_controls, runtime
         )
+        matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
+            input_ids_list, begin_think_tokens
+        )
+        reasoning_format = None
+        if generate_config.in_think_mode and generate_env_config is not None:
+            reasoning_format = _dash_sc_reasoning_format(
+                generate_env_config,
+                prompt_end_with_think=bool(matched_think_bos_ids),
+            )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -638,6 +662,17 @@ async def iter_real_model_stream_infer(
                 # any future engine-side mutation request-local; inner lists are
                 # shared (snapshot is read-only by contract).
                 generate_config.stop_words_list = list(extra_stop_word_ids)
+        if generate_env_config is None:
+            final_constraint = generate_config.finalize_response_format()
+        else:
+            final_constraint = generate_config.add_thinking_params(
+                _hf_tokenizer(tokenizer),
+                generate_env_config,
+                enable_thinking=generate_config.in_think_mode,
+                reasoning_format=reasoning_format,
+            )
+        if runtime.eos_tokens and not generate_config.end_think_token_ids:
+            generate_config.end_think_token_ids = list(runtime.eos_tokens)
         # All these are pre-resolved at servicer init via ``build_think_runtime``;
         # reading them here is O(1) and avoids per-request tokenizer.encode.
         eos_id = runtime.eos_token_id
@@ -645,9 +680,6 @@ async def iter_real_model_stream_infer(
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
         max_new_tokens = int(generate_config.max_new_tokens or 0)
-        matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
-            input_ids_list, list(runtime.bos_tokens)
-        )
         # ``runtime.phase2_enabled`` is the init-time gate (model_type + empty_tokens
         # availability). ``in_think_mode`` is per-request — ``add_thinking_params``
         # sets it from generate_config and a request can override it.
@@ -943,6 +975,7 @@ async def iter_real_model_stream_infer(
         if phase2_needed:
             phase2_config = _clone_generate_config(generate_config)
             phase2_config.in_think_mode = False
+            restore_final_constraint(phase2_config, final_constraint)
             if sampling.max_new_tokens_from_completion_alias:
                 phase2_config.max_new_tokens = (
                     _phase2_max_new_tokens_for_completion_alias(
@@ -1343,14 +1376,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     input_ids_list, sampling, request_controls = (
                         parse_dash_sc_grpc_request(request)
                     )
-                    if sampling is not None and (
-                        sampling.response_format is not None
-                        or sampling.json_format
-                        or sampling.structural_tag is not None
-                    ):
-                        raise DashScParameterError(
-                            "structured output/grammar controls are not supported yet"
-                        )
                 except DashScParameterError as e:
                     if first_request:
                         record.record_request_frame(request)

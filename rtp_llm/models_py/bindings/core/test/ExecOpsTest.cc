@@ -7,7 +7,9 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <tuple>
 #include <unordered_map>
 
@@ -389,13 +391,114 @@ TEST_F(ExecOpsTest, testGetGpuExecStatus) {
 }
 
 TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
-    auto logits = torch::randn({2, 8}, torch::kCUDA);
+    auto logits = torch::ones({2, 8}, torch::kCUDA);
     auto mask   = torch::zeros({2, 8}, torch::TensorOptions(torch::kBool).device(torch::kCUDA));
     mask[0][0]  = true;
     mask[1][3]  = true;
 
     ASSERT_NO_THROW(runtimeMaskLogits(logits, mask));
     runtimeSyncAndCheck();
+
+    auto result = logits.cpu();
+    EXPECT_TRUE(std::isinf(result[0][0].item<float>()));
+    EXPECT_LT(result[0][0].item<float>(), 0.0f);
+    EXPECT_TRUE(std::isinf(result[1][3].item<float>()));
+    EXPECT_LT(result[1][3].item<float>(), 0.0f);
+    EXPECT_FLOAT_EQ(result[0][1].item<float>(), 1.0f);
+    EXPECT_FLOAT_EQ(result[1][2].item<float>(), 1.0f);
+}
+
+TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsUsesCompactRowMapping) {
+    constexpr int64_t vocab_size        = 35;
+    constexpr int64_t logits_columns    = 40;
+    auto              packed_allow_mask = torch::tensor({1, 4, 2, 2}, torch::kInt32).reshape({2, 2}).to(torch::kCUDA);
+    auto              row_indices       = torch::tensor({1, 3}, torch::kInt32).to(torch::kCUDA);
+
+    for (const auto dtype : {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
+        auto logits = torch::ones({4, logits_columns}, torch::TensorOptions(dtype).device(torch::kCUDA));
+        ASSERT_NO_THROW(runtimeApplyPackedMaskLogits(logits, packed_allow_mask, row_indices, vocab_size));
+        runtimeSyncAndCheck();
+
+        auto result = logits.to(torch::kFloat32).cpu().contiguous();
+        for (int64_t row = 0; row < result.size(0); ++row) {
+            for (int64_t token = 0; token < result.size(1); ++token) {
+                const bool allowed = row == 0 || row == 2 || token >= vocab_size
+                                     || (row == 1 && (token == 0 || token == 34))
+                                     || (row == 3 && (token == 1 || token == 33));
+                if (allowed) {
+                    EXPECT_FLOAT_EQ(result[row][token].item<float>(), 1.0f);
+                } else if (dtype == torch::kFloat32) {
+                    EXPECT_FLOAT_EQ(result[row][token].item<float>(), -std::numeric_limits<float>::max());
+                } else {
+                    EXPECT_TRUE(std::isinf(result[row][token].item<float>()));
+                    EXPECT_LT(result[row][token].item<float>(), 0.0f);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsSupportsSingleRowIdentityMapping) {
+    constexpr int64_t vocab_size = 35;
+    auto              logits = torch::ones({vocab_size}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    auto              packed_allow_mask = torch::tensor({1, 4}, torch::kInt32).reshape({1, 2}).to(torch::kCUDA);
+
+    ASSERT_NO_THROW(runtimeApplyPackedMaskLogits(logits, packed_allow_mask, vocab_size));
+    runtimeSyncAndCheck();
+
+    auto result = logits.cpu().contiguous();
+    for (int64_t token = 0; token < vocab_size; ++token) {
+        if (token == 0 || token == 34) {
+            EXPECT_FLOAT_EQ(result[token].item<float>(), 1.0f);
+        } else {
+            EXPECT_FLOAT_EQ(result[token].item<float>(), -std::numeric_limits<float>::max());
+        }
+    }
+}
+
+TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsSkipsOutOfRangeRows) {
+    constexpr int64_t vocab_size = 4;
+    auto              logits = torch::ones({3, vocab_size}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    auto packed_allow_mask   = torch::zeros({3, 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    auto row_indices         = torch::tensor({-1, 1, 3}, torch::kInt32).to(torch::kCUDA);
+
+    ASSERT_NO_THROW(runtimeApplyPackedMaskLogits(logits, packed_allow_mask, row_indices, vocab_size));
+    runtimeSyncAndCheck();
+
+    auto result = logits.cpu().to(torch::kFloat32).contiguous();
+    for (int64_t token = 0; token < vocab_size; ++token) {
+        EXPECT_FLOAT_EQ(result[0][token].item<float>(), 1.0f);
+        EXPECT_FLOAT_EQ(result[1][token].item<float>(), -std::numeric_limits<float>::max());
+        EXPECT_FLOAT_EQ(result[2][token].item<float>(), 1.0f);
+    }
+}
+
+TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsCopiesBackToNonContiguousInput) {
+    constexpr int64_t vocab_size = 4;
+    auto backing = torch::ones({2, vocab_size + 2}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    auto logits  = backing.narrow(/*dim=*/1, /*start=*/1, /*length=*/vocab_size);
+    ASSERT_FALSE(logits.is_contiguous());
+    ASSERT_EQ(logits.stride(0), vocab_size + 2);
+
+    auto packed_allow_mask = torch::tensor({1, 8}, torch::kInt32).reshape({2, 1}).to(torch::kCUDA);
+
+    ASSERT_NO_THROW(runtimeApplyPackedMaskLogits(logits, packed_allow_mask, vocab_size));
+    runtimeSyncAndCheck();
+
+    auto result = backing.cpu().to(torch::kFloat32).contiguous();
+    for (int64_t row = 0; row < result.size(0); ++row) {
+        EXPECT_FLOAT_EQ(result[row][0].item<float>(), 1.0f);
+        EXPECT_FLOAT_EQ(result[row][vocab_size + 1].item<float>(), 1.0f);
+        for (int64_t token = 0; token < vocab_size; ++token) {
+            const bool allowed = (row == 0 && token == 0) || (row == 1 && token == 3);
+            const auto value   = result[row][token + 1].item<float>();
+            if (allowed) {
+                EXPECT_FLOAT_EQ(value, 1.0f);
+            } else {
+                EXPECT_FLOAT_EQ(value, -std::numeric_limits<float>::max());
+            }
+        }
+    }
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {

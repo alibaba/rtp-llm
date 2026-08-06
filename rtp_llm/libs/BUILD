@@ -56,6 +56,7 @@ filegroup(
     srcs = [],
     data = [
         ":librtp_compute_ops_so",
+        ":libth_grammar_tokenizer_info_so",
         ":libth_transformer_config_so",
         ":libth_transformer_so",
     ],

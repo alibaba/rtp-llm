@@ -25,7 +25,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType
+from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, TaskType
 from rtp_llm.utils.util import check_with_info
 
 
@@ -209,6 +209,10 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
         )
+        if model_config.task_type == TaskType.LANGUAGE_MODEL:
+            engine_config.grammar_config.tokenizer_info_json = (
+                model.build_grammar_tokenizer_info()
+            )
 
         model_type = model_config.model_type
         if model_type == "fake_model":
