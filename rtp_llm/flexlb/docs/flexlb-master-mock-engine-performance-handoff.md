@@ -99,7 +99,6 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb"
 test -s flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar
 test -s flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 bash -n tools/online_eval/run_online_eval.sh
-python3 -m py_compile tools/online_eval/flexlb_load_client.py
 ```
 
 重新编译后再压测，避免代码和旧 jar 不一致。完整验证可以执行：
@@ -169,7 +168,7 @@ E2E UT 默认使用 fixed-window 10 ms、batch size 16，预热 64 条后测量 
 
 ## 5. mock engine 的模拟方式
 
-基准必须使用 `MOCK_ENGINE_IMPL=java`，不使用 Python mock 做高 QPS 容量结论。
+Java mock 集群（JavaMockEngineCluster）与 JavaLoadClient 是唯一的压测路径。
 
 Java mock 不是固定延迟返回。它从每个请求读取输入 token、输出 token 和 cache key，并维护每个 engine 的运行任务、等待任务、KV 使用量和 cache 命中。Prefill 时间优先使用 `master_fixed_window.json` 中和 Master 相同的 `PREFILL_TIME_FORMULA`：
 
@@ -233,7 +232,6 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb/tools/online_eval"
 RUN_ID="handoff_$(date +%Y%m%d_%H%M%S)_w1_s13" \
 N_PREFILL=750 \
 N_DECODE=500 \
-MOCK_ENGINE_IMPL=java \
 MOCK_BASE_GRPC_PORT=61000 \
 JAVA_MOCK_EVENT_LOOP_THREADS=32 \
 PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.fast_ab.json" \
@@ -271,7 +269,6 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb/tools/online_eval"
 BASE_ENV=(
   N_PREFILL=750
   N_DECODE=500
-  MOCK_ENGINE_IMPL=java
   MOCK_BASE_GRPC_PORT=61000
   JAVA_MOCK_EVENT_LOOP_THREADS=32
   "PERFORMANCE_FILE=$PWD/data/performance/dsv4_flash_performance.fast_ab.json"
@@ -327,14 +324,10 @@ cd "$RTP_LLM_OPEN_SOURCE/rtp_llm/flexlb/tools/online_eval"
 export JAVA_HOME="${JAVA21_HOME:-$HOME/java21}"
 export JAVA21_HOME="$JAVA_HOME"
 export PATH="$JAVA_HOME/bin:$PATH"
-export PYTHON_BIN="${PYTHON_BIN:-$HOME/.venvs/flexlb-eval/bin/python3}"
-
-PYTHON_BIN="$PYTHON_BIN" \
 FLEXLB_NETWORK_ISOLATED=1 \
 RUN_ID="slo500_wait160_10k_$(date +%Y%m%d_%H%M%S)" \
 N_PREFILL=750 \
 N_DECODE=500 \
-MOCK_ENGINE_IMPL=java \
 JAVA_MOCK_EVENT_LOOP_THREADS=32 \
 JAVA_MOCK_ENGINE_HEAP_SIZE=32g \
 PERFORMANCE_FILE="$PWD/data/performance/dsv4_flash_performance.formula_1x.json" \
@@ -361,7 +354,7 @@ bash run_online_eval.sh
 
 做容量矩阵时只修改 `REPLAY_SPEED`，按 14、130、650、1400 依次运行，分别对应约 100、1K、5K、10K QPS。比较不同压力时不要改变 Master/load worker 数。
 
-脚本会在开始阶段校验 Java 21，以及 `PYTHON_BIN` 是否可导入 `aiohttp` 和 `grpc`。未满足依赖时会立即退出。测试结束会保存 `master_prometheus_after.prom`，`analyze_slo_batch.py` 优先使用 Prometheus counter 统计精确 dispatch reason 总量，并用 `log_coverage_ratio` 标识逐批日志覆盖率。
+脚本会在开始阶段校验 Java 21 与 `python3` 可用性。未满足依赖时会立即退出。测试结束会保存 `master_prometheus_after.prom`，`analyze_slo_batch.py` 优先使用 Prometheus counter 统计精确 dispatch reason 总量，并用 `log_coverage_ratio` 标识逐批日志覆盖率。
 
 ## 9. 读取和校验结果
 
@@ -545,7 +538,6 @@ artifact directory:
 
 - 只看 client RTT：会把发压端排队和网络抖动算到 Master。正式值必须取服务端打点。
 - 忘记 `SCHEDULE_ONLY=1`：会执行 FetchResponse，测试目标变成端到端链路。
-- 使用 Python mock 冲高 QPS：mock 可能先成为瓶颈，无法证明 Master 容量。
 - 使用固定 completion delay：丢失输入长度、cache 命中和 active batch 对执行时间的影响。
 - 一次直接打 10K：无法定位拐点，还可能用冷启动失败污染结论。
 - 只改 `REPLAY_SPEED` 不看实际 QPS：speed 是 trace 时间倍率，不是 QPS 本身。

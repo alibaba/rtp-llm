@@ -14,8 +14,11 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from online_eval.mock_engine import encode_unique_key
-from online_eval.proto_utils import ensure_proto_modules, ensure_schedule_proto_modules
+from online_eval.proto_utils import (
+    encode_unique_key,
+    ensure_proto_modules,
+    ensure_schedule_proto_modules,
+)
 
 # ---------------------------------------------------------------------------
 # Result helpers

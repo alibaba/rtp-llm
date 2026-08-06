@@ -30,7 +30,6 @@ fi
 
 N_PREFILL="${N_PREFILL:-2}"
 N_DECODE="${N_DECODE:-4}"
-N_SHARDS="${N_SHARDS:-64}"
 SCHEDULE_MODE="${SCHEDULE_MODE:-batch}"
 LOAD_BALANCE_STRATEGY="${LOAD_BALANCE_STRATEGY:-COST_BASED_PREFILL}"
 DECODE_LOAD_BALANCE_STRATEGY="${DECODE_LOAD_BALANCE_STRATEGY:-COST_BASED_DECODE}"
@@ -44,9 +43,9 @@ MONITOR_INTERVAL="${MONITOR_INTERVAL:-2}"
 FLEXLB_HTTP_ADDR="${FLEXLB_HTTP_ADDR:-127.0.0.1:7001}"
 FLEXLB_MANAGEMENT_PORT="${FLEXLB_MANAGEMENT_PORT:-7002}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-55151}"
-# HTTP proxy port for the shard launcher (matches run_online_eval.sh formula).
-# Placed above the gRPC engine range to avoid ephemeral port collisions.
-MOCK_HTTP_PORT=$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE + 100 + N_SHARDS))
+# HTTP control port of the Java mock cluster (JavaMockEngineCluster binds it
+# at baseGrpcPort - 1; stability_monitor.py polls /snapshot there).
+MOCK_HTTP_PORT=$((MOCK_BASE_GRPC_PORT - 1))
 
 # 输出目录
 RUN_ROOT="${RUN_ROOT:-${SCRIPT_DIR}/run}"

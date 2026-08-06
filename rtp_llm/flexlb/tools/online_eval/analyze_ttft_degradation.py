@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Analyse TTFT time-series around a Master kill-restart cycle.
 
-Loads per_request.jsonl (from flexlb_load_client.py) and monitor.jsonl
+Loads per_request.jsonl (from JavaLoadClient) and monitor.jsonl
 (from stability_monitor.py), divides the timeline into baseline /
 fallback / recovery phases, computes per-phase TTFT statistics,
 classifies the degradation pattern (spike vs sustained), runs an
@@ -771,7 +771,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--per-requests",
         required=True,
-        help="Path to per_request.jsonl from flexlb_load_client.py",
+        help="Path to per_request.jsonl from JavaLoadClient",
     )
     parser.add_argument(
         "--monitor",
@@ -817,8 +817,7 @@ def main() -> None:
         print("ERROR: no valid requests loaded", file=sys.stderr)
         sys.exit(1)
 
-    monitor_path = Path(args.monitor) if args.monitor else Path()
-    monitor = load_monitor(monitor_path)
+    monitor = load_monitor(Path(args.monitor)) if args.monitor else []
 
     # Resolve kill/restart epochs
     kill_epoch = args.kill_epoch
