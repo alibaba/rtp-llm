@@ -33,6 +33,7 @@ public final class MockWorkerBehavior {
     private final String enqueueErrorMessage;
     private final long enqueueErrorCode;
     private final EngineRpcService.RoleTypePB roleType;
+    private final boolean cancelFoundRunning;
 
     private MockWorkerBehavior(Builder b) {
         this.enqueueDelayMs = b.enqueueDelayMs;
@@ -43,6 +44,7 @@ public final class MockWorkerBehavior {
         this.enqueueErrorMessage = b.enqueueErrorMessage;
         this.enqueueErrorCode = b.enqueueErrorCode;
         this.roleType = b.roleType;
+        this.cancelFoundRunning = b.cancelFoundRunning;
     }
 
     public long getEnqueueDelayMs() {
@@ -77,6 +79,10 @@ public final class MockWorkerBehavior {
         return roleType;
     }
 
+    public boolean isCancelFoundRunning() {
+        return cancelFoundRunning;
+    }
+
     /**
      * Create a new mutable builder with sensible defaults.
      */
@@ -96,7 +102,8 @@ public final class MockWorkerBehavior {
                 .totalKvCache(totalKvCache)
                 .enqueueErrorMessage(enqueueErrorMessage)
                 .enqueueErrorCode(enqueueErrorCode)
-                .roleType(roleType);
+                .roleType(roleType)
+                .cancelFoundRunning(cancelFoundRunning);
     }
 
     public static final class Builder {
@@ -108,6 +115,7 @@ public final class MockWorkerBehavior {
         private String enqueueErrorMessage = "mock enqueue failure";
         private long enqueueErrorCode = 13;
         private EngineRpcService.RoleTypePB roleType = EngineRpcService.RoleTypePB.ROLE_TYPE_PDFUSION;
+        private boolean cancelFoundRunning = false;
 
         private Builder() {
         }
@@ -149,6 +157,16 @@ public final class MockWorkerBehavior {
 
         public Builder roleType(EngineRpcService.RoleTypePB role) {
             this.roleType = role;
+            return this;
+        }
+
+        /**
+         * Whether Cancel answers {@code found=true} (the engine still tracked
+         * the request when the cancel arrived). Default {@code false} keeps
+         * the historical byte-equivalent response.
+         */
+        public Builder cancelFoundRunning(boolean found) {
+            this.cancelFoundRunning = found;
             return this;
         }
 
