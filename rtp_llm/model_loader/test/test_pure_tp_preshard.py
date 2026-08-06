@@ -108,8 +108,8 @@ def _legacy(weight, database):
 
 
 class PureTpPreshardTest(unittest.TestCase):
-    def _assert_parity(self, weight, database, rank=0, reference=None):
-        config = _config(rank)
+    def _assert_parity(self, weight, database, rank=0, reference=None, **overrides):
+        config = _config(rank, **overrides)
         actual = weight.load(DatabaseTensorSource(database), 0, "cpu", config)
         expected = weight._split(
             {weight.name: _legacy(weight, reference or database)}, config
@@ -173,6 +173,16 @@ class PureTpPreshardTest(unittest.TestCase):
         db.safetensor = False
         self.assertIsNone(weight._load_pure_tp(source, 0, "cpu", _config()))
         self.assertFalse(db.slices)
+
+    def test_switch_off_rolls_back_to_legacy_full_reads(self):
+        # Untestable while the gate was an import-time env constant: operators had
+        # a documented rollback lever that no test could flip in-process.
+        for weight in _weights(False):
+            with self.subTest(weight.name):
+                db = _database(weight)
+                self._assert_parity(weight, db, rank=1, moe_pure_tp_preshard=False)
+                self.assertFalse(db.slices)
+                self.assertTrue(db.full_reads)
 
     def test_per_block_weights_and_scales_preshard_or_fall_back(self):
         for source in _weights(False):
