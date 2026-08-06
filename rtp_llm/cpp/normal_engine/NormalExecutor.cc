@@ -361,6 +361,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     // the next iteration can overlap forward prep with worker D2H/update work.
     // Prefill gets no overlap benefit and would only add worker startup cost.
     const bool is_decode_only = stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
+    StreamGroups::TokenCountsByPriority token_counts_by_priority;
+    if (metrics_reporter_ && tp_rank_ == 0) {
+        token_counts_by_priority = stream_groups.tokenCountsByPriority();
+    }
     if (useStreamAsync() && is_decode_only) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -377,7 +381,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
-        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
+        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         return dispatchOutputAsync(stream_groups,
                                    std::move(model_output),
@@ -397,7 +401,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
-        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
+        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         if (profile_step_finish_) {
             profile_step_finish_();
@@ -406,10 +410,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
 }
 
-void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
-                                   RtpLLMExecutorMetricsCollector& executor_collector,
-                                   RtpLLMTokenPSMetricsCollector&  tps_collector,
-                                   int64_t                         tps_execute_time_us) {
+void NormalExecutor::reportMetrics(const StreamGroups&                        stream_groups,
+                                   RtpLLMExecutorMetricsCollector&            executor_collector,
+                                   RtpLLMTokenPSMetricsCollector&             tps_collector,
+                                   int64_t                                    tps_execute_time_us,
+                                   const StreamGroups::TokenCountsByPriority& token_counts_by_priority) {
     if (tp_rank_ > 0) {
         return;
     }
@@ -431,6 +436,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
                                    stream_groups.totalDecodeBatchSize(),
                                    stream_groups.modelExecuteTokenSize(),
                                    tps_execute_time_us);
+        tps_collector.addTokenSizeByPriority(token_counts_by_priority, tps_execute_time_us);
         tps_reporter_.report(&tps_collector);
         wall_tps_reporter_.report(&tps_collector);
     }

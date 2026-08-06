@@ -35,6 +35,27 @@ public final class BatchItem {
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
 
+    /**
+     * Auto-TPM normalized priority (30/40/50/60/70); 0 = no priority (legacy
+     * request, task40) — such items never participate in any priority
+     * mechanism. Not used for ordering yet.
+     */
+    private volatile int priority = 0;
+
+    /** Auto-TPM admission deadline (epoch ms); 0 means unset. Not used for ordering yet. */
+    private volatile long deadlineMs;
+
+    /** Auto-TPM cross-endpoint rescue transfer count (Phase 6); 0 = never migrated. */
+    private volatile int transferCount;
+
+    /**
+     * Auto-TPM accepted-eviction CANCEL_REQUESTED mark (Phase 5): non-null
+     * once a preemption cancel was issued for this request, so an
+     * engine-reported CANCELLED completion is attributed to
+     * {@code PRIORITY_PREEMPTED}. Null = no cancel requested.
+     */
+    private volatile String preemptCancelDetail;
+
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -69,6 +90,23 @@ public final class BatchItem {
 
     /** Set by {@link WorkerBatcher#offer} after {@link BatcherAlgorithm#computeSortKey}. */
     public void setSortKey(long sortKey) { this.sortKey = sortKey; }
+
+    public int priority() { return priority; }
+    public void setPriority(int priority) { this.priority = priority; }
+
+    /** True iff this item carries an explicit Auto-TPM priority (task40). */
+    public boolean hasPriority() { return priority > 0; }
+
+    public long deadlineMs() { return deadlineMs; }
+    public void setDeadlineMs(long deadlineMs) { this.deadlineMs = deadlineMs; }
+
+    public int transferCount() { return transferCount; }
+    public void setTransferCount(int transferCount) { this.transferCount = transferCount; }
+
+    public String preemptCancelDetail() { return preemptCancelDetail; }
+    public void setPreemptCancelDetail(String preemptCancelDetail) {
+        this.preemptCancelDetail = preemptCancelDetail;
+    }
 
     // -- derived accessors --
 

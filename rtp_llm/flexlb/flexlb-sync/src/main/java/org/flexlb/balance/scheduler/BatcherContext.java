@@ -10,6 +10,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Controlled access to shared {@link WorkerBatcher} infrastructure.
@@ -17,6 +19,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Passed to {@link BatcherAlgorithm} methods so algorithms can
  * inspect and mutate the queue, read config, and invoke callbacks
  * without directly depending on WorkerBatcher internals.
+ *
+ * <p>Every queue mutation is performed under the shared queue lock and bumps
+ * the queue version, keeping the Auto-TPM invariant "version unchanged ⇒
+ * queue content unchanged" (optimistic plan validation).
  */
 public class BatcherContext {
 
@@ -26,7 +32,14 @@ public class BatcherContext {
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth;
+    private final AtomicLong queueVersion;
+    private final ReentrantLock queueLock;
+    private final Comparator<BatchItem> queueOrder;
     private final BatchSchedulerReporter reporter;
+
+    /** Dispatch-interval sliding average for the 8.4 queue wait estimate. */
+    private volatile long lastDispatchAtMs;
+    private volatile double dispatchIntervalEmaMs;
 
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    BatchDecisionHandler handler,
@@ -40,12 +53,27 @@ public class BatcherContext {
                    PriorityBlockingQueue<BatchItem> queue,
                    AtomicInteger queueDepth,
                    BatchSchedulerReporter reporter) {
+        this(key, prefillEp, cfg, handler, queue, queueDepth, new AtomicLong(),
+                new ReentrantLock(), Comparator.comparingLong(BatchItem::sortKey), reporter);
+    }
+
+    BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
+                   BatchDecisionHandler handler,
+                   PriorityBlockingQueue<BatchItem> queue,
+                   AtomicInteger queueDepth,
+                   AtomicLong queueVersion,
+                   ReentrantLock queueLock,
+                   Comparator<BatchItem> queueOrder,
+                   BatchSchedulerReporter reporter) {
         this.key = key;
         this.prefillEp = prefillEp;
         this.cfg = cfg;
         this.handler = handler;
         this.queue = queue;
         this.queueDepth = queueDepth;
+        this.queueVersion = queueVersion;
+        this.queueLock = queueLock;
+        this.queueOrder = queueOrder;
         this.reporter = reporter;
     }
 
@@ -71,6 +99,18 @@ public class BatcherContext {
         return System.currentTimeMillis();
     }
 
+    ReentrantLock queueLock() {
+        return queueLock;
+    }
+
+    long queueVersionValue() {
+        return queueVersion.get();
+    }
+
+    Comparator<BatchItem> queueOrder() {
+        return queueOrder;
+    }
+
     // ---- queue inspection ----
 
     BatchItem peek() {
@@ -88,27 +128,40 @@ public class BatcherContext {
     // ---- queue mutation ----
 
     boolean remove(BatchItem item) {
-        boolean removed = queue.remove(item);
-        if (removed) {
-            queueDepth.decrementAndGet();
+        queueLock.lock();
+        try {
+            boolean removed = queue.remove(item);
+            if (removed) {
+                queueDepth.decrementAndGet();
+                queueVersion.incrementAndGet();
+            }
+            return removed;
+        } finally {
+            queueLock.unlock();
         }
-        return removed;
     }
 
     void drainTo(List<BatchItem> dst) {
-        int drained = queue.drainTo(dst);
-        if (drained > 0) {
-            queueDepth.addAndGet(-drained);
+        queueLock.lock();
+        try {
+            int drained = queue.drainTo(dst);
+            if (drained > 0) {
+                queueDepth.addAndGet(-drained);
+                queueVersion.incrementAndGet();
+            }
+        } finally {
+            queueLock.unlock();
         }
     }
 
     /**
-     * Items sorted by {@link BatchItem#sortKey()}, suitable for
+     * Items in active queue order (legacy: {@link BatchItem#sortKey()};
+     * Auto-TPM: {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER}), suitable for
      * greedy-fill iteration in dispatch algorithms.
      */
     List<BatchItem> sortedItems() {
         List<BatchItem> candidates = new ArrayList<>(queue);
-        candidates.sort(Comparator.comparingLong(BatchItem::sortKey));
+        candidates.sort(queueOrder);
         return candidates;
     }
 
@@ -152,7 +205,7 @@ public class BatcherContext {
 
     void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
         if (remove(item)) {
-            handler.onOfferFailure(item, new IllegalArgumentException(
+            handler.onOfferFailure(item, new BatchTokenCapacityExceededException(
                     "request seq_len=" + item.seqLen()
                             + " cannot fit strict padded batch token capacity=" + capacity));
         }
@@ -170,6 +223,12 @@ public class BatcherContext {
      * (e.g. {@code lastParkByRequest.remove()}) before calling this.
      */
     void dispatch(List<BatchItem> items, DispatchMeta meta) {
+        // The dispatch-interval EMA only feeds the Auto-TPM queue-wait
+        // estimate (PrefillQueueManager.estimateWaitMs); skip the synchronized
+        // bookkeeping entirely on the legacy path (task10 P2-9).
+        if (cfg.isAutoTpmEnabled()) {
+            recordDispatchInterval(now());
+        }
         for (BatchItem item : items) {
             remove(item);
         }
@@ -184,5 +243,32 @@ public class BatcherContext {
     void dropHead(BatchItem head) {
         remove(head);
         handler.onExpired(head);
+    }
+
+    // ---- dispatch interval estimation (design doc 8.4) ----
+
+    private synchronized void recordDispatchInterval(long nowMs) {
+        if (lastDispatchAtMs > 0 && nowMs > lastDispatchAtMs) {
+            long intervalMs = nowMs - lastDispatchAtMs;
+            dispatchIntervalEmaMs = dispatchIntervalEmaMs <= 0
+                    ? intervalMs
+                    : 0.3 * intervalMs + 0.7 * dispatchIntervalEmaMs;
+        }
+        lastDispatchAtMs = nowMs;
+    }
+
+    /**
+     * Sliding-average interval between batch dispatches; before any dispatch
+     * is observed, falls back to the algorithm's batching window.
+     */
+    long avgDispatchIntervalMs() {
+        double ema = dispatchIntervalEmaMs;
+        if (ema > 0) {
+            return Math.max(1, Math.round(ema));
+        }
+        long windowMs = "fixed_window".equalsIgnoreCase(cfg.getFlexlbBatchAlgorithm())
+                ? cfg.getFlexlbBatchFixedWaitMs()
+                : cfg.getFlexlbBatchWindowMs();
+        return Math.max(1, windowMs);
     }
 }

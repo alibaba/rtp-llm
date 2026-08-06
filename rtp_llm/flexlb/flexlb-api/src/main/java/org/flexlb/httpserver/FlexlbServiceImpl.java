@@ -3,6 +3,7 @@ package org.flexlb.httpserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
+import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -10,13 +11,16 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityNormalizer;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
@@ -33,6 +37,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final ConfigService configService;
     private final BatchSchedulerReporter batchSchedulerReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private final PrioritySloPolicy prioritySloPolicy;
+    private final PrioritySchedulerReporter prioritySchedulerReporter;
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
@@ -40,7 +46,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              FlexlbGrpcForwarder grpcForwarder,
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
-                             ServerScheduleLatencyRecorder serverLatencyRecorder) {
+                             ServerScheduleLatencyRecorder serverLatencyRecorder,
+                             PrioritySloPolicy prioritySloPolicy,
+                             PrioritySchedulerReporter prioritySchedulerReporter) {
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
@@ -49,6 +57,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.configService = configService;
         this.batchSchedulerReporter = batchSchedulerReporter;
         this.serverLatencyRecorder = serverLatencyRecorder;
+        this.prioritySloPolicy = prioritySloPolicy;
+        this.prioritySchedulerReporter = prioritySchedulerReporter;
     }
 
     @Override
@@ -178,6 +188,65 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 ctx.setErrorMessage(response.getErrorMessage());
             }
             engineHealthReporter.reportBalancingService(ctx);
+            reportAutoTpmSchedule(ctx, response);
+        }
+    }
+
+    /**
+     * Auto-TPM Phase 0 observability: per-request one-line schedule log plus
+     * {@code auto_tpm.schedule.latency_ms}. Shared by the legacy path and the
+     * priority scheduler path (both funnel through completeSchedule).
+     */
+    private void reportAutoTpmSchedule(BalanceContext ctx,
+                                       FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+        try {
+            long now = System.currentTimeMillis();
+            long latencyMs = now - ctx.getStartTime();
+            boolean success = response.getSuccess();
+            String result = success ? "success" : "error_" + response.getCode();
+            prioritySchedulerReporter.reportScheduleLatency(ctx.getPriority(), result, latencyMs);
+            // Approximate TTFT: schedule-complete minus arrival, as seen by
+            // FlexLB. The true TTFT (first token emitted by the engine) is not
+            // observable here, so this proxy omits engine-side prefill
+            // execution time (task10 P2-8).
+            prioritySchedulerReporter.reportTtft(ctx.getPriority(), latencyMs);
+            if (ctx.getDeadlineMs() > 0 && now > ctx.getDeadlineMs()) {
+                prioritySchedulerReporter.reportDeadlineMiss(ctx.getPriority());
+            }
+
+            String selectedPrefill = "";
+            String selectedDecode = "";
+            if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
+                for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
+                    if (ss.getRole() == RoleType.PREFILL || ss.getRole() == RoleType.PDFUSION) {
+                        selectedPrefill = ss.getServerIp() != null ? ss.getServerIp() : "";
+                    } else if (ss.getRole() == RoleType.DECODE) {
+                        selectedDecode = ss.getServerIp() != null ? ss.getServerIp() : "";
+                    }
+                }
+            }
+            // Metrics above stay always-on; the per-request log line drops to
+            // DEBUG when Auto-TPM is disabled to avoid INFO noise on the
+            // legacy path (task10 P2-7).
+            String logFormat = "[auto-tpm] request_id={} priority={} seq_len={} max_new_tokens={} "
+                    + "request_slo_ms={} deadline_ms={} schedule_attempt={} plan_type={} plan_cost={} "
+                    + "victim_count={} selected_prefill={} selected_decode={} failure_reason={} commit_result={}";
+            Object[] logArgs = {
+                    ctx.getRequestId(), ctx.getPriority(), ctx.getRequest().getSeqLen(),
+                    ctx.getRequest().getMaxNewTokens(),
+                    ctx.getRequestSloMs(), ctx.getDeadlineMs(),
+                    ctx.getScheduleAttempt(), ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
+                    selectedPrefill, selectedDecode,
+                    success ? "" : response.getErrorMessage(),
+                    result};
+            if (configService.loadBalanceConfig().isAutoTpmEnabled()) {
+                Logger.info(logFormat, logArgs);
+            } else {
+                Logger.debug(logFormat, logArgs);
+            }
+        } catch (Exception e) {
+            Logger.warn("[auto-tpm] schedule observability report failed, request_id={}",
+                    ctx.getRequestId(), e);
         }
     }
 
@@ -209,7 +278,28 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+
+        // Auto-TPM: normalize priority (proto valid value > metadata header > default)
+        // and derive the per-request SLO / coarse deadline for observability.
+        // Phase 0: never changes any scheduling decision.
+        // Task40: a request that carries no priority at all normalizes to
+        // NO_PRIORITY (0) and opts out of SLO/deadline derivation entirely;
+        // it is scheduled on the legacy path.
+        int priority = PriorityNormalizer.normalize(pb.getPriority(),
+                GrpcQosHeaderInterceptor.get(),
+                configService.loadBalanceConfig().getAutoTpmDefaultPriority());
+        request.setPriority(priority);
         ctx.setRequest(request);
+
+        if (PriorityNormalizer.hasPriority(priority)) {
+            long requestSloMs = prioritySloPolicy.requestSloMs(pb.getSeqLen(), priority);
+            ctx.setRequestSloMs(requestSloMs);
+            // Coarse deadline (no predicted prefill time yet); the priority
+            // scheduler overwrites it once the target prefill endpoint is known.
+            ctx.setDeadlineMs(ctx.getStartTime() + requestSloMs);
+            prioritySchedulerReporter.reportRequest(priority,
+                    prioritySloPolicy.bucketLabel(pb.getSeqLen()), requestSloMs);
+        }
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());

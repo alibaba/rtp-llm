@@ -76,6 +76,10 @@ public:
     int64_t begin_time_us        = 0;
     int64_t global_start_time_us = 0;
 
+    // Auto-TPM QoS priority (task40): 30/40/50/60/70; 0 = not set. TPS metrics
+    // tagging only — never used for engine-side scheduling decisions.
+    int32_t priority = 0;
+
     // Batch grouping params
     int     group_size = 1;
     int64_t group_id   = -1;

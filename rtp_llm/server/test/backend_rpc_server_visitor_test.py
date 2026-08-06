@@ -250,6 +250,27 @@ class _AlwaysFailingModelRpcClient:
         raise self.error
 
 
+class _EscalatingErrorModelRpcClient:
+    """Raises a CAPACITY FtRuntimeException on the first attempt, then a
+    non-retryable RuntimeError on the second attempt.
+
+    Verifies that stream_with_aux_info re-raises the ORIGINAL exception
+    (CAPACITY) after a retry encounters a different, non-retryable error,
+    so the caller sees the correct error category (429, not 500)."""
+
+    def __init__(self):
+        self.attempts = 0
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise FtRuntimeException(
+                ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+                "no available worker",
+            )
+        raise RuntimeError("unexpected downstream error")
+
+
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -342,6 +363,25 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outputs, ["partial-output-from-failed-attempt"])
         self.assertEqual(client.attempts, 1)
+
+    async def test_retry_preserves_original_capacity_exception(self):
+        """When a retryable CAPACITY error (e.g. MASTER_NO_AVAILABLE_WORKER)
+        triggers a retry and the next attempt hits a different, non-retryable
+        error, the ORIGINAL exception must be re-raised so the caller maps
+        it to 429, not 500."""
+        client = _EscalatingErrorModelRpcClient()
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+        with self.assertRaises(FtRuntimeException) as ctx:
+            [output async for output in stream]
+
+        self.assertEqual(
+            ctx.exception.exception_type,
+            ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+        )
+        self.assertEqual(client.attempts, 2)
 
 
 if __name__ == "__main__":

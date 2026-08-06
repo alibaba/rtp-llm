@@ -6,6 +6,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <map>
+#include <string>
 #include <thread>
 #include <unistd.h>
 
@@ -371,6 +373,35 @@ public:
         }
     }
 
+    void addPriorityTokenSize(int32_t priority,
+                              int64_t context_token_num,
+                              int64_t context_token_num_with_cache,
+                              int64_t generate_token_num,
+                              int64_t total_token_num,
+                              int64_t execute_time_us) {
+        auto& collector = priority_collectors_[priority];
+        if (context_token_num > 0 && execute_time_us > 0) {
+            collector.context_token_num_ += context_token_num;
+        }
+        if (context_token_num_with_cache > 0 && execute_time_us > 0) {
+            collector.context_token_num_with_cache_ += context_token_num_with_cache;
+        }
+        if (generate_token_num > 0) {
+            collector.generate_token_num_ += generate_token_num;
+        }
+        if (total_token_num > 0) {
+            collector.total_token_num_ += total_token_num;
+        }
+    }
+
+    template<typename CountsByPriority>
+    void addTokenSizeByPriority(const CountsByPriority& counts_by_priority, int64_t execute_time_us) {
+        for (const auto& [priority, counts] : counts_by_priority) {
+            addPriorityTokenSize(
+                priority, counts.context, counts.context_with_cache, counts.generate, counts.total, execute_time_us);
+        }
+    }
+
     void merge(const RtpLLMTokenPSMetricsCollector* collector) {
         if (collector) {
             context_token_num_ += collector->context_token_num_;
@@ -379,6 +410,9 @@ public:
             context_time_us_with_cache_ += collector->context_time_us_with_cache_;
             generate_token_num_ += collector->generate_token_num_;
             total_token_num_ += collector->total_token_num_;
+            for (const auto& [priority, priority_collector] : collector->priority_collectors_) {
+                priority_collectors_[priority].merge(&priority_collector);
+            }
             if (hasMetrics()) {
                 report_zero_tps_ = false;
             } else if (collector->report_zero_tps_) {
@@ -449,6 +483,20 @@ public:
         return report_zero_tps_;
     }
 
+    std::map<int32_t, RtpLLMTokenPSMetricsCollector> priorityCollectorsForReport() const {
+        // Priority buckets are additive contributions: they share the global execution/report window so their
+        // TPS values sum to the untagged series, even when a batch contains more than one priority.
+        auto collectors = priority_collectors_;
+        for (auto& entry : collectors) {
+            auto& collector                       = entry.second;
+            collector.context_time_us_            = context_time_us_;
+            collector.context_time_us_with_cache_ = context_time_us_with_cache_;
+            collector.report_window_us_           = report_window_us_;
+            collector.priority_collectors_.clear();
+        }
+        return collectors;
+    }
+
 private:
     static double calcTps(int64_t token_num, int64_t time_us) {
         if (time_us > 0) {
@@ -458,14 +506,15 @@ private:
     }
 
 private:
-    int64_t context_token_num_            = 0;
-    int64_t context_time_us_              = 0;
-    int64_t context_token_num_with_cache_ = 0;
-    int64_t context_time_us_with_cache_   = 0;
-    int64_t generate_token_num_           = 0;
-    int64_t total_token_num_              = 0;
-    int64_t report_window_us_             = 0;
-    bool    report_zero_tps_              = false;
+    int64_t                                          context_token_num_            = 0;
+    int64_t                                          context_time_us_              = 0;
+    int64_t                                          context_token_num_with_cache_ = 0;
+    int64_t                                          context_time_us_with_cache_   = 0;
+    int64_t                                          generate_token_num_           = 0;
+    int64_t                                          total_token_num_              = 0;
+    int64_t                                          report_window_us_             = 0;
+    bool                                             report_zero_tps_              = false;
+    std::map<int32_t, RtpLLMTokenPSMetricsCollector> priority_collectors_;
 };
 
 class RtpLLMTokenPSMetrics: public kmonitor::MetricsGroup {
@@ -579,6 +628,10 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (collector_.hasMetrics()) {
                     metrics_reporter_->report<MetricsType, CollectType>(nullptr, &collector_);
+                    for (auto& [priority, collector] : collector_.priorityCollectorsForReport()) {
+                        kmonitor::MetricsTags tags("priority", std::to_string(priority));
+                        metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
+                    }
                     collector_ = CollectType();
                 } else if (active_count_ == 0) {
                     // Idle service should emit 0 TPS. An in-flight long step with no completed sample stays silent
@@ -709,6 +762,10 @@ private:
             }
             if (should_report) {
                 metrics_reporter_->report<MetricsType, CollectType>(nullptr, &report_collector);
+                for (auto& [priority, collector] : report_collector.priorityCollectorsForReport()) {
+                    kmonitor::MetricsTags tags("priority", std::to_string(priority));
+                    metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
         }

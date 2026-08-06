@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -202,6 +203,50 @@ class DefaultBatchDispatcherTest {
         BatchItem extra = createBatchItem(99L, 500, 200, prefillEp);
         dispatcher.dispatch(List.of(extra), prefillEp, 99L, 100, "test", callback);
         assertEquals(failuresBefore + 1, callback.failureCount.get(), "Post-shutdown dispatch should add exactly 1 failure");
+    }
+
+    // ---- task40: priority passthrough to GenerateInputPB ----
+
+    @Test
+    void dispatchForwardsCarriedPriorityIntoGenerateInput() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        item.ctx().getRequest().setPriority(60);
+
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    sent.add(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                });
+
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(60, sentInput(sent.getFirst()).getPriority());
+    }
+
+    @Test
+    void dispatchLeavesPriorityUnsetForNoPriorityRequests() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        // default Request priority is the no-priority sentinel (0)
+
+        List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    sent.add(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                });
+
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        assertEquals(0, sentInput(sent.getFirst()).getPriority());
+    }
+
+    private static EngineRpcService.GenerateInputPB sentInput(EngineRpcService.EnqueueBatchRequestPB request) {
+        return request.getDpSlotsList().getFirst().getRequestsList().getFirst().getInput();
     }
 
     // ---- helpers ----

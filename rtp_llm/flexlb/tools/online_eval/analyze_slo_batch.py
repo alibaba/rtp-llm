@@ -263,11 +263,22 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
         "mock": {
             "stats_samples": len(mock_stats),
             "last": mock_stats[-1] if mock_stats else {},
-            "max_observed_prefill_pending": max(
-                (item.get("prefill_pending", 0) for item in mock_stats), default=0
+            # Fall back to the legacy field names (prefill_pending /
+            # max_prefill_pending) so logs produced by older mock engines
+            # remain analyzable.
+            "max_observed_prefill_waiting": max(
+                (
+                    item.get("prefill_waiting", item.get("prefill_pending", 0))
+                    for item in mock_stats
+                ),
+                default=0,
             ),
-            "max_observed_engine_prefill_pending": max(
-                (item.get("max_prefill_pending", 0) for item in mock_stats), default=0
+            "max_observed_engine_prefill_waiting": max(
+                (
+                    item.get("max_prefill_waiting", item.get("max_prefill_pending", 0))
+                    for item in mock_stats
+                ),
+                default=0,
             ),
             "max_observed_heap_used_mb": max(
                 (item.get("heap_used_mb", 0) for item in mock_stats), default=0

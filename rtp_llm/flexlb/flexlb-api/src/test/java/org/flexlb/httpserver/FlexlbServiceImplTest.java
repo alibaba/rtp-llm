@@ -12,8 +12,10 @@ import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.PrioritySloPolicy;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -60,7 +62,11 @@ class FlexlbServiceImplTest {
                 grpcForwarder,
                 configService,
                 batchSchedulerReporter,
-                serverLatencyRecorder
+                serverLatencyRecorder,
+                new PrioritySloPolicy(
+                        PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
+                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
+                mock(PrioritySchedulerReporter.class)
         );
     }
 

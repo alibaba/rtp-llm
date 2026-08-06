@@ -84,8 +84,16 @@
           "10000"
         ],
         [
+          "FLEXLB_BATCH_ENQUEUE_DEADLINE_MS",
+          "800"
+        ],
+        [
           "FLEXLB_BATCH_FIXED_WAIT_MS",
-          "10"
+          "150"
+        ],
+        [
+          "FLEXLB_BATCH_QUEUE_MAX_SIZE",
+          "128"
         ],
         [
           "FLEXLB_BATCH_PREDICT_THRESHOLD_MS",
@@ -121,7 +129,7 @@
         ],
         [
           "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES",
-          "-1"
+          "1"
         ],
         [
           "FLEXLB_BATCH_MAX_INFLIGHT",
@@ -146,6 +154,18 @@
         [
           "PREFILL_TIME_FORMULA",
           "max(300, 244.865367146 + 37.2748283785*log(batchSize + 1)\n+ 0*2048*log(1 + exp((sum(computeTokens) - 8192)/2048))\n+ 0.00768264457133*4096*log(1 + exp((sum(computeTokens) - 24576)/4096))\n+ 0*8192*log(1 + exp((sum(computeTokens) - 65536)/8192))\n+ 0.000913293127052*8192*log(1 + exp((sum(computeTokens) - 81920)/8192))\n+ 0.000238132170008*sum(hitCacheTokens)\n+ 48.1819941798*(sum(hasHitCache)/batchSize)\n+ 14.6526667921*(sum(hitCacheTokens/(inputTokens + 1))/batchSize))"
+        ],
+        [
+          "AUTO_TPM_ENABLED",
+          "true"
+        ],
+        [
+          "AUTO_TPM_PREFILL_QUEUE_EVICT_ENABLED",
+          "true"
+        ],
+        [
+          "AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED",
+          "true"
         ]
       ]
     }

@@ -38,10 +38,10 @@ class _FakeGenerateConfig:
 
 class _FakeInput:
     prompt_length = 5
-    headers = {"x-request-id": "req-1"}
 
-    def __init__(self):
+    def __init__(self, headers=None):
         self.generate_config = _FakeGenerateConfig()
+        self.headers = {"x-request-id": "req-1"} if headers is None else headers
 
 
 class _CaptureMasterClient(MasterClient):
@@ -126,6 +126,47 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(request_pb.force_disable_sp_run)
         self.assertEqual(request_pb.generate_input, b"serialized-input")
         self.assertEqual(request_pb.cache_key_block_size, 1024)
+        self.assertEqual(request_pb.priority, 0)
+
+    async def test_schedule_payload_priority_from_qos_header(self):
+        client = _CaptureMasterClient()
+
+        await client.get_backend_role_addrs(
+            block_cache_keys=[1],
+            cache_key_block_size=1024,
+            input=_FakeInput(headers={"x-dashscope-inner-qos-level": "70"}),
+            request_id=101,
+            input_pb=_FakeInputPB(),
+        )
+
+        self.assertEqual(client.calls[0]["request_pb"].priority, 70)
+
+    async def test_schedule_payload_priority_defaults_when_header_missing(self):
+        client = _CaptureMasterClient()
+
+        await client.get_backend_role_addrs(
+            block_cache_keys=[1],
+            cache_key_block_size=1024,
+            input=_FakeInput(headers={}),
+            request_id=102,
+            input_pb=_FakeInputPB(),
+        )
+
+        self.assertEqual(client.calls[0]["request_pb"].priority, 0)
+
+    async def test_schedule_payload_priority_invalid_header_no_raise(self):
+        client = _CaptureMasterClient()
+
+        response = await client.get_backend_role_addrs(
+            block_cache_keys=[1],
+            cache_key_block_size=1024,
+            input=_FakeInput(headers={"x-dashscope-inner-qos-level": "high"}),
+            request_id=103,
+            input_pb=_FakeInputPB(),
+        )
+
+        self.assertTrue(response.is_ok)
+        self.assertEqual(client.calls[0]["request_pb"].priority, 0)
 
     async def test_schedule_deadline_does_not_retry_slave(self):
         client = _DeadlineMasterClient()

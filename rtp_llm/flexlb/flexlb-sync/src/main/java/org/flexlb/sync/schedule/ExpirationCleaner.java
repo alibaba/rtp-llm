@@ -2,6 +2,7 @@ package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -24,9 +25,37 @@ public class ExpirationCleaner {
     private final EndpointRegistry endpointRegistry;
 
     @Autowired
-    public ExpirationCleaner(EndpointRegistry endpointRegistry) {
-        this(endpointRegistry,
-                Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")));
+    public ExpirationCleaner(EndpointRegistry endpointRegistry, ConfigService configService) {
+        this(endpointRegistry, resolveWorkerTimeoutUs(configService));
+    }
+
+    /**
+     * Resolve the worker expiration timeout in microseconds.
+     *
+     * <p>Priority:
+     * <ol>
+     *   <li>Legacy env var {@code WORKER_TIMEOUT_US} (microseconds) — backward compat,
+     *       honored if explicitly set to a valid value.</li>
+     *   <li>FlexlbConfig {@code workerTimeoutMs} (milliseconds, default 15000) —
+     *       converted to microseconds. Overridable via env {@code WORKER_TIMEOUT_MS}.</li>
+     * </ol>
+     * The default 15 s is 3× the gRPC sync timeout (5 s), eliminating the race
+     * where a transient gRPC delay causes the cleaner to evict a still-alive endpoint.
+     */
+    private static long resolveWorkerTimeoutUs(ConfigService configService) {
+        long configMs = configService.loadBalanceConfig().getWorkerTimeoutMs();
+        String legacy = System.getenv("WORKER_TIMEOUT_US");
+        if (legacy != null && !legacy.trim().isEmpty()) {
+            try {
+                long legacyUs = Long.parseLong(legacy.trim());
+                logger.warn("Using legacy WORKER_TIMEOUT_US={}us (override config workerTimeoutMs={}ms)",
+                        legacyUs, configMs);
+                return legacyUs;
+            } catch (NumberFormatException ignored) {
+                logger.warn("Invalid WORKER_TIMEOUT_US='{}', falling back to workerTimeoutMs={}ms", legacy, configMs);
+            }
+        }
+        return configMs * 1000L;
     }
 
     ExpirationCleaner(EndpointRegistry endpointRegistry, long workerTimeoutUs) {
@@ -34,7 +63,7 @@ public class ExpirationCleaner {
         this.workerTimeoutUs = workerTimeoutUs;
     }
 
-    @Scheduled(fixedRate = 3000)
+    @Scheduled(fixedRateString = "${WORKER_CLEAN_INTERVAL_MS:3000}")
     public void cleanExpiredWorkers() {
         ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         this.doClean(modelWorkerStatus.getPrefillStatusMap(), RoleType.PREFILL);

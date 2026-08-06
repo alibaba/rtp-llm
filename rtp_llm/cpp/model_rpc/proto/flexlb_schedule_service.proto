@@ -54,6 +54,9 @@ message FlexlbScheduleRequestPB {
     string api_key = 11;
     reserved 12;  // was schedule_mode (removed: mode now deployment-level)
     int64 cache_key_block_size = 13;
+    // Auto-TPM QoS priority. Valid values: 30/40/50/60/70; 0 means unset and
+    // the master normalizes it to the default priority (50).
+    int32 priority = 14;
 }
 
 message FlexlbServerStatusPB {

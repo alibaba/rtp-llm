@@ -12,6 +12,7 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
+import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,11 +43,14 @@ public class FlexlbGrpcServer {
     // Default executor sizes — overridable via environment variables
     private static final int DEFAULT_EXECUTOR_CORE_SIZE = 1000;
     private static final int DEFAULT_EXECUTOR_MAX_SIZE = 1000;
-    // NOTE: Changed from 0 (unbounded, Integer.MAX_VALUE) to 10000 (bounded).
-    // This is intentional — the bounded queue enables AbortPolicy to fire under load,
-    // returning UNAVAILABLE to clients instead of unbounded queue growth leading to OOM.
-    // Deployments can override via FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE env variable.
-    private static final int DEFAULT_EXECUTOR_QUEUE_SIZE = 10000;
+    // NOTE: bounded queue + AbortPolicy so overload fires an immediate rejection
+    // (RejectedExecutionException -> gRPC error to the client) instead of silent
+    // queue growth. Default lowered 10000 -> 1000: at the measured gRPC dispatch
+    // rate a 1000-deep queue drains in tens of milliseconds (well below SLO),
+    // while a 10000-deep backlog was measured to add 1s+ of cold-start queueing
+    // delay. Deployments can override via the single FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
+    // env variable (printed at startup); <= 0 falls back to an unbounded queue.
+    private static final int DEFAULT_EXECUTOR_QUEUE_SIZE = 1000;
 
     /**
      * Metric prefix — matches {@code MicrometerFlexMonitor.METRIC_PREFIX} so that
@@ -61,6 +65,7 @@ public class FlexlbGrpcServer {
     private final EventLoopGroup grpcServerEventLoopGroup;
     private final MeterRegistry meterRegistry;
     private final GrpcServerTimingInterceptor grpcServerTimingInterceptor;
+    private final GrpcQosHeaderInterceptor grpcQosHeaderInterceptor;
 
     private Server server;
     private NioEventLoopGroup bossGroup;
@@ -72,13 +77,15 @@ public class FlexlbGrpcServer {
                             Environment environment,
                             @Qualifier("grpcServerEventLoopGroup") EventLoopGroup grpcServerEventLoopGroup,
                             @Autowired(required = false) MeterRegistry meterRegistry,
-                            GrpcServerTimingInterceptor grpcServerTimingInterceptor) {
+                            GrpcServerTimingInterceptor grpcServerTimingInterceptor,
+                            GrpcQosHeaderInterceptor grpcQosHeaderInterceptor) {
         this.flexlbServiceImpl = flexlbServiceImpl;
         this.configService = configService;
         this.environment = environment;
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.meterRegistry = meterRegistry;
         this.grpcServerTimingInterceptor = grpcServerTimingInterceptor;
+        this.grpcQosHeaderInterceptor = grpcQosHeaderInterceptor;
     }
 
     @PostConstruct
@@ -122,7 +129,8 @@ public class FlexlbGrpcServer {
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
                 .executor(grpcExecutor)
-                .addService(ServerInterceptors.intercept(flexlbServiceImpl, grpcServerTimingInterceptor))
+                .addService(ServerInterceptors.intercept(flexlbServiceImpl,
+                        grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
                 .maxInboundMessageSize(16 * 1024 * 1024)
                 .flowControlWindow(4 * 1024 * 1024)
                 .build()

@@ -27,7 +27,23 @@ N_DECODE="${N_DECODE:-4}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 MOCK_ENGINE_IMPL="${MOCK_ENGINE_IMPL:-java}"
 JAVA_MOCK_ENGINE_JAR="${JAVA_MOCK_ENGINE_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
+# Load client implementation switch: java (JavaLoadClient, carries trace
+# priority onto the wire) or python (legacy flexlb_load_client.py fallback,
+# no priority passthrough). Single env var, no other override layer.
+LOAD_CLIENT_IMPL="${LOAD_CLIENT_IMPL:-java}"
+JAVA_LOAD_CLIENT_JAR="${JAVA_LOAD_CLIENT_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
+JAVA_LOAD_CLIENT_HEAP_SIZE="${JAVA_LOAD_CLIENT_HEAP_SIZE:-16g}"
 JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
+JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-16}"
+# java_mock_stats sampling interval, passed straight to --stats-interval-ms
+# (single env, no renaming). Default matches the historical 5s cadence; lower
+# to 1000 for fine-grained pressure-test timelines.
+JAVA_MOCK_STATS_INTERVAL_MS="${JAVA_MOCK_STATS_INTERVAL_MS:-5000}"
+# Passed straight to --decode-max-concurrency (single env, no renaming).
+# Default matches the mock engine's DEFAULT_DECODE_MAX_CONCURRENCY (132);
+# lower it to trip the opt-in hard admission gate (decode.max_pending_requests)
+# so the engine queues requests into the KV_ALLOCATED/accepted layer.
+JAVA_MOCK_DECODE_MAX_CONCURRENCY="${JAVA_MOCK_DECODE_MAX_CONCURRENCY:-132}"
 JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-32g}"
 JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
 JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
@@ -61,6 +77,10 @@ GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED:-1000}"
 GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
 SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
 LOOP="${LOOP:-0}"
+# Send mode is a pure pass-through (single env-var layer): empty SEND_MODE
+# means JavaLoadClient's built-in default (replay), identical to before.
+SEND_MODE="${SEND_MODE:-}"
+SEND_MODE_QPS="${SEND_MODE_QPS:-}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
 LOAD_CLIENT_START_DELAY_SECONDS="${LOAD_CLIENT_START_DELAY_SECONDS:-10}"
@@ -80,10 +100,13 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
     PYTHON_BIN="$(command -v python3 || true)"
   fi
 fi
-if [[ -z "${PYTHON_BIN}" ]] \
-    || ! "${PYTHON_BIN}" -c 'import aiohttp, grpc' >/dev/null 2>&1; then
-  echo "Python with aiohttp and grpc is required; set PYTHON_BIN to the eval venv" >&2
-  exit 1
+# The aiohttp/grpc venv is only needed by the Python load client / mock engine.
+if [[ "${LOAD_CLIENT_IMPL}" == "python" || "${MOCK_ENGINE_IMPL}" == "python" ]]; then
+  if [[ -z "${PYTHON_BIN}" ]] \
+      || ! "${PYTHON_BIN}" -c 'import aiohttp, grpc' >/dev/null 2>&1; then
+    echo "Python with aiohttp and grpc is required; set PYTHON_BIN to the eval venv" >&2
+    exit 1
+  fi
 fi
 
 DEFAULT_FLEXLB_CONFIG='{"loadBalanceStrategy":"COST_BASED_PREFILL","decodeLoadBalanceStrategy":"COST_BASED_DECODE","cacheHitMaxCacheKeys":10000000,"cacheHitMetricReportEnabled":true,"cacheHitTimeWindowMs":1800000,"cacheHitTraceLogEnabled":false,"cacheHitWindowWriteEnabled":true,"decodeConcurrencyLimit":132,"flexlbBatchAlgorithm":"fixed_window","flexlbBatchFixedWaitMs":10,"flexlbBatchPredictThresholdMs":550,"flexlbBatchSizeMax":32,"hysteresisBiasPercent":30,"maxQueueSize":1000000,"flexlbBatchMaxInflight":1000000,"flexlbBatchDispatchPoolSize":500,"flexlbBatchDispatchQueueSize":10000,"prefillQueueSizeThreshold":100000,"defaultScheduleMode":"BATCH","flexlbBatchFixedMaxInflightBatches":-1,"costSloMs":1000,"flexlbBatchMinSize":8,"prefillLbTimeoutMs":5000}'
@@ -117,11 +140,13 @@ export NETTY_SELECT_THREAD_MULTIPLIER="${NETTY_SELECT_THREAD_MULTIPLIER:-1}"
 export NETTY_WORKER_THREAD_MULTIPLIER="${NETTY_WORKER_THREAD_MULTIPLIER:-1}"
 export FLEXLB_GRPC_EXECUTOR_CORE_SIZE="${FLEXLB_GRPC_EXECUTOR_CORE_SIZE:-128}"
 export FLEXLB_GRPC_EXECUTOR_MAX_SIZE="${FLEXLB_GRPC_EXECUTOR_MAX_SIZE:-128}"
-export FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE="${FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE:-50000}"
+# FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE: no script default — code default (1000) applies
+# unless the caller exports it explicitly (still forwarded via the environment).
 export SCHEDULE_WORKER_SIZE="${SCHEDULE_WORKER_SIZE:-16}"
 
 MOCK_PID=""
 FLEXLB_PID=""
+MASTER_COUNTER_POLLER_PID=""
 CLIENT_PIDS=()
 JAVA_MODULE_OPTS=(
   --add-modules ALL-SYSTEM
@@ -181,6 +206,7 @@ if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
 fi
 
 cleanup() {
+  stop_master_counter_poller
   for pid in "${CLIENT_PIDS[@]}"; do
     kill "${pid}" >/dev/null 2>&1 || true
   done
@@ -224,24 +250,42 @@ PY
 }
 
 assert_ports_free() {
+  # SO_REUSEADDR lets a check socket bind against a port still in TIME_WAIT
+  # (no process listening, but kernel-held) — the common state right after a
+  # previous run is killed. Without it socket.bind() gives a false failure.
+  # Poll up to 5s for ports to drain; each check binds with SO_REUSEADDR so
+  # TIME_WAIT ports pass immediately.
   python3 - "$@" <<'PY'
 import socket
 import sys
+import time
 
-sockets = []
-try:
+max_wait = 5.0
+interval = 0.5
+deadline = time.monotonic() + max_wait
+last_errors = {}
+
+while True:
+    last_errors.clear()
+    ok = True
     for raw_port in sys.argv[1:]:
         port = int(raw_port)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("0.0.0.0", port))
         except OSError as exc:
-            print(f"required port {port} is not available: {exc}", file=sys.stderr)
-            sys.exit(1)
-        sockets.append(sock)
-finally:
-    for sock in sockets:
-        sock.close()
+            ok = False
+            last_errors[port] = exc
+        finally:
+            sock.close()
+    if ok:
+        sys.exit(0)
+    if time.monotonic() >= deadline:
+        for port, exc in last_errors.items():
+            print(f"required port {port} is not available after {max_wait:.0f}s: {exc}", file=sys.stderr)
+        sys.exit(1)
+    time.sleep(interval)
 PY
 }
 
@@ -331,6 +375,53 @@ save_master_prometheus() {
   return 1
 }
 
+# Per-second master arrival/completion counter time series. The management
+# Prometheus endpoint has no arrival/completion counters, but the master
+# already exposes cumulative arrival_count/completion_count on the existing
+# GET /rtp_llm/server_latency endpoint — poll that (no master code change).
+# Counters are cumulative within the recorder window; the multi-worker path
+# resets the window right after the poller starts, visible as a counter drop.
+MASTER_COUNTERS_FILE="${RUN_DIR}/master_counters_timeseries.txt"
+MASTER_COUNTER_POLL_INTERVAL_S="${MASTER_COUNTER_POLL_INTERVAL_S:-1}"
+
+start_master_counter_poller() {
+  if [[ "${START_FLEXLB}" != "1" ]]; then
+    return 0
+  fi
+  python3 - "${FLEXLB_HTTP_ADDR}" "${MASTER_COUNTERS_FILE}" \
+    "${MASTER_COUNTER_POLL_INTERVAL_S}" <<'PY' &
+import json
+import sys
+import time
+import urllib.request
+
+addr, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+url = f"http://{addr}/rtp_llm/server_latency"
+with open(out_path, "a", encoding="utf-8") as out:
+    while True:
+        started = time.time()
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                data = json.load(response)
+            out.write(
+                f"ts_epoch_ms={int(started * 1000)} "
+                f"arrival_count={data.get('arrival_count', 0)} "
+                f"completion_count={data.get('completion_count', 0)}\n")
+            out.flush()
+        except Exception:
+            pass  # master briefly unavailable; skip this sample
+        time.sleep(max(0.0, interval_s - (time.time() - started)))
+PY
+  MASTER_COUNTER_POLLER_PID="$!"
+}
+
+stop_master_counter_poller() {
+  if [[ -n "${MASTER_COUNTER_POLLER_PID}" ]]; then
+    kill "${MASTER_COUNTER_POLLER_PID}" >/dev/null 2>&1 || true
+    MASTER_COUNTER_POLLER_PID=""
+  fi
+}
+
 assert_mock_engine_healthy() {
   if [[ "${START_MOCK}" != "1" ]]; then
     return 0
@@ -350,6 +441,22 @@ assert_mock_engine_healthy() {
 mkdir -p "${RUN_DIR}"
 mkdir -p "${FLEXLB_LOG_PATH}"
 echo "run_dir=${RUN_DIR}"
+echo "LOAD_CLIENT_IMPL=${LOAD_CLIENT_IMPL} (java=JavaLoadClient with trace priority passthrough, python=legacy flexlb_load_client.py)"
+if [[ "${LOAD_CLIENT_IMPL}" != "java" && "${LOAD_CLIENT_IMPL}" != "python" ]]; then
+  echo "Unsupported LOAD_CLIENT_IMPL=${LOAD_CLIENT_IMPL}; expected java or python" >&2
+  exit 1
+fi
+if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
+  if [[ ! -f "${JAVA_LOAD_CLIENT_JAR}" ]]; then
+    echo "Java load client jar not found: ${JAVA_LOAD_CLIENT_JAR}" >&2
+    echo "Build it with: ./mvnw package -DskipTests -P '!internal'" >&2
+    exit 1
+  fi
+  if [[ "$(java_major java)" -lt 21 ]]; then
+    echo "Java 21 is required to run JavaLoadClient. Set JAVA21_HOME or JAVA_HOME." >&2
+    exit 1
+  fi
+fi
 
 if [[ "${FLEXLB_FAIL_ON_CONCURRENT_TEST}" == "1" ]]; then
   assert_no_concurrent_flexlb_test
@@ -376,6 +483,9 @@ if [[ "${START_MOCK}" == "1" ]]; then
       --n-decode "${N_DECODE}" \
       --base-grpc-port "${MOCK_BASE_GRPC_PORT}" \
       --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
+      --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
+      --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
+      --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
       --performance "${PERFORMANCE_FILE}" \
       --master-config "${PROCESS_CONFIG_FILE}" \
       --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
@@ -385,6 +495,7 @@ if [[ "${START_MOCK}" == "1" ]]; then
       >"${RUN_DIR}/mock_engine.log" 2>&1 &
     MOCK_PID="$!"
     echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
+    echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
     # The Java process writes discovery files only after every gRPC port is bound.
     wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
     if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
@@ -623,6 +734,11 @@ print(int(time.time() * 1000 + float(sys.argv[1]) * 1000))
 PY
 )"
 echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
+echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
+
+# Capture the master arrival/completion counter time series for the whole load
+# window (stopped right after all clients finish; also killed by cleanup).
+start_master_counter_poller
 
 CLIENT_ARGS=(
   "${TRACE_FILE}"
@@ -659,22 +775,74 @@ if [[ "${GRADIENT}" == "1" ]]; then
   CLIENT_ARGS+=(--gradient --gradient-max-speed "${GRADIENT_MAX_SPEED}" --gradient-start-speed "${GRADIENT_START_SPEED}")
 fi
 
+# JavaLoadClient reads its configuration exclusively from environment
+# variables (no CLI flags); mirror CLIENT_ARGS one-to-one per shard.
+# PRIORITY is deliberately not set: priority comes from the trace records
+# only, and records without one stay unset on the wire (no default 50).
+launch_java_load_client() {
+  local output_dir="$1"
+  local num_shards="$2"
+  local shard_index="$3"
+  local max_concurrency="$4"
+  local skip_server_latency="$5"
+  env \
+    TRACE_FILE="${TRACE_FILE}" \
+    TARGET_ADDR="${TARGET_ADDR:-${FLEXLB_HTTP_ADDR}}" \
+    OUTPUT_DIR="${output_dir}" \
+    NUM_SHARDS="${num_shards}" \
+    SHARD_INDEX="${shard_index}" \
+    MAX_CONCURRENCY="${max_concurrency}" \
+    SKIP_SERVER_LATENCY="${skip_server_latency}" \
+    REPLAY_SPEED="${REPLAY_SPEED}" \
+    DURATION_S="${DURATION_S}" \
+    LIMIT="${LIMIT}" \
+    TIMEOUT_MS="${TIMEOUT_MS}" \
+    SLA_TTFT_MS="${SLA_TTFT_MS}" \
+    ZERO_OUTPUT_POLICY="${ZERO_OUTPUT_POLICY}" \
+    SCHEDULE_ONLY="${SCHEDULE_ONLY}" \
+    LOOP="${LOOP}" \
+    SEND_MODE="${SEND_MODE}" \
+    SEND_MODE_QPS="${SEND_MODE_QPS}" \
+    GRADIENT="${GRADIENT}" \
+    GRADIENT_START_SPEED="${GRADIENT_START_SPEED}" \
+    GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED}" \
+    MAX_INPUT_LEN="${MAX_INPUT_LEN}" \
+    MAX_OUTPUT_LEN="${MAX_OUTPUT_LEN}" \
+    PUSHGATEWAY_URL="${PUSHGATEWAY_URL}" \
+    RESPONSE_TIMEOUT="${RESPONSE_TIMEOUT:-}" \
+    START_AT_EPOCH_MS="${CLIENT_START_EPOCH_MS}" \
+    LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS}" \
+    java -Xmx"${JAVA_LOAD_CLIENT_HEAP_SIZE}" -XX:+ExitOnOutOfMemoryError \
+      -cp "${JAVA_LOAD_CLIENT_JAR}" org.flexlb.mockengine.JavaLoadClient
+}
+
 if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
-  PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
+  if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
+    launch_java_load_client "${RUN_DIR}/load_client" 1 0 "${MAX_CONCURRENCY}" 0 \
+      | tee "${RUN_DIR}/client.stdout"
+  else
+    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
+  fi
 else
   mkdir -p "${RUN_DIR}/load_client"
   curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null
   SHARD_MAX_CONCURRENCY=$(( (MAX_CONCURRENCY + LOAD_CLIENT_WORKERS - 1) / LOAD_CLIENT_WORKERS ))
   for ((shard = 0; shard < LOAD_CLIENT_WORKERS; shard++)); do
     shard_dir="${RUN_DIR}/load_client/shard_${shard}"
-    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" \
-      "${CLIENT_ARGS[@]}" \
-      --output-dir "${shard_dir}" \
-      --num-shards "${LOAD_CLIENT_WORKERS}" \
-      --shard-index "${shard}" \
-      --max-concurrency "${SHARD_MAX_CONCURRENCY}" \
-      --skip-server-latency \
-      >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
+    if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
+      launch_java_load_client "${shard_dir}" "${LOAD_CLIENT_WORKERS}" "${shard}" \
+        "${SHARD_MAX_CONCURRENCY}" 1 \
+        >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
+    else
+      PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" \
+        "${CLIENT_ARGS[@]}" \
+        --output-dir "${shard_dir}" \
+        --num-shards "${LOAD_CLIENT_WORKERS}" \
+        --shard-index "${shard}" \
+        --max-concurrency "${SHARD_MAX_CONCURRENCY}" \
+        --skip-server-latency \
+        >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
+    fi
     CLIENT_PIDS+=("$!")
   done
 
@@ -705,11 +873,20 @@ server = json.loads((output_dir / "server_latency.json").read_text())
 rpc_start_ms = []
 send_due_ms = []
 pacing_lag_ms = []
+priority_rows = []
 for index in range(worker_count):
     request_path = output_dir / f"shard_{index}" / "per_request.jsonl"
     with request_path.open("r", encoding="utf-8") as stream:
         for line in stream:
             record = json.loads(line)
+            # Java load client emits per-record priority (0 = unset); the
+            # legacy Python client does not, so the key may be absent.
+            if "priority" in record:
+                priority_rows.append((
+                    int(record.get("priority") or 0),
+                    str(record.get("status", "")),
+                    float(record.get("schedule_ms", 0.0) or 0.0),
+                ))
             start_ms = float(record.get("send_start_epoch_ms", 0.0) or 0.0)
             if start_ms <= 0:
                 continue
@@ -793,6 +970,29 @@ summary = {
 summary["error_rate"] = round(
     summary["error_count"] / summary["total_requests"], 6
 ) if summary["total_requests"] else 0.0
+if priority_rows:
+    # Same layout as the Java client shard-level priority_stats:
+    # {"<priority>": {total, completed, rejected, avg_schedule_ms}}.
+    groups = {}
+    for prio, status, schedule_ms in priority_rows:
+        group = groups.setdefault(prio, {"total": 0, "completed": 0, "rejected": 0, "sum": 0.0, "n": 0})
+        group["total"] += 1
+        if status in ("ok", "scheduled"):
+            group["completed"] += 1
+            if schedule_ms > 0:
+                group["sum"] += schedule_ms
+                group["n"] += 1
+        else:
+            group["rejected"] += 1
+    summary["priority_stats"] = {
+        str(prio): {
+            "total": group["total"],
+            "completed": group["completed"],
+            "rejected": group["rejected"],
+            "avg_schedule_ms": round(group["sum"] / group["n"], 3) if group["n"] else 0.0,
+        }
+        for prio, group in sorted(groups.items())
+    }
 (output_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 (output_dir / "report.md").write_text(
     "# FlexLB multi-client performance\n\n"
@@ -814,6 +1014,7 @@ PY
   fi
 fi
 
+stop_master_counter_poller
 assert_mock_engine_healthy
 
 if [[ "${SLO_BATCH_DRAIN_SECONDS}" -gt 0 ]]; then
@@ -849,6 +1050,7 @@ echo "report=${RUN_DIR}/load_client/report.md"
 echo "server_latency=${RUN_DIR}/load_client/server_latency.json"
 echo "slo_batch_analysis=${SLO_ANALYSIS_FILE}"
 echo "flexlb_file_log=${FLEXLB_LOG_PATH}/flexlb.log"
+echo "master_counters_timeseries=${MASTER_COUNTERS_FILE}"
 echo "jfr=${JFR_FILE}"
 
 SUMMARY_FILE="${RUN_DIR}/load_client/summary.json"

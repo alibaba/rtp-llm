@@ -446,6 +446,11 @@ public:
         return generate_input_->group_size;
     }
 
+    // Auto-TPM QoS priority (task40): 0 = not set; TPS metrics tagging only.
+    int32_t priority() const {
+        return generate_input_->priority;
+    }
+
     int groupTimeout() const {
         return generate_input_->generate_config->group_timeout.value_or(100);
     }

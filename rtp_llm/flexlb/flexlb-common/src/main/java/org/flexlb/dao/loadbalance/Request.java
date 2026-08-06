@@ -49,4 +49,18 @@ public class Request {
 
     @JsonProperty("model")
     private String model = "";
+
+    /**
+     * Auto-TPM QoS priority. Valid values: 30/40/50/60/70; 0 means "no
+     * priority" (request opts out of Auto-TPM and is scheduled on the legacy
+     * path). Explicit invalid values are normalized to 50 upstream. See
+     * {@code PriorityNormalizer}.
+     */
+    @JsonProperty("priority")
+    private int priority = 0;
+
+    /** True iff the request carries an explicit Auto-TPM priority. */
+    public boolean hasPriority() {
+        return priority > 0;
+    }
 }

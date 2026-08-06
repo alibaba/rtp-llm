@@ -22,7 +22,12 @@ class FlexlbScheduleProtocolTest {
         assertEquals("FlexlbService", service.getFullName());
         assertEquals("Schedule", service.findMethodByName("Schedule").getName());
         assertEquals("GetRequestState", service.findMethodByName("GetRequestState").getName());
-        assertNull(EngineRpcService.GenerateInputPB.getDescriptor().findFieldByNumber(10));
+        // Task40 explicitly reverses the P0-2 guard: GenerateInputPB field 10
+        // is now the per-request priority forwarded to the engine.
+        Descriptors.FieldDescriptor priority =
+                EngineRpcService.GenerateInputPB.getDescriptor().findFieldByNumber(10);
+        assertEquals("priority", priority.getName());
+        assertEquals(Descriptors.FieldDescriptor.Type.INT32, priority.getType());
         assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(14));
         assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(15));
         assertEquals(Descriptors.FieldDescriptor.Type.STRING,

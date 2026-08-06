@@ -22,11 +22,13 @@ import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
@@ -37,6 +39,7 @@ import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -225,7 +228,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 mock(FlexlbGrpcForwarder.class, withSettings().stubOnly()),
                 configService,
                 reporter,
-                latencyRecorder);
+                latencyRecorder,
+                new PrioritySloPolicy(
+                        PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
+                        PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
+                mock(PrioritySchedulerReporter.class, withSettings().stubOnly()));
 
         int grpcPort;
         try (ServerSocket socket = new ServerSocket(0)) {
@@ -242,7 +249,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 environment,
                 new NioEventLoopGroup(4),
                 null,
-                new GrpcServerTimingInterceptor());
+                new GrpcServerTimingInterceptor(),
+                new GrpcQosHeaderInterceptor());
         masterServer.start();
 
         masterChannel = NettyChannelBuilder

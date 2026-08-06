@@ -81,7 +81,7 @@ class FlexlbBatchSchedulerTest {
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         scheduler = new FlexlbBatchScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, null);
+                endpointRegistry, dispatcher, reporter, null, null);
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -251,12 +251,16 @@ class FlexlbBatchSchedulerTest {
         status.setFinishedTaskInfo(Map.of("85", finished));
         scheduler.onWorkerStatusUpdate(status);
 
-        assertFalse(scheduleFuture.isDone());
-        ackFuture.complete(ackFor(sentBatches.getFirst()));
-
+        // Decode completion is terminal: the schedule future completes right away
+        // without waiting for the EnqueueBatch ack.
         Response response = scheduleFuture.get(2, TimeUnit.SECONDS);
         assertTrue(response.isSuccess());
         assertTrue(response.isEnqueuedByMaster());
+        assertEquals(RequestLifecycleState.COMPLETED,
+                scheduler.getRequestState(85L, batchId).state());
+
+        // The late ack is ignored gracefully and does not disturb the terminal state.
+        ackFuture.complete(ackFor(sentBatches.getFirst()));
         assertEquals(RequestLifecycleState.COMPLETED,
                 scheduler.getRequestState(85L, batchId).state());
     }
@@ -309,6 +313,41 @@ class FlexlbBatchSchedulerTest {
         CompletableFuture<Response> second = scheduler.submit(context(52));
         Response response = second.get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
+    }
+
+    // ============ onOfferFailure error-code mapping (task10 P1-1) ============
+
+    @Test
+    void offer_failure_maps_token_capacity_exceeded_to_dedicated_error_code() throws Exception {
+        BatchItem item = offerFailureItem(61);
+
+        scheduler.onOfferFailure(item, new BatchTokenCapacityExceededException(
+                "seq_len exceeds batch token capacity"));
+
+        Response response = item.future().get(1, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("batch token capacity"));
+    }
+
+    @Test
+    void offer_failure_keeps_generic_dispatch_error_for_other_causes() throws Exception {
+        BatchItem item = offerFailureItem(62);
+
+        scheduler.onOfferFailure(item, new IllegalStateException("queue stopped"));
+
+        Response response = item.future().get(1, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
+    }
+
+    private BatchItem offerFailureItem(long requestId) {
+        Response route = successRoute(requestId);
+        return new BatchItem(context(requestId), new CompletableFuture<>(), route,
+                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
+                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                endpointRegistry.getPrefill("10.0.0.1:8080"), null,
+                System.currentTimeMillis());
     }
 
     @Test

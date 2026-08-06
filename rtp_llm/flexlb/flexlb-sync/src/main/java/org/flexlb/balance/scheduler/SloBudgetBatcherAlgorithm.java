@@ -55,8 +55,14 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         long now = ctx.now();
         long budgetMs = head.sortKey() - now;
 
-        // 1. expired → drop
-        if (budgetMs < 0) {
+        // 1. expired → drop unless Auto-TPM owns this request's protection.
+        //    Design doc 8.3: Auto-TPM never drops prioritized requests silently
+        //    — the expired head falls through to the deadline_guard dispatch
+        //    below (entry rejection/rescue/eviction cover it); deadline rescue
+        //    is a later phase. No-priority (legacy) requests never enter any
+        //    priority mechanism, so the legacy drop must stay active for them
+        //    regardless of the global switch (P0-1 protection-vacuum fix).
+        if (budgetMs < 0 && !(ctx.cfg().isAutoTpmEnabled() && head.hasPriority())) {
             dropHead(ctx, head, now, budgetMs, "deadline_expired");
             return;
         }
@@ -70,7 +76,11 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         int maxInflightBatches = ctx.cfg().getFlexlbBatchSloMaxInflightBatches();
         if (maxInflightBatches > 0 && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
             long inflightGuardMs = dispatchGuardMs(ctx, emergencyBudgetMs);
-            if (budgetMs <= inflightGuardMs) {
+            // Auto-TPM never drops prioritized requests silently (design doc
+            // 8.3): keep parking them until the engine backpressure clears.
+            // No-priority (legacy) requests keep the legacy drop even when
+            // Auto-TPM is on (P0-1 protection-vacuum fix).
+            if (budgetMs <= inflightGuardMs && !(ctx.cfg().isAutoTpmEnabled() && head.hasPriority())) {
                 dropHead(ctx, head, now, budgetMs, "inflight_full_guard");
                 return;
             }

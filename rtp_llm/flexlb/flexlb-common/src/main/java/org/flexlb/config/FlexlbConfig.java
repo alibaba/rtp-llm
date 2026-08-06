@@ -542,6 +542,105 @@ public class FlexlbConfig {
 
     private double decodeImbalanceMultiplier = 3.0;
 
+    // ========== Auto-TPM Priority Scheduler Configuration ==========
+
+    private boolean autoTpmEnabled = false;
+
+    /** 默认 50，一般无需修改（unset 请求的归一目标档）。 */
+    private int autoTpmDefaultPriority = 50;
+
+    private String autoTpmSloLengthBuckets = "256:150,1024:300,4096:600,16384:1200,*:2400";
+
+    private String autoTpmPrioritySloMultipliers = "30:2.0,40:1.5,50:1.0,60:0.75,70:0.5";
+
+    private boolean autoTpmPrefillQueueEvictEnabled = false;
+
+    private boolean autoTpmDecodeReservedEvictEnabled = false;
+
+    private long autoTpmDangerThresholdMs = 100;
+
+    /**
+     * Upper bound (in plan-cost units) of the cache-hit benefit an eviction
+     * plan may subtract from its raw cost. The effective benefit is further
+     * clamped to half of the minimum adjacent-priority cost gap so cache
+     * affinity can never flip a cross-priority victim choice. 0 (default)
+     * disables cache benefit entirely.
+     */
+    private long autoTpmPlanCacheHitBenefitCap = 0;
+
+    // ---- Auto-TPM reserved config (design doc §18) — future phases, not wired yet ----
+
+    /** Normalized priority levels accepted by the scheduler (Phase 5+, reserved). */
+    private String autoTpmPriorityLevels = "30,40,50,60,70";
+
+    /** Decode accepted-entry eviction switch (Phase 5, reserved). */
+    private boolean autoTpmDecodeAcceptedEvictEnabled = false;
+
+    /** Deadline-rescue background scanner switch (Phase 6). */
+    private boolean autoTpmDeadlineRescueEnabled = false;
+
+    /** Deadline-rescue scan interval in ms (Phase 6). */
+    private long autoTpmRescueScanIntervalMs = 20;
+
+    /** Max rescue migrations applied per scan tick (Phase 6). */
+    private int autoTpmMaxRescuePerTick = 32;
+
+    /** Max rescue migrations pulled from one source endpoint per scan tick (Phase 6). */
+    private int autoTpmMaxRescuePerEndpointPerTick = 8;
+
+    /** Max cross-endpoint transfers per request lifetime (Phase 6). */
+    private int autoTpmMaxTransferCount = 1;
+
+    /** Max wait for victim KV release before commit gives up, ms (Phase 5, reserved). */
+    private long autoTpmCommitWaitReleaseTimeoutMs = 50;
+
+    /**
+     * Normal-path plan commit strategy (plan-commit concurrency redesign N3):
+     * {@code lockfree} — no snapshot-version validation; the enqueue relies on
+     * the queue lock's own atomicity and local capacity checks, so unrelated
+     * queue churn can no longer abort a commit (the VERSION_MISMATCH storm at
+     * high QPS). {@code versioned} — the legacy optimistic-concurrency
+     * protocol, kept as a gray-release fallback for one version cycle.
+     * Default {@code lockfree}: the versioned protocol is proven unusable at
+     * production QPS (85%+ commit failures under homogeneous load).
+     */
+    private String autoTpmCommitStrategy = "lockfree";
+
+    /**
+     * Eviction victim guard mode (redesign N3): {@code victim_presence} —
+     * victim-level guards (queue victims: atomic remove-if-present with
+     * zero-side-effect VICTIM_GONE abort; decode victims: still-reserved
+     * validation) instead of whole-queue/endpoint version checks, so
+     * unrelated mutations no longer abort an eviction commit.
+     * {@code queue_version} — the legacy snapshot-version guard (fallback).
+     */
+    private String autoTpmVictimGuardMode = "victim_presence";
+
+    /**
+     * Decode concurrency-gate load mode (redesign N2, review P1-2):
+     * {@code engine_load} — the gate compares the engine-facing load
+     * (confirmed running + non-queued reservations) against the concurrency
+     * limit, so reservations parked in a prefill queue cannot saturate an
+     * idle engine (root cause C of the 8400 storm). {@code total_load} —
+     * the legacy full-shadow gate (queued reservations count too), kept as
+     * an independent gray-release fallback: N2 can be rolled back alone
+     * without touching the N3 commit/guard switches.
+     */
+    private String autoTpmDecodeGateLoadMode = "engine_load";
+
+    // ========== Worker Expiration Configuration ==========
+
+    /**
+     * Worker status expiration timeout in milliseconds.
+     * <p>Must be at least 2× the gRPC sync request timeout (5000 ms) to prevent
+     * the ExpirationCleaner from removing endpoints that are still alive but
+     * experiencing transient gRPC delays — the root cause of the decode
+     * death-spiral (error_8400).
+     * <p>Default: 10000 (10 seconds, 2× gRPC 5s timeout — does not excessively
+     * delay dead-worker detection). Environment variable: WORKER_TIMEOUT_MS.
+     */
+    private long workerTimeoutMs = 10000L;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration

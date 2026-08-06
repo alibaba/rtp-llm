@@ -405,7 +405,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(chunks[0].error_message)
         error_no, payload = _dash_error_payload(chunks[0])
         self.assertEqual(error_no, 5)
-        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_code"], 429)
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
         self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
@@ -2271,9 +2271,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             )
             expected = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 1)
             retry_id = visitor.request_id_factory()
-            expected_retry_id = rig.generate_request_id(
-                "10.0.0.1", 12345, "srv-xyz", 2
-            )
+            expected_retry_id = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 2)
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0], expected)

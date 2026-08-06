@@ -11,6 +11,8 @@ import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -27,6 +29,12 @@ public class ConfigService {
     /**
      * Critical config fields whose parse failures must abort startup (fail-fast)
      * instead of silently falling back to defaults.
+     *
+     * <p>F4 (P0-4): includes {@code autoTpmEnabled} / {@code flexlbBatchQueueMaxSize}
+     * (env parse failure aborts via the critical mechanism) and the two SLO spec
+     * strings {@code autoTpmSloLengthBuckets} / {@code autoTpmPrioritySloMultipliers}
+     * whose assignment never fails — those get a strict format pre-validation at
+     * startup instead (see {@link #validateSloPolicySpecs}).
      */
     private static final Set<String> CRITICAL_CONFIG_FIELDS = Set.of(
             "defaultScheduleMode",
@@ -36,7 +44,17 @@ public class ConfigService {
             "flexlbBatchFixedMaxInflightBatches",
             "flexlbBatchSloMaxInflightBatches",
             "costFormula",
-            "prefillPredictorType");
+            "prefillPredictorType",
+            "autoTpmEnabled",
+            "flexlbBatchQueueMaxSize",
+            "autoTpmSloLengthBuckets",
+            "autoTpmPrioritySloMultipliers");
+
+    /** Env prefixes owned by FlexLB config; scanned for unmatched names (F3/P0-3). */
+    private static final List<String> SCANNED_ENV_PREFIXES = List.of("FLEXLB_", "AUTO_TPM_", "COST_", "WORKER_");
+
+    /** Deprecated env vars that already have dedicated warnings; excluded from the unmatched scan. */
+    private static final Set<String> DEPRECATED_ENV_VARS = Set.of("FLEXLB_BATCH_ENABLED", "ENABLE_QUEUEING");
 
     private final FlexlbConfig flexlbConfig;
 
@@ -65,6 +83,7 @@ public class ConfigService {
         applyPrefillFormulaOverride(config, environment);
 
         warnDeprecatedEnvVars();
+        warnUnmatchedEnvVars(environment);
 
         // Pre-validate critical parsed config at startup (fail-fast).
         // If these throw, startup must abort rather than letting every
@@ -73,6 +92,7 @@ public class ConfigService {
         // ignores parse errors, so it is not called here. getDefaultScheduleModeEnum()
         // throws IllegalArgumentException for invalid schedule mode values.
         config.getDefaultScheduleModeEnum();
+        validateSloPolicySpecs(config);
 
         dumpEffectiveConfig(config);
         this.flexlbConfig = config;
@@ -209,7 +229,7 @@ public class ConfigService {
      * Convert camel case to upper snake case
      * Example: defaultScheduleMode -> DEFAULT_SCHEDULE_MODE
      */
-    private String camelToUpperSnakeCase(String camelCase) {
+    private static String camelToUpperSnakeCase(String camelCase) {
         StringBuilder result = new StringBuilder();
         for (int i = 0; i < camelCase.length(); i++) {
             char c = camelCase.charAt(i);
@@ -269,6 +289,28 @@ public class ConfigService {
             config.getFlexlbBatchFixedMaxInflightBatches(),
             config.getFlexlbBatchSloMaxInflightBatches());
         log.info("prefillPredictorType={}", config.getPrefillPredictorType());
+        log.info("autoTpmEnabled={}, autoTpmDefaultPriority={}",
+            config.isAutoTpmEnabled(), config.getAutoTpmDefaultPriority());
+        log.info("autoTpmSloLengthBuckets={}, autoTpmPrioritySloMultipliers={}",
+            config.getAutoTpmSloLengthBuckets(), config.getAutoTpmPrioritySloMultipliers());
+        log.info("autoTpmPrefillQueueEvictEnabled={}, autoTpmDecodeReservedEvictEnabled={}, autoTpmDangerThresholdMs={}",
+            config.isAutoTpmPrefillQueueEvictEnabled(), config.isAutoTpmDecodeReservedEvictEnabled(),
+            config.getAutoTpmDangerThresholdMs());
+        log.info("autoTpmPlanCacheHitBenefitCap={}", config.getAutoTpmPlanCacheHitBenefitCap());
+        log.info("autoTpmPriorityLevels={}, autoTpmDecodeAcceptedEvictEnabled={}",
+            config.getAutoTpmPriorityLevels(), config.isAutoTpmDecodeAcceptedEvictEnabled());
+        log.info("autoTpmDeadlineRescueEnabled={}, autoTpmRescueScanIntervalMs={}, autoTpmMaxRescuePerTick={}, "
+                + "autoTpmMaxRescuePerEndpointPerTick={}, autoTpmMaxTransferCount={}",
+            config.isAutoTpmDeadlineRescueEnabled(), config.getAutoTpmRescueScanIntervalMs(),
+            config.getAutoTpmMaxRescuePerTick(), config.getAutoTpmMaxRescuePerEndpointPerTick(),
+            config.getAutoTpmMaxTransferCount());
+        log.info("autoTpmCommitWaitReleaseTimeoutMs={}",
+            config.getAutoTpmCommitWaitReleaseTimeoutMs());
+        log.info("autoTpmCommitStrategy={}, autoTpmVictimGuardMode={}, autoTpmDecodeGateLoadMode={}",
+            config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode(),
+            config.getAutoTpmDecodeGateLoadMode());
+        log.info("workerTimeoutMs={}, autoTpmDecodeGateLoadMode={}",
+            config.getWorkerTimeoutMs(), config.getAutoTpmDecodeGateLoadMode());
         log.info("==========================================");
     }
 
@@ -280,5 +322,127 @@ public class ConfigService {
         if (env.containsKey("ENABLE_QUEUEING")) {
             log.warn("Environment variable ENABLE_QUEUEING is deprecated and ignored. Use DEFAULT_SCHEDULE_MODE=BATCH|DIRECT|QUEUE instead.");
         }
+    }
+
+    /**
+     * F4 (P0-4): the SLO bucket/multiplier specs are plain strings whose env
+     * assignment never fails, so strictly pre-validate the effective values at
+     * startup — an invalid spec aborts instead of silently falling back to the
+     * built-in defaults at runtime. Blank means "use built-in default" and is
+     * allowed. The lenient runtime fallback in {@link PrioritySloPolicy} itself
+     * is intentionally unchanged.
+     */
+    private static void validateSloPolicySpecs(FlexlbConfig config) {
+        String bucketSpec = config.getAutoTpmSloLengthBuckets();
+        String invalidBucket = PrioritySloPolicy.firstInvalidBucketEntry(bucketSpec);
+        if (invalidBucket != null) {
+            throw new ConfigValidationException("autoTpmSloLengthBuckets",
+                    "Invalid SLO length bucket fragment '" + invalidBucket + "' in '" + bucketSpec
+                            + "'. Expected format like '256:150,1024:300,*:2400'");
+        }
+        String multiplierSpec = config.getAutoTpmPrioritySloMultipliers();
+        String invalidMultiplier = PrioritySloPolicy.firstInvalidMultiplierEntry(multiplierSpec);
+        if (invalidMultiplier != null) {
+            throw new ConfigValidationException("autoTpmPrioritySloMultipliers",
+                    "Invalid priority SLO multiplier fragment '" + invalidMultiplier + "' in '" + multiplierSpec
+                            + "'. Expected format like '30:2.0,40:1.5,50:1.0'");
+        }
+    }
+
+    /**
+     * F3 (P0-3): after all overrides are applied, warn about every
+     * FLEXLB_/AUTO_TPM_/COST_-prefixed environment variable that matches no
+     * config field — previously such misspelled names were silently ignored
+     * (e.g. an intended queue-size override never taking effect). Warn-only by
+     * design: these prefixes may be shared by unrelated system variables, so
+     * aborting would be too aggressive.
+     */
+    private void warnUnmatchedEnvVars(Map<String, String> environment) {
+        Set<String> known = knownEnvVarNames();
+        for (String name : findUnmatchedEnvVars(environment)) {
+            String suggestion = nearestKnownEnvName(name, known);
+            log.warn("环境变量 {} 未匹配任何配置字段，将被忽略{}", name,
+                    suggestion == null ? "" : "（did-you-mean: " + suggestion + "？）");
+        }
+    }
+
+    /**
+     * Pure scan (package-private for tests): given an environment map, return
+     * the sorted FLEXLB_/AUTO_TPM_/COST_-prefixed variable names that neither
+     * map to any {@link FlexlbConfig} field (camelCase → UPPER_SNAKE_CASE) nor
+     * are special config entry points nor known deprecated names.
+     */
+    static List<String> findUnmatchedEnvVars(Map<String, String> environment) {
+        Set<String> known = knownEnvVarNames();
+        return environment.keySet().stream()
+                .filter(ConfigService::hasScannedPrefix)
+                .filter(name -> !known.contains(name))
+                .filter(name -> !DEPRECATED_ENV_VARS.contains(name))
+                .sorted()
+                .toList();
+    }
+
+    private static boolean hasScannedPrefix(String name) {
+        for (String prefix : SCANNED_ENV_PREFIXES) {
+            if (name.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Full env-name mapping: every FlexlbConfig field plus the special config entry points. */
+    static Set<String> knownEnvVarNames() {
+        Set<String> names = new HashSet<>();
+        for (Field field : FlexlbConfig.class.getDeclaredFields()) {
+            names.add(camelToUpperSnakeCase(field.getName()));
+        }
+        names.add(FLEXLB_CONFIG_ENV);
+        names.add(PREFILL_TIME_FORMULA_ENV);
+        names.add(TRAFFIC_POLICY_CONFIG_ENV);
+        names.add(TRAFFIC_POLICY_CONFIG_FILE_ENV);
+        return names;
+    }
+
+    /** Cheap did-you-mean: nearest known env name within edit distance 2, or null. */
+    static String nearestKnownEnvName(String name, Set<String> known) {
+        String best = null;
+        int bestDist = 3;
+        for (String candidate : known) {
+            int dist = boundedEditDistance(name, candidate, bestDist);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    /** Levenshtein distance capped at {@code limit} (returns {@code limit} when exceeded). */
+    private static int boundedEditDistance(String a, String b, int limit) {
+        if (Math.abs(a.length() - b.length()) >= limit) {
+            return limit;
+        }
+        int[] prev = new int[b.length() + 1];
+        int[] curr = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) {
+            prev[j] = j;
+        }
+        for (int i = 1; i <= a.length(); i++) {
+            curr[0] = i;
+            int rowMin = curr[0];
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                curr[j] = Math.min(Math.min(curr[j - 1] + 1, prev[j] + 1), prev[j - 1] + cost);
+                rowMin = Math.min(rowMin, curr[j]);
+            }
+            if (rowMin >= limit) {
+                return limit;
+            }
+            int[] tmp = prev;
+            prev = curr;
+            curr = tmp;
+        }
+        return Math.min(prev[b.length()], limit);
     }
 }

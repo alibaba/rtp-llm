@@ -30,7 +30,18 @@ public enum StrategyErrorType {
     BATCH_BUILD_FAILED(8512, false),
     // worker (decode engine) execution failure — non-retryable to prevent retry storms
     // on persistent errors such as OOM or input-too-long.
-    WORKER_EXECUTION_FAILED(8513, false);
+    WORKER_EXECUTION_FAILED(8513, false),
+    // Auto-TPM: request seq_len can never fit one batch's hard token capacity.
+    // Explicit failure instead of a silent batcher drop (design doc 8.3).
+    BATCH_TOKEN_CAPACITY_EXCEEDED(8514, false),
+    // Auto-TPM: plan retries exhausted purely by optimistic-concurrency conflicts
+    // (VERSION_MISMATCH / eviction CONFLICT on every attempt, design doc 16.3).
+    // Distinct from NO_AVAILABLE_WORKER, which still covers capacity shortage.
+    SCHEDULER_PLAN_CONFLICT(8515, false),
+    // Auto-TPM: queued request preempted by a strictly higher-priority request
+    // (429 / Throttling.Aborted semantics, design doc 16.3). Non-retryable
+    // against this master — the cluster is saturated with higher-priority work.
+    PRIORITY_PREEMPTED(8429, false);
 
     private final int errorCode;
     private final String errorMsg;

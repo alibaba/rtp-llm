@@ -29,6 +29,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;
+    private final boolean gateOnTotalLoad;
     private final ResourceMeasureFactory resourceMeasureFactory;
 
     public CostBasedDecodeStrategy(ConfigService configService,
@@ -37,6 +38,11 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         this.engineWorkerStatus = engineWorkerStatus;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.decayFactor = config.getWeightedCacheDecayFactor();
+        // N2: when gate mode is "engine_load", the hard filter must also use
+        // engine-facing load (excluding queued shadow reservations) — otherwise
+        // the hotspot filter amplifies the death-spiral by filtering out the
+        // last surviving endpoint whose totalLoad is inflated by shadows.
+        this.gateOnTotalLoad = "total_load".equalsIgnoreCase(config.getAutoTpmDecodeGateLoadMode());
         this.resourceMeasureFactory = resourceMeasureFactory;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, this);
     }
@@ -52,19 +58,23 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
         List<DecodeEndpoint> eligible = filterResult.endpoints();
         if (CollectionUtils.isEmpty(eligible)) {
-            Logger.warn("Decode select failed: no available endpoints, request_id={}, rejections={}",
-                    balanceContext.getRequestId(), filterResult.rejections());
+            Logger.warn("Decode select failed: no available endpoints, request_id={}, registered={}, eligible=0, rejections={}",
+                    balanceContext.getRequestId(), filterResult.registered(), filterResult.rejections());
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
         FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config);
         List<DecodeEndpoint> survivors = hardFilterResult.endpoints();
+        if (survivors.size() <= 1) {
+            Logger.warn("Decode endpoint scarcity: registered={}, eligible={}, survivors={}, hardFilterRejections={}",
+                    filterResult.registered(), eligible.size(), survivors.size(), hardFilterResult.rejections());
+        }
 
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
         if (selectedEndpoint != null) {
             return buildServerStatus(selectedEndpoint, seqLen, expectedKvTokens,
-                    roleType, balanceContext.getRequestId());
+                    roleType, balanceContext);
         }
 
         Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
@@ -74,13 +84,13 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
     }
 
-    private record EndpointFilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections) {}
+    private record EndpointFilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections, int registered) {}
     private record FilterResult(List<DecodeEndpoint> endpoints, Map<String, Integer> rejections) {}
 
     private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
         DecodeResourceMeasure measure = (DecodeResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
         if (measure == null) {
-            return new EndpointFilterResult(new ArrayList<>(), Map.of("NO_REGISTERED", 1));
+            return new EndpointFilterResult(new ArrayList<>(), Map.of("NO_REGISTERED", 1), 0);
         }
         List<DecodeEndpoint> result = new ArrayList<>(engineWorkerStatus.getModelWorkerCapacity(roleType));
         Map<String, Integer> rejections = new java.util.HashMap<>();
@@ -99,9 +109,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             result.add(de);
         });
         if (registered == 0) {
-            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
+            return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1), 0);
         }
-        return new EndpointFilterResult(result, rejections);
+        if (result.isEmpty()) {
+            Logger.warn("Decode getAvailableEndpoints: registered={}, available=0, rejections={}", registered, rejections);
+        }
+        return new EndpointFilterResult(result, rejections, registered);
     }
 
     @Override
@@ -125,7 +138,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long sumCacheUsed = 0;
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
-            loads[i] = ep.getTotalLoad();
+            loads[i] = gateOnTotalLoad ? ep.getTotalLoad() : ep.getEngineLoad();
             kvUseds[i] = ep.realKvUsed();
             sumLoad += loads[i];
             sumCacheUsed += kvUseds[i];
@@ -224,7 +237,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
                                            long expectedKvTokens, RoleType roleType,
-                                           long requestId) {
+                                           BalanceContext balanceContext) {
+        long requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
         try {
             // All schedule modes (BATCH, DIRECT, QUEUE) reserve decode KV to prevent
@@ -239,7 +253,10 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             if (totalKv > 0 && expectedKvTokens > totalKv) {
                 expectedKvTokens = totalKv;
             }
-            optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens);
+            // Carry the Auto-TPM priority/deadline into the shadow reservation
+            // so it can be ranked as a decode eviction candidate (Phase 4).
+            optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens,
+                    balanceContext.getPriority(), balanceContext.getDeadlineMs());
 
             result.setSuccess(true);
             result.setRole(roleType);

@@ -84,8 +84,8 @@ DASH_ERROR_UNSUPPORTED = DashErrorSpec(
 DASH_ERROR_CAPACITY = DashErrorSpec(
     error_no=LLMFinishReason.TASK_LIST_FULL,
     finish_reason=LLMFinishReason.TASK_LIST_FULL,
-    status_code=503,
-    status_name="ServiceUnavailable",
+    status_code=429,
+    status_name="TooManyRequests",
 )
 DASH_ERROR_TIMEOUT = DashErrorSpec(
     error_no=LLMFinishReason.STOP_TIMEOUT,
@@ -916,7 +916,11 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         )
 
     request_headers: dict[str, str] = {}
-    for header_name in ("user_id", "x-dashscope-apikeyid"):
+    for header_name in (
+        "user_id",
+        "x-dashscope-apikeyid",
+        "x-dashscope-inner-qos-level",
+    ):
         value = _normalize_non_empty_str(ds_attrs.get(header_name))
         if value is not None:
             request_headers[header_name] = value

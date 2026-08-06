@@ -109,6 +109,11 @@ class GenerateConfig(BaseModel):
     timeout_ms: Optional[int] = -1
     ttft_timeout_ms: Optional[int] = -1
     traffic_reject_priority: Optional[int] = 100
+    # Auto-TPm QoS priority (30/40/50/60/70). Set from the
+    # x-dashscope-inner-qos-level HTTP header at the endpoint layer so
+    # it survives IPC to the dash_sc enqueue loop, where GenerateInput
+    # .headers may be absent.
+    qos_priority: Optional[int] = None
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW

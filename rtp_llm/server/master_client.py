@@ -171,6 +171,11 @@ class MasterClient:
         try:
             channel = self._get_channel(target)
             stub = FlexlbServiceStub(channel)
+            route_logger.info(
+                "gRPC Schedule sending, request_id=%s, proto_priority=%d",
+                request_id,
+                request_pb.priority,
+            )
             response = await stub.Schedule(request_pb, timeout=timeout_s)
             return response
         except grpc.aio.AioRpcError as e:
@@ -257,6 +262,7 @@ class MasterClient:
 
         gc = input.generate_config
         api_key = self._extract_api_key(input)
+        priority = self._extract_priority(input)
         request_pb = FlexlbScheduleRequestPB(
             request_id=request_id,
             block_cache_keys=block_cache_keys,
@@ -269,6 +275,7 @@ class MasterClient:
             model="engine_service",
             api_key=api_key,
             cache_key_block_size=cache_key_block_size,
+            priority=priority,
         )
         if input_pb is not None:
             request_pb.generate_input = input_pb.SerializeToString()
@@ -341,3 +348,28 @@ class MasterClient:
         if auth.startswith(BEARER_PREFIX):
             return auth[len(BEARER_PREFIX) :].strip()
         return ""
+
+    @staticmethod
+    def _extract_priority(input: GenerateInput) -> int:
+        """QoS priority from x-dashscope-inner-qos-level header; returns 50
+        (default priority) when the header is absent so FlexLB participates in
+        Auto-TPM scheduling instead of opting out via NO_PRIORITY. Pure
+        passthrough, no range validation here."""
+        # 1. Try GenerateInput.headers (available when enqueue runs in the
+        #    same process that received the HTTP request).
+        headers = getattr(input, "headers", None)
+        if headers:
+            value = headers.get("x-dashscope-inner-qos-level")
+            if value is not None:
+                try:
+                    return int(str(value).strip())
+                except (TypeError, ValueError):
+                    pass  # fall through to generate_config fallback
+        # 2. Fallback: generate_config.qos_priority survives IPC to the
+        #    dash_sc enqueue loop where GenerateInput.headers may be absent.
+        gc = getattr(input, "generate_config", None)
+        if gc is not None:
+            qos_priority = getattr(gc, "qos_priority", None)
+            if qos_priority is not None and qos_priority > 0:
+                return qos_priority
+        return 50

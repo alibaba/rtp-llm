@@ -104,12 +104,21 @@ class ExceptionType(IntEnum):
     MASTER_NO_PDFUSION_WORKER = 8404, ExceptionCategory.CAPACITY
     MASTER_NO_VIT_WORKER = 8405, ExceptionCategory.CAPACITY
     MASTER_INVALID_REQUEST = 8406, ExceptionCategory.BAD_REQUEST
+    PRIORITY_PREEMPTED = 8429, ExceptionCategory.CAPACITY
 
     # route error
     ROUTE_ERROR = 8500, ExceptionCategory.CAPACITY
     ROUTER_QUEUE_FULL = 8502, ExceptionCategory.CAPACITY
     ROUTER_QUEUE_TIMEOUT = 8503, ExceptionCategory.TIMEOUT
     ROUTER_REQUEST_CANCELLED = 8504, ExceptionCategory.CANCELLED
+
+    # batch dispatch error
+    BATCH_DISPATCH_FAILED = 8510, ExceptionCategory.CAPACITY
+    BATCH_SLO_EXPIRED = 8511, ExceptionCategory.CAPACITY
+    BATCH_BUILD_FAILED = 8512, ExceptionCategory.CAPACITY
+    WORKER_EXECUTION_FAILED = 8513, ExceptionCategory.CAPACITY
+    BATCH_TOKEN_CAPACITY_EXCEEDED = 8514, ExceptionCategory.CAPACITY
+    SCHEDULER_PLAN_CONFLICT = 8515, ExceptionCategory.CAPACITY
 
     # multimodal error
     MM_LONG_PROMPT_ERROR = 901, ExceptionCategory.TOO_LONG

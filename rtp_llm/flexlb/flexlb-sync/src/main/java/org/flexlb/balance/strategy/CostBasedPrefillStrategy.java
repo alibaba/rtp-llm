@@ -70,7 +70,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
-        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
+        EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group,
+                config.getResourceMeasureIndicator(roleType), balanceContext.getExcludedPrefillIpPort());
         CandidateSet eligible = filterResult.endpoints();
         if (eligible.size() == 0) {
             Logger.warn("Prefill select failed: no available endpoints, request_id={}, rejections={}",
@@ -80,7 +81,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
 
-        FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config, cacheMatchResults);
+        FilterResult hardFilterResult = applyHardFilters(eligible, balanceContext, config, cacheMatchResults);
         CandidateSet survivors = hardFilterResult.candidates();
 
         // First pass: find the exact minimum score.
@@ -197,8 +198,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
     private record FilterResult(CandidateSet candidates, Map<String, Integer> rejections) {}
 
-    private FilterResult applyHardFilters(CandidateSet eligible, long seqLen,
+    private FilterResult applyHardFilters(CandidateSet eligible, BalanceContext balanceContext,
                                           FlexlbConfig config, Map<String, Integer> cacheMatchResults) {
+        long seqLen = balanceContext.getRequest().getSeqLen();
         long sloMs = config.resolveSloMs(seqLen);
         long sloRiskMarginMs = config.getCostSloRiskMarginMs();
         boolean sloFilterEnabled = config.isCostSloFilterEnabled();
@@ -233,9 +235,18 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             }
 
             long pendingCount = ep.realPendingCount();
-            long batcherWaitMs = ep.batcherWaitMs();
+            // Auto-TPM (design doc 6.2 simplified): endpointWaitMs +
+            // estimatedWait (8.4, priority-aware) + predictedPrefill −
+            // cacheBenefit. Cache benefit data is not available yet — 0.
+            // Task40: no-priority requests (legacy path) keep the legacy
+            // batcherWaitMs estimate — they never join the priority ordering.
+            long batcherWaitMs = config.isAutoTpmEnabled() && balanceContext.hasPriority()
+                    ? ep.batcherEstimatedWaitMs(balanceContext.getPriority(),
+                            balanceContext.getDeadlineMs(), balanceContext.getRequestId())
+                    : ep.batcherWaitMs();
+            long cacheBenefitMs = 0;
             feasible.setCandidate(feasibleCount++, ep, cacheHit,
-                    singlePrefillMs + endpointWaitMs + batcherWaitMs,
+                    singlePrefillMs + endpointWaitMs + batcherWaitMs - cacheBenefitMs,
                     endpointWaitMs, pendingCount);
             sumWaitMs += endpointWaitMs;
             sumPendingCount += pendingCount;
@@ -288,7 +299,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return new FilterResult(feasible, rejections);
     }
 
-    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group, ResourceMeasureIndicatorEnum indicator) {
+    private EndpointFilterResult getAvailableEndpoints(RoleType roleType, String group,
+                                                       ResourceMeasureIndicatorEnum indicator,
+                                                       String excludedIpPort) {
         CandidateSet result = candidateSets.get();
         result.reset(engineWorkerStatus.getModelWorkerCapacity(roleType));
         PrefillResourceMeasure measure = (PrefillResourceMeasure) resourceMeasureFactory.getMeasure(indicator);
@@ -297,6 +310,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         }
         Map<String, Integer> rejections = new java.util.HashMap<>();
 
+        PrefillEndpoint[] excludedEligible = new PrefillEndpoint[1];
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof PrefillEndpoint pe)) {
                 return;
@@ -309,10 +323,24 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 rejections.merge("RESOURCE_UNAVAILABLE", 1, Integer::sum);
                 return;
             }
+            // P1-4: skip the worker whose queue just rejected the offer — the
+            // fallback re-route must land elsewhere (kept below when it is
+            // the only eligible worker).
+            if (excludedIpPort != null && excludedIpPort.equals(ipPort)) {
+                excludedEligible[0] = pe;
+                rejections.merge("EXCLUDED_RETRY", 1, Integer::sum);
+                return;
+            }
             result.addEndpoint(pe);
         });
         if (registered == 0) {
             return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
+        }
+        if (result.size() == 0 && excludedEligible[0] != null) {
+            // P1-4: single-worker (or fully-filtered) cluster — excluding the
+            // only eligible worker would turn a queue-full retry into a hard
+            // NO_AVAILABLE_WORKER; keep the legacy candidate set instead.
+            result.addEndpoint(excludedEligible[0]);
         }
         return new EndpointFilterResult(result, rejections);
     }

@@ -157,6 +157,10 @@ message GenerateInputPB {
     int32 group_size = 7;
     google.protobuf.Int64Value group_id = 8;
     RequestInfoPB request_info = 9;
+    // Auto-TPM QoS priority (task40): 30/40/50/60/70; 0 = not set (request
+    // carries no priority). Used as a metrics tag on engine-side TPS
+    // reporting; never affects engine scheduling.
+    int32 priority = 10;
 }
 
 message AuxInfoPB {

@@ -495,4 +495,172 @@ public class MetricConstant {
      * Dispatch executor completed task count (counter — monotonically increasing)
      */
     public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS = "dispatch.executor.completed.tasks";
+
+    /* ------------------------ Auto-TPM Priority Scheduler ---------------------------- */
+
+    /**
+     * Auto-TPM request count by priority (QPS), tags: priority
+     */
+    public static final String AUTO_TPM_REQUEST_COUNT = "auto_tpm.request.count";
+
+    /**
+     * Auto-TPM per-request SLO in ms (timer), tags: priority, seq_bucket
+     */
+    public static final String AUTO_TPM_REQUEST_SLO_MS = "auto_tpm.request.slo_ms";
+
+    /**
+     * Auto-TPM schedule latency in ms (timer), tags: priority, result
+     */
+    public static final String AUTO_TPM_SCHEDULE_LATENCY_MS = "auto_tpm.schedule.latency_ms";
+
+    /**
+     * Auto-TPM normal placement success count (QPS), tags: priority
+     */
+    public static final String AUTO_TPM_NORMAL_PLACEMENT_COUNT = "auto_tpm.normal_placement.count";
+
+    /**
+     * Auto-TPM eviction plan generation count (QPS), tags: priority, case, result
+     */
+    public static final String AUTO_TPM_EVICTION_PLAN_COUNT = "auto_tpm.eviction_plan.count";
+
+    /**
+     * Auto-TPM eviction plan commit count (QPS), tags: priority, case, result
+     */
+    public static final String AUTO_TPM_EVICTION_COMMIT_COUNT = "auto_tpm.eviction_commit.count";
+
+    /**
+     * Auto-TPM evicted victim count (QPS), tags: victim_priority, incoming_priority, stage, case
+     */
+    public static final String AUTO_TPM_VICTIM_COUNT = "auto_tpm.victim.count";
+
+    /**
+     * Auto-TPM optimistic plan commit conflict count (QPS), tags: case
+     */
+    public static final String AUTO_TPM_PLAN_CONFLICT_COUNT = "auto_tpm.plan_conflict.count";
+
+    /**
+     * Auto-TPM prefill batcher queue depth (gauge), tags: endpoint
+     */
+    public static final String AUTO_TPM_PREFILL_QUEUE_DEPTH = "auto_tpm.prefill.queue_depth";
+
+    /**
+     * Auto-TPM evicted victim KV tokens released (timer), tags: victim_priority, stage
+     */
+    public static final String AUTO_TPM_VICTIM_KV_TOKENS = "auto_tpm.victim.kv_tokens";
+
+    /**
+     * Auto-TPM decode reserved (shadow, engine-unconfirmed) request count (gauge), tags: endpoint
+     */
+    public static final String AUTO_TPM_DECODE_RESERVED_COUNT = "auto_tpm.decode.reserved.count";
+
+    /**
+     * Auto-TPM decode shadow hard KV reserved tokens (gauge), tags: endpoint
+     */
+    public static final String AUTO_TPM_DECODE_SHADOW_KV_RESERVED = "auto_tpm.decode.shadow_kv_reserved";
+
+    /**
+     * Auto-TPM TTFT approximation in ms (timer), tags: priority.
+     * Approximated as request arrival → schedule completion on the Master;
+     * true TTFT (first token on the engine) is not observable here (§19.2).
+     */
+    public static final String AUTO_TPM_TTFT_MS = "auto_tpm.ttft_ms";
+
+    /**
+     * Auto-TPM deadline miss count (QPS), tags: priority.
+     * Counted when schedule completion exceeds the request deadlineMs.
+     */
+    public static final String AUTO_TPM_DEADLINE_MISS_COUNT = "auto_tpm.deadline_miss.count";
+
+    /**
+     * Auto-TPM priority preemption count (QPS), tags: stage
+     * (prefill_queued / decode_reserved).
+     */
+    public static final String AUTO_TPM_PRIORITY_PREEMPT_COUNT = "auto_tpm.priority_preempt.count";
+
+    /**
+     * Auto-TPM decode confirmed running request count (gauge), tags: endpoint.
+     * Dashboard migration note on the value semantics:
+     * <ul>
+     *   <li>Phase 4 and earlier: equalled confirmedRunningCount, i.e. the
+     *       accepted and running layers merged into one gauge.</li>
+     *   <li>Phase 5+: counts ONLY engine-reported {@code RUNNING} tasks; the
+     *       accepted layer moved to {@link #AUTO_TPM_DECODE_ACCEPTED_COUNT}.
+     *       The former merged value = running.count + accepted.count.</li>
+     * </ul>
+     */
+    public static final String AUTO_TPM_DECODE_RUNNING_COUNT = "auto_tpm.decode.running.count";
+
+    /**
+     * Auto-TPM deadline-rescue candidate processing count (QPS), tags:
+     * priority, result (success / requeue_failed / cas_skipped / limited).
+     */
+    public static final String AUTO_TPM_RESCUE_COUNT = "auto_tpm.rescue.count";
+
+    /**
+     * Auto-TPM deadline-rescue migration latency in ms (timer), tags:
+     * from_endpoint (source prefill endpoint), to_endpoint (new prefill
+     * endpoint on success, "-" on failure), priority, result
+     * (success / requeue_failed). Reported per rescueOne attempt (§14.4);
+     * auxiliary to {@link #AUTO_TPM_RESCUE_COUNT}, whose tags are unchanged.
+     */
+    public static final String AUTO_TPM_RESCUE_LATENCY_MS = "auto_tpm.rescue.latency_ms";
+
+    /**
+     * Auto-TPM cross-endpoint transfer attempt count (QPS), tags: priority,
+     * result (success / requeue_failed). Reported only when a request was
+     * actually removed from its source queue for migration.
+     */
+    public static final String AUTO_TPM_TRANSFER_COUNT = "auto_tpm.transfer.count";
+
+    /**
+     * Auto-TPM decode accepted-not-running (engine KV-allocated) request
+     * count (gauge), tags: endpoint. Introduced by the Phase 5 layered view:
+     * before Phase 5 this layer was folded into
+     * {@link #AUTO_TPM_DECODE_RUNNING_COUNT}; from Phase 5 on, the former
+     * merged value = running.count + accepted.count (dashboard migration).
+     */
+    public static final String AUTO_TPM_DECODE_ACCEPTED_COUNT = "auto_tpm.decode.accepted.count";
+
+    /**
+     * Auto-TPM engine cancel requests issued (QPS), tags: endpoint.
+     * Counted when an accepted-eviction commit fires a Cancel RPC.
+     */
+    public static final String AUTO_TPM_CANCEL_REQUEST_COUNT = "auto_tpm.cancel.request.count";
+
+    /**
+     * Auto-TPM engine cancel release confirmations (QPS), tags: endpoint.
+     * Counted when a cancelled victim's release is confirmed — either inside
+     * the commit wait window or later via the WorkerStatus settle path.
+     */
+    public static final String AUTO_TPM_CANCEL_CONFIRM_COUNT = "auto_tpm.cancel.confirm.count";
+
+    /**
+     * Auto-TPM engine cancel wait-window timeouts (QPS), tags: endpoint.
+     * The plan failed; the victim stays CANCEL_REQUESTED until WorkerStatus
+     * settles it.
+     */
+    public static final String AUTO_TPM_CANCEL_TIMEOUT_COUNT = "auto_tpm.cancel.timeout.count";
+
+    /**
+     * Auto-TPM plan age — snapshot/plan build to successful commit, ms
+     * (redesign N3 §3.8 placement_plan_age_ms), tags: priority.
+     * Quantifies how stale a lockfree commit's plan view was.
+     */
+    public static final String AUTO_TPM_PLAN_AGE_MS = "auto_tpm.plan_age_ms";
+
+    /**
+     * Auto-TPM decode engine-facing load (gauge): confirmed + dispatched
+     * reservations, excluding queued-phase shadow entries (redesign N2/§3.8
+     * decode_shadow_load vs decode_engine_running), tags: endpoint. Compare
+     * against {@link #AUTO_TPM_DECODE_RESERVED_COUNT} to monitor root cause C.
+     */
+    public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
+
+    /**
+     * Auto-TPM inflight settle misses (QPS): a finishYielded/PreemptedById
+     * found no inflight entry (review P2-2), tags: kind (yielded/preempted).
+     * Harmless in isolation, but a burst points at a registration/cleanup
+     * race — alert-worthy where a warn log is not.
+     */
+    public static final String AUTO_TPM_INFLIGHT_SETTLE_MISS = "auto_tpm.inflight_settle_miss.count";
 }

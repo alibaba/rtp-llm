@@ -11,6 +11,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import ExceptionCategory, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -369,7 +370,15 @@ class FrontendServer(object):
                 },
             )
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        status_code = 500
+        if isinstance(e, FtRuntimeException):
+            if e.exception_type.category == ExceptionCategory.CAPACITY:
+                status_code = 429
+        elif isinstance(e, ConcurrencyException):
+            # ConcurrencyException maps to CONCURRENCY_LIMIT_ERROR (CAPACITY)
+            status_code = 429
+
+        rep = ORJSONResponse(exception_json, status_code=status_code)
         return rep
 
     async def _call_generate_with_report(

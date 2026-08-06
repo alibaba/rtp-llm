@@ -3,6 +3,9 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.scheduler.priority.InflightRegistrar;
+import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -50,13 +53,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@link DispatchCallback} which this class implements.
  */
 @Component
-public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallback {
+public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallback, InflightRegistrar {
 
     private final ConfigService configService;
     private final Router router;
     private final EndpointRegistry endpointRegistry;
     private final BatchDispatcher dispatcher;
     private final BatchSchedulerReporter reporter;
+    private final PriorityAdmissionScheduler priorityScheduler;
     private final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
     private final Map<Long, RequestLifecycleSnapshot> terminalStates = new ConcurrentHashMap<>();
     private final BatchIdGenerator batchIdGenerator;
@@ -67,12 +71,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                                 EndpointRegistry endpointRegistry,
                                 BatchDispatcher dispatcher,
                                 BatchSchedulerReporter reporter,
+                                PriorityAdmissionScheduler priorityScheduler,
                                 Environment environment) {
         this.configService = configService;
         this.router = router;
         this.endpointRegistry = endpointRegistry;
         this.dispatcher = dispatcher;
         this.reporter = reporter;
+        this.priorityScheduler = priorityScheduler;
         // Initialize Snowflake batch ID generator with master identity
         this.batchIdGenerator = new BatchIdGenerator(detectLocalIp(), detectPort(environment));
     }
@@ -117,6 +123,18 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             int maxInflight = configService.loadBalanceConfig().getFlexlbBatchMaxInflight();
             if (maxInflight > 0 && inflight.size() >= maxInflight) {
                 completeError(future, StrategyErrorType.QUEUE_FULL, null);
+                return future;
+            }
+
+            // Auto-TPM priority path: delegate plan/commit to the priority
+            // scheduler. Disabled by default — the legacy path below is
+            // byte-for-byte unchanged when the switch is off.
+            // Task40: requests without an explicit priority always take the
+            // legacy path and never enter any priority mechanism; if no
+            // worker is available they fail fast with NO_AVAILABLE_WORKER.
+            if (configService.loadBalanceConfig().isAutoTpmEnabled() && priorityScheduler != null
+                    && ctx.hasPriority()) {
+                priorityScheduler.schedule(ctx, future, this);
                 return future;
             }
 
@@ -186,6 +204,138 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         return future;
     }
 
+    // ==================== InflightRegistrar (Auto-TPM commit protocol) ====================
+
+    /**
+     * Register an Auto-TPM admitted item into the same inflight tracking as
+     * the legacy path, so dispatch/completion/TTL/rollback behave identically.
+     * Mirrors the duplicate handoff check in {@link #submit}.
+     */
+    @Override
+    public boolean registerInflight(BatchItem item) {
+        InflightEntry entry = new InflightEntry(item);
+        InflightEntry existing = inflight.putIfAbsent(item.requestId(), entry);
+        if (existing != null || terminalStates.containsKey(item.requestId())) {
+            if (existing == null) {
+                inflight.remove(item.requestId(), entry);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    @Override
+    public void unregisterInflight(BatchItem item) {
+        InflightEntry entry = inflight.get(item.requestId());
+        if (entry != null && entry.item == item) {
+            inflight.remove(item.requestId(), entry);
+        }
+    }
+
+    /**
+     * Terminate an evicted victim with {@link StrategyErrorType#PRIORITY_PREEMPTED}
+     * (engine-accepted victims, contract 5.3): release its decode reservation,
+     * complete its future and tombstone the request id. Mirrors
+     * {@link #onOfferFailure} and is idempotent — the lifecycle transition,
+     * rollback CAS and future completion each apply at most once (design doc 17.3).
+     */
+    @Override
+    public void finishPreempted(BatchItem victim, String detail) {
+        finishVictim(victim, StrategyErrorType.PRIORITY_PREEMPTED, detail);
+    }
+
+    /**
+     * {@link #finishPreempted} by request id (victims whose BatchItem is not
+     * at hand, design doc 11.5). A missing inflight entry means the request
+     * already reached a terminal state — no-op, idempotent.
+     */
+    @Override
+    public void finishPreemptedById(long requestId, String detail) {
+        InflightEntry entry = inflight.get(requestId);
+        if (entry != null) {
+            finishPreempted(entry.item, detail);
+        } else {
+            // N1: a settle on an unknown id is harmless (already terminal or
+            // never registered) but worth surfacing — a burst points at a
+            // registration/cleanup race.
+            Logger.warn("finishPreemptedById miss: request_id={} not inflight, detail={}",
+                    requestId, detail);
+            // P2-2: surface the miss as a metric too — warn logs alone are
+            // not alertable.
+            if (priorityScheduler != null) {
+                priorityScheduler.onInflightSettleMiss("preempted");
+            }
+        }
+    }
+
+    /**
+     * Terminate a yielded victim — one the engine never saw (prefill queue
+     * eviction / decode reserved-only eviction, contract 5.3) — with the
+     * retryable {@link StrategyErrorType#NO_AVAILABLE_WORKER}. Shares the
+     * idempotent release/tombstone chain of {@link #finishPreempted}.
+     */
+    @Override
+    public void finishYielded(BatchItem victim, String detail) {
+        finishVictim(victim, StrategyErrorType.NO_AVAILABLE_WORKER, detail);
+    }
+
+    /**
+     * {@link #finishYielded} by request id (decode reserved-only victims).
+     * A missing inflight entry means the request already reached a terminal
+     * state — no-op, idempotent.
+     */
+    @Override
+    public void finishYieldedById(long requestId, String detail) {
+        InflightEntry entry = inflight.get(requestId);
+        if (entry != null) {
+            finishYielded(entry.item, detail);
+        } else {
+            // N1: same rationale as finishPreemptedById — no-op, but observable.
+            Logger.warn("finishYieldedById miss: request_id={} not inflight, detail={}",
+                    requestId, detail);
+            // P2-2: metric alongside the warn log.
+            if (priorityScheduler != null) {
+                priorityScheduler.onInflightSettleMiss("yielded");
+            }
+        }
+    }
+
+    /**
+     * Shared victim terminal chain: rollback CAS, lifecycle fail, future
+     * completion with the caller's terminal error type, tombstone. Each step
+     * applies at most once regardless of repeats or terminal-path races.
+     */
+    private void finishVictim(BatchItem victim, StrategyErrorType errorType, String detail) {
+        InflightEntry entry = entryFor(victim);
+        if (entry != null) {
+            synchronized (entry) {
+                rollbackOnce(entry);
+                RequestLifecycleSnapshot terminal = entry.lifecycle.fail(detail);
+                completeError(victim.future(), errorType, detail);
+                finishEntry(entry, terminal);
+            }
+        } else if (!victim.future().isDone() && !terminalStates.containsKey(victim.requestId())) {
+            rollback(victim);
+            completeError(victim.future(), errorType, detail);
+        }
+    }
+
+    /**
+     * Record the accepted-eviction CANCEL_REQUESTED mark on the victim's
+     * inflight item (Phase 5): a later engine-reported CANCELLED completion
+     * for this request is then attributed to {@code PRIORITY_PREEMPTED}
+     * instead of a generic worker failure.
+     */
+    @Override
+    public boolean markCancelRequested(long requestId, String detail) {
+        InflightEntry entry = inflight.get(requestId);
+        if (entry == null) {
+            return false;
+        }
+        entry.item.setPreemptCancelDetail(detail);
+        return true;
+    }
+
     // ==================== Completion from worker status ====================
 
     public void onWorkerStatusUpdate(WorkerStatusResponse response) {
@@ -231,6 +381,17 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     if (task.getErrorCode() == 0) {
                         terminal = entry.lifecycle.complete("decode completed");
                         completeSuccess(entry.item);
+                    } else if (isPreemptCancelled(task, entry.item)) {
+                        // Phase 5 attribution (gated by autoTpmEnabled): an
+                        // engine CANCELLED completion of a CANCEL_REQUESTED
+                        // victim is the preemption settling, not a worker
+                        // failure — terminal 8429, late confirm counted.
+                        String detail = entry.item.preemptCancelDetail();
+                        terminal = entry.lifecycle.fail(detail);
+                        completeError(entry.item.future(), StrategyErrorType.PRIORITY_PREEMPTED, detail);
+                        if (priorityScheduler != null) {
+                            priorityScheduler.onAcceptedPreemptSettled(decodeEndpointKey(entry.item));
+                        }
                     } else {
                         terminal = entry.lifecycle.fail("worker error code " + task.getErrorCode());
                         completeError(entry.item.future(), StrategyErrorType.WORKER_EXECUTION_FAILED,
@@ -248,6 +409,30 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     public int getInflightSize() {
         return inflight.size();
+    }
+
+    /**
+     * Engine {@code ErrorCodePB.CANCELLED} (engine_cancel_rpc_design.md): the
+     * request was cancelled, not failed by the worker.
+     */
+    private static final long ENGINE_ERROR_CANCELLED = 2;
+
+    /**
+     * Whether this failed completion is the settling of an accepted-eviction
+     * cancel (Phase 5): engine reports CANCELLED, the item carries the
+     * CANCEL_REQUESTED mark, and Auto-TPM is enabled. With the switch off the
+     * mark is never set, and even a stray CANCELLED keeps the legacy
+     * WORKER_EXECUTION_FAILED attribution (iron rule 1).
+     */
+    private boolean isPreemptCancelled(TaskInfo task, BatchItem item) {
+        return task.getErrorCode() == ENGINE_ERROR_CANCELLED
+                && item.preemptCancelDetail() != null
+                && configService.loadBalanceConfig().isAutoTpmEnabled();
+    }
+
+    /** Victim's decode endpoint key for the settle metric; "unknown" when absent. */
+    private static String decodeEndpointKey(BatchItem item) {
+        return item.decodeEp() != null ? item.decodeEp().ipPort() : "unknown";
     }
 
     public RequestLifecycleSnapshot getRequestState(long requestId,
@@ -279,6 +464,26 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         long cutoff = System.currentTimeMillis() - ttlMs;
         terminalStates.entrySet().removeIf(entry -> entry.getValue().updatedAtMs() < cutoff);
+
+        // N1 (P1-4): reclaim orphan decode reservations — shadow entries past
+        // the TTL with no matching scheduler inflight entry (e.g. interrupted
+        // between route() and registerInflight, or a victim settle that raced
+        // this cleanup). Without this pass they distort the admission view
+        // until the registry's 300s eviction catches them.
+        for (Map.Entry<String, DecodeEndpoint> decodeEntry
+                : endpointRegistry.getDecodeEndpoints().entrySet()) {
+            DecodeEndpoint decodeEp = decodeEntry.getValue();
+            for (Map.Entry<Long, RequestInflight> reserved : decodeEp.reservedView().entrySet()) {
+                long requestId = reserved.getKey();
+                if (now - reserved.getValue().createdAtMs() > ttlMs
+                        && !inflight.containsKey(requestId)) {
+                    decodeEp.release(requestId);
+                    Logger.warn("orphan decode reservation reclaimed: request_id={} worker={} age_ms={}",
+                            requestId, decodeEntry.getKey(),
+                            now - reserved.getValue().createdAtMs());
+                }
+            }
+        }
     }
 
     // ==================== BatchDecisionHandler callbacks (from WorkerBatcher) ====================
@@ -302,19 +507,24 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     @Override
     public void onOfferFailure(BatchItem item, Throwable error) {
+        // Auto-TPM: over-capacity requests carry a dedicated non-retryable error code
+        // instead of the generic (retryable) dispatch failure (design doc 8.3).
+        StrategyErrorType errorType = error instanceof BatchTokenCapacityExceededException
+                ? StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED
+                : StrategyErrorType.BATCH_DISPATCH_FAILED;
         InflightEntry entry = entryFor(item);
         if (entry != null) {
             synchronized (entry) {
                 rollbackOnce(entry);
                 RequestLifecycleSnapshot terminal = entry.lifecycle.fail(
                         "batcher offer failed: " + error.getMessage());
-                completeError(item.future(), StrategyErrorType.BATCH_DISPATCH_FAILED,
+                completeError(item.future(), errorType,
                         "Batcher offer failed: " + error.getMessage());
                 finishEntry(entry, terminal);
             }
         } else if (!item.future().isDone() && !terminalStates.containsKey(item.requestId())) {
             rollback(item);
-            completeError(item.future(), StrategyErrorType.BATCH_DISPATCH_FAILED,
+            completeError(item.future(), errorType,
                     "Batcher offer failed: " + error.getMessage());
         }
     }
@@ -386,6 +596,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             if (entry != null) {
                 entry.lifecycle.markDispatched();
                 item.ctx().setBatchDispatchedNanos(System.nanoTime());
+            }
+            // N2: the decode reservation leaves the queued phase — from now on
+            // it counts against the engine concurrency again.
+            if (item.decodeEp() != null) {
+                item.decodeEp().markDispatchedPhase(item.requestId());
             }
         }
 
@@ -584,7 +799,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     // ==================== Internal: static utilities ====================
 
-    private static ServerStatus findServer(Response response, RoleType roleType) {
+    /** Locate the first server of a role in a route response (shared with the Auto-TPM path). */
+    public static ServerStatus findServer(Response response, RoleType roleType) {
         if (response.getServerStatus() == null) {
             return null;
         }
@@ -619,7 +835,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         return result;
     }
 
-    private static ServerStatus copyOf(ServerStatus src) {
+    /** Defensive copy of a route server status (shared with the Auto-TPM path). */
+    public static ServerStatus copyOf(ServerStatus src) {
         if (src == null) {
             return null;
         }
@@ -668,6 +885,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         // Per-worker metrics: decode endpoints
         for (Map.Entry<String, DecodeEndpoint> entry : endpointRegistry.getDecodeEndpoints().entrySet()) {
             entry.getValue().reportBatchMetrics(reporter);
+        }
+
+        // Auto-TPM: per-endpoint prefill queue depth gauge (design doc 19.2)
+        if (priorityScheduler != null && configService.loadBalanceConfig().isAutoTpmEnabled()) {
+            priorityScheduler.reportPrefillQueueDepths();
+            priorityScheduler.reportDecodeAdmissionGauges();
         }
     }
 

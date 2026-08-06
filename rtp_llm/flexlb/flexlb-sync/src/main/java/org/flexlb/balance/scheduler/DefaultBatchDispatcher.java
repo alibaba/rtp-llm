@@ -9,6 +9,7 @@ import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -291,6 +292,13 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill());
         addRoleAddr(config, item.decode());
+        // Task40: pass the normalized Auto-TPM priority through to the engine
+        // (metrics tagging only). No-priority requests leave the field at the
+        // proto3 default 0 = "not set".
+        Request request = item.ctx().getRequest();
+        if (request != null && request.hasPriority()) {
+            input.setPriority(request.getPriority());
+        }
         return input.build();
     }
 

@@ -325,6 +325,80 @@ class FixedWindowBatcherAlgorithmTest {
         assertEquals(0, context.size());
     }
 
+    // ---- queue_deadline_exceeded valve gating (P0-2 fix) ----
+
+    @Test
+    void autoTpmOnLegacyHeadPastQueueDeadlineIsDroppedAndReleasesQueueSlot() throws InterruptedException {
+        FlexlbConfig config = sloCaseConfig();
+        config.setAutoTpmEnabled(true);
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
+        BatcherContext context = context(
+                "test", null, config, handler, queueWith(head),
+                mock(BatchSchedulerReporter.class));
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        verify(handler).onExpired(head);
+        verify(handler, never()).onBatchReady(anyList(), any(DispatchMeta.class));
+        assertEquals(0, context.size(), "drop must release the reserved queue slot");
+    }
+
+    @Test
+    void autoTpmOnPriorityHeadPastQueueDeadlineIsNotDropped() throws InterruptedException {
+        FlexlbConfig config = sloCaseConfig();
+        config.setAutoTpmEnabled(true);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
+        head.setPriority(50);
+        BatcherContext context = context(
+                "test", endpoint, config, handler, queueWith(head),
+                mock(BatchSchedulerReporter.class));
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        verify(handler, never()).onExpired(any(BatchItem.class));
+        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
+        verify(handler).onBatchReady(anyList(), meta.capture());
+        assertEquals("fixed_window_timeout", meta.getValue().reason());
+    }
+
+    @Test
+    void autoTpmOffLegacyHeadPastQueueDeadlineIsDroppedParity() throws InterruptedException {
+        FlexlbConfig config = sloCaseConfig();
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
+        BatcherContext context = context(
+                "test", null, config, handler, queueWith(head),
+                mock(BatchSchedulerReporter.class));
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        verify(handler).onExpired(head);
+        assertEquals(0, context.size());
+    }
+
+    @Test
+    void autoTpmOffPriorityHeadPastQueueDeadlineIsStillDroppedParity() throws InterruptedException {
+        // Pre-fix behavior: with the switch off, priority carried on the item
+        // has no effect — the legacy drop applies to everyone.
+        FlexlbConfig config = sloCaseConfig();
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
+        head.setPriority(50);
+        BatcherContext context = context(
+                "test", null, config, handler, queueWith(head),
+                mock(BatchSchedulerReporter.class));
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        verify(handler).onExpired(head);
+        assertEquals(0, context.size());
+    }
+
     // ---- helpers ----
 
     private static FlexlbConfig sloCaseConfig() {

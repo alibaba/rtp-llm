@@ -986,7 +986,16 @@ async def iter_real_model_stream_infer(
         yield (response, stats) if yield_access_stats else response
     except Exception as e:
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
-        error_spec = DASH_ERROR_INTERNAL
+        # If the exception has exception_type (FtRuntimeException that wasn't caught
+        # by except FtRuntimeException above, e.g. due to async generator propagation),
+        # use the category-based error spec for correct HTTP status mapping
+        if hasattr(e, "exception_type") and e.exception_type is not None:
+            try:
+                error_spec = _dash_error_spec_for_ft_exception(e)
+            except Exception:
+                error_spec = DASH_ERROR_INTERNAL
+        else:
+            error_spec = DASH_ERROR_INTERNAL
         response = build_dash_error_response(
             str(request.id),
             request.model_name,

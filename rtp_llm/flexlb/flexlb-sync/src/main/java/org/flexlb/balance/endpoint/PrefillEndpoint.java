@@ -85,6 +85,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return batcher.queueWaitMs();
     }
 
+    /**
+     * Auto-TPM priority-aware queue wait estimate (design doc 8.4):
+     * counts only items ordered ahead of the incoming request.
+     */
+    public long batcherEstimatedWaitMs(int priority, long deadlineMs, long requestId) {
+        return batcher.queueManager().estimateWaitMs(priority, deadlineMs, requestId);
+    }
+
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
         if ("learning".equalsIgnoreCase(cfg.getPrefillPredictorType())) {
             return new LearningPredictor();

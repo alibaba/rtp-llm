@@ -155,6 +155,8 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->has_group_id()) {
         generate_input->group_id = input->group_id().value();
     }
+    // Auto-TPM QoS priority (task40): 0 = not set; TPS metrics tagging only.
+    generate_input->priority = input->priority();
 
     return generate_input;
 }
