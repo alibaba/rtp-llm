@@ -52,6 +52,9 @@ Only `tp_rank=0` is an event owner when `pp_size=1`. Each DP replica has an inde
 use `NullPublisher`. Pipeline parallelism is not supported yet because RTP-LLM does not expose a stable PP-stage rank
 to this component; when `pp_size>1`, the publisher is disabled with a warning to prevent multiple stages from using
 the same KVCM identity.
+CP sharded KV cache (`prefill_cp_config.kv_cache_sharded` with `tp_size>1`) is also unsupported: per-rank cache keys
+use the CP virtual block granularity (`seq_size_per_block * cp_size` tokens), which differs from the block size the
+publisher would register. When CP sharding is enabled the publisher is disabled with a warning.
 The HBM location spec is named `rtp_llm_hbm_<block_size_tokens>` and uses an
 `rtp-llm://<host_ip_port>/hbm` URI. It represents the complete DP-replica location; its registered size is the sum of
 all cache groups across all TP shards, while only the owner rank emits state transitions.
@@ -125,8 +128,10 @@ Publisher type values are case-sensitive for both CLI arguments and environment 
 during argument parsing. In mixed CLI + environment mode, this strict `choices` validation applies only to the new
 `--kv_cache_event_publisher_type` argument; pre-existing arguments with `choices` (PDFusion scheduler mode, cache-store
 RDMA mode, KV-cache dtype, MoE backend selectors) keep their legacy tolerance for stale invalid env values and surface
-them via an ERROR log instead of failing startup. Empty environment values are treated as "unset" on both the pure-env
-and the mixed path. Environment values rejected by an explicit
+them via an ERROR log instead of failing startup. Empty environment values are treated as "unset" (on both the pure-env
+and the mixed path) only for the 14 `kv_cache_event_*` environment variables introduced by this feature; every other
+argument keeps the legacy semantics where an empty value is bound as-is, so existing deployments that set an env
+variable to an empty string as an explicit "disable" switch are unaffected. Environment values rejected by an explicit
 converter such as `str2bool` (e.g. a misspelled boolean) abort startup with an argparse error, matching the pure
 environment-variable mode. Only plain numeric conversion failures (`ValueError`/`TypeError`) retain the legacy
 fallback-to-default behavior and emit a warning naming the ignored variable.

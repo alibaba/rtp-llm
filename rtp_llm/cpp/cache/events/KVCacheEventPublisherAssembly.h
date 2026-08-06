@@ -18,6 +18,9 @@ enum class KVCacheEventPublisherGate {
     DISABLED_INACTIVE,           // warmup, empty type or explicit "none"
     DISABLED_UNKNOWN_TYPE,       // unrecognized type; deserves a warning
     DISABLED_PIPELINE_PARALLEL,  // pp_size > 1 cannot elect a unique owner
+    DISABLED_CP_SHARDED,         // CP sharded KV cache publishes per-rank keys
+                                 // whose token granularity differs from the
+                                 // external logical block size; unsupported
     DISABLED_NON_OWNER_RANK,     // only tp_rank == 0 publishes events
     DISABLED_NO_REUSE_GROUP,     // no cache group participates in prefix reuse
 };
@@ -26,6 +29,7 @@ inline KVCacheEventPublisherGate evaluateKVCacheEventPublisherGate(const std::st
                                                                    bool               warmup,
                                                                    int64_t            tp_rank,
                                                                    int64_t            pp_size,
+                                                                   bool               cp_sharded,
                                                                    bool               has_reuse_group) noexcept {
     if (warmup || type.empty() || type == "none") {
         return KVCacheEventPublisherGate::DISABLED_INACTIVE;
@@ -35,6 +39,9 @@ inline KVCacheEventPublisherGate evaluateKVCacheEventPublisherGate(const std::st
     }
     if (pp_size != 1) {
         return KVCacheEventPublisherGate::DISABLED_PIPELINE_PARALLEL;
+    }
+    if (cp_sharded) {
+        return KVCacheEventPublisherGate::DISABLED_CP_SHARDED;
     }
     if (!isKVCacheEventPublisherOwner(tp_rank, pp_size)) {
         return KVCacheEventPublisherGate::DISABLED_NON_OWNER_RANK;

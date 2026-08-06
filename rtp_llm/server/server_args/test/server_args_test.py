@@ -424,6 +424,39 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.kv_cache_config.kv_cache_event_publisher_type,
         )
 
+    def test_empty_env_value_still_binds_for_legacy_args_in_mixed_mode(self):
+        # Empty-value-as-unset is limited to the kv_cache_event_* whitelist.
+        # Pre-existing arguments keep the legacy semantics where "" is bound
+        # as-is: some deployments set an env variable to an empty string as an
+        # explicit "disable" switch (e.g. THINK_START_TAG="").
+        os.environ["THINK_START_TAG"] = ""
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "",
+            py_env_configs.generate_env_config.think_start_tag,
+        )
+
+    def test_empty_env_value_still_binds_for_legacy_args_in_pure_env_mode(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["THINK_START_TAG"] = ""
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "",
+            py_env_configs.generate_env_config.think_start_tag,
+        )
+
     def test_invalid_typed_env_value_warns_and_uses_default_in_mixed_mode(self):
         os.environ["KV_CACHE_EVENT_QUEUE_CAPACITY"] = "not-an-integer"
         sys.argv = ["prog", "--model_type", "qwen"]

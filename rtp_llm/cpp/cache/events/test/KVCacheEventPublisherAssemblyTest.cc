@@ -11,37 +11,50 @@ namespace rtp_llm::test {
 TEST(KVCacheEventPublisherAssemblyTest, GateDisablesInactiveConfigurations) {
     for (const auto& type : {std::string(""), std::string("none")}) {
         EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_INACTIVE,
-                  evaluateKVCacheEventPublisherGate(type, /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, true));
+                  evaluateKVCacheEventPublisherGate(type, /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/false, true));
     }
     // Warmup wins even over a valid type.
     EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_INACTIVE,
-              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/true, /*tp_rank=*/0, /*pp_size=*/1, true));
+              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/true, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/false, true));
 }
 
 TEST(KVCacheEventPublisherAssemblyTest, GateWarnsOnUnknownType) {
     EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_UNKNOWN_TYPE,
-              evaluateKVCacheEventPublisherGate("KVCM", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, true));
+              evaluateKVCacheEventPublisherGate("KVCM", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/false, true));
     EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_UNKNOWN_TYPE,
-              evaluateKVCacheEventPublisherGate("http", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, true));
+              evaluateKVCacheEventPublisherGate("http", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/false, true));
 }
 
 TEST(KVCacheEventPublisherAssemblyTest, GateRejectsNonOwnerTopologies) {
     EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_PIPELINE_PARALLEL,
-              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/2, true));
+              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/2, /*cp_sharded=*/false, true));
     EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_NON_OWNER_RANK,
-              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/1, /*pp_size=*/1, true));
+              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/1, /*pp_size=*/1, /*cp_sharded=*/false, true));
 }
 
 TEST(KVCacheEventPublisherAssemblyTest, GateRejectsTopologiesWithoutReuseGroups) {
     EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_NO_REUSE_GROUP,
-              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, false));
+              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/false, false));
+}
+
+TEST(KVCacheEventPublisherAssemblyTest, GateRejectsCpShardedKVCache) {
+    // CP sharded KV cache publishes per-rank keys whose token granularity
+    // differs from the external logical block size, so the publisher must be
+    // disabled even on the owner rank.
+    EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_CP_SHARDED,
+              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/true, true));
+    EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_CP_SHARDED,
+              evaluateKVCacheEventPublisherGate("log", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/true, true));
+    // Pipeline parallelism is reported first when both limitations apply.
+    EXPECT_EQ(KVCacheEventPublisherGate::DISABLED_PIPELINE_PARALLEL,
+              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/2, /*cp_sharded=*/true, true));
 }
 
 TEST(KVCacheEventPublisherAssemblyTest, GateEnablesSupportedTypesOnOwnerRank) {
     EXPECT_EQ(KVCacheEventPublisherGate::ENABLED,
-              evaluateKVCacheEventPublisherGate("log", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, true));
+              evaluateKVCacheEventPublisherGate("log", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/false, true));
     EXPECT_EQ(KVCacheEventPublisherGate::ENABLED,
-              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, true));
+              evaluateKVCacheEventPublisherGate("kvcm", /*warmup=*/false, /*tp_rank=*/0, /*pp_size=*/1, /*cp_sharded=*/false, true));
 }
 
 TEST(KVCacheEventPublisherAssemblyTest, DeriveConfigClampsNonPositiveValues) {

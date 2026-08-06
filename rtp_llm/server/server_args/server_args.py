@@ -256,6 +256,38 @@ class EnvArgumentParser(argparse.ArgumentParser):
     # env values keep starting up; widening this set is a separate change.
     _STRICT_ENV_CHOICE_DESTS = frozenset({"kv_cache_event_publisher_type"})
 
+    # Destinations for which an empty environment variable value is treated as
+    # "unset" instead of being bound as an empty string. Limited to arguments
+    # introduced together with this behavior; every other argument keeps the
+    # legacy semantics where an empty value is bound as-is, because some
+    # deployments rely on setting an env variable to "" as an explicit
+    # "disable" switch. Widening this set is a separate change.
+    _EMPTY_ENV_AS_UNSET_DESTS = frozenset(
+        {
+            "kv_cache_event_publisher_type",
+            "kv_cache_event_manager_endpoint",
+            "kv_cache_event_instance_group",
+            "kv_cache_event_instance_id",
+            "kv_cache_event_host_ip_port",
+            "kv_cache_event_queue_capacity",
+            "kv_cache_event_report_batch_size",
+            "kv_cache_event_flush_interval_ms",
+            "kv_cache_event_heartbeat_interval_ms",
+            "kv_cache_event_request_timeout_ms",
+            "kv_cache_event_snapshot_timeout_ms",
+            "kv_cache_event_retry_interval_ms",
+            "kv_cache_event_snapshot_interval_ms",
+            "kv_cache_event_log_max_keys",
+        }
+    )
+
+    def _env_value_provided(self, dest: str, env_value: Optional[str]) -> bool:
+        if env_value is None:
+            return False
+        if env_value == "" and dest in self._EMPTY_ENV_AS_UNSET_DESTS:
+            return False
+        return True
+
     def _validate_env_choice(
         self, action: argparse.Action, value: Any, env_name: str
     ) -> None:
@@ -300,9 +332,10 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 # Read values from environment variables for all registered arguments
                 for dest, env_name in self._env_mappings.items():
                     env_value = os.environ.get(env_name)
-                    # Empty strings are treated as "unset" on both env paths so
-                    # neither argparse nor the converters see them.
-                    if env_value:
+                    # For kv_cache_event_* destinations an empty value is
+                    # treated as "unset"; all other arguments keep the legacy
+                    # semantics where an empty value is bound as-is.
+                    if self._env_value_provided(dest, env_value):
                         # Find the action for this dest
                         action = None
                         for action_item in self._actions:
@@ -376,9 +409,10 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 # Only set from environment if the value wasn't provided via command line
                 if dest not in provided_args:
                     env_value = os.environ.get(env_name)
-                    # Empty strings are treated as "unset", matching the pure
-                    # environment-variable path above.
-                    if env_value:
+                    # Same empty-value semantics as the pure environment
+                    # variable path above: "unset" only for the whitelisted
+                    # kv_cache_event_* destinations.
+                    if self._env_value_provided(dest, env_value):
                         # Find the action to get the type converter
                         action = None
                         for action_item in self._actions:

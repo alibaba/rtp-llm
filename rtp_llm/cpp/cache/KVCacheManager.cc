@@ -608,10 +608,12 @@ void KVCacheManager::initCacheEventPublisher() {
         // An empty set would mean "READY but never publishes", so fall back to
         // Null instead.
         const auto reuse_group_ids = allocator_->reuseParticipatingGroupIds();
+        const bool cp_sharded      = cp_slot_mapper_ && cp_slot_mapper_->isSharded();
         const auto gate            = evaluateKVCacheEventPublisherGate(publisher_type,
                                                             warmup_,
                                                             parallelism_config_.tp_rank,
                                                             parallelism_config_.pp_size,
+                                                            cp_sharded,
                                                             !reuse_group_ids.empty());
         switch (gate) {
             case KVCacheEventPublisherGate::ENABLED:
@@ -629,6 +631,17 @@ void KVCacheManager::initCacheEventPublisher() {
                                     "type=%s pp_size=%lld tp_rank=%lld dp_rank=%lld",
                                     publisher_type.c_str(),
                                     static_cast<long long>(parallelism_config_.pp_size),
+                                    static_cast<long long>(parallelism_config_.tp_rank),
+                                    static_cast<long long>(parallelism_config_.dp_rank));
+                cache_event_publisher_ = createNullKVCacheEventPublisher();
+                return;
+            case KVCacheEventPublisherGate::DISABLED_CP_SHARDED:
+                RTP_LLM_LOG_WARNING("KV cache event publisher disabled because CP sharded KV cache is unsupported: "
+                                    "per-rank keys use virtual block granularity (%d tokens) that differs from the "
+                                    "published block size (%zu tokens), type=%s tp_rank=%lld dp_rank=%lld",
+                                    cp_slot_mapper_->virtualBlockSize(),
+                                    config_.seq_size_per_block,
+                                    publisher_type.c_str(),
                                     static_cast<long long>(parallelism_config_.tp_rank),
                                     static_cast<long long>(parallelism_config_.dp_rank));
                 cache_event_publisher_ = createNullKVCacheEventPublisher();
