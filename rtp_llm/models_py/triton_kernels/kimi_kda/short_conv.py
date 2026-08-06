@@ -45,6 +45,7 @@ def _kimi_kda_short_conv_prefill_kernel(
 
     i_d, i_t = tl.program_id(0), tl.program_id(1)
     o_d = i_d * BD + tl.arange(0, BD)
+    o_d_i64 = o_d.to(tl.int64)
     o_w = tl.arange(0, BW) + W - BW
     m_d = o_d < D
     m_w = o_w >= 0
@@ -73,13 +74,14 @@ def _kimi_kda_short_conv_prefill_kernel(
         o_t = i_t * BT + tl.arange(0, BT)
         for i_w in tl.static_range(-W + 1, 1):
             o_x = o_t + i_w
+            o_x_i64 = o_x.to(tl.int64)
             m_x = ((o_x >= 0) & (o_x < T))[:, None] & m_d[None, :]
             # RTP stores only the W-1 values consumed by the next call.  FLA
             # stores W values and indexes its initial state at o_x + W, so the
             # equivalent compact-history index is o_x + W - 1.
             m_h = ((o_x >= -W + 1) & (o_x < 0))[:, None] & m_d[None, :]
             b_yi = tl.load(
-                x + o_x[:, None] * stride_x_t + o_d[None, :] * stride_x_d,
+                x + o_x_i64[:, None] * stride_x_t + o_d_i64[None, :] * stride_x_d,
                 mask=m_x,
                 other=0,
             ).to(tl.float32)
@@ -120,13 +122,14 @@ def _kimi_kda_short_conv_prefill_kernel(
     from_history = combined_idx < history_size
     history_idx = combined_idx
     x_idx = combined_idx - history_size
+    x_idx_i64 = x_idx.to(tl.int64)
     b_final_history = tl.load(
         history + o_d[:, None] * stride_h_d + history_idx[None, :] * stride_h_w,
         mask=m_d[:, None] & (o_h[None, :] < history_size) & from_history[None, :],
         other=0,
     )
     b_final_x = tl.load(
-        x + x_idx[None, :] * stride_x_t + o_d[:, None] * stride_x_d,
+        x + x_idx_i64[None, :] * stride_x_t + o_d_i64[:, None] * stride_x_d,
         mask=m_d[:, None]
         & (o_h[None, :] < history_size)
         & (~from_history[None, :])
@@ -249,9 +252,7 @@ def _kimi_kda_short_conv_paged_decode_kernel(
     m_d = o_d < D
     m_w = o_w < W
 
-    sequence_length_plus_one = tl.load(sequence_lengths_plus_one + i_b).to(
-        tl.int64
-    )
+    sequence_length_plus_one = tl.load(sequence_lengths_plus_one + i_b).to(tl.int64)
     # ``sequence_lengths_plus_one`` is past_length + one decode token.  The
     # old state therefore lives at past_length - 1 and the new state at
     # past_length.  Clamp only the table address; validity still masks empty
@@ -314,10 +315,7 @@ def _kimi_kda_short_conv_paged_decode_kernel(
     b_y = tl.sum(b_cache * b_weight, 1)
     b_y = b_y * tl.sigmoid(b_y)
     tl.store(
-        output
-        + i_p * stride_o_p
-        + i_b * stride_o_b
-        + o_d * stride_o_d,
+        output + i_p * stride_o_p + i_b * stride_o_b + o_d * stride_o_d,
         tl.cast(
             b_y,
             dtype=output.dtype.element_ty,
@@ -337,9 +335,7 @@ def _kimi_kda_short_conv_paged_decode_kernel(
         mask=read_valid & m_d[:, None] & (o_w[None, :] < W - 2),
         other=0,
     )
-    b_new_history = tl.where(
-        (o_w == W - 2)[None, :], b_x[:, None], b_shifted_history
-    )
+    b_new_history = tl.where((o_w == W - 2)[None, :], b_x[:, None], b_shifted_history)
     tl.store(
         conv_state
         + write_block_id * stride_s_block
@@ -545,7 +541,10 @@ def is_kimi_kda_short_conv_paged_decode_supported(
         return False
     if block_map.ndim != 2 or block_map.shape[0] != batch or block_map.shape[1] == 0:
         return False
-    if sequence_lengths_plus_one.ndim != 1 or sequence_lengths_plus_one.numel() != batch:
+    if (
+        sequence_lengths_plus_one.ndim != 1
+        or sequence_lengths_plus_one.numel() != batch
+    ):
         return False
     if block_map.dtype not in (torch.int32, torch.int64):
         return False

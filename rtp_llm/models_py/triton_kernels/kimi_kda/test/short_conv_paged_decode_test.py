@@ -8,6 +8,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
 from rtp_llm.models_py.triton_kernels.kimi_kda.short_conv import (
     kimi_kda_short_conv_decode,
     kimi_kda_short_conv_paged_decode,
+    kimi_kda_short_conv_prefill,
 )
 
 
@@ -105,6 +106,37 @@ class KimiKDAShortConvPagedDecodeTest(unittest.TestCase):
             lengths_plus_one,
             page_size,
         )
+
+    def test_prefill_accepts_k3_fused_projection_leading_stride(self) -> None:
+        token_count = 257
+        channels = 256
+        fused_width = 6368
+        fused = torch.randn(
+            token_count,
+            fused_width,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        projected = fused[:, 2 * channels : 3 * channels]
+        self.assertEqual(projected.stride(), (fused_width, 1))
+        weight = torch.randn(channels, 4, dtype=torch.float32, device="cuda")
+        history = torch.randn(channels, 3, dtype=torch.bfloat16, device="cuda")
+
+        actual_output, actual_final = kimi_kda_short_conv_prefill(
+            projected,
+            weight,
+            history,
+            use_history=True,
+        )
+        expected_output, expected_final = kimi_kda_short_conv_prefill(
+            projected.contiguous(),
+            weight,
+            history,
+            use_history=True,
+        )
+
+        torch.testing.assert_close(actual_output, expected_output, rtol=0, atol=0)
+        torch.testing.assert_close(actual_final, expected_final, rtol=0, atol=0)
 
     def test_matches_per_request_decode_at_page_boundaries(self) -> None:
         inputs = self._inputs()

@@ -70,8 +70,8 @@ if [[ ! -f "${checkpoint}/config.json" ]]; then
   echo "4-layer checkpoint not found: ${checkpoint}" >&2
   exit 2
 fi
-if [[ "${kda_comm_backend}" != "rs_ag" && "${kda_comm_backend}" != "a2a" ]]; then
-  echo "KIMI_K3_KDA_COMM_BACKEND must be rs_ag or a2a" >&2
+if [[ "${kda_comm_backend}" != "rs_ag" ]]; then
+  echo "KIMI_K3_KDA_COMM_BACKEND must be rs_ag for the fused-prefix layout" >&2
   exit 2
 fi
 if curl --silent --fail "http://127.0.0.1:${start_port}/health" >/dev/null 2>&1; then
@@ -86,16 +86,12 @@ fi
 rm -rf "${ops_overlay}"
 "${python_bin}" -m pip install \
   --no-deps --target "${ops_overlay}" \
-  "${script_dir}/wheels/cuda_linear_attention-0.1.dev1+ed777e01.cu132-cp310-cp310-linux_x86_64.whl" \
   "${script_dir}/wheels/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl" \
-  "${script_dir}/wheels/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl" \
-  "${script_dir}/wheels/flash_linear_attention-0.5.0+rtp.3a9ce1c.3-py3-none-any.whl"
+  "${script_dir}/wheels/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl"
 
 KDA_BACKEND="${kda_backend}" PYTHONPATH="${ops_overlay}" "${python_bin}" - <<'PY'
 import inspect
 import os
-from importlib.metadata import version
-from pathlib import Path
 
 import deep_gemm
 import torch
@@ -112,35 +108,8 @@ if torch.cuda.get_device_capability(0) != (10, 3):
         f"operator wheels target sm_103a, got "
         f"{torch.cuda.get_device_capability(0)}"
     )
-overlay = Path(os.environ["PYTHONPATH"].split(os.pathsep, 1)[0])
 if os.environ["KDA_BACKEND"] == "cula":
-    from packaging.version import Version
-
-    if version("flash-linear-attention") != "0.5.0+rtp.3a9ce1c.3":
-        raise RuntimeError("unexpected flash-linear-attention version")
-    if version("cuda-linear-attention") != "0.1.dev1+ed777e01.cu132":
-        raise RuntimeError("unexpected cuda-linear-attention version")
-    for distribution, minimum in (
-        ("nvidia-cutlass-dsl", "4.4.2"),
-        ("apache-tvm-ffi", "0.1.9"),
-    ):
-        installed = version(distribution)
-        if Version(installed) < Version(minimum):
-            raise RuntimeError(
-                f"{distribution}>={minimum} is required, got {installed}"
-            )
-    if not (overlay / "cula" / "kda" / "chunk.py").is_file():
-        raise RuntimeError("cuLA chunk_kda Python entrypoint is unavailable")
-    if not list((overlay / "cula").glob("_cudac_sm100*.so")):
-        raise RuntimeError("cuLA sm_103a extension is unavailable")
-
-    import cula
-    import cula._cudac_sm100 as cula_cudac_sm100
-
-    if overlay.resolve() not in Path(cula.__file__).resolve().parents:
-        raise RuntimeError(f"cuLA loaded outside operator overlay: {cula.__file__}")
-    print(f"cula={os.path.realpath(cula.__file__)}")
-    print(f"cula_cudac={os.path.realpath(cula_cudac_sm100.__file__)}")
+    print("cuLA/FLA=provided by the Bazel dependency set")
 else:
     import flash_kda
     import flash_kda_C
@@ -156,8 +125,6 @@ missing = required.difference(
 if missing:
     raise RuntimeError(f"DeepGEMM wheel lacks K3 SiTU parameters: {missing}")
 print(f"deep_gemm={os.path.realpath(deep_gemm.__file__)}")
-print(f"fla={overlay / 'fla'}")
-print(f"cula={overlay / 'cula'}")
 PY
 
 cd "${repo_root}"

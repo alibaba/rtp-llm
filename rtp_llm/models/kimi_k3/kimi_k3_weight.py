@@ -38,7 +38,6 @@ from rtp_llm.utils.model_weight import (
     ffn_sp_0,
     ffn_sp_neg1,
     identity,
-    merge_qkv_hf,
     mla_pad_t,
     sp_0,
     sp_id,
@@ -59,6 +58,15 @@ def _merge_conv1d(ts: List[torch.Tensor]) -> torch.Tensor:
     """
 
     return torch.cat(ts, dim=0)
+
+
+def _merge_kda_qkvg_fa_beta(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Build the global K3 fused projection before heterogeneous TP split."""
+
+    if len(ts) != 6:
+        raise ValueError(f"K3 KDA fused projection expects six tensors, got {len(ts)}")
+    q, k, v, g, f_a, beta = ts
+    return torch.cat((q.T, k.T, v.T, g.T, f_a.T, beta.T), dim=1).contiguous()
 
 
 def _unpad_kda_alog(ts: List[torch.Tensor], *, num_heads: int) -> torch.Tensor:
@@ -363,16 +371,16 @@ class KimiK3Weight(ModelDeployWeightInfo):
     def _kda_weights(self) -> List[WeightModule]:
         """KDA linear-attention weights on the shared ``W.linear_attn_*`` vocab.
 
-        Aligned with main's ``kimi_linear`` so a future rebase converges: q/k/v
-        fuse into one ``linear_attn_qkv_w`` GEMM and the three depthwise convs
-        fuse into ``linear_attn_conv1d_w``.  Two K3-specific deviations from
-        ``kimi_linear``: the checkpoint stores ``A_log`` as a 128-element
+        Q/K/V/G, the full forget-gate down projection and the full 96-column
+        beta projection fuse into ``linear_attn_qkvg_fa_beta_w``. The three
+        depthwise convs fuse into ``linear_attn_conv1d_w``. One K3-specific
+        deviation from ``kimi_linear`` is that the checkpoint stores ``A_log``
+        as a 128-element
         aligned vector whose first ``num_heads`` entries are logical and whose
         remaining entries are zero padding.  The padding is removed before TP
-        head sharding.  The output gate is a single full-rank projection
-        (``linear_attn_g_w``) rather than the ``g_a``/``g_b`` LoRA pair.
-        Per-weight TP sharding is resolved by name via
-        ``LinearAttnAtomicWeight``'s split-strategy table.
+        head sharding. The output gate is K3's single full-rank projection and
+        is sharded by head in the fused weight. Per-weight TP sharding is
+        resolved by name via ``LinearAttnAtomicWeight``'s split-strategy table.
         """
 
         cfg = LinearAttnConfig(self.model_config.linear_attention_config)
@@ -388,7 +396,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
 
         return [
             LinearAttnAtomicWeight(
-                W.linear_attn_qkv_w,
+                W.linear_attn_qkvg_fa_beta_w,
                 [
                     CkptWeightInfo(
                         self._layer_ckpt("self_attn.q_proj.weight"), identity
@@ -399,8 +407,17 @@ class KimiK3Weight(ModelDeployWeightInfo):
                     CkptWeightInfo(
                         self._layer_ckpt("self_attn.v_proj.weight"), identity
                     ),
+                    CkptWeightInfo(
+                        self._layer_ckpt("self_attn.g_proj.weight"), identity
+                    ),
+                    CkptWeightInfo(
+                        self._layer_ckpt("self_attn.f_a_proj.weight"), identity
+                    ),
+                    CkptWeightInfo(
+                        self._layer_ckpt("self_attn.b_proj.weight"), identity
+                    ),
                 ],
-                merge_qkv_hf,
+                _merge_kda_qkvg_fa_beta,
                 cfg,
             ),
             LinearAttnAtomicWeight(
@@ -439,10 +456,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 identity,
                 data_type=torch.float32,
             ),
-            _w(W.linear_attn_f_a_w, "self_attn.f_a_proj.weight", transpose),
             _w(W.linear_attn_f_b_w, "self_attn.f_b_proj.weight", transpose),
-            _w(W.linear_attn_b_w, "self_attn.b_proj.weight", transpose),
-            _w(W.linear_attn_g_w, "self_attn.g_proj.weight", transpose),
             _w(
                 W.linear_attn_norm_w,
                 "self_attn.o_norm.weight",

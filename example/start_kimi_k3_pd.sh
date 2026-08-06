@@ -402,8 +402,7 @@ decode_capture_config="${DECODE_CAPTURE_CONFIG:-}"
 prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
 
 if { [[ "${role}" == "PREFILL" ]] \
-        && { [[ "${kda_backend}" == "cula" ]] \
-            || [[ "${kda_backend}" == "flash_kda" ]]; }; } \
+        && [[ "${kda_backend}" == "flash_kda" ]]; } \
     || [[ "${moe_backend}" == "deep_gemm_mega" ]]; then
     if [[ -z "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
         operator_bundle="${repo_root}/example/kimi_k3_prefill_perf/wheels"
@@ -420,12 +419,7 @@ if { [[ "${role}" == "PREFILL" ]] \
         if [[ ! -f "${operator_marker}" ]]; then
             mkdir -p "${operator_overlay}"
             operator_wheels=()
-            if [[ "${kda_backend}" == "cula" ]]; then
-                operator_wheels+=(
-                    "${operator_bundle}/flash_linear_attention-0.5.0+rtp.3a9ce1c.3-py3-none-any.whl"
-                    "${operator_bundle}/cuda_linear_attention-0.1.dev1+ed777e01.cu132-cp310-cp310-linux_x86_64.whl"
-                )
-            elif [[ "${kda_backend}" == "flash_kda" ]]; then
+            if [[ "${kda_backend}" == "flash_kda" ]]; then
                 operator_wheels+=(
                     "${operator_bundle}/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl"
                 )
@@ -445,43 +439,6 @@ if { [[ "${role}" == "PREFILL" ]] \
         fi
         export KIMI_K3_OPERATOR_PYTHONPATH="${operator_overlay}"
         export PYTHONPATH="${operator_overlay}${PYTHONPATH:+:${PYTHONPATH}}"
-        if [[ "${kda_backend}" == "cula" ]]; then
-            "${python_bin}" - <<'PY'
-import os
-from importlib.metadata import version
-from pathlib import Path
-
-import torch
-from packaging.version import Version
-
-overlay = Path(os.environ["KIMI_K3_OPERATOR_PYTHONPATH"]).resolve()
-if version("flash-linear-attention") != "0.5.0+rtp.3a9ce1c.3":
-    raise RuntimeError("unexpected flash-linear-attention version")
-if version("cuda-linear-attention") != "0.1.dev1+ed777e01.cu132":
-    raise RuntimeError("unexpected cuda-linear-attention version")
-for distribution, minimum in (
-    ("nvidia-cutlass-dsl", "4.4.2"),
-    ("apache-tvm-ffi", "0.1.9"),
-):
-    installed = version(distribution)
-    if Version(installed) < Version(minimum):
-        raise RuntimeError(
-            f"{distribution}>={minimum} is required, got {installed}"
-        )
-if not (overlay / "cula" / "kda" / "chunk.py").is_file():
-    raise RuntimeError("cuLA chunk_kda Python entrypoint is unavailable")
-if not list((overlay / "cula").glob("_cudac_sm100*.so")):
-    raise RuntimeError("cuLA sm_103a extension is unavailable")
-
-import cula
-import cula._cudac_sm100 as cula_cudac_sm100
-
-if overlay not in Path(cula.__file__).resolve().parents:
-    raise RuntimeError(f"cuLA loaded outside operator overlay: {cula.__file__}")
-print(f"cula={os.path.realpath(cula.__file__)}")
-print(f"cula_cudac={os.path.realpath(cula_cudac_sm100.__file__)}")
-PY
-        fi
     fi
 fi
 

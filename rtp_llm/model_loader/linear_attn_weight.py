@@ -181,6 +181,81 @@ def split_kda_qkv(
     return torch.cat([q, k, v], dim=1)
 
 
+def split_kda_qkvg_fa_beta_sections(
+    tensor: torch.Tensor,
+    q_size: int,
+    k_size: int,
+    v_size: int,
+    g_size: int,
+    f_a_size: int,
+    beta_size: int,
+    *,
+    dim: int = -1,
+) -> tuple[torch.Tensor, ...]:
+    """Split the shared K3 fused-projection layout into its six sections."""
+
+    section_sizes = (q_size, k_size, v_size, g_size, f_a_size, beta_size)
+    if any(size <= 0 for size in section_sizes):
+        raise ValueError(
+            "KDA fused projection section widths must be positive, got "
+            f"{section_sizes}"
+        )
+    actual_width = tensor.shape[dim]
+    expected_width = sum(section_sizes)
+    if actual_width != expected_width:
+        raise ValueError(
+            "KDA fused projection width does not match its layout: "
+            f"shape={tuple(tensor.shape)}, dim={dim}, "
+            f"sections={section_sizes}, expected={expected_width}, "
+            f"actual={actual_width}"
+        )
+    return torch.split(tensor, section_sizes, dim=dim)
+
+
+# K3 fused projection: shard Q/K/V/G by head while replicating F_A/beta.
+def split_kda_qkvg_fa_beta(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    q_size = linear_config.linear_num_key_heads * linear_config.linear_key_head_dim
+    k_size = linear_config.linear_num_key_heads * linear_config.linear_key_head_dim
+    v_size = linear_config.linear_num_value_heads * linear_config.linear_value_head_dim
+    g_size = linear_config.linear_num_value_heads * linear_config.linear_value_head_dim
+    beta_size = linear_config.linear_num_value_heads
+    f_a_size = t.shape[1] - q_size - k_size - v_size - g_size - beta_size
+    if f_a_size <= 0:
+        raise ValueError(
+            "KDA fused projection must contain a non-empty F_A section: "
+            f"shape={tuple(t.shape)}, qkvg={[q_size, k_size, v_size, g_size]}, "
+            f"beta={beta_size}"
+        )
+    if any(size % load_config.tp_size for size in (q_size, k_size, v_size, g_size)):
+        raise ValueError(
+            "KDA Q/K/V/G widths must be divisible by TP: "
+            f"qkvg={[q_size, k_size, v_size, g_size]}, tp={load_config.tp_size}"
+        )
+
+    q, k, v, g, f_a, beta = split_kda_qkvg_fa_beta_sections(
+        t,
+        q_size,
+        k_size,
+        v_size,
+        g_size,
+        f_a_size,
+        beta_size,
+        dim=1,
+    )
+
+    def _local(section: torch.Tensor) -> torch.Tensor:
+        width = section.shape[1] // load_config.tp_size
+        begin = load_config.tp_rank * width
+        return section.narrow(1, begin, width)
+
+    return torch.cat(
+        [_local(q), _local(k), _local(v), _local(g), f_a, beta],
+        dim=1,
+    ).contiguous()
+
+
 # KDA split: TP split on dim=1 (b_proj, LoRA up projections, full-rank gate).
 def split_kda_tp_dim1(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
@@ -212,6 +287,7 @@ _linear_attn_split_stratey = {
     W.linear_attn_norm_w: sp_id,
     # KDA (Kimi Delta Attention) fused weights.
     W.linear_attn_qkv_w: split_kda_qkv,
+    W.linear_attn_qkvg_fa_beta_w: split_kda_qkvg_fa_beta,
     W.linear_attn_b_w: split_kda_tp_dim1,
     W.linear_attn_f_a_w: sp_id,  # forget-gate LoRA down: rank not sharded
     W.linear_attn_f_b_w: split_kda_tp_dim1,

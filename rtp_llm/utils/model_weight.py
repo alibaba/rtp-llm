@@ -1189,6 +1189,7 @@ class W:
     # kimi_linear naming so a future rebase converges. K3 keeps the same q/k/v
     # and forget-gate layout as kimi_linear; the output gate differs (see below).
     linear_attn_qkv_w = "linear_attn.in_proj_qkv.weight"
+    linear_attn_qkvg_fa_beta_w = "linear_attn.in_proj_qkvg_fa_beta.weight"
     linear_attn_b_w = "linear_attn.b_proj.weight"
     linear_attn_f_a_w = "linear_attn.f_a_proj.weight"
     linear_attn_f_b_w = "linear_attn.f_b_proj.weight"

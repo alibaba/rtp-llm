@@ -27,3 +27,11 @@ py_test(
         'gpu': 'H20',
     },
 )
+
+py_test(
+    name = "test_linear_attn_weight",
+    srcs = ["test_linear_attn_weight.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:models",
+    ],
+)

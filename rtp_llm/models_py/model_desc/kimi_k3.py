@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from torch import nn
 
 import rtp_llm.ops.compute_ops as compute_ops
+from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
@@ -185,9 +186,10 @@ def _sp_moe_enabled() -> bool:
 
 def _kda_comm_backend() -> str:
     backend = os.environ.get("KIMI_K3_KDA_COMM_BACKEND", "rs_ag").strip().lower()
-    if backend not in ("rs_ag", "a2a"):
-        raise ValueError(
-            "KIMI_K3_KDA_COMM_BACKEND must be 'rs_ag' or 'a2a', got " f"{backend!r}"
+    if backend != "rs_ag":
+        raise RuntimeError(
+            "KIMI_K3_KDA_COMM_BACKEND supports only production 'rs_ag'; "
+            f"the experimental A2A path is disabled, got {backend!r}"
         )
     return backend
 
@@ -1481,7 +1483,6 @@ class KimiK3KDA(nn.Module):
         self._segment_cu_seqlens: dict[tuple[int, int], torch.Tensor] = {}
         self.projection_size = self.local_heads * self.head_dim
         self.full_projection_size = self.total_heads * self.head_dim
-        self._full_beta_weight: Optional[torch.Tensor] = None
         self._full_column_weights: dict[str, torch.Tensor] = {}
         self._segment_cu_seqlens_cpu: dict[int, torch.Tensor] = {}
         self._kda_comm_backend = _kda_comm_backend()
@@ -1490,13 +1491,6 @@ class KimiK3KDA(nn.Module):
             self.attn_tp_rank,
             self._kda_comm_backend,
         )
-        if self._kda_comm_backend == "a2a" and (
-            self.attn_tp_size != 8 or int(parallelism_config.ep_size) != 8
-        ):
-            raise RuntimeError(
-                "K3 KDA A2A currently requires Prefill TP8 == EP8; "
-                f"got TP={self.attn_tp_size}, EP={parallelism_config.ep_size}"
-            )
         self._a2a_weights_ready = False
         self._a2a_qkvb_weight: Optional[torch.Tensor] = None
         self._a2a_g_weight: Optional[torch.Tensor] = None
@@ -1529,20 +1523,44 @@ class KimiK3KDA(nn.Module):
             self.local_heads,
             self.head_dim,
         )
-        # KDA q/k/v projections and their depthwise convs are stored fused on
-        # the shared ``W.linear_attn_*`` vocabulary (aligned with main's
-        # kimi_linear).  Split them once into the per-projection views the
-        # conv/cache path consumes; the KimiKDAState cache ABI is unchanged.
-        fused_qkv = weights[W.linear_attn_qkv_w]
-        if fused_qkv.shape[1] != 3 * self.projection_size:
-            raise ValueError(
-                "fused KDA qkv width "
-                f"{fused_qkv.shape[1]} != 3*{self.projection_size}"
-            )
-        self.kda_qkv_w = fused_qkv
-        self.kda_q_w, self.kda_k_w, self.kda_v_w = torch.split(
-            fused_qkv, self.projection_size, dim=1
+        # Production rs_ag uses one rank-local physical projection. Q/K/V/G
+        # are TP-head shards while F_A and beta96 are replicated. Keep section
+        # views only for canonical diagnostics and downstream kernels;
+        # production forward launches the complete projection as one GEMM.
+        fused_projection = weights[W.linear_attn_qkvg_fa_beta_w]
+        self.forget_latent_size = int(weights[W.linear_attn_f_b_w].shape[0])
+        expected_fused_width = (
+            4 * self.projection_size + self.forget_latent_size + self.total_heads
         )
+        if fused_projection.shape[1] != expected_fused_width:
+            raise ValueError(
+                "fused KDA QKVG/F_A/beta width "
+                f"{fused_projection.shape[1]} != {expected_fused_width}"
+            )
+        self.kda_fused_w = fused_projection
+        fused_sections = split_kda_qkvg_fa_beta_sections(
+            fused_projection,
+            self.projection_size,
+            self.projection_size,
+            self.projection_size,
+            self.projection_size,
+            self.forget_latent_size,
+            self.total_heads,
+            dim=1,
+        )
+        if _accuracy_canonical_tp_enabled():
+            # Preserve the old independent-GEMM leading dimensions in the
+            # diagnostic path. Production keeps zero-copy section views.
+            fused_sections = tuple(section.contiguous() for section in fused_sections)
+        (
+            self.kda_q_w,
+            self.kda_k_w,
+            self.kda_v_w,
+            self.kda_g_w,
+            self.kda_f_a_w,
+            self.kda_beta_w,
+        ) = fused_sections
+        self.kda_qkv_w = fused_projection[:, : 3 * self.projection_size]
         fused_conv = weights[W.linear_attn_conv1d_w].squeeze(1)
         if fused_conv.shape[0] != 3 * self.projection_size:
             raise ValueError(
@@ -1671,7 +1689,6 @@ class KimiK3KDA(nn.Module):
         self.kda_q_w = None
         self.kda_k_w = None
         self.kda_v_w = None
-        self._full_beta_weight = None
         self._full_column_weights.clear()
         self._a2a_weights_ready = True
         logging.info(
@@ -1681,42 +1698,6 @@ class KimiK3KDA(nn.Module):
             tuple(self._a2a_g_weight.shape),
             tuple(self._a2a_o_weight.shape),
         )
-
-    def _beta_projection(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Keep KDA beta numerically invariant between TP1 and head-sharded TP.
-
-        ``b_proj`` has only one output per KDA head.  Running eight independent
-        ``[hidden, 12]`` GEMMs lets cuBLAS choose a different reduction path
-        from Dummy/TP1's ``[hidden, 96]`` GEMM; a one-BF16-ULP difference in
-        ``raw_beta`` is then exposed as an FP32 sigmoid mismatch.  Gather this
-        small weight once, reproduce the full TP1 GEMM on every attention rank,
-        and return only the rank-local head slice.  The large Q/K/V and output
-        projections remain normally tensor-parallel.
-        """
-
-        local_weight = self.weights[W.linear_attn_b_w]
-        if self.attn_tp_size <= 1:
-            return _linear(hidden_states, local_weight)
-        if self._full_beta_weight is None:
-            # all_gather concatenates dim 0, so gather [local_heads, hidden]
-            # and transpose back to RTP's [hidden, total_heads] layout.
-            gathered = all_gather(
-                local_weight.transpose(0, 1).contiguous(), group=Group.TP
-            )
-            expected_shape = (
-                self.attn_tp_size * self.local_heads,
-                local_weight.shape[0],
-            )
-            if tuple(gathered.shape) != expected_shape:
-                raise ValueError(
-                    "unexpected gathered KDA beta weight shape "
-                    f"{tuple(gathered.shape)}, expected {expected_shape}"
-                )
-            self._full_beta_weight = gathered.transpose(0, 1).contiguous()
-
-        full_beta = _linear(hidden_states, self._full_beta_weight)
-        begin = self.attn_tp_rank * self.local_heads
-        return full_beta[:, begin : begin + self.local_heads].contiguous()
 
     def _prepared_trace_values(
         self,
@@ -1744,9 +1725,7 @@ class KimiK3KDA(nn.Module):
         attention_inputs: Optional[PyAttentionInputs],
         *,
         mode: KDAExecutionMode,
-    ) -> Optional[
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]
-    ]:
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]]:
         """Return device-resident paged KDA state for the batched decode path.
 
         The optimized path is deliberately isolated behind an environment flag
@@ -1770,9 +1749,7 @@ class KimiK3KDA(nn.Module):
         sequence_lengths_plus_one = getattr(
             attention_inputs, "sequence_lengths_plus_1_d", None
         )
-        block_map = getattr(
-            attention_inputs, "kv_cache_kernel_block_id_device", None
-        )
+        block_map = getattr(attention_inputs, "kv_cache_kernel_block_id_device", None)
         if (
             sequence_lengths_plus_one is None
             or block_map is None
@@ -1963,7 +1940,7 @@ class KimiK3KDA(nn.Module):
                         k.contiguous(),
                         v.contiguous(),
                         raw_gate.to(dtype=q.dtype).contiguous(),
-                        raw_beta.to(dtype=q.dtype).contiguous(),
+                        raw_beta.to(dtype=q.dtype),
                         scale=self.head_dim**-0.5,
                         initial_state=state_in,
                         output_final_state=True,
@@ -2106,7 +2083,10 @@ class KimiK3KDA(nn.Module):
                 k,
                 v,
                 raw_gate,
-                raw_beta,
+                # The in-tree FLA beta preprocessor still uses flat contiguous
+                # addressing. cuLA consumes the fused-prefix view directly;
+                # keep this diagnostic fallback correct with an explicit copy.
+                raw_beta.contiguous(),
                 initial_state=state_v_first,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
@@ -2674,170 +2654,102 @@ class KimiK3KDA(nn.Module):
                 f"{self.trace_prefix}.cache_input.recurrent",
                 state.recurrent_state,
             )
-        a2a_prefill = (
-            self.uses_a2a_comm
-            and mode == "prefill"
-            and sequence_parallel
-            and hidden_states.is_cuda
-        )
-        if self.uses_a2a_comm and not a2a_prefill:
-            raise RuntimeError(
-                "K3 KDA A2A is only valid for CUDA Prefill Sequence Parallel"
-            )
+        # A2A is intentionally rejected by _kda_comm_backend(). Keep the local
+        # selector until the remaining experimental post-processing code is
+        # removed in a follow-up cleanup.
+        a2a_prefill = False
         local_token_count = hidden_states.shape[0]
-        output_gate: Optional[torch.Tensor] = None
-        if a2a_prefill:
-            if (
-                not self._a2a_weights_ready
-                or self._a2a_qkvb_weight is None
-                or self._a2a_g_weight is None
-                or self._a2a_o_weight is None
-            ):
-                raise RuntimeError(
-                    "K3 KDA A2A weights must be materialized before forward"
-                )
-            if cu_seqlens.numel() != 2:
-                raise RuntimeError(
-                    "K3 KDA A2A currently supports batch=1 packed Prefill only"
-                )
-            local_payload = 3 * self.projection_size + self.local_heads
+        token_count = hidden_states.shape[0]
+        if _accuracy_canonical_tp_enabled():
             with _perf_profile(
-                f"{self.trace_prefix}.a2a_pre.qkvb_rank_major_projection",
+                f"{self.trace_prefix}.canonical_qkvg_column_parallel_projections",
                 hidden_states,
             ):
-                projected_qkvb = _linear(hidden_states, self._a2a_qkvb_weight)
-            pre_send = self._a2a_buffer(
-                "pre_send",
-                (self.attn_tp_size, local_token_count, local_payload),
-                projected_qkvb,
-            )
-            with _perf_profile(
-                f"{self.trace_prefix}.a2a_pre.pack_destination_major_no_head_shuffle",
-                projected_qkvb,
-            ):
-                kimi_k3_pack_a2a_projection(
-                    projected_qkvb,
+                q_projected = _column_parallel_linear(
+                    hidden_states,
+                    self.kda_q_w,
                     self.attn_tp_size,
-                    output=pre_send,
+                    self.attn_tp_rank,
+                    self._full_column_weights,
+                    "q",
                 )
-            pre_recv = self._a2a_buffer(
-                "pre_recv",
-                tuple(pre_send.shape),
-                pre_send,
-            )
-            with _perf_profile(
-                f"{self.trace_prefix}.a2a_pre.exchange_SP_tokens_to_TP_heads",
-                pre_send,
-            ):
-                all_to_all_single(pre_send, Group.TP, output=pre_recv)
-            token_count = local_token_count * self.attn_tp_size
-            received_qkvb = pre_recv.reshape(token_count, local_payload)
-            q_projected, k_projected, v_projected, raw_beta = torch.split(
-                received_qkvb,
-                (
-                    self.projection_size,
-                    self.projection_size,
-                    self.projection_size,
-                    self.local_heads,
-                ),
-                dim=1,
-            )
-            with _perf_profile(
-                f"{self.trace_prefix}.forget_gate.low_rank_SP_projection",
-                hidden_states,
-            ):
-                local_forget_latent = _linear(
+                k_projected = _column_parallel_linear(
                     hidden_states,
-                    self.weights[W.linear_attn_f_a_w],
+                    self.kda_k_w,
+                    self.attn_tp_size,
+                    self.attn_tp_rank,
+                    self._full_column_weights,
+                    "k",
                 )
-            gathered_forget_latent = self._a2a_buffer(
-                "forget_latent_gather",
-                (
-                    token_count,
-                    local_forget_latent.shape[1],
-                ),
-                local_forget_latent,
-            )
-            with _perf_profile(
-                f"{self.trace_prefix}.forget_gate.low_rank_token_allgather_TP8",
-                local_forget_latent,
-            ):
-                all_gather_into(
-                    local_forget_latent.contiguous(),
-                    gathered_forget_latent,
-                    Group.TP,
-                )
-            with _perf_profile(
-                f"{self.trace_prefix}.forget_gate.local_head_up_projection",
-                gathered_forget_latent,
-            ):
-                raw_gate = _linear(
-                    gathered_forget_latent,
-                    self.weights[W.linear_attn_f_b_w],
-                )
-            with _perf_profile(
-                f"{self.trace_prefix}.output_gate.SP_full_head_projection",
-                hidden_states,
-            ):
-                output_gate = _linear(
+                v_projected = _column_parallel_linear(
                     hidden_states,
-                    self._a2a_g_weight,
-                ).reshape(
-                    1,
-                    local_token_count,
-                    self.total_heads,
-                    self.head_dim,
+                    self.kda_v_w,
+                    self.attn_tp_size,
+                    self.attn_tp_rank,
+                    self._full_column_weights,
+                    "v",
                 )
-        else:
+                output_gate_projected = _column_parallel_linear(
+                    hidden_states,
+                    self.kda_g_w,
+                    self.attn_tp_size,
+                    self.attn_tp_rank,
+                    self._full_column_weights,
+                    "output_gate",
+                )
             with _perf_profile(
-                f"{self.trace_prefix}.qkv_column_parallel_projections", hidden_states
-            ):
-                if paged_decode_cache is not None:
-                    packed_qkv_projected = _linear(hidden_states, self.kda_qkv_w)
-                    q_projected, k_projected, v_projected = torch.split(
-                        packed_qkv_projected,
-                        self.projection_size,
-                        dim=1,
-                    )
-                else:
-                    q_projected = _column_parallel_linear(
-                        hidden_states,
-                        self.kda_q_w,
-                        self.attn_tp_size,
-                        self.attn_tp_rank,
-                        self._full_column_weights,
-                        "q",
-                    )
-                    k_projected = _column_parallel_linear(
-                        hidden_states,
-                        self.kda_k_w,
-                        self.attn_tp_size,
-                        self.attn_tp_rank,
-                        self._full_column_weights,
-                        "k",
-                    )
-                    v_projected = _column_parallel_linear(
-                        hidden_states,
-                        self.kda_v_w,
-                        self.attn_tp_size,
-                        self.attn_tp_rank,
-                        self._full_column_weights,
-                        "v",
-                    )
-            token_count = hidden_states.shape[0]
-            with _perf_profile(
-                f"{self.trace_prefix}.forget_gate_and_beta_projections",
+                f"{self.trace_prefix}.canonical_forget_gate_and_beta_projections",
                 hidden_states,
             ):
+                forget_latent = _linear(hidden_states, self.kda_f_a_w)
                 raw_gate = _column_parallel_linear(
-                    _linear(hidden_states, self.weights[W.linear_attn_f_a_w]),
+                    forget_latent,
                     self.weights[W.linear_attn_f_b_w],
                     self.attn_tp_size,
                     self.attn_tp_rank,
                     self._full_column_weights,
                     "forget_gate_up",
                 )
-                raw_beta = self._beta_projection(hidden_states)
+                full_raw_beta = _linear(hidden_states, self.kda_beta_w)
+        else:
+            with _perf_profile(
+                f"{self.trace_prefix}.qkvg_fa_beta_fused_projection",
+                hidden_states,
+            ):
+                projected_fused = _linear(hidden_states, self.kda_fused_w)
+            (
+                q_projected,
+                k_projected,
+                v_projected,
+                output_gate_projected,
+                forget_latent,
+                full_raw_beta,
+            ) = split_kda_qkvg_fa_beta_sections(
+                projected_fused,
+                self.projection_size,
+                self.projection_size,
+                self.projection_size,
+                self.projection_size,
+                self.forget_latent_size,
+                self.total_heads,
+                dim=1,
+            )
+            with _perf_profile(
+                f"{self.trace_prefix}.forget_gate_up_projection",
+                forget_latent,
+            ):
+                raw_gate = _column_parallel_linear(
+                    forget_latent,
+                    self.weights[W.linear_attn_f_b_w],
+                    self.attn_tp_size,
+                    self.attn_tp_rank,
+                    self._full_column_weights,
+                    "forget_gate_up",
+                )
+        beta_begin = self.attn_tp_rank * self.local_heads
+        raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
+        head_shape = (1, token_count, self.local_heads, self.head_dim)
+        output_gate = output_gate_projected.reshape(head_shape)
         if trace_enabled:
             record_accuracy_tensor(
                 f"{self.trace_prefix}.q_projected", q_projected, token_dim=0
@@ -2848,7 +2760,6 @@ class KimiK3KDA(nn.Module):
             record_accuracy_tensor(
                 f"{self.trace_prefix}.v_projected", v_projected, token_dim=0
             )
-        head_shape = (1, token_count, self.local_heads, self.head_dim)
         if trace_enabled:
             record_accuracy_tensor(
                 f"{self.trace_prefix}.raw_gate", raw_gate, token_dim=0
@@ -2985,7 +2896,7 @@ class KimiK3KDA(nn.Module):
                     k.reshape(head_shape),
                     v.reshape(head_shape),
                     raw_gate.reshape(head_shape),
-                    raw_beta.float().reshape(1, token_count, self.local_heads),
+                    raw_beta.reshape(1, token_count, self.local_heads),
                     self.weights[W.linear_attn_alog],
                     self.weights[W.linear_attn_dt_b_kda],
                     recurrent_state,
@@ -2993,9 +2904,7 @@ class KimiK3KDA(nn.Module):
                     cu_seqlens=cu_seqlens,
                 )
                 assert (
-                    q_final is not None
-                    and k_final is not None
-                    and v_final is not None
+                    q_final is not None and k_final is not None and v_final is not None
                 )
                 final_state = KimiKDAState(
                     q_conv_state=q_final,
@@ -3094,17 +3003,6 @@ class KimiK3KDA(nn.Module):
                     self._a2a_o_weight,
                 )
         else:
-            with _perf_profile(
-                f"{self.trace_prefix}.output_gate_projection", hidden_states
-            ):
-                output_gate = _column_parallel_linear(
-                    hidden_states,
-                    self.weights[W.linear_attn_g_w],
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "output_gate",
-                ).reshape(head_shape)
             if trace_enabled:
                 record_accuracy_tensor(
                     f"{self.trace_prefix}.output_gate",
@@ -4784,8 +4682,8 @@ class KimiK3LatentMoE(nn.Module):
             source_slots = torch.stack(
                 [
                     combined[
-                        :, slot_idx * self.latent_size : (slot_idx + 1)
-                        * self.latent_size
+                        :,
+                        slot_idx * self.latent_size : (slot_idx + 1) * self.latent_size,
                     ]
                     for slot_idx in range(slots_per_row)
                 ],

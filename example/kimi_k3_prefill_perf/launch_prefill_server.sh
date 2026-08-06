@@ -5,7 +5,7 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
 : "${RUN_ROOT:?RUN_ROOT must point to this run artifact directory}"
-: "${OPS_OVERLAY:?OPS_OVERLAY must contain cuLA/FLA/FlashKDA/DeepGEMM}"
+: "${OPS_OVERLAY:?OPS_OVERLAY must contain FlashKDA/DeepGEMM}"
 
 checkpoint="${CHECKPOINT_PATH:-/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight}"
 start_port="${START_PORT:-27188}"
@@ -46,8 +46,8 @@ if [[ ! -f "${checkpoint}/config.json" ]]; then
   echo "checkpoint config not found: ${checkpoint}/config.json" >&2
   exit 2
 fi
-if [[ "${kda_comm_backend}" != "rs_ag" && "${kda_comm_backend}" != "a2a" ]]; then
-  echo "KIMI_K3_KDA_COMM_BACKEND must be rs_ag or a2a" >&2
+if [[ "${kda_comm_backend}" != "rs_ag" ]]; then
+  echo "KIMI_K3_KDA_COMM_BACKEND must be rs_ag for the fused-prefix layout" >&2
   exit 2
 fi
 
@@ -86,7 +86,6 @@ export KIMI_K3_USE_HOST_METADATA=1
 export KIMI_K3_SP_MOE=1
 export KIMI_K3_KDA_BACKEND="${KIMI_K3_KDA_BACKEND:-cula}"
 export KIMI_K3_KDA_COMM_BACKEND="${kda_comm_backend}"
-export KIMI_K3_KDA_A2A_SAFETY_GIB="${KIMI_K3_KDA_A2A_SAFETY_GIB:-8}"
 export KIMI_K3_MOE_BACKEND=deep_gemm_mega
 export KIMI_K3_MLA_BACKEND="${KIMI_K3_MLA_BACKEND:-flashmla}"
 export KIMI_K3_DEEPGEMM_EXPECTED_PATH="${OPS_OVERLAY}"
