@@ -235,11 +235,21 @@ class Qwen35Moe(Qwen3NextBase):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        from rtp_llm.device.device_type import is_hip
-        from rtp_llm.models_py.utils.arch import is_cuda
+        from rtp_llm.models_py.utils.arch import (
+            get_device_type,
+            is_cuda,
+            is_hip,
+            is_ppu,
+        )
 
-        if not is_cuda() and not is_hip():
-            raise RuntimeError("Qwen3Next is only supported in cuda/rocm arch")
+        # Per-model allowlist: a device belongs here once it has the attention,
+        # MoE and MRoPE impls Qwen35Model needs. Naming the device in the message
+        # keeps it truthful as the list grows.
+        if not is_cuda() and not is_hip() and not is_ppu():
+            raise RuntimeError(
+                "Qwen3Next has no python-model implementation for "
+                f"{get_device_type().name}"
+            )
         from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
 
         self.py_model = Qwen35Model(
