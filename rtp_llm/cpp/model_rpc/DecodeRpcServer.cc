@@ -196,8 +196,14 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
     decode_context.time_info.updateRequestBegineTime();
     auto& allocate_request = decode_context.allocate_request;
     if (!decode_context.rpc_context.grpc_stream->Read(&allocate_request)) {
-        const bool cancelled = decode_context.server_context != nullptr && decode_context.server_context->IsCancelled();
+        const bool cancelled        = decode_context.isRequestCancelled();
         decode_context.error_status = generateRequestReadFailureStatus(cancelled);
+        const auto peer = decode_context.server_context != nullptr ? decode_context.server_context->peer() : "unknown";
+        RTP_LLM_LOG_WARNING(
+            "request [pending peer=%s] read allocate request failed, cancelled [%d], grpc status code [%d]",
+            peer.c_str(),
+            cancelled ? 1 : 0,
+            static_cast<int>(decode_context.error_status.error_code()));
         return;
     }
     GRPC_RET_IF_ERROR(decode_context,
@@ -323,7 +329,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     auto&             generate_stream = decode_context.getStream();
     GenerateRequestPB generate_request;
     if (!grpc_stream->Read(&generate_request)) {
-        const bool cancelled        = decode_context.server_context->IsCancelled();
+        const bool cancelled        = decode_context.isRequestCancelled();
         decode_context.error_status = generateRequestReadFailureStatus(cancelled);
         RTP_LLM_LOG_WARNING("request [%s] read generate request failed, cancelled [%d], grpc status code [%d]",
                             decode_context.request_key.c_str(),

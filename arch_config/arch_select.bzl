@@ -186,10 +186,10 @@ def internal_deps():
     return []
 
 def telemetry_test_deps():
-    # The public pip lock has no opentelemetry, and tracing.py degrades to no-op
-    # when the import fails. The internal arch_config declares the runtime for the
-    # locks that carry it, so the telemetry test never depends on whatever the
-    # execution image's interpreter happens to have installed.
+    # The tracing SDK is optional at runtime. SDK-specific test methods skip
+    # explicitly when it is unavailable, while Trace-off tests remain independent
+    # of interpreter-wide packages. The lock carrying the SDK supplies it through
+    # the architecture-specific dependency selector.
     return []
 
 def jit_deps():

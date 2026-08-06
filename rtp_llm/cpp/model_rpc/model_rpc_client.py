@@ -2,6 +2,7 @@ import asyncio
 import functools
 import json
 import logging
+import math
 import time
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
@@ -47,6 +48,8 @@ from rtp_llm.utils.grpc_util import (
 )
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
+RPC_CLEANUP_TIMEOUT_SECONDS = 0.1
+RPC_SETTLE_TIMEOUT_SECONDS = 5.0
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 
 
@@ -101,15 +104,161 @@ def _request_completed_normally(trace_state: Any) -> bool:
         return False
 
 
-async def _wait_for_rpc_termination(response_iterator: Any) -> Any:
+async def _wait_for_rpc_termination(
+    response_iterator: Any, timeout_seconds: Optional[float] = None
+) -> Any:
     """Waits until grpc.aio has observed the server-side stream termination."""
     try:
         code = getattr(response_iterator, "code", None)
         if code is not None:
-            return await code()
+            if timeout_seconds is None:
+                return await code()
+            return await asyncio.wait_for(code(), timeout_seconds)
+    except asyncio.TimeoutError:
+        pass
+    except asyncio.CancelledError:
+        # This helper also runs from enqueue()'s finally block. Swallowing the
+        # task cancellation there would turn caller cancellation into success.
+        raise
     except Exception:  # noqa: BLE001 - span cleanup must stay fail-open
         pass
     return None
+
+
+async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle state machine
+    response_iterator: Any,
+    client_span: Any,
+    outputs: Optional[GenerateOutputs],
+    abandoned_event: "asyncio.Event",
+    active_deadline: Optional[float] = None,
+    include_all_sequences: bool = True,
+) -> Any:
+    """Settle a CLIENT span without letting observation own an active call.
+
+    ``active_deadline`` is the absolute deadline of the underlying gRPC call.
+    Once it expires, gRPC is responsible for producing its terminal status;
+    only an explicit abandonment transfers cancellation ownership here. A
+    missing deadline deliberately means that active observation has no local
+    upper bound, matching ``enqueue()``'s no-deadline contract.
+    """
+    try:
+        can_observe_rpc_status = callable(getattr(response_iterator, "code", None))
+    except Exception:  # noqa: BLE001 - optional grpc.aio observation
+        can_observe_rpc_status = False
+    status = None
+    status_task = None
+    abandoned_task = None
+    cleanup_timed_out = False
+    try:
+        if can_observe_rpc_status:
+            loop = asyncio.get_running_loop()
+            status_task = asyncio.create_task(
+                _wait_for_rpc_termination(response_iterator)
+            )
+            abandoned_task = asyncio.create_task(abandoned_event.wait())
+
+            while True:
+                if status_task.done():
+                    status = status_task.result()
+                    break
+
+                if abandoned_event.is_set():
+                    # The consumer has handed the transport to this task. Give
+                    # cleanup its own bounded window, even if active observation
+                    # already ran past the request deadline.
+                    cleanup_deadline = loop.time() + RPC_SETTLE_TIMEOUT_SECONDS
+                    remaining = max(0.0, cleanup_deadline - loop.time())
+                    done, _ = await asyncio.wait({status_task}, timeout=remaining)
+                    if done:
+                        status = status_task.result()
+                    else:
+                        try:
+                            response_iterator.cancel()
+                        except Exception:  # noqa: BLE001 - fail-open cleanup
+                            pass
+                        done, _ = await asyncio.wait(
+                            {status_task}, timeout=RPC_CLEANUP_TIMEOUT_SECONDS
+                        )
+                        if done:
+                            status = status_task.result()
+                        else:
+                            cleanup_timed_out = True
+                    break
+
+                remaining = (
+                    active_deadline - loop.time()
+                    if active_deadline is not None
+                    else None
+                )
+                wait_set = {status_task, abandoned_task}
+                if remaining is None:
+                    await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+                elif remaining > 0:
+                    done, _ = await asyncio.wait(
+                        wait_set,
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not done:
+                        # The active consumer still owns the transport. After the
+                        # observation deadline, keep waiting for either the real
+                        # status or an explicit ownership transfer from aclose().
+                        continue
+                else:
+                    # A configured gRPC deadline should make code() resolve to
+                    # DEADLINE_EXCEEDED. Do not add a second local cancellation
+                    # at this boundary; wait for that transport terminal state
+                    # or for the consumer to abandon ownership.
+                    await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
+        if client_span is not None:
+            _record_client_rpc_status(client_span, status)
+            _record_client_span_usage(
+                client_span, outputs, include_all_sequences=include_all_sequences
+            )
+            _record_client_span_latency(client_span, outputs)
+            if status == StatusCode.OK or not can_observe_rpc_status:
+                client_span.finish()
+            elif cleanup_timed_out:
+                client_span.finish(error_type="RpcSettlementTimeout")
+            else:
+                client_span.finish(error_type="RpcError")
+        return status
+    except asyncio.CancelledError as cancellation:
+        if status_task is not None and status_task.done():
+            try:
+                status = status_task.result()
+            except BaseException:  # noqa: BLE001 - preserve task cancellation
+                pass
+        if client_span is not None:
+            _record_client_rpc_status(client_span, status)
+            _record_client_span_usage(
+                client_span, outputs, include_all_sequences=include_all_sequences
+            )
+            _record_client_span_latency(client_span, outputs)
+            client_span.finish(error=cancellation, error_type="RpcSettlementCancelled")
+        if abandoned_event.is_set():
+            try:
+                response_iterator.cancel()
+            except Exception:  # noqa: BLE001 - fail-open cleanup
+                pass
+        raise
+    finally:
+        pending_tasks = []
+        for task in (status_task, abandoned_task):
+            if task is not None and not task.done():
+                task.cancel()
+                pending_tasks.append(task)
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+
+def _consume_settlement_task(task: "asyncio.Task[Any]") -> None:
+    try:
+        task.result()
+    except BaseException:  # noqa: BLE001 - detached cleanup is fail-open
+        logging.debug(
+            "client span settlement task ended before RPC status", exc_info=True
+        )
 
 
 def _record_client_rpc_status(client_span: Any, status: Any) -> None:
@@ -124,7 +273,10 @@ def _record_client_rpc_status(client_span: Any, status: Any) -> None:
 
 
 def _record_client_span_usage(
-    client_span: Any, outputs: Optional[GenerateOutputs]
+    client_span: Any,
+    outputs: Optional[GenerateOutputs],
+    *,
+    include_all_sequences: bool = True,
 ) -> None:
     """Writes the per-hop token attributes on the gRPC CLIENT span.
 
@@ -142,6 +294,8 @@ def _record_client_span_usage(
         generate_outputs = outputs.generate_outputs if outputs is not None else []
         if not generate_outputs:
             return
+        if not include_all_sequences:
+            generate_outputs = generate_outputs[:1]
         aux_infos = [out.aux_info for out in generate_outputs]
         input_len = aux_infos[0].input_len
         if (
@@ -161,6 +315,64 @@ def _record_client_span_usage(
         client_span.set_attribute(
             trace_attrs.GEN_AI_USAGE_TOTAL_TOKENS, input_len + output_len
         )
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+
+
+def _record_client_span_latency(
+    client_span: Any, outputs: Optional[GenerateOutputs]
+) -> None:
+    """Writes Engine TTFT/TPOT on one physical engine CLIENT span.
+
+    Multi-return (n>1) is served by a single physical stream, so every sequence
+    shares the prefill that commits the first token: Engine TTFT is written only
+    when all sequences agree on it. The per-token decode interval, by contrast,
+    is per-sequence and has no unambiguous stream-level value, so Engine TPOT is
+    restricted to single-sequence streams instead of silently publishing
+    sequence 0 as if it described the whole span.
+    """
+    if client_span is None:
+        return
+    try:
+        generate_outputs = outputs.generate_outputs if outputs is not None else []
+        if not generate_outputs:
+            return
+        aux_infos = [out.aux_info for out in generate_outputs]
+        if any(
+            not isinstance(aux.output_len, int)
+            or isinstance(aux.output_len, bool)
+            or aux.output_len <= 0
+            for aux in aux_infos
+        ):
+            return
+        ttft_ms = aux_infos[0].first_token_cost_time
+        if (
+            not isinstance(ttft_ms, (int, float))
+            or isinstance(ttft_ms, bool)
+            or not math.isfinite(float(ttft_ms))
+            or ttft_ms <= 0
+            or any(aux.first_token_cost_time != ttft_ms for aux in aux_infos)
+        ):
+            return
+        client_span.set_attribute(
+            trace_attrs.RTP_LLM_ENGINE_TIME_TO_FIRST_TOKEN_MS, float(ttft_ms)
+        )
+
+        if len(aux_infos) != 1:
+            return
+        output_len = aux_infos[0].output_len
+        cost_ms = aux_infos[0].cost_time
+        if (
+            output_len > 1
+            and isinstance(cost_ms, (int, float))
+            and not isinstance(cost_ms, bool)
+            and math.isfinite(float(cost_ms))
+            and cost_ms >= ttft_ms
+        ):
+            client_span.set_attribute(
+                trace_attrs.RTP_LLM_ENGINE_TIME_PER_OUTPUT_TOKEN_MS,
+                float(cost_ms - ttft_ms) / (output_len - 1),
+            )
     except Exception:  # noqa: BLE001 - fail-open
         pass
 
@@ -694,14 +906,19 @@ class ModelRpcClient(object):
         if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
             metadata["grpc-status-details-bin"]
         ):
+            raw_error_code = error_details.error_code
+            try:
+                exception_type = ExceptionType(raw_error_code)
+                error_code_name = exception_type.name
+            except ValueError:
+                exception_type = ExceptionType.UNKNOWN_ERROR
+                error_code_name = f"UNKNOWN({raw_error_code})"
             logging.error(
                 f"{request_desc} RPC{peer_desc} failed: "
                 f"{e.code()}, {e.details()}, detail error code is "
-                f"{ExceptionType.from_value(error_details.error_code)}"
+                f"{error_code_name}"
             )
-            raise FtRuntimeException(
-                ExceptionType(error_details.error_code), error_details.error_message
-            )
+            raise FtRuntimeException(exception_type, error_details.error_message)
         else:
             logging.error(
                 f"{request_desc} RPC{peer_desc} failed: "
@@ -732,7 +949,8 @@ class ModelRpcClient(object):
     ) -> AsyncGenerator[GenerateOutputs, None]:
         request_timeout_ms = input_py.generate_config.timeout_ms
         # Prefer per-request timeout; otherwise fall back to the server-side default
-        # (pd_sep_config.max_rpc_timeout_ms). effective_ms <= 0 means no gRPC deadline.
+        # (pd_sep_config.max_rpc_timeout_ms). effective_ms <= 0 means no gRPC
+        # deadline and therefore no local active-consumer upper bound.
         effective_ms = (
             request_timeout_ms
             if request_timeout_ms is not None and request_timeout_ms > 0
@@ -747,6 +965,7 @@ class ModelRpcClient(object):
         response_iterator = None
         rpc_status = None
         stream_state = StreamState()
+        include_all_sequences = not input_py.generate_config.has_num_beams()
         use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
         selected_role = None
 
@@ -785,9 +1004,11 @@ class ModelRpcClient(object):
         logging.debug(
             f"request: [{input_py.request_id}] send to address: {target_address}"
         )
-        stub = None
         stream_done = False
         terminal_seen = False
+        client_settlement_task = None
+        client_settlement_abandoned = None
+        rpc_deadline = None
 
         trace_state = CURRENT_TRACE_STATE.get()
         pd_separation = _selected_pd_separation(selected_role, input_py.generate_config)
@@ -801,6 +1022,7 @@ class ModelRpcClient(object):
             "rtp_llm.generate_stream_call", target_address
         )
         if client_span is not None:
+            client_settlement_abandoned = asyncio.Event()
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
             client_span.set_attribute(trace_attrs.REQUEST_ID, str(input_py.request_id))
             client_span.set_attribute(
@@ -820,6 +1042,11 @@ class ModelRpcClient(object):
                 # One injection point covers both channels: W3C traceparent
                 # rides gRPC metadata for FetchResponse and GenerateStreamCall.
                 grpc_kwargs["metadata"] = trace_metadata
+            if effective_ms > 0:
+                # grpc.aio starts this timeout when the call is created. The
+                # observer uses the same absolute boundary, so time spent
+                # receiving application frames is included.
+                rpc_deadline = asyncio.get_running_loop().time() + effective_ms / 1000.0
             if use_fetch_response:
                 response_iterator = stub.FetchResponse(
                     FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
@@ -832,32 +1059,38 @@ class ModelRpcClient(object):
                 last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
                     terminal_seen = True
-                if _engine_reported_finished(output_py):
+                if _engine_reported_finished(output_py) and client_span is not None:
                     # The finished application frame is not the gRPC EOF. If it
                     # escapes first, an upstream renderer can close this generator
-                    # while the server is still settling the RPC, converting a
-                    # naturally completed call into CANCELLED. grpc.aio receives
-                    # the terminal status independently of the message iterator,
-                    # so wait for that physical boundary before publishing the
-                    # final frame.
-                    rpc_status = await _wait_for_rpc_termination(response_iterator)
-                    # Settle the CLIENT span here, not in ``finally``: consumers
-                    # habitually abandon this generator right after the finished
-                    # frame (the wrapper's async-for exits without aclosing the
-                    # inner generator), so ``finally`` only runs at GC-finalizer
-                    # time -- or never -- and the span would leak unexported.
-                    # ``finish()`` is idempotent with every later settle path.
-                    if client_span is not None:
-                        _record_client_rpc_status(client_span, rpc_status)
-                        _record_client_span_usage(client_span, output_py)
-                        client_span.finish()
+                    # while the server is still settling the RPC. The application
+                    # frame is the data-plane completion boundary; keep terminal
+                    # observation off that path and settle the span independently.
+                    if client_settlement_task is None:
+                        client_settlement_task = asyncio.create_task(
+                            _settle_client_span_after_rpc(
+                                response_iterator,
+                                client_span,
+                                output_py,
+                                client_settlement_abandoned,
+                                active_deadline=rpc_deadline,
+                                include_all_sequences=include_all_sequences,
+                            )
+                        )
+                        client_settlement_task.add_done_callback(
+                            _consume_settlement_task
+                        )
                 yield output_py
             stream_done = True
         except grpc.RpcError as e:
             rpc_status = e.code()
             if client_span is not None:
                 _record_client_rpc_status(client_span, rpc_status)
-                _record_client_span_usage(client_span, last_output)
+                _record_client_span_usage(
+                    client_span,
+                    last_output,
+                    include_all_sequences=include_all_sequences,
+                )
+                _record_client_span_latency(client_span, last_output)
                 client_span.finish(error=e, error_type="RpcError")
             if response_iterator:
                 response_iterator.cancel()
@@ -881,17 +1114,29 @@ class ModelRpcClient(object):
                 if not engine_finished:
                     response_iterator.cancel()
                 # A CLIENT span covers grpc.aio's terminal RPC state. Engine-finished
-                # streams already waited before exposing their final frame; after
-                # local cancellation, remote handler cleanup can still be asynchronous.
-                if rpc_status is None:
-                    rpc_status = await _wait_for_rpc_termination(response_iterator)
-                _record_client_rpc_status(client_span, rpc_status)
-            if client_span is not None:
+                # streams settle independently; after local cancellation, remote
+                # handler cleanup can still be asynchronous.
+                if (
+                    rpc_status is None
+                    and client_span is not None
+                    and client_settlement_task is None
+                ):
+                    rpc_status = await _wait_for_rpc_termination(
+                        response_iterator, timeout_seconds=RPC_CLEANUP_TIMEOUT_SECONDS
+                    )
+                if client_settlement_task is None:
+                    _record_client_rpc_status(client_span, rpc_status)
+            if client_span is not None and client_settlement_task is None:
                 # Keep usage for both successful cleanup and a genuinely
                 # cancelled stream. The last delivered response is confirmed
                 # work; writing it after finish() would be dropped.
-                _record_client_span_usage(client_span, last_output)
+                _record_client_span_usage(
+                    client_span,
+                    last_output,
+                    include_all_sequences=include_all_sequences,
+                )
                 if engine_finished or _request_completed_normally(trace_state):
+                    _record_client_span_latency(client_span, last_output)
                     client_span.finish()
                 else:
                     client_span.finish(error=e, error_type="Cancelled")
@@ -899,31 +1144,82 @@ class ModelRpcClient(object):
         except Exception as e:
             if response_iterator:
                 response_iterator.cancel()
-                if rpc_status is None:
-                    rpc_status = await _wait_for_rpc_termination(response_iterator)
-                _record_client_rpc_status(client_span, rpc_status)
-            if client_span is not None:
-                _record_client_span_usage(client_span, last_output)
+                if (
+                    rpc_status is None
+                    and client_span is not None
+                    and client_settlement_task is None
+                ):
+                    rpc_status = await _wait_for_rpc_termination(
+                        response_iterator, timeout_seconds=RPC_CLEANUP_TIMEOUT_SECONDS
+                    )
+                if client_settlement_task is None:
+                    _record_client_rpc_status(client_span, rpc_status)
+            if client_span is not None and client_settlement_task is None:
+                _record_client_span_usage(
+                    client_span,
+                    last_output,
+                    include_all_sequences=include_all_sequences,
+                )
+                _record_client_span_latency(client_span, last_output)
                 client_span.finish(error=e)
             logging.error(
                 f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
             )
             raise e
         finally:
-            if client_span is not None:
-                # Fallback for streams that ended without a finished flag (the
-                # branch above already settled the normal case): non-streaming
-                # merges, engines that close the stream without flagging, and
-                # error paths where the span is already settled and these calls
-                # are dropped.
-                if response_iterator and rpc_status is None:
-                    rpc_status = await _wait_for_rpc_termination(response_iterator)
-                _record_client_rpc_status(client_span, rpc_status)
-                _record_client_span_usage(client_span, last_output)
-                # success/cancel fallback; idempotent with the error paths above
-                client_span.finish()
-            should_cancel = not stream_done and not (
-                use_fetch_response and terminal_seen
+            try:
+                if client_span is not None:
+                    if (
+                        client_settlement_task is not None
+                        and not stream_done
+                        and client_settlement_abandoned is not None
+                    ):
+                        client_settlement_abandoned.set()
+                    # Normal completion has a detached settlement task. Do not
+                    # await it here, otherwise aclose() would reintroduce the
+                    # finished-frame blocking regression.
+                    if client_settlement_task is not None:
+                        if client_settlement_task.done():
+                            try:
+                                rpc_status = client_settlement_task.result()
+                            except BaseException:  # noqa: BLE001 - fail-open
+                                pass
+                        else:
+                            rpc_status = None
+                    elif response_iterator and rpc_status is None:
+                        rpc_status = await _wait_for_rpc_termination(
+                            response_iterator,
+                            timeout_seconds=RPC_CLEANUP_TIMEOUT_SECONDS,
+                        )
+                    if client_settlement_task is None or client_settlement_task.done():
+                        _record_client_rpc_status(client_span, rpc_status)
+                        _record_client_span_usage(
+                            client_span,
+                            last_output,
+                            include_all_sequences=include_all_sequences,
+                        )
+                        _record_client_span_latency(client_span, last_output)
+                        # success/cancel fallback; idempotent with the error paths above
+                        client_span.finish()
+            except asyncio.CancelledError as cleanup_cancel:
+                if response_iterator:
+                    try:
+                        response_iterator.cancel()
+                    except Exception:  # noqa: BLE001 - preserve caller cancellation
+                        pass
+                if client_span is not None and client_settlement_task is None:
+                    _record_client_rpc_status(client_span, StatusCode.CANCELLED)
+                    _record_client_span_usage(
+                        client_span,
+                        last_output,
+                        include_all_sequences=include_all_sequences,
+                    )
+                    client_span.finish(error=cleanup_cancel, error_type="Cancelled")
+                raise
+            should_cancel = (
+                not stream_done
+                and client_settlement_task is None
+                and not (use_fetch_response and terminal_seen)
             )
             if response_iterator and should_cancel:
                 response_iterator.cancel()

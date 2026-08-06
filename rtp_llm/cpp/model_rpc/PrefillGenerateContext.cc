@@ -112,7 +112,8 @@ void PrefillGenerateContext::stopStream() {
         stream_.reset();
     }
 }
-grpc::Status PrefillGenerateContext::closeGrpcStream(const std::string& attempt_error_override) {
+grpc::Status PrefillGenerateContext::closeGrpcStream(const std::string& attempt_error_override,
+                                                     bool               override_transport_error) {
     if (grpc_stream_closed) {
         // The first close owns the transport/application terminal state. A
         // later settlement callback is expected during stream teardown; it
@@ -162,10 +163,10 @@ grpc::Status PrefillGenerateContext::closeGrpcStream(const std::string& attempt_
         pd_client_span_guard->setAttribute(telemetry::kAttrRtpLlmPollRemoteOutputRtUs, poll_remote_output_rt_us);
         pd_client_span_guard->setAttribute(telemetry::kAttrRpcResponseStatusCode,
                                            telemetry::grpcStatusCodeValue(last_grpc_stream_closed_status.error_code()));
-        if (last_grpc_stream_closed_status.ok() && !attempt_error_override.empty()) {
-            // Transport Finish()==OK but the caller knows this attempt failed
-            // before receiving a response. The override must be supplied on
-            // this first (and only) close pass.
+        if (!attempt_error_override.empty() && (last_grpc_stream_closed_status.ok() || override_transport_error)) {
+            // The caller knows the semantic first cause. Retry attempts use this
+            // only when transport is OK; priority preemption explicitly keeps it
+            // authoritative even when TryCancel makes Finish() return CANCELLED.
             pd_client_span_guard->setAttribute(telemetry::kAttrErrorType, attempt_error_override);
             pd_client_span_guard->finish(opentelemetry::trace::StatusCode::kError,
                                          "Prefill-to-decode RPC attempt failed before receiving a response");
@@ -299,7 +300,7 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
     // execution; Decode's cancellation finalizer runs before Finish returns.
     tryCancelDownstream();
-    (void)closeGrpcStream();
+    (void)closeGrpcStream(ErrorCodeToString(ErrorCode::PRIORITY_PREEMPTED), true);
 
     const auto finalized_stream = stream_;
     if (finalized_stream) {

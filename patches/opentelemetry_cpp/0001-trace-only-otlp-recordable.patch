@@ -1,3 +1,11 @@
+# RTP-LLM's pinned protobuf toolchain cannot compile the upstream OTLP metrics
+# inputs that require newer proto3-optional support. This workspace currently
+# exports traces only, so remove the metrics sources and proto dependency from
+# the shared recordable target while retaining trace and log inputs.
+#
+# This intentionally makes the vendored target unsuitable for OTel metrics.
+# Restore the removed inputs when the protobuf toolchain supports them, or
+# before adding any metrics exporter consumer, and then remove this patch.
 diff --git a/exporters/otlp/BUILD b/exporters/otlp/BUILD
 --- a/exporters/otlp/BUILD
 +++ b/exporters/otlp/BUILD

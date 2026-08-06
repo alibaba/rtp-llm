@@ -48,7 +48,6 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:base64",
     "@havenask//aios/autil:zlib",
-    "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
 ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
 # cc_test(
@@ -169,7 +168,9 @@ cc_test(
         "RpcWriterCancellationTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

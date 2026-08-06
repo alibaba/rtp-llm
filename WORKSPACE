@@ -8,6 +8,8 @@ http_archive(
     sha256 = "d020f3aa595a9e0cb8db468c07383e8771744cfe8d0257af4aa721f82c5b4220",
     strip_prefix = "opentelemetry-cpp-b9cf499ff5715433848b316059714b5c59af1f2c",
     patch_args = ["-p1"],
+    # See the patch header for the trace-only compatibility contract and the
+    # conditions under which the upstream metrics inputs must be restored.
     patches = ["//patches/opentelemetry_cpp:0001-trace-only-otlp-recordable.patch"],
     repo_mapping = {
         "@zlib": "@zlib_archive",

@@ -372,8 +372,8 @@ class BackendRPCServerVisitor:
         route_span = start_internal_span("rtp_llm.master_route")
         if route_span is not None:
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
-            route_span.set_attribute("request_id", str(input.request_id))
-            route_span.set_attribute("rtp_llm.request_id", input.request_id)
+            route_span.set_attribute(trace_attrs.REQUEST_ID, str(input.request_id))
+            route_span.set_attribute(trace_attrs.RTP_LLM_REQUEST_ID, input.request_id)
         route_source = "none"
         route_error_type = ""
         try:
@@ -478,7 +478,9 @@ class BackendRPCServerVisitor:
         except BaseException as e:
             if route_span is not None:
                 route_span.set_attribute(trace_attrs.RTP_LLM_ROUTE_SOURCE, route_source)
-                if isinstance(e, FtRuntimeException):
+                if isinstance(e, asyncio.CancelledError):
+                    route_error_type = "Cancelled"
+                elif isinstance(e, FtRuntimeException):
                     route_span.set_attribute(
                         trace_attrs.RTP_LLM_ERROR_CODE,
                         int(getattr(e, "rtp_error_code", e.exception_type)),

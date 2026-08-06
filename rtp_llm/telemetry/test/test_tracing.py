@@ -4,9 +4,9 @@ Run directly (conda310 interpreter) or via Bazel:
     /opt/conda310/bin/python -m unittest rtp_llm.telemetry.test.test_tracing -v
     bazelisk test //rtp_llm/telemetry/test:test_tracing
 
-unittest style on purpose (repo convention; pytest is not in any pip lock).
-opentelemetry comes from the execution image's interpreter site-packages (not
-in the public pip locks; rules_python here does not isolate system packages).
+unittest style on purpose (repo convention; pytest is not part of the test
+runtime). The dependency-contract test checks that the tracing SDK is available
+in the configured test environment rather than relying on an ambient import.
 The unskipped dependency-contract test prevents a missing runtime from turning
 the functional suite into an all-skip success.
 """
@@ -694,6 +694,22 @@ class TestActiveRuntime(TracingTestCase):
         assert len(spans) == 1
         assert spans[0].parent is None
 
+    def test_delayed_server_span_uses_rpc_monotonic_start_for_ttft(self):
+        exporter = _start_in_memory_runtime()
+        request_start_ns = time.monotonic_ns()
+        state = tracing.start_server_span(
+            "delayed_ttft",
+            {},
+            start_time=time.time_ns(),
+            request_start_ns=request_start_ns,
+        )
+        assert state is not None
+        state.record_frontend_output_tokens(1, request_start_ns + 50_000_000)
+        state.finish()
+        tracing.shutdown_telemetry()
+        span = exporter.get_finished_spans()[0]
+        assert abs(span.attributes["gen_ai.response.time_to_first_token"] - 50.0) < 1e-6
+
     def test_inject_extract_roundtrip(self):
         _start_in_memory_runtime()
         state = tracing.start_server_span("parent", {})
@@ -1114,16 +1130,18 @@ class TestResponseAttributes(TracingTestCase):
         assert a[attrs.GEN_AI_USAGE_PROMPT_TOKENS] == 12
         assert a[attrs.GEN_AI_USAGE_COMPLETION_TOKENS] == 5
         assert a[attrs.GEN_AI_USAGE_TOTAL_TOKENS] == 17
-        assert a[attrs.GEN_AI_TIME_TO_FIRST_TOKEN] == 8.5
-        assert a[attrs.RTP_LLM_ENGINE_TIME_PER_OUTPUT_TOKEN_MS] == 2.875
+        assert attrs.GEN_AI_TIME_TO_FIRST_TOKEN not in a
+        assert attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS not in a
+        assert attrs.RTP_LLM_ENGINE_TIME_TO_FIRST_TOKEN_MS not in a
+        assert attrs.RTP_LLM_ENGINE_TIME_PER_OUTPUT_TOKEN_MS not in a
         assert a[attrs.RTP_LLM_PD_SEP] is True
         assert a[attrs.RTP_LLM_CACHE_TOTAL_REUSE_LEN] == 4
         assert a[attrs.RTP_LLM_CACHE_LOCAL_REUSE_LEN] == 3
         assert a[attrs.RTP_LLM_CACHE_REMOTE_REUSE_LEN] == 1
 
     def test_trimmed_attributes_absent(self):
-        # Raw cost/wait/iter are intentionally NOT written. TPOT is the only
-        # derived summary retained from cost_time and output_len.
+        # Raw engine timing fields and their derived TTFT/TPOT are not written
+        # on the logical request SERVER span.
         exporter = _start_in_memory_runtime()
         state = tracing.start_server_span("srv", {})
         tracing.record_response_attributes(self._SAMPLE)
@@ -1134,20 +1152,8 @@ class TestResponseAttributes(TracingTestCase):
         assert "rtp_llm.cost_time_ms" not in a
         assert "rtp_llm.wait_time_ms" not in a
         assert "rtp_llm.iter_count" not in a
-
-    def test_engine_tpot_requires_multiple_tokens_and_coherent_times(self):
-        for aux in (
-            {"cost_time": 20.0, "first_token_cost_time": 8.5, "output_len": 1},
-            {"cost_time": 8.0, "first_token_cost_time": 8.5, "output_len": 5},
-        ):
-            exporter = _start_in_memory_runtime()
-            state = tracing.start_server_span("srv", {})
-            tracing.record_response_attributes({"aux_info": aux})
-            state.finish()
-            tracing.shutdown_telemetry()
-
-            span = exporter.get_finished_spans()[0]
-            assert attrs.RTP_LLM_ENGINE_TIME_PER_OUTPUT_TOKEN_MS not in span.attributes
+        assert attrs.GEN_AI_TIME_TO_FIRST_TOKEN not in a
+        assert attrs.RTP_LLM_ENGINE_TIME_PER_OUTPUT_TOKEN_MS not in a
 
     def test_multiple_finish_reasons_as_array(self):
         exporter = _start_in_memory_runtime()
@@ -1354,6 +1360,79 @@ class TestSpanEvents(TracingTestCase):
         state = tracing.RequestTraceState()
         state.add_event(attrs.EVENT_FIRST_RESPONSE_CHUNK)
         state.finish()
+
+
+class TestFrontendTokenLatency(TracingTestCase):
+    def test_visible_token_ttft_and_tpot_use_server_timeline(self):
+        exporter = _start_in_memory_runtime()
+        span = tracing.get_tracer().start_span("srv")
+        state = tracing.RequestTraceState(
+            server_span=span, request_start_ns=1_000_000_000
+        )
+
+        state.record_frontend_output_tokens(0, 1_005_000_000)
+        assert attrs.GEN_AI_TIME_TO_FIRST_TOKEN not in span.attributes
+
+        state.record_frontend_output_tokens(1, 1_012_500_000)
+        assert span.attributes[attrs.GEN_AI_TIME_TO_FIRST_TOKEN] == 12.5
+        assert attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS not in span.attributes
+
+        state.record_frontend_output_tokens(2, 1_032_500_000)
+        assert span.attributes[attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS] == 10.0
+        state.finish()
+        tracing.shutdown_telemetry()
+
+        finished = exporter.get_finished_spans()[0]
+        assert finished.attributes[attrs.GEN_AI_TIME_TO_FIRST_TOKEN] == 12.5
+        assert (
+            finished.attributes[attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS] == 10.0
+        )
+
+    def test_tpot_requires_two_distinct_delivery_instants(self):
+        exporter = _start_in_memory_runtime()
+        span = tracing.get_tracer().start_span("srv")
+        state = tracing.RequestTraceState(
+            server_span=span, request_start_ns=1_000_000_000
+        )
+
+        # One frame carrying 3 tokens exposes no inter-token send boundary, so
+        # TPOT must stay absent rather than be reported as 0.0.
+        state.record_frontend_output_tokens(3, 1_012_500_000)
+        assert span.attributes[attrs.GEN_AI_TIME_TO_FIRST_TOKEN] == 12.5
+        assert attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS not in span.attributes
+
+        # A second frame delivered at the same instant adds no boundary either.
+        state.record_frontend_output_tokens(2, 1_012_500_000)
+        assert attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS not in span.attributes
+
+        # A later frame supplies the second instant: 6 tokens across 10ms.
+        state.record_frontend_output_tokens(1, 1_022_500_000)
+        assert span.attributes[attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS] == 2.0
+        state.finish()
+        tracing.shutdown_telemetry()
+
+        finished = exporter.get_finished_spans()[0]
+        assert finished.attributes[attrs.GEN_AI_TIME_TO_FIRST_TOKEN] == 12.5
+        assert (
+            finished.attributes[attrs.RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS] == 2.0
+        )
+
+    def test_invalid_or_late_observations_are_ignored(self):
+        exporter = _start_in_memory_runtime()
+        span = tracing.get_tracer().start_span("srv")
+        state = tracing.RequestTraceState(
+            server_span=span, request_start_ns=1_000_000_000
+        )
+        state.record_frontend_output_tokens(True, 1_010_000_000)
+        state.record_frontend_output_tokens(1, 999_000_000)
+        state.finish()
+        state.record_frontend_output_tokens(1, 1_020_000_000)
+        tracing.shutdown_telemetry()
+
+        assert (
+            attrs.GEN_AI_TIME_TO_FIRST_TOKEN
+            not in exporter.get_finished_spans()[0].attributes
+        )
 
 
 if __name__ == "__main__":

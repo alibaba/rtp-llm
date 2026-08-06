@@ -37,17 +37,20 @@ SERVER_ADDRESS = "server.address"
 SERVER_PORT = "server.port"
 
 # --- ARMS-Unitrace extension: NOT official OTel semconv ---
-# Per-trace Engine TTFT: engine stream begin to the first valid token commit,
-# including engine queueing and prefill but excluding frontend/client latency.
-# Unit: milliseconds. AuxInfo.first_token_cost_time is already ms on the Python
-# side (model_rpc_client divides the us field by 1000), so no conversion here.
+# Logical-request TTFT observed at the HTTP/Dash SERVER boundary: SERVER span
+# start to the first response carrying caller-visible output tokens. Unit: ms.
 # Do not rename this span attribute to gen_ai.server.time_to_first_token: the
 # latter is an OTel Histogram metric in seconds, not a per-trace attribute.
 GEN_AI_TIME_TO_FIRST_TOKEN = "gen_ai.response.time_to_first_token"
 
-# Engine decode latency after the first committed token. Unit: milliseconds.
-# This is an RTP-LLM attribute rather than an OTel candidate because the
-# current GenAI span convention does not define a per-trace TPOT attribute.
+# Logical-request delivery interval after the first caller-visible token. It is
+# written only on streaming HTTP/Dash SERVER spans. Unit: milliseconds.
+RTP_LLM_FRONTEND_TIME_PER_OUTPUT_TOKEN_MS = "rtp_llm.frontend.time_per_output_token_ms"
+
+# Per-engine-stream latency copied from AuxInfo onto generate_stream_call CLIENT
+# spans. first_token_cost_time/cost_time are already milliseconds on the Python
+# side (model_rpc_client divides the protobuf microseconds by 1000).
+RTP_LLM_ENGINE_TIME_TO_FIRST_TOKEN_MS = "rtp_llm.engine.time_to_first_token_ms"
 RTP_LLM_ENGINE_TIME_PER_OUTPUT_TOKEN_MS = "rtp_llm.engine.time_per_output_token_ms"
 
 # Unit: NANOSECONDS. The platform expects nanoseconds for these two keys even

@@ -159,7 +159,8 @@ std::shared_ptr<memory_exporter::InMemorySpanData> startTelemetryForCloseTest() 
 }
 
 void expectClientSpanError(const std::shared_ptr<memory_exporter::InMemorySpanData>& span_data,
-                           const std::string&                                        error_type) {
+                           const std::string&                                        error_type,
+                           const std::optional<std::string>&                         rpc_status = std::nullopt) {
     auto spans = span_data->GetSpans();
     ASSERT_EQ(spans.size(), 1u);
     ASSERT_NE(spans[0], nullptr);
@@ -168,6 +169,10 @@ void expectClientSpanError(const std::shared_ptr<memory_exporter::InMemorySpanDa
     const auto& attributes = span->GetAttributes();
     ASSERT_NE(attributes.find("error.type"), attributes.end());
     EXPECT_EQ(nostd::get<std::string>(attributes.at("error.type")), error_type);
+    if (rpc_status.has_value()) {
+        ASSERT_NE(attributes.find("rpc.response.status_code"), attributes.end());
+        EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.response.status_code")), *rpc_status);
+    }
 }
 
 void expectClientSpanOk(const std::shared_ptr<memory_exporter::InMemorySpanData>& span_data) {
@@ -191,6 +196,7 @@ TEST(RpcWriterCancellationTest, LocalWriteFailureCancelsStreamAndReturnsCancelle
 }
 
 TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
+    test::TestLogCapture   log_capture("decode_first_read_cancel");
     DecodeFirstReadService service;
     int                    listen_port = 0;
     grpc::ServerBuilder    builder;
@@ -213,12 +219,14 @@ TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
     const auto client_status = stream->Finish();
     const auto server_status = service.waitUntilReturned(std::chrono::seconds(5));
 
-    server->Shutdown();
+    server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
     server->Wait();
 
     EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
     ASSERT_TRUE(server_status.has_value());
     EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
+    EXPECT_NE(log_capture.content().find("request [pending peer="), std::string::npos);
+    EXPECT_NE(log_capture.content().find("read allocate request failed"), std::string::npos);
 }
 
 TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
@@ -358,6 +366,32 @@ TEST(RpcWriterCancellationTest, CloseGrpcStreamUsesOverrideOnFirstOkClose) {
     }
     ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
     expectClientSpanError(span_data, "REMOTE_GENERATE_FAILED");
+}
+
+TEST(RpcWriterCancellationTest, PriorityPreemptionOverridesOkAndCancelledTransportStatus) {
+    const std::vector<std::pair<grpc::Status, std::string>> cases = {
+        {grpc::Status::OK, "OK"},
+        {grpc::Status(grpc::StatusCode::CANCELLED, "cancelled"), "CANCELLED"},
+    };
+    for (const auto& [finish_status, expected_rpc_status] : cases) {
+        auto span_data = startTelemetryForCloseTest();
+        {
+            GenerateInputPB request;
+            request.set_request_id(48);
+            RPCContext                   rpc_context{&request, nullptr};
+            RemoteServerResource         resource;
+            kmonitor::MetricsReporterPtr metrics_reporter;
+            PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, nullptr);
+            context.client_stream        = std::make_shared<SingleResponseClientStream>(finish_status);
+            context.pd_client_span_guard = std::make_unique<telemetry::RequestSpanGuard>(
+                telemetry::TelemetryRuntime::tracer()->StartSpan("priority_preempt"));
+
+            EXPECT_EQ(context.requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+            EXPECT_TRUE(context.finalizePriorityPreemption());
+        }
+        ASSERT_TRUE(telemetry::TelemetryRuntime::shutdown(5000));
+        expectClientSpanError(span_data, "PRIORITY_PREEMPTED", expected_rpc_status);
+    }
 }
 
 }  // namespace

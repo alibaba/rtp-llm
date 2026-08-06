@@ -370,8 +370,8 @@ class TestBackendRouteTrace(unittest.TestCase):
             ):
                 asyncio.run(visitor.route_ips(request))
 
-        route_span.set_attribute.assert_any_call("request_id", "123")
-        route_span.set_attribute.assert_any_call("rtp_llm.request_id", 123)
+        route_span.set_attribute.assert_any_call(trace_attrs.REQUEST_ID, "123")
+        route_span.set_attribute.assert_any_call(trace_attrs.RTP_LLM_REQUEST_ID, 123)
         route_span.set_attribute.assert_any_call(
             trace_attrs.RTP_LLM_ROUTE_QUEUE_LENGTH, 0
         )
@@ -389,6 +389,33 @@ class TestBackendRouteTrace(unittest.TestCase):
             route_span.finish.call_args.kwargs["error_type"], "TrafficLimit"
         )
         self.assertEqual(route_span.method_calls[-1][0], "finish")
+        self.assertIn("none", trace_attrs.RTP_LLM_ROUTE_SOURCE_VALUES)
+
+    def test_route_cancellation_uses_stable_span_error_type(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.master_config = None
+        visitor.host_service = MagicMock()
+        visitor.host_service.get_master_addr.return_value = "master:9000"
+        visitor.backend_role_list = ["PREFILL"]
+        route_span = MagicMock()
+
+        async def cancel_master_route(_input):
+            raise asyncio.CancelledError("request cancelled")
+
+        visitor.get_master_route_addrs = cancel_master_route
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.start_internal_span",
+            return_value=route_span,
+        ), patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor.report"):
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(visitor.route_ips(_FakeInput()))
+
+        route_span.set_attribute.assert_any_call(
+            trace_attrs.RTP_LLM_ROUTE_SOURCE, "none"
+        )
+        route_span.finish.assert_called_once()
+        self.assertEqual(route_span.finish.call_args.kwargs["error_type"], "Cancelled")
 
 
 class _RetryingModelRpcClient:

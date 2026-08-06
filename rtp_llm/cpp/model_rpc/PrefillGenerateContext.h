@@ -105,7 +105,7 @@ public:
     // priority-preemption first cause and its CANCELING overlay.
     void         dequeueStreamFromRuntimeMeta();
     void         nextStage();
-    grpc::Status closeGrpcStream(const std::string& attempt_error_override = "");
+    grpc::Status closeGrpcStream(const std::string& attempt_error_override = "", bool override_transport_error = false);
     void         closeGrpcConnection();
     bool         multimodalProcessed() const {
         return multimodal_processed_;

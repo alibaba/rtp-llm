@@ -7,7 +7,7 @@ RTP-LLM 内置 OpenTelemetry trace（Python frontend + C++ engine 双侧自产 s
 ```bash
 export RTP_LLM_OTEL_TRACE_ENABLE=1        # 总开关，默认关闭
 # 二选一：
-export RTP_LLM_OTEL_REGION=cn-hangzhou    # 内部部署：region 映射自动解析 endpoint/headers/CA
+export RTP_LLM_OTEL_REGION=cn-hangzhou    # region 映射自动解析 endpoint/headers/CA
 # 或显式指定 endpoint：
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://<collector>/v1/traces
 ```
@@ -22,14 +22,13 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://<collector>/v1/traces
 
 1. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`（原样使用）
 2. `OTEL_EXPORTER_OTLP_ENDPOINT`（自动拼接 `/v1/traces`）
-3. `RTP_LLM_OTEL_REGION` + region 配置文件（仅内部部署可用，见下）
+3. `RTP_LLM_OTEL_REGION` + region 配置文件
 
 生产环境优先由部署平台显式注入 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` 和
-`OTEL_EXPORTER_OTLP_TRACES_HEADERS`。region 配置文件包含接入凭证，**不会内置于镜像或公开 wheel**；
-若必须使用 region 单变量模式，应通过 Secret 在运行时挂载配置，并用
+`OTEL_EXPORTER_OTLP_TRACES_HEADERS`。region 配置文件包含接入凭证，不应内置于镜像或发布包；
+若使用 region 单变量模式，应通过 Secret 在运行时挂载配置，并用
 `RTP_LLM_OTEL_REGION_CONFIG_FILE` 指向挂载路径（也兼容挂载到
-`/etc/rtp_llm/trace_regions.json`）。开发环境仍可读取
-`internal_source/rtp_llm/telemetry/trace_regions.json`。region 解析结果不会覆盖用户已显式设置的 env。
+`/etc/rtp_llm/trace_regions.json`）。region 解析结果不会覆盖用户已显式设置的 env。
 region 解析在 launcher 进程（`start_server.py`）中执行后随环境继承给 C++ backend 子进程。
 
 ## 3. POD_IP 与平台指标面板（重要）
@@ -52,7 +51,7 @@ Python/C++ 两侧均在 **`POD_IP` 环境变量非空**时向 Resource 写入 `h
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `RTP_LLM_OTEL_TRACE_ENABLE` | `0` | trace 总开关 |
-| `RTP_LLM_OTEL_REGION` | 空 | 内部 region 映射（自动解析 endpoint/headers/CA） |
+| `RTP_LLM_OTEL_REGION` | 空 | region 映射（自动解析 endpoint/headers/CA） |
 | `RTP_LLM_OTEL_REGION_CONFIG_FILE` | 空 | region 配置文件路径覆盖 |
 | `RTP_LLM_OTEL_SERVICE_NAME` | 空 | 整体覆盖 service.name；默认按角色拆分为 `rtp_llm_frontend/prefill/decode/pdfusion` |
 | `RTP_LLM_OTEL_TRACE_SAMPLER_RATIO` | `1.0` | ParentBased(TraceIdRatio) 采样率 |
