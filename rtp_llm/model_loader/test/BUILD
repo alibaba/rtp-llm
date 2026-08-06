@@ -13,6 +13,15 @@ py_test(
 )
 
 py_test(
+    name = "test_pure_tp_preshard",
+    srcs = ["test_pure_tp_preshard.py"],
+    # auto_model: this test imports rtp_llm.models weight infos.
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    # Accelerator hooks, FP8 device copies, and handle recycling need a GPU target.
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_compressed_w4a8_int4_per_channel",
     srcs = ["test_compressed_w4a8_int4_per_channel.py"],
     deps = py_test_deps,
