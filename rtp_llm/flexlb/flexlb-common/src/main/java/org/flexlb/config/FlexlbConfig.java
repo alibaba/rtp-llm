@@ -498,6 +498,35 @@ public class FlexlbConfig {
 
     private double decodeImbalanceMultiplier = 3.0;
 
+    // ========== Auto-TPM Configuration ==========
+
+    /** AUTO_TPM_ENABLED 总开关 */
+    private boolean autoTpmEnabled = false;
+
+    /** 合法优先级集合,逗号分隔 */
+    private String autoTpmPriorityLevels = "30,40,50,60,70";
+
+    /** 缺省优先级 */
+    private int autoTpmDefaultPriority = 50;
+
+    /** 队列让行开关 */
+    private boolean autoTpmQueueYieldEnabled = false;
+
+    /** Stage 3 用,预声明: decode running preempt 开关 */
+    private boolean autoTpmDecodeRunningPreemptEnabled = false;
+
+    /** Stage 3 用: preempt rate limit per minute */
+    private int autoTpmPreemptRateLimitPerMin = 10;
+
+    /** Stage 3 用: endpoint preempt QPS limit, 0=不限 */
+    private int autoTpmEndpointPreemptQpsLimit = 0;
+
+    /** Stage 3 用: commit wait release timeout ms */
+    private long autoTpmCommitWaitReleaseTimeoutMs = 50;
+
+    /** Stage 3 用: preempt critical section ms, 0=不保护 */
+    private long autoTpmPreemptCriticalSectionMs = 0;
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration

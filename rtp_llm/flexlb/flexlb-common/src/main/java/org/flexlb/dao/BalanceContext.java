@@ -83,6 +83,11 @@ public class BalanceContext {
 
     private String errorMessage;
 
+    //======================== Auto-TPM ======================//
+
+    /** Normalized request priority (from the legal set, e.g. 30-70). Default 0 = not yet set. */
+    private int priority;
+
     //===================== Method ===================//
 
     public long getRequestId() {

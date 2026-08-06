@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
+import org.flexlb.autotpm.PriorityNormalizer;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -32,6 +33,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final ConfigService configService;
     private final BatchSchedulerReporter batchSchedulerReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private final PriorityNormalizer priorityNormalizer;
+
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
@@ -39,7 +42,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              FlexlbGrpcForwarder grpcForwarder,
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
-                             ServerScheduleLatencyRecorder serverLatencyRecorder) {
+                             ServerScheduleLatencyRecorder serverLatencyRecorder,
+                             PriorityNormalizer priorityNormalizer) {
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
@@ -48,6 +52,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.configService = configService;
         this.batchSchedulerReporter = batchSchedulerReporter;
         this.serverLatencyRecorder = serverLatencyRecorder;
+        this.priorityNormalizer = priorityNormalizer;
     }
 
     @Override
@@ -217,6 +222,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (grpcEntryNanos != null) {
             ctx.setGrpcEntryNanos(grpcEntryNanos);
         }
+
+        // Auto-TPM: normalize priority from proto field and/or gRPC header
+        ctx.setPriority(priorityNormalizer.normalize(
+                pb.getPriority(), GrpcServerTimingInterceptor.getPriorityHeader()));
 
         return ctx;
     }

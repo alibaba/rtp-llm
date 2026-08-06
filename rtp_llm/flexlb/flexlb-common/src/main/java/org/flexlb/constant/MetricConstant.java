@@ -664,4 +664,46 @@ public class MetricConstant {
      * Path value for the direct scheduling path.
      */
     public static final String PATH_DIRECT = "DIRECT";
+
+    /* ==================== Auto-TPM Priority Metrics ==================== */
+
+    /**
+     * Auto-TPM request count by priority.
+     */
+    public static final String AUTO_TPM_REQUEST_COUNT = "auto_tpm.request.count";
+
+    /**
+     * Schedule latency by priority and result.
+     */
+    public static final String AUTO_TPM_SCHEDULE_LATENCY_MS = "schedule.latency_ms";
+
+    /**
+     * Normal placement count by priority.
+     */
+    public static final String AUTO_TPM_NORMAL_PLACEMENT_COUNT = "normal_placement.count";
+
+    /**
+     * Queue reject count by victim/incoming priority.
+     */
+    public static final String AUTO_TPM_QUEUE_REJECT_COUNT = "queue_reject.count";
+
+    /**
+     * Tag key for priority dimension.
+     */
+    public static final String TAG_PRIORITY = "priority";
+
+    /**
+     * Tag key for schedule result (success/failure).
+     */
+    public static final String TAG_RESULT = "result";
+
+    /**
+     * Tag key for victim priority in queue reject.
+     */
+    public static final String TAG_VICTIM_PRIORITY = "victim_priority";
+
+    /**
+     * Tag key for incoming priority in queue reject.
+     */
+    public static final String TAG_INCOMING_PRIORITY = "incoming_priority";
 }

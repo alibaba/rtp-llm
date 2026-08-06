@@ -111,6 +111,11 @@ public final class BatchItem {
                 ? ctx.getRequest().getRequestId() : 0;
     }
 
+    /** Normalized priority from the BalanceContext. */
+    public int priority() {
+        return ctx != null ? ctx.getPriority() : 0;
+    }
+
     /** Total sequence length of this request. */
     public long seqLen() {
         return ctx != null && ctx.getRequest() != null

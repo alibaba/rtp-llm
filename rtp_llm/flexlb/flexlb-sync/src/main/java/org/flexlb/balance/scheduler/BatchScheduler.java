@@ -157,6 +157,8 @@ public class BatchScheduler extends AbstractScheduler {
 
             WorkerBatcher batcher = prefillEp.getBatcher();
             ctx.setRouteSubmittedNanos(System.nanoTime());
+            Logger.debug("FlexLB batch_submit request_id={} priority={} worker={}",
+                    ctx.getRequestId(), ctx.getPriority(), prefillEp.getIp());
             batcher.offer(item);
 
             // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion

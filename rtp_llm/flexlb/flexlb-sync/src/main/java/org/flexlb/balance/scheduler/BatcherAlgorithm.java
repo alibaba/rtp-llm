@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import java.util.List;
+
 /**
  * Batching algorithm that owns its queue container and produces dispatch
  * decisions.
@@ -39,4 +41,11 @@ public interface BatcherAlgorithm {
 
     /** Clear the internal container. */
     void shutdown();
+
+    /**
+     * Drain all remaining items into the destination list. Used by
+     * {@link WorkerBatcher#shutdown()} to settle queued items on close.
+     * Default implementation is a no-op (implementations override as needed).
+     */
+    default void drainTo(List<BatchItem> dst) {}
 }

@@ -30,6 +30,7 @@ enum CancelReasonPB {
     CANCEL_REASON_UNSPECIFIED = 0;
     CANCEL_REASON_CLIENT_CANCELLED = 1;
     CANCEL_REASON_DEADLINE_EXCEEDED = 2;
+    CANCEL_REASON_AUTO_TPM_PREEMPTED = 3;  // Stage 3 预留,本阶段仅声明不消费
 }
 
 // DEPRECATED: Java/frontend 不读写此消息，仅 C++ 侧可能消费。保留以维持 wire compat。
@@ -57,6 +58,8 @@ message FlexlbScheduleRequestPB {
     string api_key = 11;
     reserved 12;  // was schedule_mode (removed: mode now deployment-level)
     int64 cache_key_block_size = 13;
+    // 0=未设置(proto3 默认),合法集 {30,40,50,60,70}
+    int32 priority = 14;
 }
 
 message FlexlbServerStatusPB {

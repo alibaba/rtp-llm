@@ -58,7 +58,8 @@ class FlexlbServiceImplTest {
                 grpcForwarder,
                 configService,
                 batchSchedulerReporter,
-                serverLatencyRecorder
+                serverLatencyRecorder,
+                new org.flexlb.autotpm.PriorityNormalizer(flexlbConfig)
         );
     }
 

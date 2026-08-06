@@ -30,6 +30,17 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
     public static final Context.Key<Long> GRPC_ENTRY_NANOS_KEY = Context.key("grpcEntryNanos");
 
     /**
+     * Metadata key for the priority header "x-dashscope-inner-qos-level".
+     */
+    private static final Metadata.Key<String> PRIORITY_HEADER_KEY =
+            Metadata.Key.of("x-dashscope-inner-qos-level", Metadata.ASCII_STRING_MARSHALLER);
+
+    /**
+     * Context key carrying the extracted priority header value.
+     */
+    public static final Context.Key<String> PRIORITY_HEADER_CTX_KEY = Context.key("priorityHeader");
+
+    /**
      * Convenience method to retrieve the current gRPC entry time from the
      * active context. Returns {@code null} if the interceptor did not set it
      * (e.g. when the call bypassed the interceptor).
@@ -42,15 +53,25 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
         return GRPC_ENTRY_NANOS_KEY.get();
     }
 
+    /**
+     * Retrieve the priority header value from the current gRPC context.
+     * Returns {@code null} if the header was not present or the interceptor was bypassed.
+     */
+    public static String getPriorityHeader() {
+        return PRIORITY_HEADER_CTX_KEY.get();
+    }
+
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
             ServerCall<ReqT, RespT> call, Metadata headers,
             ServerCallHandler<ReqT, RespT> next) {
         long grpcEntryTime = System.currentTimeMillis();
         long grpcEntryNanos = System.nanoTime();
+        String priorityHeader = headers.get(PRIORITY_HEADER_KEY);
         Context ctx = Context.current()
                 .withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime)
-                .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos);
+                .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos)
+                .withValue(PRIORITY_HEADER_CTX_KEY, priorityHeader);
         return Contexts.interceptCall(ctx, call, headers, next);
     }
 }

@@ -51,6 +51,11 @@ public class FlexlbMetricHelper {
         monitor.register(MetricConstant.REQUEST_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.REQUEST_TTFT_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.INFLIGHT_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Auto-TPM priority metrics
+        monitor.register(MetricConstant.AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.AUTO_TPM_NORMAL_PLACEMENT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.AUTO_TPM_QUEUE_REJECT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
     // ==================== Individual report methods ====================
@@ -167,5 +172,61 @@ public class FlexlbMetricHelper {
             case TIMED_OUT -> reportTimeout(role, engineIp);
             case CANCELLED -> reportCancel(role, engineIp);
         }
+    }
+
+    // ==================== Auto-TPM priority metrics ====================
+
+    /**
+     * Report a request arrival with its priority.
+     */
+    public void reportAutoTpmRequestCount(int priority) {
+        if (monitor == null) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                MetricConstant.TAG_PRIORITY, String.valueOf(priority),
+                MetricConstant.TAG_PATH, path);
+        monitor.report(MetricConstant.AUTO_TPM_REQUEST_COUNT, tags, 1.0);
+    }
+
+    /**
+     * Report scheduling latency with priority dimension.
+     */
+    public void reportAutoTpmScheduleLatency(int priority, String result, long latencyMs) {
+        if (monitor == null) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                MetricConstant.TAG_PRIORITY, String.valueOf(priority),
+                MetricConstant.TAG_RESULT, result,
+                MetricConstant.TAG_PATH, path);
+        monitor.report(MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS, tags, latencyMs);
+    }
+
+    /**
+     * Report a normal placement (successfully dispatched) with priority.
+     */
+    public void reportAutoTpmNormalPlacement(int priority) {
+        if (monitor == null) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                MetricConstant.TAG_PRIORITY, String.valueOf(priority),
+                MetricConstant.TAG_PATH, path);
+        monitor.report(MetricConstant.AUTO_TPM_NORMAL_PLACEMENT_COUNT, tags, 1.0);
+    }
+
+    /**
+     * Report a queue reject event (victim yielded for incoming).
+     */
+    public void reportAutoTpmQueueReject(int victimPriority, int incomingPriority) {
+        if (monitor == null) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                MetricConstant.TAG_VICTIM_PRIORITY, String.valueOf(victimPriority),
+                MetricConstant.TAG_INCOMING_PRIORITY, String.valueOf(incomingPriority),
+                MetricConstant.TAG_PATH, path);
+        monitor.report(MetricConstant.AUTO_TPM_QUEUE_REJECT_COUNT, tags, 1.0);
     }
 }

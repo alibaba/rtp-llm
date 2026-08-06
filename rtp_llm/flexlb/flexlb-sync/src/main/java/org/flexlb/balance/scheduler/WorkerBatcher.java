@@ -17,14 +17,15 @@ import java.util.concurrent.locks.ReentrantLock;
  * Per-worker request batcher: a thin shell that handles thread coordination
  * and side-effect execution (metric reporting, dispatch to the engine,
  * settlement), delegating all queue management and dispatch decisions to
- * {@link FixedWindowBatcherAlgorithm}.
+ * a {@link BatcherAlgorithm} implementation selected by
+ * {@link #createAlgorithm(FlexlbConfig, PrefillEndpoint)}.
  *
  * <p>One instance per Prefill worker. Requests are submitted via
  * {@link #offer(BatchItem)} and batched by the algorithm. The run loop
  * interprets each {@link BatchDecision}: ready batches go to
  * {@link PrefillEndpoint#submitBatch}; rejected or expired items settle
  * themselves through {@link BatchItem} terminal transitions. The algorithm
- * removes items from its internal queue inside {@link FixedWindowBatcherAlgorithm#decide};
+ * removes items from its internal queue inside {@link BatcherAlgorithm#decide};
  * this class never touches the queue directly.
  */
 public class WorkerBatcher {
@@ -33,7 +34,7 @@ public class WorkerBatcher {
     private final FlexlbConfig cfg;
     private final Thread workerThread;
     private volatile boolean stopped;
-    private final FixedWindowBatcherAlgorithm algorithm;
+    private final BatcherAlgorithm algorithm;
     private final BatcherContext ctx;
 
     /** Guard + signal for the run-loop's blocking wait when the queue is empty. */
@@ -44,12 +45,19 @@ public class WorkerBatcher {
                          BatchSchedulerReporter reporter) {
         this.key = key;
         this.cfg = cfg;
-        this.algorithm = new FixedWindowBatcherAlgorithm(cfg, prefillEp);
+        this.algorithm = createAlgorithm(cfg, prefillEp);
         this.ctx = new BatcherContext(key, prefillEp, cfg, reporter);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
                 Logger.error("WorkerBatcher[{}] thread died unexpectedly", key, e));
+    }
+
+    private static BatcherAlgorithm createAlgorithm(FlexlbConfig cfg, PrefillEndpoint prefillEp) {
+        if (cfg.isAutoTpmEnabled() && cfg.isAutoTpmQueueYieldEnabled()) {
+            return new PriorityYieldBatcherAlgorithm(cfg, prefillEp);
+        }
+        return new FixedWindowBatcherAlgorithm(cfg, prefillEp);
     }
 
     public void start() {
@@ -77,7 +85,7 @@ public class WorkerBatcher {
 
     /**
      * Estimated time a new request would wait in the queue before dispatch.
-     * Delegates to {@link FixedWindowBatcherAlgorithm#queueWaitMs}.
+     * Delegates to {@link BatcherAlgorithm#queueWaitMs}.
      */
     public long queueWaitMs() {
         return algorithm.queueWaitMs();
@@ -141,9 +149,10 @@ public class WorkerBatcher {
         ctx.reporter().reportBatchTotalTokens(role, ip, d.reason(), totalSeqLen);
 
         Logger.debug("flexlb_batch_decision reason={} picked_size={} "
-                        + "wait_ms={} queue_before={} worker={} head_req_id={}",
+                        + "wait_ms={} queue_before={} worker={} head_req_id={} priority={}",
                 d.reason(), d.items().size(), d.headWaitMs(),
-                d.queueSizeBefore(), ctx.key(), d.items().get(0).requestId());
+                d.queueSizeBefore(), ctx.key(), d.items().get(0).requestId(),
+                d.items().get(0).priority());
 
         ctx.prefillEp().submitBatch(d.items(),
                 new DispatchMeta(d.reason()));
@@ -170,7 +179,7 @@ public class WorkerBatcher {
     /**
      * Block until the queue is non-empty, using {@link Condition#await()}.
      *
-     * <p>The fast path checks {@link FixedWindowBatcherAlgorithm#size()}
+     * <p>The fast path checks {@link BatcherAlgorithm#size()}
      * without holding the lock. Only when the queue is empty does the thread
      * acquire {@link #waitLock} and await on {@link #notEmpty}, which is
      * signalled by {@link #offer(BatchItem)} after each successful enqueue.

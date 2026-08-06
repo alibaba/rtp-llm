@@ -173,7 +173,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
      * Drain all remaining items into the destination list. Used by
      * {@link WorkerBatcher#shutdown()} to settle queued items on close.
      */
-    void drainTo(List<BatchItem> dst) {
+    @Override
+    public void drainTo(List<BatchItem> dst) {
         queue.drainTo(dst);
     }
 
