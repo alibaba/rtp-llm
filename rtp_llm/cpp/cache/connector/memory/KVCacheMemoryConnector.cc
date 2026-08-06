@@ -658,34 +658,62 @@ bool KVCacheMemoryConnector::isDsv4TypedCacheLayout(const std::vector<LayerRegio
     return true;
 }
 
+// Every pinned host buffer this connector owns, across all memory-cache layouts:
+//   - single pool        : block_pool_
+//   - dual pool          : complete_pool_ (+ incomplete_pool_ when linear_step > 1)
+//   - prefix-tree (DSV4) : compressed_pool_ + state_swa_pool_
+// Only the pools for the active layout are non-null (see initBlockPool()); the rest stay
+// null and are skipped. When the memory cache is disabled every pool is null (no-op).
+std::vector<std::shared_ptr<BlockPool>> KVCacheMemoryConnector::allHostPools() const {
+    std::vector<std::shared_ptr<BlockPool>> pools;
+    for (const auto& pool : {block_pool_, complete_pool_, incomplete_pool_, compressed_pool_, state_swa_pool_}) {
+        if (pool) {
+            pools.push_back(pool);
+        }
+    }
+    return pools;
+}
+
 bool KVCacheMemoryConnector::releaseMemoryCacheBacking() {
     std::lock_guard<std::mutex> lock(malloc_mutex_);
-    if (!block_pool_) {
+    const auto                  pools = allHostPools();
+    if (pools.empty()) {
         return true;
     }
-    // The cache-key -> block index LRU points into the buffer we are about to free.
-    // Clear in place (keeping block_cache_'s address stable) so lock-free readers that
-    // hold the shared_ptr never race a pointer swap; MemoryBlockCache is internally locked.
+    // The cache-key -> block index maps point into the buffers we are about to free.
+    // Clear in place (keeping the cache object's address stable) so lock-free readers that
+    // hold the shared_ptr never race a pointer swap; both caches are internally locked.
     if (block_cache_) {
         block_cache_->clear();
     }
-    block_pool_->releaseHostBuffer();
-    RTP_LLM_LOG_INFO("memory cache backing released for sleep");
+    if (prefix_block_cache_) {
+        prefix_block_cache_->clear();
+    }
+    for (const auto& pool : pools) {
+        pool->releaseHostBuffer();
+    }
+    RTP_LLM_LOG_INFO("memory cache backing released for sleep (%zu host pool(s))", pools.size());
     return true;
 }
 
 bool KVCacheMemoryConnector::restoreMemoryCacheBacking() {
     std::lock_guard<std::mutex> lock(malloc_mutex_);
-    if (!block_pool_) {
+    const auto                  pools = allHostPools();
+    if (pools.empty()) {
         return true;
     }
-    block_pool_->reallocateHostBuffer();
+    for (const auto& pool : pools) {
+        pool->reallocateHostBuffer();
+    }
     // Start from an empty cache: the previous host KV contents were discarded.
     // Clear in place rather than swapping the pointer so lock-free readers stay safe.
     if (block_cache_) {
         block_cache_->clear();
     }
-    RTP_LLM_LOG_INFO("memory cache backing restored on wake");
+    if (prefix_block_cache_) {
+        prefix_block_cache_->clear();
+    }
+    RTP_LLM_LOG_INFO("memory cache backing restored on wake (%zu host pool(s))", pools.size());
     return true;
 }
 

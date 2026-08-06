@@ -226,8 +226,11 @@ private:
     void                       releaseCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
     void                       referenceCacheBacking(const MemoryDiskBlockCache::CacheItem& item);
     std::shared_ptr<BlockPool> memoryPoolFor(CacheBlockKind kind) const;
-    DiskBlockPoolPtr           diskPoolFor(CacheBlockKind kind) const;
-    size_t                     maxDiskSlotStrideBytes() const;
+    // All non-null pinned host pools across the active layout (single / dual / prefix-tree).
+    // Used by release/restoreMemoryCacheBacking to discard + rebuild the host KV tier on sleep.
+    std::vector<std::shared_ptr<BlockPool>> allHostPools() const;
+    DiskBlockPoolPtr                        diskPoolFor(CacheBlockKind kind) const;
+    size_t                                  maxDiskSlotStrideBytes() const;
 
     bool isDualPool() const;
     bool isFullOnlySlot(const LayerRegionSlot& slot) const;

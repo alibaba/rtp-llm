@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -180,6 +181,11 @@ protected:
     mutable std::mutex                                         abortable_streams_mutex_;
     std::unordered_map<int64_t, std::weak_ptr<GenerateStream>> abortable_streams_;
     std::shared_ptr<BroadcastManager>                          tp_broadcaster_;
+    // Level-2 wake overlaps the host memory-cache pinned rebuild (restoreMemoryCacheBacking,
+    // pure host cudaHostAlloc + memcpy) with the GPU weight reload. Launched at the start of
+    // restoreRestorableGpuMemory, joined in restoreKvMemoryBackingAndResetMetadata before the
+    // GPU KV VMM resume. Not valid when the async launch was skipped (fall back to sync).
+    std::future<bool> memory_cache_restore_future_;
 };
 
 }  // namespace rtp_llm

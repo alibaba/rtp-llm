@@ -494,9 +494,13 @@ void LocalRpcServer::installSleepHooks() {
         if (!cache_manager) {
             return true;
         }
-        // Reallocate the host memory-cache pinned buffer first (mirrors the sleep-side
-        // release order). Independent of the GPU KV VMM resume below; no-op when disabled.
-        if (!cache_manager->restoreMemoryCacheBacking()) {
+        // Join the host memory-cache pinned rebuild that restoreRestorableGpuMemory launched
+        // asynchronously so it overlapped the GPU weight reload. Must complete before the GPU KV
+        // VMM resume below (mirrors the sleep-side release order). Fall back to a synchronous
+        // rebuild if the async launch was skipped (cache_manager briefly unavailable there).
+        const bool mem_cache_ok = memory_cache_restore_future_.valid() ? memory_cache_restore_future_.get() :
+                                                                         cache_manager->restoreMemoryCacheBacking();
+        if (!mem_cache_ok) {
             RTP_LLM_LOG_WARNING("restoreKvMemoryBackingAndResetMetadata: restoreMemoryCacheBacking failed");
             return false;
         }
@@ -511,6 +515,19 @@ void LocalRpcServer::installSleepHooks() {
     };
     hooks.restoreRestorableGpuMemory = [this, engine, vmm_backend, local_rank]() {
         OptionalSleepDeviceGuard device_guard(local_rank);
+        // Overlap the host memory-cache pinned rebuild with the GPU weight reload below.
+        // restoreMemoryCacheBacking is pure host work (torch pin_memory == cudaHostAlloc + memcpy),
+        // independent of the GPU weights/KV pages. At large memory_cache sizes it costs ~size/2GBps
+        // (tens of seconds), so we run it on a background thread to hide it behind the level-2
+        // reload_weights_from_loader disk reload. The future is joined in
+        // restoreKvMemoryBackingAndResetMetadata before the GPU KV VMM resume (which must stay
+        // ordered after the weight reload). No shared lock with the reload; own device guard.
+        if (auto cache_manager = engine->getCacheManager()) {
+            memory_cache_restore_future_ = std::async(std::launch::async, [cache_manager, local_rank]() {
+                OptionalSleepDeviceGuard bg_guard(local_rank);
+                return cache_manager->restoreMemoryCacheBacking();
+            });
+        }
         if (!vmm_backend->isAvailable()) {
             return true;
         }
