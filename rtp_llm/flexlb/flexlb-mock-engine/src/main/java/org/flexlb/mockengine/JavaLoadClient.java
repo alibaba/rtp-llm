@@ -36,6 +36,8 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -63,6 +65,12 @@ public final class JavaLoadClient {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BLOCK_SIZE = 1024;
+    /** Default request priority when neither the trace nor PRIORITY_MIX provides one. */
+    static final int DEFAULT_PRIORITY = 50;
+    /** Sentinel for "trace line carried no explicit priority field". */
+    static final int PRIORITY_UNSET = Integer.MIN_VALUE;
+    /** Fixed seed so PRIORITY_MIX assignment is deterministic across runs. */
+    static final long PRIORITY_MIX_SEED = 42L;
 
     private final Config config;
     private final EventLoopGroup eventLoopGroup;
@@ -138,6 +146,15 @@ public final class JavaLoadClient {
         if (records.isEmpty()) {
             throw new RuntimeException("no replayable requests loaded from " + config.traceFile);
         }
+
+        // Priority resolution: trace explicit value > PRIORITY_MIX > DEFAULT_PRIORITY.
+        records = assignPriorities(records, PriorityMix.parse(config.priorityMix));
+        Map<Integer, Integer> priorityCounts = new TreeMap<>(Comparator.reverseOrder());
+        for (TraceRecord r : records) {
+            priorityCounts.merge(r.priority, 1, Integer::sum);
+        }
+        System.out.println("PRIORITY_MIX=" + (config.priorityMix.isEmpty() ? "<unset>" : config.priorityMix)
+                + " priority allocation: " + priorityCounts);
 
         // Parity with the legacy Python load client: load_replay_requests applies
         // duration/limit filters FIRST, then num_shards slicing — so LIMIT applies
@@ -360,7 +377,7 @@ public final class JavaLoadClient {
         String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + "_L" + loopIdx;
         long newRequestId = stableRequestId(newSourceRid);
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
-                req.inputLen, req.outputLen, req.blockKeys, req.tokenIds);
+                req.inputLen, req.outputLen, req.blockKeys, req.tokenIds, req.priority);
     }
 
     private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
@@ -374,6 +391,7 @@ public final class JavaLoadClient {
         result.ts = record.tsMs;
         result.inputLen = record.inputLen;
         result.outputLen = record.outputLen;
+        result.priority = record.priority;
         result.status = "unknown";
         result.routePath = "master";
         result.sendDueEpochMs = sendDueEpochMs;
@@ -772,6 +790,7 @@ public final class JavaLoadClient {
                 .setModel(config.model)
                 .setApiKey(config.apiKey)
                 .setCacheKeyBlockSize(BLOCK_SIZE)
+                .setPriority(record.priority)
                 .build();
     }
 
@@ -917,8 +936,12 @@ public final class JavaLoadClient {
             blockKeys = computeBlockKeys(tokenIds, BLOCK_SIZE);
         }
 
+        // Explicit per-record priority from the trace wins over PRIORITY_MIX; the
+        // sentinel marks records that fall through to mix / default assignment.
+        int priority = raw.has("priority") ? raw.get("priority").asInt() : PRIORITY_UNSET;
+
         return new TraceRecord(requestId, sourceRid, traceId, tsMs,
-                inputLen, outputLen, blockKeys, tokenIds);
+                inputLen, outputLen, blockKeys, tokenIds, priority);
     }
 
     private String extractTraceId(JsonNode raw) {
@@ -1027,6 +1050,7 @@ public final class JavaLoadClient {
                 node.put("ts", result.ts);
                 node.put("input_len", result.inputLen);
                 node.put("output_len", result.outputLen);
+                node.put("priority", result.priority);
                 node.put("status", result.status);
                 node.put("schedule_ms", result.scheduleMs);
                 node.put("ttft_ms", result.ttftMs);
@@ -1135,6 +1159,26 @@ public final class JavaLoadClient {
         summary.set("status_counts", countBy(results, r -> r.status));
         summary.set("route_path_counts", countBy(results, r -> r.routePath));
 
+        // Per-priority buckets: request count plus TTFT / schedule latency summaries
+        // (same LatencySummary shape as the top-level ttft_ms / schedule_latency_ms).
+        ObjectNode priorityBuckets = MAPPER.createObjectNode();
+        results.stream().map(r -> r.priority).distinct()
+                .sorted(Comparator.reverseOrder()).forEach(p -> {
+                    List<RequestResult> bucket = results.stream()
+                            .filter(r -> r.priority == p).toList();
+                    List<Double> bucketTtft = bucket.stream()
+                            .filter(r -> "ok".equals(r.status) && r.ttftMs > 0)
+                            .map(r -> r.ttftMs).toList();
+                    List<Double> bucketSchedule = bucket.stream()
+                            .filter(r -> r.scheduleMs > 0).map(r -> r.scheduleMs).toList();
+                    ObjectNode bucketNode = MAPPER.createObjectNode();
+                    bucketNode.put("count", bucket.size());
+                    bucketNode.set("ttft_ms", summarizeLatencies(bucketTtft).toJson());
+                    bucketNode.set("schedule_ms", summarizeLatencies(bucketSchedule).toJson());
+                    priorityBuckets.set(String.valueOf(p), bucketNode);
+                });
+        summary.set("priority_buckets", priorityBuckets);
+
         Path summaryPath = Path.of(config.outputDir, "summary.json");
         MAPPER.writerWithDefaultPrettyPrinter().writeValue(summaryPath.toFile(), summary);
         System.out.println(MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(summary));
@@ -1201,18 +1245,102 @@ public final class JavaLoadClient {
                     tokens = new ArrayList<>(tokens.subList(0, Math.min(maxInputLen, tokens.size())));
                 }
                 cur = new TraceRecord(cur.requestId, cur.sourceRid, cur.traceId, cur.tsMs,
-                        maxInputLen, cur.outputLen, cur.blockKeys, tokens);
+                        maxInputLen, cur.outputLen, cur.blockKeys, tokens, cur.priority);
                 truncated++;
             }
             if (maxOutputLen > 0 && cur.outputLen > maxOutputLen) {
                 cur = new TraceRecord(cur.requestId, cur.sourceRid, cur.traceId, cur.tsMs,
-                        cur.inputLen, maxOutputLen, cur.blockKeys, cur.tokenIds);
+                        cur.inputLen, maxOutputLen, cur.blockKeys, cur.tokenIds, cur.priority);
                 truncated++;
             }
             out.add(cur);
         }
         System.out.println("truncated " + truncated + " request length(s): "
                 + "max_input_len=" + maxInputLen + ", max_output_len=" + maxOutputLen);
+        return out;
+    }
+
+    // ---- Priority Mix ----
+
+    /**
+     * Weighted priority distribution parsed from {@code PRIORITY_MIX}, e.g.
+     * {@code "70:10,60:15,50:50,40:15,30:10"} (priority:weight pairs). Weights are
+     * normalized by their sum, so they do not need to add up to 100.
+     */
+    static final class PriorityMix {
+        final int[] priorities;
+        final double[] cumulative; // normalized cumulative distribution, last entry == 1.0
+
+        private PriorityMix(int[] priorities, double[] cumulative) {
+            this.priorities = priorities;
+            this.cumulative = cumulative;
+        }
+
+        /** Returns {@code null} when {@code spec} is unset/blank (default-50 mode). */
+        static PriorityMix parse(String spec) {
+            if (spec == null || spec.isBlank()) {
+                return null;
+            }
+            String[] parts = spec.split(",");
+            int[] priorities = new int[parts.length];
+            double[] weights = new double[parts.length];
+            double total = 0;
+            for (int i = 0; i < parts.length; i++) {
+                String[] kv = parts[i].trim().split(":");
+                if (kv.length != 2) {
+                    throw new IllegalArgumentException(
+                            "invalid PRIORITY_MIX entry (want priority:weight): " + parts[i]);
+                }
+                priorities[i] = Integer.parseInt(kv[0].trim());
+                weights[i] = Double.parseDouble(kv[1].trim());
+                if (weights[i] < 0) {
+                    throw new IllegalArgumentException(
+                            "PRIORITY_MIX weight must be >= 0: " + parts[i]);
+                }
+                total += weights[i];
+            }
+            if (total <= 0) {
+                throw new IllegalArgumentException("PRIORITY_MIX weights must sum to > 0: " + spec);
+            }
+            double[] cumulative = new double[parts.length];
+            double acc = 0;
+            for (int i = 0; i < parts.length; i++) {
+                acc += weights[i] / total;
+                cumulative[i] = acc;
+            }
+            cumulative[parts.length - 1] = 1.0;
+            return new PriorityMix(priorities, cumulative);
+        }
+
+        int assign(Random rng) {
+            double x = rng.nextDouble();
+            for (int i = 0; i < cumulative.length; i++) {
+                if (x < cumulative[i]) {
+                    return priorities[i];
+                }
+            }
+            return priorities[priorities.length - 1];
+        }
+    }
+
+    /**
+     * Resolves the effective priority for every record. Single override chain:
+     * explicit trace {@code "priority"} &gt; PRIORITY_MIX weighted assignment &gt;
+     * {@link #DEFAULT_PRIORITY}. Mix assignment draws from a fixed-seed RNG in
+     * record order, so repeated runs over the same trace are identical.
+     */
+    static List<TraceRecord> assignPriorities(List<TraceRecord> records, PriorityMix mix) {
+        Random rng = new Random(PRIORITY_MIX_SEED);
+        List<TraceRecord> out = new ArrayList<>(records.size());
+        for (TraceRecord r : records) {
+            int priority = r.priority;
+            if (priority == PRIORITY_UNSET) {
+                priority = mix != null ? mix.assign(rng) : DEFAULT_PRIORITY;
+            }
+            out.add(priority == r.priority ? r
+                    : new TraceRecord(r.requestId, r.sourceRid, r.traceId, r.tsMs,
+                            r.inputLen, r.outputLen, r.blockKeys, r.tokenIds, priority));
+        }
         return out;
     }
 
@@ -1603,6 +1731,7 @@ public final class JavaLoadClient {
         final boolean enableFallback;
         final String endpointsFile;
         final boolean dryRun;
+        final String priorityMix;
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
@@ -1614,7 +1743,8 @@ public final class JavaLoadClient {
                String model, String apiKey, boolean fetchResponseEnabled,
                boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
-               boolean enableFallback, String endpointsFile, boolean dryRun) {
+               boolean enableFallback, String endpointsFile, boolean dryRun,
+               String priorityMix) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
@@ -1648,6 +1778,7 @@ public final class JavaLoadClient {
             this.enableFallback = enableFallback;
             this.endpointsFile = endpointsFile;
             this.dryRun = dryRun;
+            this.priorityMix = priorityMix;
         }
 
         static Config fromEnv() {
@@ -1698,7 +1829,8 @@ public final class JavaLoadClient {
                     env("PUSHGATEWAY_URL", ""),
                     envBool("ENABLE_FALLBACK", false),
                     env("ENDPOINTS_FILE", ""),
-                    envBool("DRY_RUN", false)
+                    envBool("DRY_RUN", false),
+                    env("PRIORITY_MIX", "")
             );
         }
 
@@ -1736,6 +1868,7 @@ public final class JavaLoadClient {
             System.out.println("  PUSHGATEWAY_URL=" + pushgatewayUrl);
             System.out.println("  ENABLE_FALLBACK=" + enableFallback);
             System.out.println("  ENDPOINTS_FILE=" + endpointsFile);
+            System.out.println("  PRIORITY_MIX=" + (priorityMix.isEmpty() ? "<unset>" : priorityMix));
             System.out.println("=====================================");
         }
 
@@ -1777,9 +1910,17 @@ public final class JavaLoadClient {
         final int outputLen;
         final List<Long> blockKeys;
         final List<Integer> tokenIds;
+        final int priority;
 
         TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
                     int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds) {
+            this(requestId, sourceRid, traceId, tsMs, inputLen, outputLen, blockKeys, tokenIds,
+                    DEFAULT_PRIORITY);
+        }
+
+        TraceRecord(long requestId, String sourceRid, String traceId, long tsMs,
+                    int inputLen, int outputLen, List<Long> blockKeys, List<Integer> tokenIds,
+                    int priority) {
             this.requestId = requestId;
             this.sourceRid = sourceRid;
             this.traceId = traceId;
@@ -1788,6 +1929,7 @@ public final class JavaLoadClient {
             this.outputLen = outputLen;
             this.blockKeys = blockKeys;
             this.tokenIds = tokenIds;
+            this.priority = priority;
         }
     }
 
@@ -1798,6 +1940,7 @@ public final class JavaLoadClient {
         long ts;
         int inputLen;
         int outputLen;
+        int priority = DEFAULT_PRIORITY;
         String status = "unknown";
         double scheduleMs;
         double ttftMs;
