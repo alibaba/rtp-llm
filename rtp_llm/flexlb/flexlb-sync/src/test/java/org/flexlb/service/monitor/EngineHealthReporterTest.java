@@ -5,6 +5,7 @@ import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.constant.ZkMasterEvent;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -89,6 +90,38 @@ class EngineHealthReporterTest {
 
         verify(monitor).register("app.engine.worker.status.observed.decision.to.waiting.ms",
                 FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+    }
+
+    @Test
+    void shouldRegisterRequestPayloadMetrics() {
+        reporter.init();
+
+        verify(monitor).register("app.request.input.ids.count",
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        verify(monitor).register("app.request.body.bytes",
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+    }
+
+    @Test
+    void shouldReportRequestPayloadMetricsWithoutResponse() {
+        BalanceContext context = new BalanceContext();
+        context.setSuccess(false);
+        context.setInputIdsCount(512L);
+        context.setRequestBodyBytes(5_242_881L);
+
+        reporter.reportRequestPayload(context);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of("success", "false");
+        verify(monitor).report("app.request.input.ids.count", expectedTags, 512.0);
+        verify(monitor).report("app.request.body.bytes", expectedTags, 5_242_881.0);
+    }
+
+    @Test
+    void shouldSkipUnknownRequestPayloadMetrics() {
+        reporter.reportRequestPayload(new BalanceContext());
+
+        verify(monitor, never()).report(eq("app.request.input.ids.count"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq("app.request.body.bytes"), any(FlexMetricTags.class), anyDouble());
     }
 
     @Test

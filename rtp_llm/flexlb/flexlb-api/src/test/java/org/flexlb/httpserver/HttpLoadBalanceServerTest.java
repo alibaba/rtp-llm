@@ -26,6 +26,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -33,6 +34,7 @@ import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -112,14 +114,15 @@ class HttpLoadBalanceServerTest {
                 .thenReturn(Mono.empty());
         when(routeService.route(any())).thenReturn(Mono.just(response));
 
+        String body = "{\"request_id\":\"c68b72ff-982d-944f-9834-bc0e8bf2f43f\","
+                + "\"seq_len\":5,\"request_time_ms\":1,\"input_ids\":[1,2,3,4,5]}";
+        long requestBodyBytes = body.getBytes(StandardCharsets.UTF_8).length;
+
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of(
-                        "request_id", "c68b72ff-982d-944f-9834-bc0e8bf2f43f",
-                        "seq_len", 5,
-                        "request_time_ms", 1,
-                        "input_ids", new int[]{1, 2, 3, 4, 5}))
+                .contentLength(requestBodyBytes)
+                .bodyValue(body)
                 .exchange()
                 .expectStatus().isOk();
 
@@ -138,9 +141,12 @@ class HttpLoadBalanceServerTest {
         assertArrayEquals(
                 new int[]{1, 2, 3, 4, 5},
                 routeContextCaptor.getValue().getRequest().getInputIds());
+        assertEquals(Long.valueOf(5), routeContextCaptor.getValue().getInputIdsCount());
+        assertEquals(Long.valueOf(requestBodyBytes), routeContextCaptor.getValue().getRequestBodyBytes());
         assertTrue(routeContextCaptor.getValue().getRequestArrivalDelayMs() > 0);
         assertTrue(routeContextCaptor.getValue()
                 .getRequestBodyReadAndDeserializeTimeUs() >= 0);
+        verify(engineHealthReporter).reportRequestPayload(routeContextCaptor.getValue());
     }
 
     @Test
@@ -281,6 +287,29 @@ class HttpLoadBalanceServerTest {
                 .exchange()
                 .expectStatus().isBadRequest();
 
+        verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void preservesPayloadMetadataWhenDecoderRejectsAnOversizedBody() {
+        String body = "{\"request_id\":\"" + "x".repeat(300_000) + "\",\"input_ids\":[1]}";
+        long requestBodyBytes = body.getBytes(StandardCharsets.UTF_8).length;
+
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .contentLength(requestBodyBytes)
+                .bodyValue(body)
+                .exchange()
+                .expectStatus().is5xxServerError();
+
+        ArgumentCaptor<BalanceContext> contextCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(engineHealthReporter).reportRequestPayload(contextCaptor.capture());
+        BalanceContext context = contextCaptor.getValue();
+        assertFalse(context.isSuccess());
+        assertNull(context.getRequest());
+        assertNull(context.getInputIdsCount());
+        assertEquals(Long.valueOf(requestBodyBytes), context.getRequestBodyBytes());
         verify(routeService, never()).route(any());
     }
 

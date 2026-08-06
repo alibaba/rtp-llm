@@ -454,6 +454,17 @@ public class MetricConstant {
     public static final String REQUEST_ARRIVAL_DELAY_MS = "app.request.arrival.delay.ms";
 
     /**
+     * Actual input_ids element count after the request body has been deserialized.
+     */
+    public static final String REQUEST_INPUT_IDS_COUNT = "app.request.input.ids.count";
+
+    /**
+     * Request body size in bytes as declared by the HTTP Content-Length header.
+     * Requests without that header are not reported for this metric.
+     */
+    public static final String REQUEST_BODY_BYTES = "app.request.body.bytes";
+
+    /**
      * Graceful online/offline lifecycle events
      */
     public static final String LIFECYCLE_EVENT_METRIC = "graceful.lifecycle.event";

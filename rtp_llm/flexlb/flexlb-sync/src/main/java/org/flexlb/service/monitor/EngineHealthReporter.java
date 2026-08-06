@@ -88,6 +88,8 @@ import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_ENGINE_OBS
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.REQUEST_ARRIVAL_DELAY_MS;
+import static org.flexlb.constant.MetricConstant.REQUEST_BODY_BYTES;
+import static org.flexlb.constant.MetricConstant.REQUEST_INPUT_IDS_COUNT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
@@ -189,6 +191,8 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_TOTAL_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(REQUEST_ARRIVAL_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(REQUEST_INPUT_IDS_COUNT, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(REQUEST_BODY_BYTES, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
@@ -450,6 +454,24 @@ public class EngineHealthReporter {
                     monitor.report(ENGINE_BALANCING_MASTER_SELECT_DETAIL, serverSelectionTags, 1.0);
                 }
             }
+        }
+    }
+
+    /**
+     * Reports request payload dimensions captured at the HTTP boundary. The body size is taken
+     * from Content-Length, so chunked requests without that header are intentionally omitted.
+     */
+    public void reportRequestPayload(BalanceContext ctx) {
+        if (ctx == null) {
+            return;
+        }
+
+        FlexMetricTags metricTags = FlexMetricTags.of("success", String.valueOf(ctx.isSuccess()));
+        if (ctx.getInputIdsCount() != null) {
+            monitor.report(REQUEST_INPUT_IDS_COUNT, metricTags, ctx.getInputIdsCount());
+        }
+        if (ctx.getRequestBodyBytes() != null) {
+            monitor.report(REQUEST_BODY_BYTES, metricTags, ctx.getRequestBodyBytes());
         }
     }
 

@@ -3,6 +3,7 @@ package org.flexlb.dao.pv;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 
 import java.util.List;
@@ -13,15 +14,22 @@ import java.util.List;
 @Data
 public class PvLogData {
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private String requestId;
-    private long seqLen;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long seqLen;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long inputIdsCount;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long requestBodyBytes;
     private Response response;
     private String error;
     private boolean success;
     private long enqueueTime;
     private long startTime;
     private long totalUs;
-    private long requestTimeMs;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Long requestTimeMs;
     private long arrivalMs;
     private long reqParseUs;
     private long hashWaitUs;
@@ -36,15 +44,20 @@ public class PvLogData {
 
     public PvLogData(BalanceContext ctx) {
 
-        this.requestId = ctx.getRequestId();
-        this.seqLen = ctx.getRequest().getSeqLen();
+        Request request = ctx.getRequest();
+        if (request != null) {
+            this.requestId = request.getRequestId();
+            this.seqLen = request.getSeqLen();
+            this.requestTimeMs = request.getRequestTimeMs();
+        }
+        this.inputIdsCount = ctx.getInputIdsCount();
+        this.requestBodyBytes = ctx.getRequestBodyBytes();
         this.response = ctx.getResponse();
         this.success = ctx.isSuccess();
         this.error = ctx.getErrorMessage();
         this.enqueueTime = ctx.getEnqueueTime();
         this.startTime = ctx.getStartTime();
         this.totalUs = ctx.getTotalTimeUs();
-        this.requestTimeMs = ctx.getRequest().getRequestTimeMs();
         this.arrivalMs = ctx.getRequestArrivalDelayMs();
         this.reqParseUs = ctx.getRequestBodyReadAndDeserializeTimeUs();
         this.hashWaitUs = ctx.getBlockHashQueueWaitTimeUs();

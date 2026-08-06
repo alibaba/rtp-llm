@@ -6,7 +6,7 @@ spring:
   main:
     web-application-type: reactive
   codec:
-    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:5MB}
+    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:10MB}
   lifecycle:
     timeout-per-shutdown-phase: ${FLEXLB_SHUTDOWN_TIMEOUT:30s}
 

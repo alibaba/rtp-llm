@@ -99,10 +99,14 @@ public class HttpLoadBalanceServer {
      */
     public Mono<ServerResponse> scheduleRequest(ServerRequest request) {
         BalanceContext ctx = new BalanceContext();
+        request.headers().contentLength().ifPresent(ctx::setRequestBodyBytes);
         long bodyReadStartTimeNs = System.nanoTime();
         return request.bodyToMono(Request.class)
                 .flatMap(req -> {
                     ctx.setRequest(req);
+                    if (req.getInputIds() != null) {
+                        ctx.setInputIdsCount((long) req.getInputIds().length);
+                    }
                     ctx.recordRequestTiming(
                             req.getRequestTimeMs(),
                             (System.nanoTime() - bodyReadStartTimeNs) / 1_000);
@@ -338,6 +342,7 @@ public class HttpLoadBalanceServer {
      */
     private void finalizeRequestContext(BalanceContext ctx) {
         ctx.finishRequestTiming();
+        engineHealthReporter.reportRequestPayload(ctx);
         engineHealthReporter.reportBalancingService(ctx);
         logPvRecord(ctx);
         updateRequestCacheMetadata(ctx);
@@ -363,10 +368,8 @@ public class HttpLoadBalanceServer {
      * @param ctx the balance context containing PV log data
      */
     private void logPvRecord(BalanceContext ctx) {
-
-        PvLogData pvLogData = new PvLogData(ctx);
-
         try {
+            PvLogData pvLogData = new PvLogData(ctx);
             String jsonLog = JsonUtils.toStringOrEmpty(pvLogData);
             if (pvLogData.isSuccess()) {
                 pvLogger.info(jsonLog);

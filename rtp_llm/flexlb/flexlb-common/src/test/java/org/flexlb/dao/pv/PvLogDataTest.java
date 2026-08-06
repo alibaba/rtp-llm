@@ -13,6 +13,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PvLogDataTest {
@@ -105,5 +106,47 @@ class PvLogDataTest {
         assertTrue(json.contains("\"selectionReason\":\"SHORTEST_TTFT\""));
         assertTrue(json.contains("\"estimatedTtft\":90"));
         assertTrue(json.contains("\"trackedTaskCount\":1"));
+    }
+
+    @Test
+    void includesActualInputIdsCountAndRequestBodyBytes() {
+        Request request = new Request();
+        request.setRequestId("request-with-payload-dimensions");
+        request.setSeqLen(999);
+        request.setInputIds(new int[]{1, 2, 3});
+
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setInputIdsCount(3L);
+        context.setRequestBodyBytes(1_234L);
+
+        PvLogData data = new PvLogData(context);
+
+        assertEquals(Long.valueOf(3), data.getInputIdsCount());
+        assertEquals(Long.valueOf(1_234), data.getRequestBodyBytes());
+        String json = JsonUtils.toStringOrEmpty(data);
+        assertTrue(json.contains("\"inputIdsCount\":3"));
+        assertTrue(json.contains("\"requestBodyBytes\":1234"));
+    }
+
+    @Test
+    void keepsFailurePvWhenRequestBodyCannotBeDeserialized() {
+        BalanceContext context = new BalanceContext();
+        context.setSuccess(false);
+        context.setErrorMessage("Exceeded limit on max bytes to buffer");
+        context.setRequestBodyBytes(5_242_881L);
+
+        PvLogData data = new PvLogData(context);
+
+        assertNull(data.getRequestId());
+        assertNull(data.getSeqLen());
+        assertNull(data.getInputIdsCount());
+        assertEquals(Long.valueOf(5_242_881), data.getRequestBodyBytes());
+        String json = JsonUtils.toStringOrEmpty(data);
+        assertFalse(json.contains("\"requestId\""));
+        assertFalse(json.contains("\"seqLen\""));
+        assertFalse(json.contains("\"inputIdsCount\""));
+        assertTrue(json.contains("\"requestBodyBytes\":5242881"));
+        assertTrue(json.contains("\"success\":false"));
     }
 }

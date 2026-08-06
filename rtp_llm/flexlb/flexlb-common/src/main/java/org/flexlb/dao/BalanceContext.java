@@ -60,6 +60,18 @@ public class BalanceContext {
 
     private long requestBodyReadAndDeserializeTimeUs;
 
+    /**
+     * Number of input IDs in the decoded request. Null means the body was not decoded or
+     * input_ids was not supplied (for example, a block_cache_keys-only request).
+     */
+    private Long inputIdsCount;
+
+    /**
+     * Request body size advertised by the HTTP Content-Length header. Null means that the
+     * request used a body with no declared length, such as chunked transfer encoding.
+     */
+    private Long requestBodyBytes;
+
     private long blockHashQueueWaitTimeUs;
 
     private long blockHashExecutionTimeUs;
@@ -81,7 +93,7 @@ public class BalanceContext {
     //===================== Method ===================//
 
     public String getRequestId() {
-        return request.getRequestId();
+        return request == null ? null : request.getRequestId();
     }
 
     /**

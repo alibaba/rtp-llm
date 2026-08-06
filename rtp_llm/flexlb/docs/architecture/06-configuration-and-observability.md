@@ -118,6 +118,8 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
     `cache.match.active.source`、`standby.fallback.qps`、
     `kvcm.query.retry.qps`、diff 大小、find/update RT；
   - `app.block.hash.*` / `app.local.standby.hash.*`：hash 排队/执行耗时、线程池状态；
+  - `app.request.input.ids.count`（实际 `input_ids` 数量）与
+    `app.request.body.bytes`（HTTP `Content-Length`，未声明长度的请求不报该值）；
   - `app.worker.permit.capacity`（1s）、`graceful.lifecycle.event`、
     `app.forward.to.master.result`、`app.engine.zk.master.*`。
 - 上报器：`EngineHealthReporter`（~40 个指标，2s 周期性 worker 计数/线程池）、
@@ -133,6 +135,6 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
 - Spring profiles：`default`（生产日志）、`pre`/`test`（staging/testing Docker 镜像，
   test 下跳过 GracefulOnlineService）、`dashscope`（日志走 stdout）；生产镜像用
   `-Dspring.profiles.active=${FLEXLB_ACTIVE_PROFILES}` 由环境注入。
-- 其他 env：`MAX_IN_MEMORY_SIZE`（codec 5MB）、`FLEXLB_LOG_LEVEL`、`FLEXLB_LOG_PATH`、
+- 其他 env：`MAX_IN_MEMORY_SIZE`（codec 默认 10MB）、`FLEXLB_LOG_LEVEL`、`FLEXLB_LOG_PATH`、
   `FLEXLB_APP_LOG_PATH`、`FLEXLB_MONITOR_PROVIDER`、
   `FLEXLB_BLOCK_HASH_{CORE_THREAD_COUNT,MAX_THREAD_COUNT,KEEP_ALIVE_SECONDS,QUEUE_CAPACITY}`。
