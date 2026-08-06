@@ -8,7 +8,7 @@ from io import StringIO
 from unittest import TestCase, main
 from unittest.mock import patch
 
-from rtp_llm.utils.pre_import_config import str2bool
+from rtp_llm.server.server_args.util import str2bool
 
 # The pickle state tuple is produced in C++ (rtp_llm/cpp/pybind/ConfigInit.cc) and
 # consumed there by index, so its length is a cross-layer contract this test file
@@ -24,13 +24,6 @@ _ARITY_TRIPWIRE_MSG = (
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
-
-
-class PreImportConfigTest(TestCase):
-    def test_server_parser_reuses_pre_import_bool_parser(self):
-        from rtp_llm.server.server_args.util import str2bool as server_str2bool
-
-        self.assertIs(server_str2bool, str2bool)
 
 
 class ServerArgsSetTest(TestCase):
@@ -335,12 +328,20 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(records[0].levelno, logging.INFO)
         message = records[0].getMessage()
         self.assertIn("world_rank=", message)
+        self.assertIn("tuned=none", message)
         # The reserver default lives at the argparse layer (1024), not in the C++
-        # RuntimeConfig (0): rendering 1024 here at INFO proves the summary compares
-        # against the right default, else this default run would log a WARNING.
+        # RuntimeConfig (0): rendering 1024 with tuned=none proves the summary
+        # compares against the right default, else this default run would list it
+        # in the tuned field.
         self.assertIn("reserver_runtime_mem_mb=1024", message)
 
-    def test_runtime_tuning_summary_warns_on_non_default_values(self):
+    def test_runtime_tuning_summary_lists_non_default_values_in_tuned_field(self):
+        """Tuned knobs stay at INFO and surface in the same-line tuned=[...] field.
+
+        Collectors filter on the field, not the level: legal tuning is
+        configuration, not an incident. WARNING is reserved for genuinely
+        actionable conditions.
+        """
         from rtp_llm.server.server_args.server_args import setup_args
 
         for args, expected_fragments in (
@@ -349,7 +350,7 @@ class ServerArgsSetTest(TestCase):
                 ("moe_skew_mult=1.75", "(default 2.0)"),
             ),
             # The only knob whose default is argparse-level (1024) rather than a
-            # freshly constructed C++ config: it must still trip the WARNING branch.
+            # freshly constructed C++ config: it must still land in tuned=[...].
             (
                 ["--reserver_runtime_mem_mb", "8192"],
                 ("reserver_runtime_mem_mb=8192", "(default 1024)"),
@@ -368,8 +369,10 @@ class ServerArgsSetTest(TestCase):
                     if record.getMessage().startswith("Runtime memory tuning:")
                 ]
                 self.assertEqual(len(records), 1)
-                self.assertEqual(records[0].levelno, logging.WARNING)
+                self.assertEqual(records[0].levelno, logging.INFO)
                 message = records[0].getMessage()
+                self.assertIn("tuned=[", message)
+                self.assertNotIn("tuned=none", message)
                 for fragment in expected_fragments:
                     self.assertIn(fragment, message)
 
@@ -395,6 +398,49 @@ class ServerArgsSetTest(TestCase):
         # The append action copies the seeded sentinel and calls .append on it.
         with self.assertRaisesRegex(AttributeError, "append"):
             parser._provided_argument_dests(["--tag", "a"])
+
+    def test_provided_dest_probe_is_pure_tokenization(self):
+        """Pin the probe contract: no conversion, no exit, actions restored.
+
+        The registry contains side-effectful type converters
+        (_grpc_config_from_json writes its bound config object), so the probe
+        strips type/choices for its duration and uses parse_known_args. If a
+        refactor reverts it to a full re-parse, the converter-call assertion
+        below fails; if the strip is not restored, the post-probe assertions
+        fail; if the probe regains exit ability, the bad-choice/unknown-arg
+        calls SystemExit out of this test.
+        """
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        calls = []
+
+        def tracking_converter(value):
+            calls.append(value)
+            return int(value)
+
+        parser = EnvArgumentParser(description="probe purity test")
+        parser.add_argument("--knob", type=tracking_converter, choices=[0, 1])
+
+        provided = parser._provided_argument_dests(["--knob", "1"])
+        self.assertEqual(provided, {"knob"})
+        self.assertEqual(calls, [])
+
+        # A value outside choices and an unrecognized option must not exit:
+        # the probe runs after the real parse already accepted the argv, and
+        # divergence between the two parses must never abort a live startup.
+        self.assertEqual(
+            parser._provided_argument_dests(["--knob", "7"]), {"knob"}
+        )
+        self.assertEqual(parser._provided_argument_dests(["--nonsense"]), set())
+        self.assertEqual(calls, [])
+
+        # type/choices restored: the real parse still converts and validates.
+        action = next(a for a in parser._actions if a.dest == "knob")
+        self.assertIs(action.type, tracking_converter)
+        self.assertEqual(action.choices, [0, 1])
+        namespace = super(EnvArgumentParser, parser).parse_args(["--knob", "1"])
+        self.assertEqual(namespace.knob, 1)
+        self.assertEqual(calls, ["1"])
 
     def test_production_parser_registers_no_accumulating_actions(self):
         """No production argument may use an accumulating action.
@@ -521,6 +567,25 @@ class ServerArgsSetTest(TestCase):
         os.environ["RESERVER_RUNTIME_MEM_MB"] = "not-an-int"
         py_env_configs = setup_args(["--reserver_runtime_mem_mb", "2048"])
         self.assertEqual(py_env_configs.runtime_config.reserve_runtime_mem_mb, 2048)
+
+    def test_blank_reserver_env_is_treated_as_unset(self):
+        """A blank strict-dest env keeps the pre-fail-fast fallback semantics.
+
+        Deploy templates commonly export RESERVER_RUNTIME_MEM_MB= with no value;
+        historically that fell back to the default, and fail-fast is reserved for
+        values with actual content. Pin both startup paths: env-only (no CLI
+        args) and CLI-mixed (some unrelated CLI arg present).
+        """
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for env_value in ("", "  "):
+            for cli_args in ([], ["--moe_skew_mult", "2.5"]):
+                with self.subTest(env_value=env_value, cli_args=cli_args):
+                    os.environ["RESERVER_RUNTIME_MEM_MB"] = env_value
+                    py_env_configs = setup_args(cli_args)
+                    self.assertEqual(
+                        py_env_configs.runtime_config.reserve_runtime_mem_mb, 1024
+                    )
 
     def test_invalid_runtime_env_reports_name_and_raw_value(self):
         from rtp_llm.server.server_args.server_args import setup_args

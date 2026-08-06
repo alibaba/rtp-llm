@@ -85,8 +85,12 @@ class FusedMoeDataRouter(ABC):
             raise ValueError(
                 f"expert_num={expert_num} and ep_size={ep_size} must be positive"
             )
-        # A redundant layout (phy_exp_num != expert_num) may carry a custom
-        # phy2log placement, so leave its partitioning behaviour untouched.
+        # Redundant layouts (phy_exp_num != expert_num) are exempted only to
+        # keep their pre-existing partitioning bit-for-bit. Known gap: nothing
+        # in this path consumes phy2log/phy_exp_num, so a non-divisible
+        # redundant layout still floor-divides -- dropping tail experts and
+        # misplacing rank offsets -- exactly as it did before this check
+        # existed (see test_non_divisible_redundant_layout_is_a_known_gap).
         if expert_num % ep_size != 0 and int(self.config.phy_exp_num) == expert_num:
             raise ValueError(
                 f"{type(self).__name__} partitions logical experts evenly across ranks, "
@@ -200,7 +204,8 @@ class FusedMoe(torch.nn.Module):
         self.enable_moe_warmup_skew = bool(router.config.enable_moe_warmup_skew)
         # Only ep_size is validated here, and only because this class branches on
         # it directly. expert_num positivity and its divisibility by ep_size belong
-        # to FusedMoeDataRouter.experts_per_ep_rank(), which owns the partitioning;
+        # to FusedMoeDataRouter.experts_per_ep_rank(), which owns the router-side
+        # partitioning (executors that slice experts run their own asserts);
         # restating them here would let the two copies drift.
         if self.ep_size <= 0:
             raise ValueError(f"ep_size={self.ep_size} must be positive")

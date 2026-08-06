@@ -17,14 +17,18 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
-# Host-side: pure warmup-skew math + CPU-tensor index shuffling, no GPU required so it runs
-# in the default (non-GPU) test gates instead of depending on a GPU smoke run.
+# The assertions are pure math + CPU-tensor shuffling, but the target still needs
+# a GPU host: importing anything under rtp_llm.models_py.modules routes through
+# compute_ops' arch dispatch, which requires torch.cuda.is_available() in the CUDA
+# build (verified: with CUDA_VISIBLE_DEVICES="" the import fails with "cannot
+# import name 'FusedRopeKVCacheDecodeOp'"). Same basis as test_config_resolver.
 py_test(
     name = "test_warmup_skew",
     srcs = ["test_warmup_skew.py"],
     deps = [
         "//rtp_llm:testlib",
     ],
+    exec_properties = {"gpu": "H20"},
 )
 
 # Runs in the default wildcard test gates: the assertions need no device, and

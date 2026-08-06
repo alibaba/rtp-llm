@@ -40,7 +40,7 @@ MOE_SKEW_MARKER = "[MOE_WARMUP] executor="
 EXPECTED_SKEW_FRACTION_ENV = "SMOKE_EXPECTED_SKEW_FRACTION"
 
 # Emitted unconditionally by _log_runtime_tuning_summary (server_args.py) on every
-# rank of every role, at INFO or WARNING. Requiring it in the matched text proves
+# rank of every role, always at INFO. Requiring it in the matched text proves
 # the Python-side logs actually reached the files we read; without this the decode
 # negative assertion (marker absent) would pass vacuously whenever Python logging
 # went somewhere we did not look.

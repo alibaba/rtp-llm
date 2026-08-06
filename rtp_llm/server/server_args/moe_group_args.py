@@ -21,9 +21,9 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
     moe_group = parser.add_argument_group("MOE 专家并行")
     # MoeConfig (C++ ConfigModules.h) is the single source of truth for this
     # default: the value below feeds both `default=` and the help text, so a C++
-    # change cannot leave the documented default behind. The Python-side mirror in
-    # rtp_llm/utils/pre_import_config.py is pinned to the same value by
-    # tests/test_warmup_bindings.py.
+    # change cannot leave the documented default behind. warmup_diagnostics.py
+    # reads the same MoeConfig default for its singleton's initial value, so
+    # there is no Python-side literal to drift.
     default_skew_mult = moe_config.moe_skew_mult
     moe_group.add_argument(
         "--moe_skew_mult",

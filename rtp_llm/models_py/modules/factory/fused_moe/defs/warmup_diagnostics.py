@@ -16,9 +16,15 @@ from typing import Callable, Optional
 
 import torch
 
-from rtp_llm.utils.pre_import_config import DEFAULT_MOE_SKEW_MULT
+from rtp_llm.ops import MoeConfig
 
 logger = logging.getLogger(__name__)
+
+# MoeConfig (rtp_llm/cpp/config/ConfigModules.h) owns this default; read it from
+# the binding instead of mirroring the literal. Importing any rtp_llm module runs
+# rtp_llm/__init__'s unconditional `from .ops import *`, so the extension is
+# always loaded by the time this executes -- there is no pre-import window.
+_DEFAULT_MOE_SKEW_MULT = float(MoeConfig().moe_skew_mult)
 
 # Mirror of TraceMemoryPhase in rtp_llm/models_py/bindings/core/ExecOps.h. The
 # values are a cross-language contract pinned by a static_assert next to that
@@ -65,11 +71,11 @@ class MoeWarmupDiagnostics:
 
         self.warmup_skew_logged = False
         self.warmup_capture_warned = False
-        self.skew_mult = DEFAULT_MOE_SKEW_MULT
+        self.skew_mult = _DEFAULT_MOE_SKEW_MULT
 
     def reload_runtime_settings(
         self,
-        skew_mult: float = DEFAULT_MOE_SKEW_MULT,
+        skew_mult: float = _DEFAULT_MOE_SKEW_MULT,
     ) -> None:
         """Refresh production skew settings for a new model-build lifecycle."""
         validated_skew_mult = float(skew_mult)
@@ -81,8 +87,14 @@ class MoeWarmupDiagnostics:
                 f"moe_skew_mult must be finite and greater than 1.0, got {skew_mult!r}"
             )
 
-        # These values describe one model-build/warmup lifecycle. A process may
-        # construct another model after the previous trace reached Finished.
+        # Per-lifecycle flags, reset for a fresh model build. No entrypoint
+        # interleaves serving with another build's warmup: production runs one
+        # build per process, speculative/MTP builds both models before the
+        # single warmup, and test-process rebuilds are serial with no forwards
+        # reaching the old model. So resetting trace_memory_finished cannot
+        # re-open the skew gate for live traffic. An entrypoint that serves one
+        # model while another warms up would break this assumption and must
+        # first add lifecycle ownership to is_moe_warmup_active().
         self.trace_memory_finished = False
         self.warmup_skew_logged = False
         self.warmup_capture_warned = False
@@ -283,6 +295,6 @@ diagnostics = MoeWarmupDiagnostics()
 
 
 def reload_runtime_diagnostics(
-    skew_mult: float = DEFAULT_MOE_SKEW_MULT,
+    skew_mult: float = _DEFAULT_MOE_SKEW_MULT,
 ) -> None:
     diagnostics.reload_runtime_settings(skew_mult)

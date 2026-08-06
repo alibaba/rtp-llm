@@ -297,7 +297,23 @@ class EnvArgumentParser(argparse.ArgumentParser):
         list of strict dests even where the converter's exception class already
         implies fail-fast. In all fail-fast cases this handler adds the
         environment variable name to the diagnostic.
+
+        A blank value (empty or whitespace-only) that failed conversion is
+        treated as "not set" on every path, including strict dests: an exported
+        empty RESERVER_RUNTIME_MEM_MB historically fell back to the default,
+        and aborting on it would turn a common deploy-template artifact into a
+        startup failure. Only values with actual content fail fast. Args whose
+        converter accepts "" (plain str, choices containing "") never reach
+        this handler and keep treating it as a real value.
         """
+        if env_value.strip() == "":
+            logging.info(
+                "%s is set but blank (%r); treating it as unset and using parser default %r",
+                env_name,
+                env_value,
+                action.default,
+            )
+            return
         message = f"invalid value for {env_name}={env_value!r}: {error}"
         if (
             not allow_fallback
@@ -330,18 +346,22 @@ class EnvArgumentParser(argparse.ArgumentParser):
         accepts but a plain "--opt value"/"--opt=value" spelling: abbreviations
         (--moe_skew_mul), and any future short or single-dash option.
 
-        So let argparse do the tokenizing. parse_known_args only fills a default
-        for a dest missing from the namespace, so pre-seeding every dest with a
-        sentinel leaves exactly the CLI-set dests holding a real value.
+        So let argparse do the tokenizing -- and only the tokenizing. Every
+        action's type/choices is stripped for the duration of the probe (and
+        restored after) so no converter runs a second time: converters may carry
+        side effects (_grpc_config_from_json writes its bound config object) and
+        a converter error or choices mismatch would route through self.error()
+        and exit -- the probe must not be able to abort a startup whose real
+        parse already succeeded. parse_known_args, not parse_args, for the same
+        reason: unrecognized argv must not exit here either. parse_known_args
+        only fills a default for a dest missing from the namespace, so
+        pre-seeding every dest with a sentinel leaves exactly the CLI-set dests
+        holding a real value.
 
-        Two constraints this probe imposes on registered arguments, checked by
+        One constraint this probe imposes on registered arguments, checked by
         test_provided_dest_probe_rejects_accumulating_actions:
           * No accumulating actions (append/extend/count): they read the seeded
             namespace value and try to extend it, which blows up on the sentinel.
-          * Type converters run a second time on the same input, so they must be
-            idempotent and side-effect-free; a converter that can fail
-            differently across two identical calls would surface a new error
-            here even though the real parse already succeeded.
         """
         dests = [
             action.dest
@@ -349,7 +369,16 @@ class EnvArgumentParser(argparse.ArgumentParser):
             if action.dest is not argparse.SUPPRESS
         ]
         probe = argparse.Namespace(**{dest: _NOT_PROVIDED for dest in dests})
-        super().parse_args(args, probe)
+        saved = [(action, action.type, action.choices) for action in self._actions]
+        for action in self._actions:
+            action.type = None
+            action.choices = None
+        try:
+            super().parse_known_args(args, probe)
+        finally:
+            for action, action_type, action_choices in saved:
+                action.type = action_type
+                action.choices = action_choices
         return {dest for dest in dests if getattr(probe, dest) is not _NOT_PROVIDED}
 
     def parse_args(
@@ -627,11 +656,14 @@ def _log_runtime_tuning_summary(py_env_configs: PyEnvConfigs) -> None:
     cache. That is safe but lossy, and invisible from any single rank's log.
 
     So carry world_rank/role_type on the line, which lets log aggregation group by
-    rank and spot a fork, and raise the level to WARNING once any value leaves its
-    default so the line is greppable without knowing the defaults. Defaults come
-    from freshly constructed configs rather than literals (the C++ structs in
-    ConfigModules.h own them) -- except reserver_runtime_mem_mb, whose default is
-    the argparse layer's DEFAULT_RESERVER_RUNTIME_MEM_MB: the bare C++
+    rank and spot a fork, and render the non-default knobs as a same-line
+    tuned=[...] / tuned=none field so collectors filter by field, not by level:
+    a legally tuned knob is configuration, not an incident, so the line stays at
+    INFO. WARNING is reserved for conditions that need a human (a value entering
+    a dangerous range, or a cross-rank divergence check if one is ever added).
+    Defaults come from freshly constructed configs rather than literals (the C++
+    structs in ConfigModules.h own them) -- except reserver_runtime_mem_mb, whose
+    default is the argparse layer's DEFAULT_RESERVER_RUNTIME_MEM_MB: the bare C++
     RuntimeConfig deliberately defaults it to 0, so a fresh RuntimeConfig() would
     flag every default deployment as tuned.
     """
@@ -667,26 +699,28 @@ def _log_runtime_tuning_summary(py_env_configs: PyEnvConfigs) -> None:
         if value != default
     ]
 
-    summary = (
+    tuned_field = (
+        "[" + ", ".join(
+            f"{name}={value!r} (default {default!r})" for name, value, default in tuned
+        ) + "]"
+        if tuned
+        else "none"
+    )
+    # The "Runtime memory tuning: world_rank=" prefix is the smoke gate's
+    # PYTHON_LOG_SENTINEL (rtp_llm/test/smoke/multi_inst_case_runner.py); changing
+    # it requires updating that constant in the same commit. The level is fixed
+    # at INFO on purpose -- the smoke matcher and collectors key on the text.
+    logging.info(
         "Runtime memory tuning: world_rank=%s role_type=%s "
         "runtime_mem_safety_ratio=%s runtime_mem_no_warmup_floor_mb=%s "
-        "reserver_runtime_mem_mb=%s moe_skew_mult=%s. "
+        "reserver_runtime_mem_mb=%s moe_skew_mult=%s tuned=%s. "
         "All ranks in a role/group must agree; "
-        "a diverging rank is not rejected, it just min-reduces the cluster's KV cache."
-    )
-    summary_args = (
+        "a diverging rank is not rejected, it just min-reduces the cluster's KV cache.",
         py_env_configs.parallelism_config.world_rank,
         py_env_configs.role_config.role_type,
         kv_cache_config.runtime_mem_safety_ratio,
         kv_cache_config.runtime_mem_no_warmup_floor_mb,
         runtime_config.reserve_runtime_mem_mb,
         moe_config.moe_skew_mult,
+        tuned_field,
     )
-    if tuned:
-        logging.warning(
-            summary + " Non-default on this rank: %s.",
-            *summary_args,
-            ", ".join(f"{name}={value!r} (default {default!r})" for name, value, default in tuned),
-        )
-    else:
-        logging.info(summary, *summary_args)

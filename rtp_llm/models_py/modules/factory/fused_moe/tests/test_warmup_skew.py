@@ -1,9 +1,11 @@
-"""Host-side (no-GPU) regression for the MoE warmup skew math.
+"""Device-free regression for the MoE warmup skew math.
 
 The warmup skew logic decides how much reserved hot-expert load is folded into the
-memory-traced warmup forward. It is pure Python arithmetic + CPU-tensor index shuffling, so
-it can and should be verified without a GPU smoke run. All supported executors are slot-based,
-so these tests pin:
+memory-traced warmup forward. It is pure Python arithmetic + CPU-tensor index shuffling;
+no assertion touches a GPU device. The target still schedules on a GPU host
+(exec_properties in BUILD): the import chain routes through compute_ops' arch
+dispatch, which requires torch.cuda.is_available() in the CUDA build.
+All supported executors are slot-based, so these tests pin:
   * the reserved-fraction formula (skew_fraction),
   * warmup_skew_topk_ids expert-id legality and rank-0 routing, including the
     n_hot==0 (no hot tokens) and all-hot boundaries, plus the fact that cold rows
@@ -168,9 +170,13 @@ class EpRankPartitionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "divisible"):
             router.experts_per_ep_rank()
 
-    def test_non_divisible_redundant_layout_keeps_existing_behaviour(self):
-        # A redundant layout may carry a custom phy2log placement, so its
-        # partitioning is left exactly as it was before the check existed.
+    def test_non_divisible_redundant_layout_is_a_known_gap(self):
+        # Known gap, not endorsed behaviour: redundant layouts are exempted from
+        # the divisibility check solely to keep their pre-existing partitioning
+        # bit-for-bit. Nothing in this path consumes phy2log/phy_exp_num, so the
+        # floor division below still drops tail experts (60 % 8 != 0 -> 7 per
+        # rank, 4 experts unreachable). If redundant partitioning ever becomes
+        # phy2log-aware, this test should start failing and be rewritten.
         router = _EpPartitionRouter(expert_num=60, ep_size=8, phy_exp_num=64)
         self.assertEqual(router.experts_per_ep_rank(), 7)
 

@@ -3,18 +3,20 @@ import math
 from typing import Optional
 
 from rtp_llm.ops import CPRotateMethod
-from rtp_llm.utils.pre_import_config import str2bool
 
-# str2bool is a deliberate re-export: argument-group modules import it from here.
-# Listing it in __all__ keeps lint autofixes from deleting the "unused" import.
-__all__ = [
-    "MAX_RUNTIME_MEMORY_MIB",
-    "DEFAULT_RESERVER_RUNTIME_MEM_MB",
-    "nonnegative_int",
-    "nonnegative_float",
-    "str2_cp_rotate_method",
-    "str2bool",
-]
+
+def str2bool(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = value.lower()
+    if normalized in ("yes", "true", "t", "1", "on"):
+        return True
+    if normalized in ("no", "false", "f", "0", "off"):
+        return False
+    raise argparse.ArgumentTypeError("Boolean value expected.")
+
 
 # Largest MiB count that still converts to a size_t byte count, mirroring
 # checkedMiBToBytes in rtp_llm/cpp/cache/MemoryEvaluationHelper.cc: size_t max

@@ -172,6 +172,13 @@ struct KVCacheConfig {
     // off this config (MemoryEvaluationHelper.cc) instead of restating them, and
     // the Python side reads them back off the constructed config (see
     // kv_cache_group_args.py).
+    // Placement tradeoff, recorded so it is not re-litigated: these two knobs
+    // are inputs to KV-cache sizing and live here next to their consumer, while
+    // the third knob of the same formula, RuntimeConfig::reserve_runtime_mem_mb,
+    // predates them and keeps its argparse-layer default (see
+    // DEFAULT_RESERVER_RUNTIME_MEM_MB in server_args/util.py). Moving either
+    // side changes a pybind pickle tuple arity and every entrypoint constructing
+    // these configs; the split was judged cheaper to document than to close.
     double  runtime_mem_safety_ratio       = kDefaultRuntimeMemorySafetyRatio;
     int64_t runtime_mem_no_warmup_floor_mb = kDefaultRuntimeNoWarmupFloorMb;
     int     seq_size_per_block             = 64;

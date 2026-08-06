@@ -66,29 +66,18 @@ class WarmupBindingTest(unittest.TestCase):
 
 
 class MoeSkewDefaultTest(unittest.TestCase):
-    """Pin the Python skew-default mirror to MoeConfig, the single source of truth.
+    """Pin the diagnostics singleton's initial skew default to MoeConfig.
 
-    MoeConfig (rtp_llm/cpp/config/ConfigModules.h) owns these defaults and reaches
-    the diagnostics singleton through ModelFactory -> reload_runtime_diagnostics().
-    pre_import_config duplicates them because it must be importable before the C++
-    extension loads, so nothing at runtime can catch the two drifting apart: the
-    mirror only surfaces as the pre-reload initial value and as the test-suite
-    default, both of which would silently keep testing a stale number. This test is
-    the only thing that fails when one side moves.
+    MoeConfig (rtp_llm/cpp/config/ConfigModules.h) owns the default and reaches
+    the singleton twice: at import time (warmup_diagnostics reads
+    MoeConfig().moe_skew_mult for the module-level singleton's initial value)
+    and per model build through ModelFactory -> reload_runtime_diagnostics().
+    This test pins the import-time wiring; a change that stops __init__ from
+    reading the binding would otherwise only surface as a stale pre-reload
+    value in tests that never call reload.
     """
 
-    def test_python_mirror_matches_moe_config_defaults(self):
-        from rtp_llm.ops import MoeConfig
-        from rtp_llm.utils.pre_import_config import DEFAULT_MOE_SKEW_MULT
-
-        moe_config = MoeConfig()
-        self.assertEqual(moe_config.moe_skew_mult, DEFAULT_MOE_SKEW_MULT)
-
     def test_diagnostics_singleton_starts_from_the_same_defaults(self):
-        # The singleton is constructed at import time, before any config exists, so
-        # its initial values come from the mirror rather than from MoeConfig. Assert
-        # the wiring here too: pinning only the constants would miss a change that
-        # stops __init__ from using them.
         from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
             diagnostics,
         )

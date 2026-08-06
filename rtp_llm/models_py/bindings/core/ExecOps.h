@@ -116,10 +116,11 @@ void          finishTraceMemory();
 // routing during warmup, making the measured peak already cover the skewed case.
 bool isTraceMemory();
 // 0=pending, 1=active, 2=finished. Finished ends one warmup lifecycle and is never revisited
-// within it, but it is not terminal for the process: a second model build calls
-// setTraceMemory(true) again, which re-activates the phase (see the deliberate
-// trace_memory_finished reset in MoeWarmupDiagnostics.reload_runtime_settings). activate() is
-// therefore unguarded on purpose.
+// within it, but activate() is unguarded on purpose so a serial rebuild in the same process
+// (in practice: test processes) can trace again after reload_runtime_settings resets the
+// Python-side latch. No entrypoint serves one model while another warms up -- see the
+// reset comment in MoeWarmupDiagnostics.reload_runtime_settings; an entrypoint that did
+// would have to add lifecycle ownership on the Python side first.
 int getTraceMemoryState();
 
 // ===================================================================
