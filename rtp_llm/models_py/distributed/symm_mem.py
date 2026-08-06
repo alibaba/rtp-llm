@@ -269,3 +269,9 @@ def get_symm_mem_communicator() -> Optional[TorchSymmMemCommunicator]:
     """Get or initialize TorchSymmMemCommunicator (lazy initialization)."""
     global _symm_mem_comm
     return _symm_mem_comm
+
+
+def destroy_symm_mem_communicator() -> None:
+    """Drop symmetric-memory state before its ProcessGroup is destroyed."""
+    global _symm_mem_comm
+    _symm_mem_comm = None

@@ -779,18 +779,35 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
+    auto   cancel_planning      = [&]() noexcept {
+        try {
+            cuda_graph::cancel_capture_planning(graph_owner_lease_.context());
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("Failed to cancel capture planning for %s %d: %s", key_type, key, e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("Failed to cancel capture planning for %s %d: unknown error", key_type, key);
+        }
+    };
 
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
-    RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
-        py_forward_method_(inputs, attn_pyobj);
-        py_forward_method_(inputs, attn_pyobj);
+        RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
+        cuda_graph::runCapturePlanning([&]() { cuda_graph::begin_capture_planning(graph_owner_lease_.context()); },
+                                       [&]() { py_forward_method_(inputs, attn_pyobj); },
+                                       [&]() { cuda_graph::prepare_capture_arena(graph_owner_lease_.context()); },
+                                       cancel_planning);
+        RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
+        throw;
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: unknown error", key_type, key);
+        throw;
     }
-    RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
         // sync before capture
@@ -810,18 +827,28 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         RTP_LLM_LOG_INFO("Capture for %s %d begin.", key_type, key);
         PyModelOutputs outputs;
         {
-            cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
-            cuda_graph::GraphNcclCaptureContext capture_ctx;
-            CudaGraphCaptureGuard               capture_guard(&capture_ctx);
+            std::unique_ptr<CudaGraphCaptureGuard> capture_guard;
             try {
-                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs             = py_outputs_obj.cast<PyModelOutputs>();
+#if USING_ROCM
+                constexpr auto guard_order = cuda_graph::CaptureGuardOrder::BEFORE_CAPTURE_BEGIN;
+#else
+                constexpr auto guard_order = cuda_graph::CaptureGuardOrder::AFTER_CAPTURE_BEGIN;
+#endif
+                cuda_graph::runCaptureTransaction(
+                    guard_order,
+                    [&]() { capture_guard = std::make_unique<CudaGraphCaptureGuard>(graph_owner_lease_.contextPtr()); },
+                    [&]() { cuda_graph::graphCaptureBegin(graph, shared_graph_pool_); },
+                    [&]() {
+                        auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
+                        outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                        graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+                    },
+                    [&]() { graph.capture_end(); },
+                    [&]() { capture_guard.reset(); });
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
             }
-            graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-            graph.capture_end();
         }
 
         if (enable_cuda_graph_debug_mode_) {

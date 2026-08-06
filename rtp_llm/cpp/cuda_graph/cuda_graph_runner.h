@@ -44,6 +44,9 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
+#if USING_ROCM
+        graph_owner_lease_.acquire(reinterpret_cast<uintptr_t>(this));
+#endif
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
@@ -66,9 +69,47 @@ public:
 
     ~CudaGraphRunner() {
         RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
-        py::gil_scoped_acquire gil;
-        py_instance_.release();
-        RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
+        synchronizeForShutdown();
+        try {
+            // Explicitly destroy every py::object-bearing member while the GIL
+            // is held. Graph state and stable buffers precede the owner lease.
+            py::gil_scoped_acquire gil;
+            graph_instances_.clear();
+            capture_mem_hold_     = CaptureMemoryHold{};
+            py_forward_method_    = py::object();
+            py_attn_pyobj_method_ = py::object();
+            py_instance_          = py::object();
+            graph_owner_lease_.reset();
+            RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("Failed to release CudaGraphRunner: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("Failed to release CudaGraphRunner: unknown error");
+        }
+    }
+    void synchronizeForShutdown() noexcept override {
+#if USING_ROCM
+        const auto& context = graph_owner_lease_.context();
+        if (!shutdown_synchronization_gate_.claim(context.owner_token != 0)) {
+            return;
+        }
+        // Borrowed ProcessGroup communication must be drained before its
+        // lease is released. PyWrappedModel calls this before acquiring GIL;
+        // the destructor call is an idempotent fallback for other owners.
+        try {
+            cuda_graph::graphDeviceSynchronize();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("Failed to synchronize graph lifecycle token=%" PRIu64 " generation=%" PRIu64 ": %s",
+                                context.owner_token,
+                                context.generation,
+                                e.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("Failed to synchronize graph lifecycle token=%" PRIu64 " generation=%" PRIu64
+                                ": unknown error",
+                                context.owner_token,
+                                context.generation);
+        }
+#endif
     }
     void           captureDecode();
     void           capturePrefill();
@@ -142,6 +183,10 @@ private:
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    // Declared before captured state so reverse member destruction always drops
+    // graph executables and stable buffers before releasing the communicator.
+    cuda_graph::GraphOwnerLease graph_owner_lease_{cuda_graph::acquire_graph_owner, cuda_graph::release_graph_owner};
+    cuda_graph::ShutdownSynchronizationGate shutdown_synchronization_gate_;
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
@@ -154,10 +199,9 @@ private:
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
-
-    std::vector<std::string>      kv_cache_group_tags_;
-    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
-    mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
+    std::vector<std::string>               kv_cache_group_tags_;
+    int                                    position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    mutable std::atomic<uint64_t>          combo_position_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

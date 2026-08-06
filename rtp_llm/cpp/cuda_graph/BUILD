@@ -18,6 +18,13 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "graph_capture_lifecycle",
+    hdrs = ["graph_capture_lifecycle.h"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "cuda_graph_srcs",
     srcs = [
@@ -36,6 +43,7 @@ filegroup(
         "cuda_graph_base.h",
         "combo_position_ids_validation.h",
         "cuda_graph_device_shims.h",
+        "graph_capture_lifecycle.h",
         "cuda_graph_utils.h",
         "cuda_graph_runner.h",
     ],
@@ -51,6 +59,7 @@ cc_library(
         "cuda_graph_runner.h",
     ],
     deps = [
+        ":graph_capture_lifecycle",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     visibility = ["//visibility:public"],
@@ -74,6 +83,7 @@ cc_library(
     deps = torch_deps() + [
         ":cuda_graph_base",
         ":combo_position_ids_validation",
+        ":graph_capture_lifecycle",
         ":cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:core_utils",
@@ -86,6 +96,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda:cuda",
         ],
         "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],

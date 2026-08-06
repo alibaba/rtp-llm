@@ -24,6 +24,10 @@ void open_ar_fusion_barrier_handles(fptr_t fptr, std::vector<torch::Tensor> hand
 
 void open_ar_fusion_data_handles(fptr_t fptr, std::vector<torch::Tensor> handles);
 
+void close_ar_fusion_peer_mappings(fptr_t fptr);
+
+void release_ar_fusion_local_exports(fptr_t fptr);
+
 void ar_fusion_capture_clear(fptr_t fptr);
 
 void ar_fusion_invalidate_capture(fptr_t fptr);

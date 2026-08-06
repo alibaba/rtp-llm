@@ -58,19 +58,26 @@ void PyWrappedModel::releaseBuffers() {
 
 PyWrappedModel::~PyWrappedModel() {
     try {
-        py::gil_scoped_acquire gil;
-        held_attn_pyobj_ = py::object();
-        // Always release py_model_ since it's always initialized now
-        py_model_.release();
-        if (graph_runner_ != nullptr) {
-            delete graph_runner_;
-            graph_runner_ = nullptr;
+        // Device synchronization can block; keep it outside the GIL while
+        // draining graph work that borrows the ProcessGroup communicator.
+        if (graph_runner_ && PyGILState_Check()) {
+            py::gil_scoped_release release;
+            graph_runner_->synchronizeForShutdown();
+        } else if (graph_runner_) {
+            graph_runner_->synchronizeForShutdown();
         }
+        // Destroy every Python-owning member in one explicit GIL scope.
+        py::gil_scoped_acquire gil;
+        graph_runner_.reset();
+        held_attn_pyobj_ = py::object();
+        py_model_        = py::object();
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Unknown error during PyWrappedModel destruction");
     }
 }
 
