@@ -7,12 +7,13 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * Assertion matrix per blueprint §二:
+ * Assertion matrix per D12 (task40 revision):
  * - proto=60 → 60  (legal proto value wins)
  * - proto=0, header="70" → 70  (header fallback)
- * - both absent → 50  (default)
- * - proto=99 → 50  (illegal proto → default)
- * - header non-numeric → 50  (unparseable header → default)
+ * - both absent → 0  (NO_PRIORITY sentinel, legacy path)
+ * - header="0" → 0  (explicit 0 = "not carried" sentinel)
+ * - proto=99 → 50  (carried illegal proto → default)
+ * - header="25" / non-numeric / negative → 50  (carried illegal header → default)
  */
 class PriorityNormalizerTest {
 
@@ -37,10 +38,16 @@ class PriorityNormalizerTest {
     }
 
     @Test
-    void default_when_both_absent() {
-        assertEquals(50, normalizer.normalize(0, null));
-        assertEquals(50, normalizer.normalize(0, ""));
-        assertEquals(50, normalizer.normalize(0, "  "));
+    void no_priority_sentinel_when_both_absent() {
+        assertEquals(PriorityNormalizer.NO_PRIORITY, normalizer.normalize(0, null));
+        assertEquals(PriorityNormalizer.NO_PRIORITY, normalizer.normalize(0, ""));
+        assertEquals(PriorityNormalizer.NO_PRIORITY, normalizer.normalize(0, "  "));
+    }
+
+    @Test
+    void explicit_zero_header_is_no_priority_sentinel() {
+        assertEquals(PriorityNormalizer.NO_PRIORITY, normalizer.normalize(0, "0"));
+        assertEquals(PriorityNormalizer.NO_PRIORITY, normalizer.normalize(0, " 0 "));
     }
 
     @Test
@@ -75,11 +82,10 @@ class PriorityNormalizerTest {
 
     @Test
     void header_illegal_value_falls_to_default() {
-        // 99 is not in the legal set
+        // 99 / 25 are not in the legal set
         assertEquals(50, normalizer.normalize(0, "99"));
-        // negative is not > 0
+        assertEquals(50, normalizer.normalize(0, "25"));
+        // negative is carried but illegal
         assertEquals(50, normalizer.normalize(0, "-1"));
-        // 0 is not > 0
-        assertEquals(50, normalizer.normalize(0, "0"));
     }
 }

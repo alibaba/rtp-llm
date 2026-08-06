@@ -177,12 +177,14 @@ public class FlexlbMetricHelper {
     }
 
     // ==================== Auto-TPM priority metrics ====================
+    // D12: the 0 sentinel (no priority carried) never emits priority-tagged
+    // metrics — every method below drops the report when priority <= 0.
 
     /**
      * Report a request arrival with its priority.
      */
     public void reportAutoTpmRequestCount(int priority) {
-        if (monitor == null) {
+        if (monitor == null || priority <= 0) {
             return;
         }
         FlexMetricTags tags = FlexMetricTags.of(
@@ -195,7 +197,7 @@ public class FlexlbMetricHelper {
      * Report scheduling latency with priority dimension.
      */
     public void reportAutoTpmScheduleLatency(int priority, String result, long latencyMs) {
-        if (monitor == null) {
+        if (monitor == null || priority <= 0) {
             return;
         }
         FlexMetricTags tags = FlexMetricTags.of(
@@ -209,7 +211,7 @@ public class FlexlbMetricHelper {
      * Report a normal placement (successfully dispatched) with priority.
      */
     public void reportAutoTpmNormalPlacement(int priority) {
-        if (monitor == null) {
+        if (monitor == null || priority <= 0) {
             return;
         }
         FlexMetricTags tags = FlexMetricTags.of(
@@ -222,7 +224,7 @@ public class FlexlbMetricHelper {
      * Report a queue reject event (victim yielded for incoming).
      */
     public void reportAutoTpmQueueReject(int victimPriority, int incomingPriority) {
-        if (monitor == null) {
+        if (monitor == null || victimPriority <= 0 || incomingPriority <= 0) {
             return;
         }
         FlexMetricTags tags = FlexMetricTags.of(
@@ -238,7 +240,7 @@ public class FlexlbMetricHelper {
      * @param result one of success/timeout/not_found/unsupported/rate_limited
      */
     public void reportAutoTpmRunningCancel(int victimPriority, int incomingPriority, String result) {
-        if (monitor == null) {
+        if (monitor == null || victimPriority <= 0 || incomingPriority <= 0) {
             return;
         }
         FlexMetricTags tags = FlexMetricTags.of(

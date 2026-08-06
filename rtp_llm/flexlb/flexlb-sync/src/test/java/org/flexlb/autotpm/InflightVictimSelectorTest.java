@@ -86,6 +86,17 @@ class InflightVictimSelectorTest {
         assertTrue(select(candidates, 70).isEmpty());
     }
 
+    // ---- D12: 0-sentinel (no-priority) candidates are never victims ----
+
+    @Test
+    void select_zeroSentinelCandidate_neverSelected() {
+        // Defence-in-depth: a no-priority request should never be registered,
+        // but even if a 0 candidate leaks into the snapshot it is ineligible.
+        List<VictimCandidate> candidates = List.of(candidate(1, 0, 5, 200));
+
+        assertTrue(select(candidates, 70).isEmpty());
+    }
+
     // ---- criticalSection grace-period filter ----
 
     @Test

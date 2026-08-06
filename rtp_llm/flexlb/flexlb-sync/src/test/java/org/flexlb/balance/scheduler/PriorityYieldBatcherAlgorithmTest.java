@@ -143,6 +143,54 @@ class PriorityYieldBatcherAlgorithmTest {
         assertEquals(0, alg.size());
     }
 
+    // ---- D12: 0-sentinel items take the legacy path ----
+
+    @Test
+    void zeroSentinel_neverYieldSkipped_dispatchedAlongsideHead() {
+        FlexlbConfig cfg = defaultConfig();
+        cfg.setFlexlbBatchFixedWaitMs(0);
+        cfg.setCostSloMs(100); // head elapsed 200 > sloMs/2=50 → yield active
+        PriorityYieldBatcherAlgorithm alg = createAlgorithm(cfg);
+        long now = System.currentTimeMillis();
+
+        alg.offer(itemWithPriority(1, 70, now - 200)); // head with SLO risk
+        alg.offer(itemWithPriority(2, 0, now - 100));  // 0 sentinel: legacy, never skipped
+        alg.offer(itemWithPriority(3, 30, now - 100)); // low priority: yield-skipped
+
+        BatchDecision decision = alg.decide();
+        assertInstanceOf(BatchDecision.Dispatch.class, decision);
+        BatchDecision.Dispatch dispatch = (BatchDecision.Dispatch) decision;
+
+        // The 0-sentinel item is dispatched with the head; only P30 is skipped.
+        assertEquals(2, dispatch.items().size());
+        assertEquals(1, dispatch.items().get(0).requestId());
+        assertEquals(2, dispatch.items().get(1).requestId());
+        assertEquals(1, alg.size());
+    }
+
+    @Test
+    void zeroSentinel_expired_clearedAsLegacyQueueDeadline_notYielded() {
+        FlexlbConfig cfg = defaultConfig();
+        cfg.setFlexlbBatchFixedWaitMs(300);
+        cfg.setFlexlbBatchEnqueueDeadlineMs(1_000);
+        PriorityYieldBatcherAlgorithm alg = createAlgorithm(cfg);
+        long now = System.currentTimeMillis();
+
+        alg.offer(itemWithPriority(1, 70, now));           // fresh head
+        alg.offer(itemWithPriority(2, 0, now - 2_000));    // expired 0 sentinel
+
+        BatchDecision decision = alg.decide();
+        assertInstanceOf(BatchDecision.Drop.class, decision);
+        BatchDecision.Drop drop = (BatchDecision.Drop) decision;
+
+        // Legacy queue-deadline attribution (BATCH_SLO_EXPIRED path),
+        // never the yielded 8400 attribution.
+        assertEquals(2, drop.item().requestId());
+        assertEquals(BatchDecision.DropCause.QUEUE_DEADLINE_EXCEEDED, drop.cause());
+        assertEquals(0, drop.yieldedForPriority());
+        assertEquals(1, alg.size());
+    }
+
     // ---- helpers ----
 
     private static FlexlbConfig defaultConfig() {

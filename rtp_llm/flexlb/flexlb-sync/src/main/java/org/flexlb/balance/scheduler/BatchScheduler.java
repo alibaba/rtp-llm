@@ -110,9 +110,13 @@ public class BatchScheduler extends AbstractScheduler {
             // Auto-TPM priority bookkeeping: register right after winning the
             // InflightStore registration; every terminal path settles the
             // future (exactly-once), so whenComplete reliably drops the entry.
+            // D12: the 0 sentinel (no priority carried) is never registered —
+            // such requests must never enter the victim candidate snapshot.
             long requestId = ctx.getRequestId();
-            priorityRegistry.register(requestId, ctx.getPriority());
-            future.whenComplete((response, throwable) -> priorityRegistry.remove(requestId));
+            if (ctx.getPriority() > 0) {
+                priorityRegistry.register(requestId, ctx.getPriority());
+                future.whenComplete((response, throwable) -> priorityRegistry.remove(requestId));
+            }
 
             Response routeResponse = router.route(ctx);
             if (routeResponse == null || !routeResponse.isSuccess()) {

@@ -117,6 +117,11 @@ public class PriorityPressureController {
         if (config == null || !config.isAutoTpmEnabled() || !config.isAutoTpmDecodeRunningPreemptEnabled()) {
             return Optional.empty();
         }
+        // D12: the 0 sentinel (no priority carried) never initiates preemption —
+        // a no-priority request that finds no capacity fails plain 8400.
+        if (ctx.getPriority() <= 0) {
+            return Optional.empty();
+        }
         pruneExpiredIntents();
 
         int incomingPriority = ctx.getPriority();

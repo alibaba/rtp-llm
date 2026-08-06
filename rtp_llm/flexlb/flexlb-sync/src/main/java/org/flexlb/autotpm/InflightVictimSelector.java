@@ -65,7 +65,10 @@ public final class InflightVictimSelector {
                               long criticalSectionMs,
                               long nowMs,
                               LongPredicate hasCancelIntent) {
-        return candidate.priority() < incomingPriority
+        // D12 defence: a 0-sentinel (no-priority) candidate is never a victim,
+        // even though registration should already have excluded it upstream.
+        return candidate.priority() > 0
+                && candidate.priority() < incomingPriority
                 && nowMs - candidate.runningSinceMs() >= criticalSectionMs
                 && !hasCancelIntent.test(candidate.requestId());
     }

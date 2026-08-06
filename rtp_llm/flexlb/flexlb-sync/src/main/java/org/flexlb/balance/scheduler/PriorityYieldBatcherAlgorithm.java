@@ -21,6 +21,10 @@ import java.util.List;
  * priority is strictly less than the head's priority are skipped for this
  * round but remain in the queue for future rounds.
  *
+ * <p>D12: items carrying the 0 sentinel (no priority) take the legacy path —
+ * they are never yield-skipped and an expired 0-sentinel item is cleared
+ * with the legacy queue-deadline attribution instead of the yielded 8400.
+ *
  * <p>Uses a synchronized {@link ArrayList} with insertion sort — lock
  * granularity is per-worker so contention is low.
  */
@@ -96,8 +100,20 @@ public class PriorityYieldBatcherAlgorithm implements BatcherAlgorithm {
                 int headPriorityForYield = head.priority();
                 for (int i = 1; i < queue.size(); i++) {
                     BatchItem item = queue.get(i);
-                    if (item.priority() < headPriorityForYield
-                            && now - item.enqueuedAtMs() > queueDeadlineMs) {
+                    if (now - item.enqueuedAtMs() <= queueDeadlineMs) {
+                        continue;
+                    }
+                    // D12: a 0-sentinel item was never yielded — clear it with
+                    // the legacy queue-deadline attribution (BATCH_SLO_EXPIRED),
+                    // not the yielded 8400.
+                    if (item.priority() <= 0) {
+                        queue.remove(i);
+                        return new BatchDecision.Drop(item,
+                                BatchDecision.DropCause.QUEUE_DEADLINE_EXCEEDED,
+                                "elapsed_ms=" + (now - item.enqueuedAtMs())
+                                        + " deadline_ms=" + queueDeadlineMs);
+                    }
+                    if (item.priority() < headPriorityForYield) {
                         queue.remove(i);
                         return new BatchDecision.Drop(item,
                                 BatchDecision.DropCause.YIELDED_QUEUE_DEADLINE,
@@ -213,8 +229,10 @@ public class PriorityYieldBatcherAlgorithm implements BatcherAlgorithm {
             if (picked.size() >= maxCount) {
                 break;
             }
-            // Yield: skip lower-priority items when head has SLO risk
-            if (yieldActive && item.priority() < headPriority) {
+            // Yield: skip lower-priority items when head has SLO risk.
+            // D12: 0-sentinel items are not part of the yield semantics —
+            // they keep the legacy path and are never skipped here.
+            if (yieldActive && item.priority() > 0 && item.priority() < headPriority) {
                 continue;
             }
             BatchShape candidate = shape.add(item);
