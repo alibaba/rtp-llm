@@ -11,7 +11,9 @@ import org.flexlb.enums.ScheduleModeEnum;
 import com.fasterxml.jackson.annotation.JsonAlias;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.flexlb.enums.LoadBalanceStrategyEnum.COST_BASED_DECODE;
 import static org.flexlb.enums.LoadBalanceStrategyEnum.COST_BASED_PREFILL;
@@ -488,6 +490,53 @@ public class FlexlbConfig {
      */
     private long flexlbBatchPredictThresholdMs = 0;
 
+    // ========== Auto-TPM Queue Configuration ==========
+
+    /**
+     * Master switch for priority-aware pick order in the fixed-window batcher.
+     * When false (default) the batcher behaves byte-for-byte like the FIFO
+     * baseline. Read once at batcher construction time (process-lifetime).
+     * Environment variable: AUTO_TPM_PRIORITY_QUEUE_ENABLED.
+     */
+    private boolean autoTpmPriorityQueueEnabled = false;
+
+    /**
+     * Enables priority-adjusted scheduling targets in
+     * {@link #resolveSchedulingTargetMs(long, int)}. Observability only —
+     * never feeds routing or dispatch decisions.
+     * Environment variable: AUTO_TPM_SCHEDULING_TARGET_ENABLED.
+     */
+    private boolean autoTpmSchedulingTargetEnabled = false;
+
+    /**
+     * Sequence-length buckets mapping to baseline scheduling targets (ms).
+     * Format {@code "maxSeqLen:targetMs,...,*:targetMs"} where {@code *}
+     * is the catch-all bucket.
+     * Environment variable: AUTO_TPM_SLO_LENGTH_BUCKETS.
+     */
+    private String autoTpmSloLengthBuckets = "256:150,1024:300,4096:600,16384:1200,*:2400";
+
+    private transient volatile List<long[]> parsedAutoTpmSloBuckets;
+
+    public void setAutoTpmSloLengthBuckets(String autoTpmSloLengthBuckets) {
+        this.autoTpmSloLengthBuckets = autoTpmSloLengthBuckets;
+        this.parsedAutoTpmSloBuckets = null;
+    }
+
+    /**
+     * Per-priority multipliers applied to the bucket baseline.
+     * Format {@code "priority:multiplier,..."}.
+     * Environment variable: AUTO_TPM_PRIORITY_SLO_MULTIPLIERS.
+     */
+    private String autoTpmPrioritySloMultipliers = "30:2.0,40:1.5,50:1.0,60:0.75,70:0.5";
+
+    private transient volatile Map<Integer, Double> parsedAutoTpmMultipliers;
+
+    public void setAutoTpmPrioritySloMultipliers(String autoTpmPrioritySloMultipliers) {
+        this.autoTpmPrioritySloMultipliers = autoTpmPrioritySloMultipliers;
+        this.parsedAutoTpmMultipliers = null;
+    }
+
     // ========== gRPC Configuration ==========
 
     private long prefillLbTimeoutMs = 5000;
@@ -584,6 +633,84 @@ public class FlexlbConfig {
         }
         result.sort(Comparator.comparingLong(a -> a[0]));
         parsedSloBuckets = result;
+        return result;
+    }
+
+    /**
+     * Resolves the Auto-TPM scheduling target for a request. Read-only helper
+     * for logs/metrics — never used for routing or dispatch decisions.
+     *
+     * <p>When {@link #autoTpmSchedulingTargetEnabled} is false this simply
+     * delegates to {@link #resolveSloMs(long)}. When enabled, the baseline is
+     * looked up in {@link #autoTpmSloLengthBuckets} (with {@code *} as the
+     * catch-all bucket) and scaled by the priority multiplier from
+     * {@link #autoTpmPrioritySloMultipliers} (missing priority → 1.0).
+     */
+    public long resolveSchedulingTargetMs(long seqLen, int priority) {
+        if (!autoTpmSchedulingTargetEnabled) {
+            return resolveSloMs(seqLen);
+        }
+        long base = resolveAutoTpmBucketMs(seqLen);
+        double multiplier = getParsedAutoTpmMultipliers().getOrDefault(priority, 1.0);
+        return Math.round(base * multiplier);
+    }
+
+    private long resolveAutoTpmBucketMs(long seqLen) {
+        List<long[]> buckets = getParsedAutoTpmSloBuckets();
+        if (buckets.isEmpty()) {
+            return resolveSloMs(seqLen);
+        }
+        long fallback = buckets.get(buckets.size() - 1)[1];
+        for (long[] bucket : buckets) {
+            if (bucket[0] == Long.MAX_VALUE) {
+                fallback = bucket[1];
+            } else if (seqLen <= bucket[0]) {
+                return bucket[1];
+            }
+        }
+        return fallback;
+    }
+
+    private List<long[]> getParsedAutoTpmSloBuckets() {
+        if (parsedAutoTpmSloBuckets != null) {
+            return parsedAutoTpmSloBuckets;
+        }
+        List<long[]> result = new ArrayList<>();
+        if (autoTpmSloLengthBuckets != null && !autoTpmSloLengthBuckets.isBlank()) {
+            for (String entry : autoTpmSloLengthBuckets.split(",")) {
+                String[] kv = entry.trim().split(":");
+                if (kv.length == 2) {
+                    try {
+                        long bound = "*".equals(kv[0].trim())
+                                ? Long.MAX_VALUE : Long.parseLong(kv[0].trim());
+                        result.add(new long[]{bound, Long.parseLong(kv[1].trim())});
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            result.sort(Comparator.comparingLong(a -> a[0]));
+        }
+        parsedAutoTpmSloBuckets = result;
+        return result;
+    }
+
+    private Map<Integer, Double> getParsedAutoTpmMultipliers() {
+        if (parsedAutoTpmMultipliers != null) {
+            return parsedAutoTpmMultipliers;
+        }
+        Map<Integer, Double> result = new HashMap<>();
+        if (autoTpmPrioritySloMultipliers != null && !autoTpmPrioritySloMultipliers.isBlank()) {
+            for (String entry : autoTpmPrioritySloMultipliers.split(",")) {
+                String[] kv = entry.trim().split(":");
+                if (kv.length == 2) {
+                    try {
+                        result.put(Integer.parseInt(kv[0].trim()), Double.parseDouble(kv[1].trim()));
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+        }
+        parsedAutoTpmMultipliers = result;
         return result;
     }
 

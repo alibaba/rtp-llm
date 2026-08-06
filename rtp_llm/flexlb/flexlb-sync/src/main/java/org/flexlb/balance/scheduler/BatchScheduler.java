@@ -159,6 +159,9 @@ public class BatchScheduler extends AbstractScheduler {
             ctx.setRouteSubmittedNanos(System.nanoTime());
             batcher.offer(item);
 
+            // Auto-TPM: count accepted requests by priority
+            reporter.reportAutoTpmRequestCount(ctx.getPriority());
+
             // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
             reporter.reportRouteSubmitTimeMs(
                     RoleType.PREFILL.name(),

@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -159,6 +160,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
             batchSchedulerReporter.reportAckToResponseTimeMs(
                     RoleType.PREFILL.name(), prefillIp, ackToResponseMs);
+            // Auto-TPM: schedule-to-ack time (TTFT proxy) by priority
+            batchSchedulerReporter.reportAutoTpmScheduleToAckTimeMs(
+                    ctx.getPriority(), ctx.getAckAtMs() - ctx.getStartTime());
         }
         try {
             observer.onNext(response);
@@ -200,6 +204,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setMaxNewTokens(pb.getMaxNewTokens());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        request.setPriority(normalizePriority(pb.getPriority()));
         ctx.setRequest(request);
 
         if (!pb.getGenerateInput().isEmpty()) {
@@ -219,6 +224,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         return ctx;
+    }
+
+    /**
+     * Authoritative fallback for the Auto-TPM priority: valid values
+     * {30,40,50,60,70} are kept, anything else (including the proto3
+     * default 0 from old clients) is normalized to the default 50.
+     */
+    private static int normalizePriority(int priority) {
+        return CommonConstants.VALID_REQUEST_PRIORITIES.contains(priority)
+                ? priority : CommonConstants.DEFAULT_REQUEST_PRIORITY;
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB toProtoResponse(Response response) {

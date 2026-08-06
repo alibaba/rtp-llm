@@ -6,6 +6,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
+import org.flexlb.constant.CommonConstants;
 
 import java.util.List;
 
@@ -40,4 +41,11 @@ public class Request {
 
     @JsonProperty("max_new_tokens")
     private int maxNewTokens = 1;
+
+    /**
+     * Auto-TPM QoS priority level {30,40,50,60,70}; defaults to
+     * {@link CommonConstants#DEFAULT_REQUEST_PRIORITY}.
+     */
+    @JsonProperty("priority")
+    private int priority = CommonConstants.DEFAULT_REQUEST_PRIORITY;
 }

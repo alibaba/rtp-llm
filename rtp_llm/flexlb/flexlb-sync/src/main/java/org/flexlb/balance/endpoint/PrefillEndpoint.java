@@ -989,6 +989,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // Two-layer breakdown
         reporter.reportPrefillInflightEntriesCount(RoleType.PREFILL.name(), getIp(), prefillInflightCount());
         reporter.reportPrefillEngineTasksCount(RoleType.PREFILL.name(), getIp(), prefillEngineTaskCount());
+        // Auto-TPM: batcher queue depth by priority
+        batcher.depthByPriority().forEach((priority, depth) ->
+                reporter.reportAutoTpmQueueDepth(priority, getIp(), depth));
     }
 
     /**

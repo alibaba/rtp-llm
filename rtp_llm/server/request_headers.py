@@ -12,7 +12,11 @@ REQUEST_HEADER_NAMES = (
     "trace_id",
     "eagleeye-traceid",
     "x-b3-traceid",
+    "x-dashscope-inner-qos-level",
 )
+PRIORITY_HEADER_NAME = "x-dashscope-inner-qos-level"
+DEFAULT_PRIORITY = 50
+VALID_PRIORITIES = frozenset((30, 40, 50, 60, 70))
 CORRELATION_HEADER_NAMES = (
     "x-dashscope-request-id",
     "x-request-id",
@@ -56,6 +60,35 @@ def extract_request_headers(
 
 def normalize_request_headers(headers: Optional[Mapping[str, Any]]) -> Dict[str, str]:
     return extract_request_headers(headers)
+
+
+def resolve_priority(headers: Optional[Mapping[str, Any]]) -> int:
+    """Resolve request priority from headers; invalid/missing values fall back to DEFAULT_PRIORITY."""
+    if not headers:
+        return DEFAULT_PRIORITY
+    try:
+        raw = None
+        for key, value in headers.items():
+            if str(key).lower() == PRIORITY_HEADER_NAME:
+                raw = value
+                break
+        if raw is None:
+            return DEFAULT_PRIORITY
+        priority = int(str(raw).strip())
+    except Exception:
+        return DEFAULT_PRIORITY
+    return priority if priority in VALID_PRIORITIES else DEFAULT_PRIORITY
+
+
+def apply_request_priority(
+    request_pb: Any, headers: Optional[Mapping[str, Any]]
+) -> int:
+    """Resolve priority from headers and set it on the request PB only when the
+    generated message supports the field (backward compatible with stale pb2)."""
+    priority = resolve_priority(headers)
+    if hasattr(request_pb, "priority"):
+        request_pb.priority = priority
+    return priority
 
 
 def extract_correlation_request_id(headers: Optional[Mapping[str, Any]]) -> str:

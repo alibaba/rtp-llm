@@ -238,6 +238,38 @@ public class MetricConstant {
      */
     public static final String BATCH_QUEUE_WAIT_TIME_MS = "app.flexlb.batch.queue.wait.time.ms";
 
+        // ==================== Auto-TPM Queue MVP metrics ====================
+
+        /**
+         * Auto-TPM request arrival count by priority (QPS, tag: priority).
+         * Reported by BatchScheduler.submit() after a successful batcher offer.
+         */
+        public static final String AUTO_TPM_REQUEST_COUNT = "auto_tpm.request.count";
+
+        /**
+         * Auto-TPM per-item batcher queue wait (TIMER, tags: priority, engineIp).
+         * Reported by WorkerBatcher.executeDispatch() for each dispatched item.
+         */
+        public static final String AUTO_TPM_QUEUE_WAIT_TIME_MS = "auto_tpm.queue.wait.time.ms";
+
+        /**
+         * Auto-TPM schedule-to-ack time, a TTFT proxy (TIMER, tag: priority).
+         * Reported by FlexlbServiceImpl.completeSchedule() as ackAtMs - startTime.
+         */
+        public static final String AUTO_TPM_SCHEDULE_TO_ACK_TIME_MS = "auto_tpm.schedule.to.ack.time.ms";
+
+        /**
+         * Auto-TPM queue-deadline expiry count by priority (QPS, tag: priority).
+         * Core starvation observation for low-priority requests.
+         */
+        public static final String AUTO_TPM_EXPIRED_COUNT = "auto_tpm.expired.count";
+
+        /**
+         * Auto-TPM batcher queue depth by priority (GAUGE, tags: priority, engineIp).
+         * Reported on the existing periodic per-endpoint metric path.
+         */
+        public static final String AUTO_TPM_QUEUE_DEPTH = "auto_tpm.queue.depth";
+
     /**
      * Engine finished task list size
      */

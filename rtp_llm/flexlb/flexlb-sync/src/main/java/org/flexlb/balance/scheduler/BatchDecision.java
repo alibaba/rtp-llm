@@ -18,7 +18,8 @@ public sealed interface BatchDecision {
     /**
      * Successful batch assembly — ready to dispatch.
      *
-     * @param items           picked items in FIFO order, never empty
+     * @param items           picked items in FIFO order (or priority-first order when
+     *                        auto-TPM priority scheduling is enabled), never empty
      * @param reason          {@code "batch_full"} | {@code "fixed_window_timeout"}
      *                        | {@code "predict_threshold"}
      * @param headWaitMs      head item enqueue-to-now elapsed time

@@ -10,8 +10,14 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_EXPIRED_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_QUEUE_DEPTH;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_SCHEDULE_TO_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
@@ -127,6 +133,14 @@ public class BatchSchedulerReporter {
 
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+
+        // Auto-TPM Queue MVP metrics — priority-tagged, reported regardless of
+        // whether the priority pick-order switch is on
+        monitor.register(AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_QUEUE_WAIT_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_SCHEDULE_TO_ACK_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_EXPIRED_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_QUEUE_DEPTH, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         log.info("BatchSchedulerReporter initialized");
     }
@@ -486,5 +500,68 @@ public class BatchSchedulerReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(ACK_TO_RESPONSE_TIME_MS, tags, ackToResponseMs);
+    }
+
+    // ==================== Auto-TPM Queue MVP metrics ====================
+
+    /**
+     * Auto-TPM tag caches: priorities are a small fixed set ({30..70} after
+     * normalization) and engine IPs are one per endpoint, so tags are cached
+     * to keep per-request report calls allocation-free on the hot path.
+     */
+    private final ConcurrentHashMap<Integer, FlexMetricTags> autoTpmPriorityTags = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Integer, ConcurrentHashMap<String, FlexMetricTags>> autoTpmEngineTags =
+            new ConcurrentHashMap<>();
+
+    private FlexMetricTags autoTpmTags(int priority) {
+        return autoTpmPriorityTags.computeIfAbsent(priority,
+                p -> FlexMetricTags.of("priority", String.valueOf(p)));
+    }
+
+    private FlexMetricTags autoTpmTags(int priority, String engineIp) {
+        return autoTpmEngineTags
+                .computeIfAbsent(priority, p -> new ConcurrentHashMap<>())
+                .computeIfAbsent(engineIp,
+                        ip -> FlexMetricTags.ofEngine(ip, "priority", String.valueOf(priority)));
+    }
+
+    /**
+     * Report an Auto-TPM request arrival via {@code auto_tpm.request.count}.
+     * Called by BatchScheduler.submit() after a successful batcher offer.
+     */
+    public void reportAutoTpmRequestCount(int priority) {
+        monitor.report(AUTO_TPM_REQUEST_COUNT, autoTpmTags(priority), 1.0);
+    }
+
+    /**
+     * Report per-item batcher queue wait by priority via
+     * {@code auto_tpm.queue.wait.time.ms}.
+     */
+    public void reportAutoTpmQueueWaitTimeMs(int priority, String engineIp, long waitMs) {
+        monitor.report(AUTO_TPM_QUEUE_WAIT_TIME_MS, autoTpmTags(priority, engineIp), waitMs);
+    }
+
+    /**
+     * Report schedule-to-ack time (TTFT proxy) by priority via
+     * {@code auto_tpm.schedule.to.ack.time.ms}.
+     */
+    public void reportAutoTpmScheduleToAckTimeMs(int priority, long scheduleToAckMs) {
+        monitor.report(AUTO_TPM_SCHEDULE_TO_ACK_TIME_MS, autoTpmTags(priority), scheduleToAckMs);
+    }
+
+    /**
+     * Report a queue-deadline expiry by priority via {@code auto_tpm.expired.count}.
+     * Core starvation observation for low-priority requests.
+     */
+    public void reportAutoTpmExpiredCount(int priority) {
+        monitor.report(AUTO_TPM_EXPIRED_COUNT, autoTpmTags(priority), 1.0);
+    }
+
+    /**
+     * Report batcher queue depth by priority via {@code auto_tpm.queue.depth}.
+     * Called on the existing periodic per-endpoint metric path.
+     */
+    public void reportAutoTpmQueueDepth(int priority, String engineIp, int depth) {
+        monitor.report(AUTO_TPM_QUEUE_DEPTH, autoTpmTags(priority, engineIp), depth);
     }
 }

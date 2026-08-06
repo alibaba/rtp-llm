@@ -25,6 +25,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GenerateInputPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
+from rtp_llm.server.request_headers import apply_request_priority
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -270,6 +271,7 @@ class MasterClient:
             api_key=api_key,
             cache_key_block_size=cache_key_block_size,
         )
+        apply_request_priority(request_pb, getattr(input, "headers", None))
         if input_pb is not None:
             request_pb.generate_input = input_pb.SerializeToString()
 

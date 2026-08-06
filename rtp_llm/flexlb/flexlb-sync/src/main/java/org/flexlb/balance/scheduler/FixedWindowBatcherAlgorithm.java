@@ -3,10 +3,13 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.LinkedBlockingQueue;
 
 /**
@@ -58,9 +61,17 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     private final PrefillEndpoint prefillEp;
     private final LinkedBlockingQueue<BatchItem> queue = new LinkedBlockingQueue<>();
 
+    /**
+     * Auto-TPM priority pick order, frozen at construction time
+     * (process-lifetime switch). When false the pick order is the FIFO
+     * snapshot and behavior is identical to the baseline.
+     */
+    private final boolean priorityQueueEnabled;
+
     public FixedWindowBatcherAlgorithm(FlexlbConfig cfg, PrefillEndpoint prefillEp) {
         this.cfg = cfg;
         this.prefillEp = prefillEp;
+        this.priorityQueueEnabled = cfg.isAutoTpmPriorityQueueEnabled();
     }
 
     // ==================== BatcherAlgorithm ====================
@@ -91,15 +102,22 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long predictThresholdMs = cfg.getFlexlbBatchPredictThresholdMs();
         long batchMaxTokens = batchTokenCapacity();
 
-        // 0. Oversized head: can never be picked by any batch
-        if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
-            queue.remove(head);
-            return new BatchDecision.Drop(head,
+        // 0. Oversized pick-order head: can never be picked by any batch.
+        // Checking the pick-order head (== FIFO head when the switch is off)
+        // prevents an oversized high-priority item from blocking dispatch.
+        // The full snapshot is deferred to the dispatch paths so park cycles
+        // stay allocation-free, matching the baseline hot path.
+        BatchItem first = priorityQueueEnabled ? peekPickOrder() : head;
+        if (!BatchShape.empty().add(first).fitsCompute(batchMaxTokens)) {
+            queue.remove(first);
+            return new BatchDecision.Drop(first,
                     BatchDecision.DropCause.EXCEEDS_BATCH_TOKEN_CAPACITY,
-                    "seq_len=" + head.seqLen() + " capacity=" + batchMaxTokens);
+                    "seq_len=" + first.seqLen() + " capacity=" + batchMaxTokens);
         }
 
-        // 1. Queue deadline: drop expired head before backpressure check
+        // 1. Queue deadline: drop expired head before backpressure check.
+        // Anchored to the FIFO head (oldest request) regardless of pick order,
+        // so expiry semantics are identical in both switch states.
         long queueDeadlineMs = cfg.getFlexlbBatchEnqueueDeadlineMs();
         if (queueDeadlineMs > 0 && elapsedMs > queueDeadlineMs) {
             queue.remove(head);
@@ -117,7 +135,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // 3. Queue size >= batchMaxCount → dispatch immediately (batch full)
         int queueSizeBefore = queue.size();
         if (queueSizeBefore >= batchMaxCount) {
-            List<BatchItem> picked = pickWithinCapacity(batchMaxCount, batchMaxTokens, batchKvCapacity());
+            List<BatchItem> picked = pickWithinCapacity(candidateView(), batchMaxCount, batchMaxTokens, batchKvCapacity());
             if (!picked.isEmpty()) {
                 picked.forEach(queue::remove);
                 return new BatchDecision.Dispatch(picked, "batch_full", elapsedMs, queueSizeBefore);
@@ -127,7 +145,7 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
         // 4. Queue size < batchMaxCount → check window timeout
         if (elapsedMs >= fixedWaitMs) {
-            List<BatchItem> picked = pickWithinCapacity(batchMaxCount, batchMaxTokens, batchKvCapacity());
+            List<BatchItem> picked = pickWithinCapacity(candidateView(), batchMaxCount, batchMaxTokens, batchKvCapacity());
             if (!picked.isEmpty()) {
                 picked.forEach(queue::remove);
                 return new BatchDecision.Dispatch(picked, "fixed_window_timeout", elapsedMs, queueSizeBefore);
@@ -137,10 +155,10 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
         // 5. Predictor-based early dispatch
         if (predictThresholdMs > 0) {
-            List<BatchItem> candidates = pickWithinCapacity(batchMaxCount, batchMaxTokens, batchKvCapacity());
-            if (!candidates.isEmpty() && predictor().predictBatchMs(candidates) >= predictThresholdMs) {
-                candidates.forEach(queue::remove);
-                return new BatchDecision.Dispatch(candidates, "predict_threshold", elapsedMs, queueSizeBefore);
+            List<BatchItem> tentative = pickWithinCapacity(candidateView(), batchMaxCount, batchMaxTokens, batchKvCapacity());
+            if (!tentative.isEmpty() && predictor().predictBatchMs(tentative) >= predictThresholdMs) {
+                tentative.forEach(queue::remove);
+                return new BatchDecision.Dispatch(tentative, "predict_threshold", elapsedMs, queueSizeBefore);
             }
         }
 
@@ -233,19 +251,51 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
     // ==================== Internal: picking ====================
 
     /**
-     * Greedily pick up to {@code maxCount} items in FIFO order while keeping
+     * Pick-order view of the queue for one decide cycle: a snapshot of the
+     * FIFO container, priority-sorted (stable) when the Auto-TPM switch is
+     * on, unchanged otherwise. The container itself stays FIFO so head-based
+     * deadline / window / {@link #queueWaitMs} semantics never change.
+     */
+    private List<BatchItem> candidateView() {
+        List<BatchItem> snapshot = new ArrayList<>(queue);
+        if (priorityQueueEnabled) {
+            snapshot.sort(BatchItemOrder.PRIORITY_FIRST);
+        }
+        return snapshot;
+    }
+
+    /**
+     * First item in pick order without materializing a snapshot: a single
+     * allocation-free scan for the minimum under
+     * {@link BatchItemOrder#PRIORITY_FIRST}. Only used when the Auto-TPM
+     * switch is on; with the switch off the pick-order head is the FIFO head.
+     */
+    private BatchItem peekPickOrder() {
+        BatchItem best = null;
+        for (BatchItem item : queue) {
+            if (best == null || BatchItemOrder.PRIORITY_FIRST.compare(item, best) < 0) {
+                best = item;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Greedily pick up to {@code maxCount} items in pick order while keeping
      * the batch inside the Engine's compute and KV resource shape.
      *
-     * <p>The FIFO head is never rejected on dynamic KV availability: temporary
-     * KV pressure only prevents adding more members to this batch. The Engine
-     * remains the final admission authority for the singleton request.
+     * <p>The pick-order head is never rejected on dynamic KV availability:
+     * temporary KV pressure only prevents adding more members to this batch.
+     * The Engine remains the final admission authority for the singleton
+     * request.
      */
-    private List<BatchItem> pickWithinCapacity(int maxCount,
+    private List<BatchItem> pickWithinCapacity(List<BatchItem> candidates,
+                                                int maxCount,
                                                 long batchMaxTokens,
                                                 long batchKvTokens) {
         List<BatchItem> picked = new ArrayList<>();
         BatchShape shape = BatchShape.empty();
-        for (BatchItem item : new ArrayList<>(queue)) {
+        for (BatchItem item : candidates) {
             if (picked.size() >= maxCount) {
                 break;
             }
@@ -260,5 +310,47 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             shape = candidate;
         }
         return picked;
+    }
+
+    // ==================== Internal: Auto-TPM observability ====================
+
+    /**
+     * Upper-bound estimate (ms) of how long a new request with the given
+     * priority would wait before dispatch, based on how many queued items
+     * precede it in pick order. <b>Observability only</b> — never feeds
+     * routing ({@link #queueWaitMs} stays untouched) or dispatch decisions.
+     */
+    long estimateWaitMs(int priority) {
+        int itemsAhead;
+        if (priorityQueueEnabled) {
+            int ahead = 0;
+            for (BatchItem item : queue) {
+                if (item.priority() >= priority) {
+                    ahead++;
+                }
+            }
+            itemsAhead = ahead;
+        } else {
+            itemsAhead = queue.size();
+        }
+        int batchMaxCount = Math.max(1, cfg.getFlexlbBatchSizeMax());
+        long waves = itemsAhead / batchMaxCount + 1L;
+        return waves * cfg.getFlexlbBatchFixedWaitMs();
+    }
+
+    /**
+     * Current queue depth per priority level for periodic gauge reporting.
+     * All valid priorities are present (0 when empty) so the gauge tag set
+     * stays complete.
+     */
+    Map<Integer, Integer> depthByPriority() {
+        Map<Integer, Integer> depth = new TreeMap<>();
+        for (int priority : CommonConstants.VALID_REQUEST_PRIORITIES) {
+            depth.put(priority, 0);
+        }
+        for (BatchItem item : queue) {
+            depth.merge(item.priority(), 1, Integer::sum);
+        }
+        return depth;
     }
 }

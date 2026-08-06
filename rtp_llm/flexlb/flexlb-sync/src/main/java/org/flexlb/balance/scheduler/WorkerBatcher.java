@@ -8,6 +8,7 @@ import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
@@ -76,6 +77,14 @@ public class WorkerBatcher {
     }
 
     /**
+     * Current queue depth per Auto-TPM priority level, for periodic gauge
+     * reporting. Delegates to {@link FixedWindowBatcherAlgorithm#depthByPriority}.
+     */
+    public Map<Integer, Integer> depthByPriority() {
+        return algorithm.depthByPriority();
+    }
+
+    /**
      * Estimated time a new request would wait in the queue before dispatch.
      * Delegates to {@link FixedWindowBatcherAlgorithm#queueWaitMs}.
      */
@@ -133,17 +142,22 @@ public class WorkerBatcher {
         // Compute batch-aggregated cache hit ratio
         long totalSeqLen = 0;
         long totalHitCache = 0;
+        long now = System.currentTimeMillis();
         for (BatchItem item : d.items()) {
             totalSeqLen += item.seqLen();
             totalHitCache += item.hitCache();
+            // Auto-TPM: per-item queue wait by priority
+            ctx.reporter().reportAutoTpmQueueWaitTimeMs(
+                    item.priority(), ip, Math.max(0, now - item.enqueuedAtMs()));
         }
         ctx.reporter().reportBatchCacheHitMetrics(role, ip, totalHitCache, totalSeqLen);
         ctx.reporter().reportBatchTotalTokens(role, ip, d.reason(), totalSeqLen);
 
         Logger.debug("flexlb_batch_decision reason={} picked_size={} "
-                        + "wait_ms={} queue_before={} worker={} head_req_id={}",
+                        + "wait_ms={} queue_before={} worker={} head_req_id={} head_priority={}",
                 d.reason(), d.items().size(), d.headWaitMs(),
-                d.queueSizeBefore(), ctx.key(), d.items().get(0).requestId());
+                d.queueSizeBefore(), ctx.key(), d.items().get(0).requestId(),
+                d.items().get(0).priority());
 
         ctx.prefillEp().submitBatch(d.items(),
                 new DispatchMeta(d.reason()));
@@ -157,8 +171,10 @@ public class WorkerBatcher {
     private void executeDrop(BatchDecision.Drop d) {
         switch (d.cause()) {
             case QUEUE_DEADLINE_EXCEEDED -> {
-                Logger.warn("flexlb_batch_drop request_id={} reason=queue_deadline_exceeded {}",
-                        d.item().requestId(), d.detail());
+                Logger.warn("flexlb_batch_drop request_id={} priority={} reason=queue_deadline_exceeded {}",
+                        d.item().requestId(), d.item().priority(), d.detail());
+                // Auto-TPM: starvation observation — expired count by priority
+                ctx.reporter().reportAutoTpmExpiredCount(d.item().priority());
                 d.item().failExpired();
             }
             case EXCEEDS_BATCH_TOKEN_CAPACITY ->

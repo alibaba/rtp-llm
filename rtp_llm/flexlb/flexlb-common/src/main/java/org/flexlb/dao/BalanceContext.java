@@ -3,6 +3,7 @@ package org.flexlb.dao;
 import lombok.Data;
 import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
@@ -87,6 +88,14 @@ public class BalanceContext {
 
     public long getRequestId() {
         return request.getRequestId();
+    }
+
+    /**
+     * Auto-TPM QoS priority of the underlying request; falls back to
+     * {@link CommonConstants#DEFAULT_REQUEST_PRIORITY} when no request is set.
+     */
+    public int getPriority() {
+        return request != null ? request.getPriority() : CommonConstants.DEFAULT_REQUEST_PRIORITY;
     }
 
     /**

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
@@ -45,6 +46,12 @@ public final class BatchItem {
     private final long enqueuedAtMs;
 
     /**
+     * Auto-TPM QoS priority frozen at enqueue time so pick-order sorting
+     * sees a stable value for the item's whole queue lifetime.
+     */
+    private final int priority;
+
+    /**
      * Batch ID assigned in {@link PrefillEndpoint#submitBatch} just before
      * dispatch. Used for stale-ACK detection (the endpoint compares the
      * incoming batch ID against this field). 0 = not yet dispatched.
@@ -80,6 +87,7 @@ public final class BatchItem {
         this.prefillEp = prefillEp;
         this.decodeEp = decodeEp;
         this.enqueuedAtMs = enqueuedAtMs;
+        this.priority = ctx != null ? ctx.getPriority() : CommonConstants.DEFAULT_REQUEST_PRIORITY;
     }
 
     // -- accessors --
@@ -91,6 +99,9 @@ public final class BatchItem {
     public PrefillEndpoint prefillEp() { return prefillEp; }
     public DecodeEndpoint decodeEp() { return decodeEp; }
     public long enqueuedAtMs() { return enqueuedAtMs; }
+
+    /** Auto-TPM QoS priority frozen at construction time. */
+    public int priority() { return priority; }
 
     /** Batch ID assigned at dispatch time; 0 = not yet dispatched. */
     public long assignedBatchId() { return assignedBatchId; }
