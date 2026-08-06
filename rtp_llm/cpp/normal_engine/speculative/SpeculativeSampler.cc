@@ -9,25 +9,16 @@ namespace speculative {
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
-    auto                  draft_probs = torch::softmax(logits, -1);
+    output.all_probs = torch::softmax(logits, -1);
 
     std::tuple<torch::Tensor, torch::Tensor> sample_res;
     if (top_k == 1) {
-        sample_res = torch::max(draft_probs, -1, true);
+        sample_res = torch::max(output.all_probs, -1, true);
     } else {
-        sample_res = torch::topk(draft_probs, top_k, -1);
+        sample_res = torch::topk(output.all_probs, top_k, -1);
     }
 
     output.token_ids = std::get<1>(sample_res);
-    if (top_k == 1) {
-        // A deterministic top-1 proposal must be represented by its point-mass
-        // distribution when rejection sampling computes its acceptance ratio.
-        output.all_probs = torch::zeros_like(draft_probs).scatter_(-1, output.token_ids, 1.0);
-    } else {
-        // Preserve the existing multi-candidate behavior. This path does not
-        // describe the deterministic top-1 proposal fixed above.
-        output.all_probs = std::move(draft_probs);
-    }
 
     int batch_size = output.token_ids.size(0);
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
@@ -59,8 +50,9 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     auto draft_token_ids  = draft_sampler_output.token_ids;
     auto target_token_ids = target_sampler_output.token_ids;
 
-    auto draft_token_probs  = draft_sampler_output.all_probs;
-    auto target_token_probs = target_sampler_output.all_probs;
+    auto       draft_token_probs      = draft_sampler_output.all_probs;
+    auto       target_token_probs     = target_sampler_output.all_probs;
+    const bool draft_probs_point_mass = draft_sampler_output.token_ids_are_point_mass;
 
     buffer_holder_.hold_host(draft_token_ids);
     auto draft_token_ids_d_t = draft_token_ids.to(target_device, true);
@@ -105,7 +97,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     torch::Tensor output_accepted_token_num_d = torch::zeros(
         {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
 
-    if (draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
+    RTP_LLM_CHECK_WITH_INFO(draft_probs_point_mass
+                                || (draft_token_probs_d_t.defined() && draft_token_probs_d_t.dim() == 3),
+                            "draft probabilities must be [B, steps, vocab] unless token ids define a point mass");
+    if (!draft_probs_point_mass && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
         const int64_t target_vocab_size = target_token_probs_d_t.size(2);
         const int64_t num_spec          = draft_token_probs_d_t.size(1);
 
@@ -145,6 +140,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             output_token_ids_d,
             output_accepted_token_num_d,
             do_sample_d,
+            draft_probs_point_mass,
         });
     }
 

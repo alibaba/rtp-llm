@@ -96,17 +96,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     if (propose_params_) {
-        const auto gamma = propose_params_->gen_num_per_circle;
-        reserve_step_    = gamma + 1;
-        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
-            // DSpARK decode can schedule the next step before the previous
-            // async specUpdate has committed the accepted tokens on host.
-            // The verifier may therefore see one extra max accept window
-            // (gamma + 1), then seed a gamma-wide draft block from that tail.
-            // Reserving 3 * gamma keeps the largest RoPE index below
-            // max_seq_len while still admitting the longest safe prompts.
-            reserve_step_ = 3 * gamma;
-        }
+        reserve_step_ = propose_params_->gen_num_per_circle + 1;
     } else {
         reserve_step_ = 0;
     }
@@ -642,6 +632,10 @@ bool NormalEngine::isEagle() {
         return propose_params_->sp_type == SP_TYPE_EAGLE;
     }
     return false;
+}
+
+bool NormalEngine::isDSpark() {
+    return propose_params_ && propose_params_->sp_type == SP_TYPE_DSPARK;
 }
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {

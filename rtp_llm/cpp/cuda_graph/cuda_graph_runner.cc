@@ -214,10 +214,18 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
 
     // check size and dtype
     if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0) {
-        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.numel() <= py_model_inputs_.input_hiddens.numel(),
-                                "input_hiddens numel mismatch: %zu >= %zu",
-                                inputs.input_hiddens.numel(),
-                                py_model_inputs_.input_hiddens.numel());
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.dim() == 2 && py_model_inputs_.input_hiddens.dim() == 2,
+                                "input_hiddens must be rank 2, got input dim=%ld capture dim=%ld",
+                                inputs.input_hiddens.dim(),
+                                py_model_inputs_.input_hiddens.dim());
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.size(1) == py_model_inputs_.input_hiddens.size(1),
+                                "input_hiddens row width mismatch: input=%ld capture=%ld",
+                                inputs.input_hiddens.size(1),
+                                py_model_inputs_.input_hiddens.size(1));
+        RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.size(0) <= py_model_inputs_.input_hiddens.size(0),
+                                "input_hiddens row count exceeds graph capacity: input=%ld capture=%ld",
+                                inputs.input_hiddens.size(0),
+                                py_model_inputs_.input_hiddens.size(0));
         RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.dtype() == py_model_inputs_.input_hiddens.dtype(),
                                 "input_hiddens dtype mismatch: %s != %s",
                                 inputs.input_hiddens.dtype().name(),
@@ -300,28 +308,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           max_bs_ + 1,
                                           last_valid);
         }
-        if (is_dspark_draft_ && state.current_batch_size < state.current_real_graph_bs) {
-            addCudaGraphPrepareFillRegion(fill_params,
-                                          py_model_inputs_.attention_inputs.input_lengths,
-                                          state.current_batch_size,
-                                          state.current_real_graph_bs,
-                                          0);
-            addCudaGraphPrepareFillRegion(fill_params,
-                                          py_model_inputs_.attention_inputs.prefix_lengths,
-                                          state.current_batch_size,
-                                          state.current_real_graph_bs,
-                                          0);
-        }
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
 #else
     py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
-    if (is_dspark_draft_ && state.current_batch_size < state.current_real_graph_bs) {
-        py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, state.current_real_graph_bs)
-            .fill_(0);
-        py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, state.current_real_graph_bs)
-            .fill_(0);
-    }
 #endif
 
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store
@@ -518,12 +508,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
-        const auto& hold = graph_instances_[state.current_real_graph_seq_len].mem_hold_;
-        if (hold.draft_tokens_.defined()) {
-            // The DSpark proposal is deterministic argmax: the captured graph
-            // emits tokens only and the engine reconstructs the point-mass q.
-            outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
-        }
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
@@ -532,12 +516,6 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);
-        const auto& hold = graph_instances_[state.current_real_graph_bs].mem_hold_;
-        if (hold.draft_tokens_.defined()) {
-            // The DSpark proposal is deterministic argmax: the captured graph
-            // emits tokens only and the engine reconstructs the point-mass q.
-            outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
-        }
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -716,7 +694,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
 
     // prefix_lengths [batch_size, int32] is only meaningful for prefill and target-verify.
     // Plain decode must leave it undefined.
-    if (is_target_verify_ || is_dspark_draft_) {
+    if (is_target_verify_) {
         inputs.attention_inputs.prefix_lengths =
             torch::full({int(max_bs_)}, max_seq_len_ - num_tokens_per_bs_, options_cuda_int32_);
     } else if (is_prefill_cuda_graph_mode_) {
@@ -819,15 +797,9 @@ void CudaGraphRunner::initCapture() {
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
-        // The DSpARK draft graph captures the propose call, which carries no
-        // feature input — a defined input_hiddens would route the captured
-        // forward into the eager commit arm. Generic/MTP graphs retain the
-        // historical T x hc*hidden defaults populated in the constructor.
-        // "No feature rows" is uniformly encoded as a 0-row tensor so the
-        // replay slice below needs no per-model special case.
-        const int64_t hidden_rows = is_dspark_draft_ ? 0 : static_cast<int64_t>(max_bs_) * num_tokens_per_bs_;
-        inputs.input_hiddens =
-            torch::empty({hidden_rows, static_cast<int64_t>(hidden_size_) * hc_mult_}, options_cuda_float_);
+        RTP_LLM_CHECK_WITH_INFO(
+            input_hidden_size_ > 0, "CUDA graph input_hidden_size must be positive, got %zu", input_hidden_size_);
+        inputs.input_hiddens = torch::zeros({max_num_token_, input_hidden_size_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -841,16 +813,13 @@ void CudaGraphRunner::initCapture() {
         // get real output data type (params already prepared in attn impl __init__/create_params)
         auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
         RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        PyModelOutputs probe_outputs;
         {
             ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
-            probe_outputs = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj).cast<PyModelOutputs>();
+            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
         }
         RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
-        capture_mem_hold_.setOptionalOutputs(
-            probe_outputs.draft_tokens.defined() ? torch::zeros_like(probe_outputs.draft_tokens) : torch::Tensor());
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
 
@@ -951,14 +920,6 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-            auto& hold = graph_instances_[key].mem_hold_;
-            if (hold.draft_tokens_.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(outputs.draft_tokens.defined(),
-                                        "DSpARK CUDA graph draft tokens disappeared during capture");
-                // The deterministic-argmax proposal emits tokens only; the
-                // engine rebuilds the point-mass q outside the graph.
-                hold.draft_tokens_.copy_(outputs.draft_tokens);
-            }
             graph.capture_end();
         }
 
@@ -1061,15 +1022,9 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
 
 CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count) {
     // only when prefill or target model score phase, the num_tokens_per_bs_ > 1
-    auto      hold         = CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
-                                  inputs,
-                                  is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
-    const int batch_size   = num_tokens_per_bs_ > 0 ? tokens_count / num_tokens_per_bs_ : 0;
-    auto      draft_tokens = capture_mem_hold_.draft_tokens_.defined() ?
-                                 capture_mem_hold_.draft_tokens_.slice(0, 0, batch_size) :
-                                 torch::Tensor();
-    hold.setOptionalOutputs(std::move(draft_tokens));
-    return hold;
+    return CaptureMemoryHold(capture_mem_hold_.decoder_layer_hidden_states_.slice(0, 0, tokens_count),
+                             inputs,
+                             is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
 }
 
 CudaGraphRunner* CudaGraphRunner::createForPrefill(py::object py_instance, GraphParams params) {

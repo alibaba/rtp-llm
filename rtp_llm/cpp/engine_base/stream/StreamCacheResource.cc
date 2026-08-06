@@ -206,13 +206,11 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
         stream->setSPOutputBuffer(sp_output_buffer);
 
         if (payload->propose_tokens.size() >= 2) {
-            auto propose_tokens_gpu =
-                sp_output_buffer->tokens.narrow(1, 1, static_cast<int64_t>(payload->propose_tokens.size() - 1))
-                    .to(cuda_i32, /*non_blocking=*/true);
-            auto accept_len     = torch::ones({1}, cuda_i32);
-            auto accept_tokens  = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
-            accept_tokens[0][0] = sp_output_buffer->tokens[0][0];
-            auto next_seq_len   = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
+            auto propose_tokens_gpu = sp_output_buffer->tokens.narrow(1, 1, 1).to(cuda_i32, /*non_blocking=*/true);
+            auto accept_len         = torch::ones({1}, cuda_i32);
+            auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(payload->propose_tokens.size())}, cuda_i32);
+            accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+            auto next_seq_len       = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32);
 
             stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
                 .epoch                  = 0,

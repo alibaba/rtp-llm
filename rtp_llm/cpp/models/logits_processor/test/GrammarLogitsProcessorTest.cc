@@ -573,33 +573,6 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
     EXPECT_EQ(processor.acceptedTokenLen(), 3);
 }
 
-TEST(ReasoningGrammarLogitsProcessorTest, CountsCommittedTailAfterMatcherFinished) {
-    auto backend  = makeBackend();
-    auto compiled = backend.compileNow({"regex", "a"}).compiled;
-    ASSERT_TRUE(compiled);
-
-    auto matcher = backend.createMatcher(
-        compiled, /*require_reasoning=*/false, std::nullopt, /*terminate_without_stop_token=*/true);
-    ReasoningGrammarLogitsProcessor processor(matcher,
-                                              /*eos_token_id=*/0,
-                                              /*max_thinking_tokens=*/0,
-                                              {},
-                                              {},
-                                              /*input_length=*/0);
-
-    // Model the state observed at the next engine handoff after grammar has
-    // already completed in the preceding iteration.
-    matcher->markFinished();
-    ASSERT_TRUE(matcher->finished());
-    EXPECT_EQ(processor.acceptedTokenLen(), 0);
-
-    // The stop token can arrive in the next speculative iteration.  It is no
-    // longer parsed by the completed matcher, but it is still a committed
-    // stream token and must participate in the owner-state length invariant.
-    processor.updateStatus(torch::tensor({{0}}, torch::kInt32), 1);
-    EXPECT_EQ(processor.acceptedTokenLen(), 1);
-}
-
 TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsThinkMode) {
     GrammarConfig grammar_config;
     grammar_config.grammar_backend     = "xgrammar";

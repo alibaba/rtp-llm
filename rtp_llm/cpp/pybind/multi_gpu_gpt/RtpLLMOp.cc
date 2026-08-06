@@ -374,11 +374,6 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     grpc::ServerBuilder builder;
     const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
     auto                server_config = grpc_config.get_server_config();
-    if (server_config.find(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH) == server_config.end()) {
-        // The fixed-gamma DSpARK side channel carries [1, gamma, vocab]
-        // probabilities and can exceed gRPC's default receive limit.
-        server_config[GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH] = -1;
-    }
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);

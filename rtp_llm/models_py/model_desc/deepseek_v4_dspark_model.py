@@ -19,9 +19,8 @@ projection into each draft layer's paged SWA cache before evaluating the next
 query block.
 
 The width is fixed for the lifetime of a service and comes only from
-``GEN_NUM_PER_CIRCLE``. Decode CUDA graph capture/replay keeps that query width,
-target-feature width, and FlashMLA scheduler metadata stable for each captured
-batch size.
+``GEN_NUM_PER_CIRCLE``. The executor evaluates proposal blocks eagerly and
+routes feature-KV commit calls through the ordinary prefill CUDA graph.
 """
 
 from __future__ import annotations
@@ -120,24 +119,14 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self._dspark_target_layer_ids = tuple(int(v) for v in target_layer_ids)
         self._dspark_markov_rank = int(markov_rank)
         self.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
-        # Commit-side CP context: on a PD prefill worker with a sharded
-        # prefill-CP KV cache, the draft pool is byte-sliced exactly like the
-        # target's SWA pool and commit writes must go through the CP-sliced
-        # FP8 writer. Decode workers restore full-width blocks over PD and
-        # single-node deployments never slice, so this stays None there.
-        self._dspark_commit_cp_ctx = None
+        # Commit-side CP context. Target features remain rank-local after the
+        # target model's zigzag prefill, so draft commit gathers the projected
+        # KV for both replicated and byte-sharded prefill-CP cache layouts.
+        self._dspark_commit_cp_enabled = False
+        self._active_dspark_commit_cp_ctx = None
         _cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
-        if (
-            _cp_cfg is not None
-            and bool(getattr(_cp_cfg, "kv_cache_sharded", False))
-            and self.tp_size > 1
-            and not self._is_decode_role
-        ):
-            self._dspark_commit_cp_ctx = SimpleNamespace(
-                cp_size=self.tp_size,
-                cp_rank=int(getattr(parallelism_config, "tp_rank", 0) or 0),
-                kv_cache_sharded=True,
-            )
+        if _cp_cfg is not None and bool(_cp_cfg.is_enabled()) and self.tp_size > 1:
+            self._dspark_commit_cp_enabled = True
 
         if self._gen_num_per_cycle <= 0:
             raise ValueError(
@@ -183,10 +172,15 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # Initialization / graph policy
     # ------------------------------------------------------------------
 
+    def cuda_graph_input_hidden_size(self) -> int:
+        """Return the target-feature row width consumed by commit graphs."""
+
+        return int(self._dspark_aux_feature_dim)
+
     def _should_capture_cuda_graph(self, attn: Any, is_target_verify: bool) -> bool:
-        # DSpARK always evaluates a fixed-width query block.  Accepted context
-        # lengths remain device data in the persistent CudaGraphRunner input
-        # buffers, so they do not change the captured launch topology.
+        # Only the separate commit wrapper enables CUDA graph for DSpARK; the
+        # proposal wrapper stays eager. Commit row capacity is fixed at
+        # gamma+1 per request and live lengths remain device data.
         return True
 
     def prepare_fmha_impl(
@@ -381,9 +375,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
         ``entries_per_block`` is the full ring-entry domain of one block
         (both CP slices together under a sharded prefill); ``pool`` is the
-        packed 3-D FP8 view, or None when the pool is CP byte-sliced and only
-        the raw per-rank slice exists — the writer dispatches on
-        ``attn._swa_cp_byte_sliced()`` accordingly."""
+        packed 3-D FP8 view used by the regular writer. Byte-sliced commits
+        also require it for layout validation, then write through the raw
+        per-rank pool selected by ``attn._swa_cp_byte_sliced()``."""
         attn = self.v4.layers[layer_idx].attn
         if int(attn.compress_ratio) != 0:
             raise RuntimeError(
@@ -395,8 +389,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         previous_cp_ctx = attn._cp_ctx
         attn._kv_cache = self.kv_cache
         attn._block_tables_by_type = {int(SWA_KV): block_table}
-        if attn._cp_ctx is None and self._dspark_commit_cp_ctx is not None:
-            attn._cp_ctx = self._dspark_commit_cp_ctx
+        if attn._cp_ctx is None and self._active_dspark_commit_cp_ctx is not None:
+            attn._cp_ctx = self._active_dspark_commit_cp_ctx
         try:
             attn._ensure_freqs_cis_bound()
             entries_per_block = int(attn._swa_entries_per_block())
@@ -428,12 +422,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
         generations carry a -1 slot and are ignored by the FP8 writer.
 
-        Under sharded-CP prefill ``main_x``/``context_positions`` are the
-        rank-local zigzag rows; the projected KV is all-gathered across the
-        CP group (proj-then-gather: the per-row wkv/RoPE projection commutes
-        with the row split, and the projected rows are an order of magnitude
-        narrower than the raw feature rows) and the write then covers the
-        full domain described by ``gathered_req_ids``/``gathered_positions``.
+        Under CP prefill ``main_x``/``context_positions`` are the rank-local
+        zigzag rows; the projected KV is all-gathered across the CP group
+        (proj-then-gather: the per-row wkv/RoPE projection commutes with the
+        row split, and the projected rows are much narrower than the raw
+        feature rows). Replicated caches write the full gathered domain on
+        every rank; byte-sharded caches write only the local slice.
         """
         with self._swa_cache_bound(layer_idx, block_table) as (
             attn,
@@ -519,22 +513,21 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         committed_ends: torch.Tensor,
         row_count: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Sharded-CP prefill hands the commit the target's rank-local zigzag
+        """CP prefill hands the commit the target's rank-local zigzag
         rows, so their (request, position) map comes from the CPContext the
         target prefill just published — the packed ``starts``/``lengths``
         layout only describes the non-CP row order."""
-        if self._dspark_commit_cp_ctx is None:
+        if not self._dspark_commit_cp_enabled:
             return super().map_commit_rows(starts, lengths, committed_ends, row_count)
         cp_ctx = take_dspark_commit_cp_ctx()
         if cp_ctx is None:
-            raise RuntimeError(
-                "DSpark sharded-CP commit expects the CPContext published by "
-                "the target prefill forward; none is pending"
-            )
+            # Prefill CP is a one-shot handoff. Decode commits in a colocated
+            # engine have ordinary dense geometry and no pending CPContext.
+            return super().map_commit_rows(starts, lengths, committed_ends, row_count)
         positions = cp_ctx.global_positions
         if int(positions.numel()) != int(row_count):
             raise RuntimeError(
-                "DSpark sharded-CP commit row mismatch: buffer supplied "
+                "DSpark CP commit row mismatch: buffer supplied "
                 f"{row_count} rank-local rows, CPContext maps "
                 f"{int(positions.numel())}"
             )
@@ -548,6 +541,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # slot mapping / FP8 writer on every rank after the gather.
         req32 = torch.where(valid, req32, torch.full_like(req32, -1))
         pos32 = torch.where(valid, pos32, torch.full_like(pos32, -1))
+        self._active_dspark_commit_cp_ctx = cp_ctx
         return req32.contiguous(), pos32.contiguous()
 
     def commit_feature_rows(
@@ -561,44 +555,52 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         batch_size = int(committed_ends.numel())
         if batch_size == 0 or int(main_x.shape[0]) == 0:
             return
-        attention_inputs = inputs.attention_inputs
-        block_table = self._swa_block_table(attention_inputs, batch_size)
-        tokens_per_block = int(
-            require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
-        )
-        write_cache_store_impl = create_write_cache_store_impl(
-            attention_inputs, self.kv_cache
-        )
-        gathered_req_ids: Optional[torch.Tensor] = None
-        gathered_positions: Optional[torch.Tensor] = None
-        if self._dspark_commit_cp_ctx is not None:
-            # Proj-then-gather: the row map is gathered once here; each
-            # layer's projected KV is gathered inside _commit_layer_features.
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+        try:
+            attention_inputs = inputs.attention_inputs
+            block_table = self._swa_block_table(attention_inputs, batch_size)
+            tokens_per_block = int(
+                require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
+            )
+            write_cache_store_impl = create_write_cache_store_impl(
+                attention_inputs, self.kv_cache
+            )
+            gathered_req_ids: Optional[torch.Tensor] = None
+            gathered_positions: Optional[torch.Tensor] = None
+            if self._active_dspark_commit_cp_ctx is not None:
+                # Proj-then-gather: the row map is gathered once here; each
+                # layer's projected KV is gathered inside _commit_layer_features.
+                from rtp_llm.models_py.distributed.collective_torch import (
+                    Group,
+                    all_gather,
+                )
 
-            gathered_req_ids = all_gather(context_req_ids.contiguous(), group=Group.TP)
-            gathered_positions = all_gather(
-                context_positions.contiguous(), group=Group.TP
-            )
-        for layer_idx in range(len(self.v4.layers)):
-            self._commit_layer_features(
-                layer_idx,
-                main_x,
-                context_req_ids,
-                context_positions,
-                committed_ends,
-                block_table,
-                tokens_per_block,
-                batch_size,
-                gathered_req_ids=gathered_req_ids,
-                gathered_positions=gathered_positions,
-            )
-            # PD-separated prefill publishes each committed draft-layer cache
-            # from the commit call: the published range is exactly the
-            # committed rows, so speculative query rows never enter the
-            # store's block plan.
-            if write_cache_store_impl is not None:
-                write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
+                gathered_req_ids = all_gather(
+                    context_req_ids.contiguous(), group=Group.TP
+                )
+                gathered_positions = all_gather(
+                    context_positions.contiguous(), group=Group.TP
+                )
+            for layer_idx in range(len(self.v4.layers)):
+                self._commit_layer_features(
+                    layer_idx,
+                    main_x,
+                    context_req_ids,
+                    context_positions,
+                    committed_ends,
+                    block_table,
+                    tokens_per_block,
+                    batch_size,
+                    gathered_req_ids=gathered_req_ids,
+                    gathered_positions=gathered_positions,
+                )
+                # PD-separated prefill publishes each committed draft-layer
+                # cache from the commit call: the published range is exactly
+                # the committed rows, so proposal rows never enter the store's
+                # block plan.
+                if write_cache_store_impl is not None:
+                    write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
+        finally:
+            self._active_dspark_commit_cp_ctx = None
 
     def _forward_dspark_attention(
         self,
@@ -773,18 +775,30 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # vocab-sharded across TP ranks; the sequential Markov tail needs the
         # full vocabulary on every rank. Only k rows per request cross this
         # gather, so it stays tiny relative to the aliased ~1.8 GiB matrix.
-        if self.tp_size > 1:
+        local_vocab = int(base_logits.size(-1))
+        if local_vocab < self._dspark_vocab_size:
+            if self.tp_size <= 1:
+                raise RuntimeError(
+                    "DSpARK lm_head output is vocabulary-sharded but TP is disabled: "
+                    f"local={local_vocab}, vocab={self._dspark_vocab_size}"
+                )
             from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
             rows = int(base_logits.size(0))
             gathered = all_gather(base_logits.contiguous(), group=Group.TP)
-            shard_vocab = int(base_logits.size(-1))
+            shard_vocab = local_vocab
             base_logits = (
                 gathered.reshape(self.tp_size, rows, shard_vocab)
                 .permute(1, 0, 2)
                 .reshape(rows, self.tp_size * shard_vocab)
             )
-            base_logits = base_logits[..., : self._dspark_vocab_size].contiguous()
+            if int(base_logits.size(-1)) < self._dspark_vocab_size:
+                raise RuntimeError(
+                    "DSpARK gathered lm_head output is narrower than vocabulary: "
+                    f"gathered={int(base_logits.size(-1))}, "
+                    f"vocab={self._dspark_vocab_size}"
+                )
+        base_logits = base_logits[..., : self._dspark_vocab_size].contiguous()
         return normalized, base_logits.view(batch_size, gamma, -1)
 
     @torch.inference_mode()

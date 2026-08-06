@@ -90,6 +90,14 @@ py_test(
 )
 
 py_test(
+    name = "test_dspark_weight",
+    srcs = ["test_dspark_weight.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_aux_hidden_capture",
     srcs = ["test_aux_hidden_capture.py"],
     deps = [

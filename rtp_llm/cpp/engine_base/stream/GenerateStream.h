@@ -52,10 +52,6 @@ struct StreamSpecUpdateInfo {
     // shape: [propose_step] (the per-stream slice). When defined, PDFUSION
     // path will skip D2H and consume this GPU tensor directly.
     torch::Tensor draft_token_gpu;
-    // CPU mirror of a complete fixed-width block proposal. DSpARK fills this
-    // only for PD-separated streams so the decode node receives every draft
-    // token; MTP keeps using the single legacy draft_token above.
-    torch::Tensor draft_tokens_cpu;
 
     bool update_remote_generate = true;
     bool force_update_info      = false;

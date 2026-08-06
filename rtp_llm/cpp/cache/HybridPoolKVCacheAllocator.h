@@ -58,12 +58,6 @@ private:
     void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
-    void logMallocFailure(const MallocInfo& malloc_info,
-                          const char*       phase,
-                          int               failed_batch,
-                          int               failed_group,
-                          bool              incremental,
-                          int               failed_need_blocks) const override;
 
     int    groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
     int    defaultGroupIdForLayer(int layer_id) const;

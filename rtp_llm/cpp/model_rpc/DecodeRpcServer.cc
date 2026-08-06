@@ -249,14 +249,21 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
 
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        // A DSpark seeding handoff carries no proposal (commit-only prefill);
-        // the decode round head produces the first one, so the stream enters
-        // the engine exactly like a steady decode stream. MTP/Eagle always
-        // send target+draft tokens.
-        if (propose_tokens.size() >= 2) {
-            generate_stream->setReuseLength(generate_stream->seqLength() - 1);
-            generate_stream->setSpEditRun(false);
-            generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
+        // A DSpARK seeding handoff carries no proposal (commit-only prefill);
+        // the decode round head produces the first one. Traditional MTP/Eagle
+        // retain their target+draft handoff contract.
+        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() : propose_tokens.size() >= 2,
+                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
+                                propose_tokens.size(),
+                                static_cast<int>(engine_->isDSpark()));
+        // These positions describe the target cache loaded from prefill and
+        // apply to every speculative mode. DSpARK intentionally carries no
+        // proposal in the handoff, but its first decode round starts from the
+        // same prompt-tail position.
+        generate_stream->setReuseLength(generate_stream->seqLength() - 1);
+        generate_stream->setSpEditRun(false);
+        generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
+        if (!propose_tokens.empty()) {
             generate_stream->setContainProposeToken(true);
             generate_stream->setProposeToken(propose_tokens);
 

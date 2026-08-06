@@ -678,7 +678,6 @@ class BuildRecordTest(TestCase):
             "max_tokens_per_frame",
             "generate_config",
             "generate_config_role_addrs",
-            "aux_info",
             "input_ids",
             "generated_ids",
             "repetition_monitor_impl",
@@ -742,23 +741,6 @@ class EmitLogTest(TestCase):
         self.assertEqual(parsed["status"], "OK")
         self.assertIn("ts", parsed)
         self.assertIn("method", parsed)
-
-    def test_invalid_aux_info_does_not_drop_access_log(self) -> None:
-        rec = _make_record()
-        rec.record_aux_info({"invalid": object()})
-        rec.resolve_status(_FakeContext(code=grpc.StatusCode.OK), None)
-
-        with patch.object(
-            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
-        ) as info, patch("rtp_llm.dash_sc.access_record.logging.warning") as warning:
-            emit_access_log(rec, rank_id=0, server_id=1)
-
-        self.assertEqual(info.call_count, 1)
-        parsed = json.loads(info.call_args.args[0])
-        self.assertEqual(parsed["aux_info"], {})
-        self.assertEqual(warning.call_count, 1)
-        self.assertEqual(warning.call_args.args[1], "PydanticSerializationError")
-        self.assertIs(warning.call_args.args[3], rec.aux_info)
 
     def test_access_log_repetition_alert_warns(self) -> None:
         fake = SimpleNamespace(

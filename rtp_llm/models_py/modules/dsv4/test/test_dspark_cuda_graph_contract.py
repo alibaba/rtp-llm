@@ -12,6 +12,8 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
 def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
     model._gen_num_per_cycle = gamma
+    model._dspark_commit_cp_enabled = False
+    model._active_dspark_commit_cp_ctx = None
     model._v4_args = type(
         "Args", (), {"window_size": 128, "dim": 8, "vocab_size": 17}
     )()
@@ -88,23 +90,83 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertTrue(torch.all(req[3:] == -1))
         self.assertTrue(torch.all(positions[3:] == -1))
 
-    def test_packed_verify_rows_map_accepted_prefixes(self) -> None:
-        # Decode-tail rows arrive front-packed (accepted rows only); rows
-        # past the packed span are scatter padding and must stay invalid.
-        lengths = torch.tensor([3, 1], dtype=torch.int32)
+    def test_dense_verify_rows_map_full_fixed_width_blocks(self) -> None:
+        # Decode-tail commit preserves every target verify row, independent
+        # of rejection. Rows past the fixed-width batch span are graph-bucket
+        # padding and must stay invalid.
+        lengths = torch.tensor([4, 4], dtype=torch.int32)
         starts = (lengths.cumsum(0) - lengths).to(torch.int32)
         committed_ends = torch.tensor([123, 367], dtype=torch.int32)
 
         req, positions = map_context_rows(starts, lengths, committed_ends, row_count=12)
 
         expected_req = torch.full((12,), -1, dtype=torch.int32)
-        expected_req[:3] = 0
-        expected_req[3] = 1
+        expected_req[:4] = 0
+        expected_req[4:8] = 1
         expected_positions = torch.full((12,), -1, dtype=torch.int32)
-        expected_positions[:3] = torch.tensor([120, 121, 122], dtype=torch.int32)
-        expected_positions[3] = 366
+        expected_positions[:4] = torch.tensor([119, 120, 121, 122], dtype=torch.int32)
+        expected_positions[4:8] = torch.tensor([363, 364, 365, 366], dtype=torch.int32)
         self.assertTrue(torch.equal(req, expected_req))
         self.assertTrue(torch.equal(positions, expected_positions))
+
+    def test_cp_row_map_is_consumed_for_one_commit_only(self) -> None:
+        model = _dspark_harness(gamma=3)
+        model._dspark_commit_cp_enabled = True
+        starts = torch.tensor([0], dtype=torch.int32)
+        lengths = torch.tensor([4], dtype=torch.int32)
+        committed_ends = torch.tensor([14], dtype=torch.int32)
+        cp_ctx = SimpleNamespace(
+            global_positions=torch.tensor([10, 13], dtype=torch.int64),
+            local_is_real=torch.tensor([True, True]),
+            req_id_per_token=torch.tensor([0, 0], dtype=torch.int32),
+            cp_size=2,
+            cp_rank=0,
+            kv_cache_sharded=False,
+        )
+
+        with patch.object(
+            dspark_model_module, "take_dspark_commit_cp_ctx", return_value=cp_ctx
+        ):
+            req, positions = model.map_commit_rows(
+                starts, lengths, committed_ends, row_count=2
+            )
+
+        self.assertEqual(req.tolist(), [0, 0])
+        self.assertEqual(positions.tolist(), [10, 13])
+        self.assertIs(model._active_dspark_commit_cp_ctx, cp_ctx)
+
+        model._active_dspark_commit_cp_ctx = None
+        with patch.object(
+            dspark_model_module, "take_dspark_commit_cp_ctx", return_value=None
+        ):
+            req, positions = model.map_commit_rows(
+                starts, lengths, committed_ends, row_count=4
+            )
+
+        self.assertEqual(req.tolist(), [0, 0, 0, 0])
+        self.assertEqual(positions.tolist(), [10, 11, 12, 13])
+        self.assertIsNone(model._active_dspark_commit_cp_ctx)
+
+    def test_cp_commit_context_is_cleared_on_failure(self) -> None:
+        model = _dspark_harness(gamma=3)
+        model._active_dspark_commit_cp_ctx = SimpleNamespace(cp_size=2)
+        with (
+            patch.object(
+                DeepSeekV4DSparkModel,
+                "_swa_block_table",
+                side_effect=RuntimeError("bad table"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "bad table"),
+        ):
+            model.commit_feature_rows(
+                torch.zeros((1, 8)),
+                torch.tensor([0], dtype=torch.int32),
+                torch.tensor([10], dtype=torch.int32),
+                torch.tensor([11], dtype=torch.int32),
+                SimpleNamespace(attention_inputs=SimpleNamespace()),
+            )
+
+        self.assertIsNone(model._active_dspark_commit_cp_ctx)
 
     def test_cuda_graph_metadata_owner_is_persistent(self) -> None:
         model = _dspark_harness()
@@ -128,6 +190,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
             def __init__(self) -> None:
                 self._kv_cache = None
                 self._block_tables_by_type = {}
+                self._cp_ctx = None
                 self.freqs_cis = torch.zeros((32, 2), dtype=torch.float32)
                 self.wkv = object()
                 self.kv_norm = object()
@@ -137,6 +200,12 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
 
             def _pool_entries_per_block(self, _region: int) -> int:
                 return 134
+
+            def _swa_entries_per_block(self) -> int:
+                return 134
+
+            def _swa_cp_byte_sliced(self) -> bool:
+                return False
 
             def _pool_view_3d_fp8(self, _region: int) -> torch.Tensor:
                 return torch.zeros((2, 134, 1), dtype=torch.uint8)
@@ -197,6 +266,123 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertTrue(
             torch.equal(cache_writer.call_args.kwargs["slot_mapping"], expected_slots)
         )
+
+    def test_cp_project_then_gather_selects_cache_writer(self) -> None:
+        """CP gathers projected KV and honors replicated/byte-sliced pools."""
+
+        class FakeAttention:
+            compress_ratio = 0
+            rope_head_dim = 2
+            head_dim = 4
+            eps = 1e-6
+
+            def __init__(self, byte_sliced: bool) -> None:
+                self._byte_sliced = byte_sliced
+                self._kv_cache = None
+                self._block_tables_by_type = {}
+                self._cp_ctx = None
+                self.freqs_cis = torch.zeros((32, 2), dtype=torch.float32)
+                self.wkv = object()
+                self.kv_norm = object()
+                self.raw_pool = torch.zeros((64,), dtype=torch.uint8)
+                self.compaction = object()
+
+            def _ensure_freqs_cis_bound(self) -> None:
+                pass
+
+            def _swa_entries_per_block(self) -> int:
+                return 16
+
+            def _swa_cp_byte_sliced(self) -> bool:
+                return self._byte_sliced
+
+            def _pool_view_3d_fp8(self, _region: int) -> torch.Tensor:
+                return torch.zeros((4, 16, 1), dtype=torch.uint8)
+
+            def _pool_raw_u8(self, _region: int) -> torch.Tensor:
+                return self.raw_pool
+
+            def _build_swa_cp_byte_compaction(self, *_args, **_kwargs):
+                return self.compaction
+
+            def _lin(self, _weight: object, x: torch.Tensor) -> torch.Tensor:
+                return x
+
+        local_kv = torch.arange(8, dtype=torch.bfloat16).reshape(2, 4)
+        gathered_kv = torch.cat((local_kv, local_kv + 10), dim=0)
+        gathered_req_ids = torch.tensor([0, 0, 0, 0], dtype=torch.int32)
+        gathered_positions = torch.tensor([10, 12, 11, 13], dtype=torch.int32)
+        expected_slots = torch.tensor([26, 28, 27, 29], dtype=torch.long)
+
+        for byte_sliced in (False, True):
+            with self.subTest(byte_sliced=byte_sliced):
+                model = _dspark_harness(gamma=1)
+                attention = FakeAttention(byte_sliced)
+                model.v4 = SimpleNamespace(layers=[SimpleNamespace(attn=attention)])
+                model.kv_cache = object()
+                model._active_dspark_commit_cp_ctx = SimpleNamespace(
+                    cp_rank=1, cp_size=2
+                )
+
+                with (
+                    patch.object(
+                        dspark_model_module,
+                        "fused_rmsnorm_rope",
+                        return_value=local_kv,
+                    ),
+                    patch(
+                        "rtp_llm.models_py.distributed.collective_torch.all_gather",
+                        return_value=gathered_kv,
+                    ) as all_gather,
+                    patch.object(
+                        dspark_model_module,
+                        "compute_swa_slot_mapping_from_positions",
+                        return_value=expected_slots,
+                    ) as slot_mapper,
+                    patch.object(
+                        dspark_model_module, "decode_write_swa_fp8"
+                    ) as regular_writer,
+                    patch(
+                        "rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton."
+                        "quantize_and_insert_k_cache_cp_byte_sliced"
+                    ) as sliced_writer,
+                ):
+                    model._commit_layer_features(
+                        layer_idx=0,
+                        main_x=torch.zeros((2, 4), dtype=torch.bfloat16),
+                        context_req_ids=torch.tensor([0, 0], dtype=torch.int32),
+                        context_positions=torch.tensor([10, 12], dtype=torch.int32),
+                        committed_ends=torch.tensor([14], dtype=torch.int32),
+                        block_table=torch.tensor([[1]], dtype=torch.int32),
+                        tokens_per_block=16,
+                        batch_size=1,
+                        gathered_req_ids=gathered_req_ids,
+                        gathered_positions=gathered_positions,
+                    )
+
+                all_gather.assert_called_once()
+                self.assertTrue(
+                    torch.equal(
+                        slot_mapper.call_args.kwargs["positions"],
+                        gathered_positions,
+                    )
+                )
+                if byte_sliced:
+                    regular_writer.assert_not_called()
+                    sliced_writer.assert_called_once()
+                    kwargs = sliced_writer.call_args.kwargs
+                    self.assertEqual(kwargs["cp_rank"], 1)
+                    self.assertEqual(kwargs["cp_size"], 2)
+                    self.assertIs(kwargs["compaction"], attention.compaction)
+                    self.assertTrue(
+                        torch.equal(sliced_writer.call_args.args[2], expected_slots)
+                    )
+                else:
+                    sliced_writer.assert_not_called()
+                    regular_writer.assert_called_once()
+                    self.assertTrue(
+                        torch.equal(regular_writer.call_args.kwargs["kv"], gathered_kv)
+                    )
 
 
 if __name__ == "__main__":

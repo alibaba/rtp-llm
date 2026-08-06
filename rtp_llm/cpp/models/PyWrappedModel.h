@@ -165,7 +165,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
+    // DSpARK proposals are prefill-shaped and intentionally run eagerly. Do
+    // not construct an unused decode graph: its synthetic input_hiddens would
+    // also misclassify the capture warmup as a commit.
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && (!is_dspark_draft || is_prefill_cuda_graph_mode)),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
@@ -305,18 +308,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.tokens_per_block             = params.tokens_per_block;
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
-        graph_params.hc_mult                      = params.hc_mult;
-        graph_params.model_data_type              = dtype;
-        graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
-        graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
-        graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
-        graph_params.kv_cache_group_num           = params.kv_cache_group_num;
-
-        // The graphed DSpARK call is the fixed-width propose block, which
-        // carries no feature input — commit calls (feature rows in
-        // input_hiddens) stay eager, so no aux-specific graph geometry is
-        // needed.
-        graph_params.is_dspark_draft = params.sp_config.type == SP_TYPE_DSPARK && params.model_id != 0;
+        graph_params.input_hidden_size            = params.hidden_size * params.hc_mult;
+        if (is_dspark_draft_) {
+            RTP_LLM_CHECK_WITH_INFO(is_prefill_cuda_graph_mode_,
+                                    "DSpARK CUDA graph is supported only for commit prefill");
+            auto width = py_instance.attr("cuda_graph_input_hidden_size")().cast<int64_t>();
+            RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
+            graph_params.input_hidden_size = static_cast<size_t>(width);
+        }
+        graph_params.model_data_type            = dtype;
+        graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
+        graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
+        graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.kv_cache_group_num         = params.kv_cache_group_num;
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
@@ -340,8 +344,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
-        } else if (is_dspark_draft) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
                    && (!params.model_id || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill

@@ -107,7 +107,8 @@ protected:
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
-    GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
+    GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
+    GptModelOutputs runDraftCommitForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                              const torch::Tensor&                draft_tokens,
@@ -146,10 +147,6 @@ protected:
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
     // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
     // carrier. The source returns the full buffer; consumers slice as needed.
-    // Fill the DSpARK propose-call input after the commit forward. Ranks
-    // without the anchors (non-root, fake streams) build placeholder shapes
-    // for the subsequent broadcast/sync to fill.
-    torch::Tensor dsparkPointMassDraftProbs(const torch::Tensor& draft_tokens) const;
 
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                               ModelBase&      source,

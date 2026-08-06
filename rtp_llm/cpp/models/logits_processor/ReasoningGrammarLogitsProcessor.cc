@@ -264,15 +264,7 @@ void ReasoningGrammarLogitsProcessor::updateStatus(const torch::Tensor& new_toke
     const auto* token_ptr = tokens_cpu.data_ptr<int32_t>();
 
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!matcher_) {
-        return;
-    }
-
-    // The matcher finishes on the final JSON token, but the stream commits its
-    // stop token one iteration later.  Keep counting those tail tokens so
-    // acceptedTokenLen() stays in step with the stream's committed length.
-    if (matcher_->finished()) {
-        think_info_.current_output_length += num_new_tokens;
+    if (!matcher_ || matcher_->finished()) {
         return;
     }
 

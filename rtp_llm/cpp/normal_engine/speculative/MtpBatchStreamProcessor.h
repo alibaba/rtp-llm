@@ -72,9 +72,7 @@ public:
     // last_hidden_states from the shared MTP hidden buffer) and a
     // fixed-width propose call ([anchor, noise x (gamma - 1)] against the
     // committed feature KV).
-    void updatePrefillPostDSparkCommitInput(GptModelInputs&      model_input,
-                                            const SamplerOutput& sampler_output,
-                                            TensorHolder&        host_holder);
+    void validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const;
 
     void buildDSparkProposeInput(GptModelInputs&      model_input,
                                  const torch::Tensor& anchors,
@@ -93,12 +91,9 @@ public:
                                        const torch::Tensor& proposals,
                                        TensorHolder&        host_holder);
 
-    void updateDecodePostDSparkCommitInput(GptModelInputs&                              model_input,
-                                           const torch::Tensor&                         target_features,
-                                           const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                           size_t                                       batch_size,
-                                           torch::Tensor&                               hidden_states_d_t,
-                                           TensorHolder&                                host_holder);
+    void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
+                                           const torch::Tensor& target_features,
+                                           size_t               batch_size);
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,

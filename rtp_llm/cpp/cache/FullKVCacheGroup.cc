@@ -18,13 +18,9 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(
-    BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step, int* need_blocks) {
+bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     (void)enable_reuse_cache;
     int need_blocks_num = needBlocksNum(seq_len, static_cast<int>(block_ids.blocksNum()), reserve_step);
-    if (need_blocks != nullptr) {
-        *need_blocks = need_blocks_num;
-    }
     if (need_blocks_num == 0) {
         return true;
     }

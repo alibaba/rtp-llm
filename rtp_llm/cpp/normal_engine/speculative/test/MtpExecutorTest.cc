@@ -552,18 +552,6 @@ public:
     }
 };
 
-TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
-    auto identity_map = torch::arange(4, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
-    spec::FastTopKSampler sampler(identity_map);
-    auto                  logits =
-        torch::tensor({{0.0f, 1.0f, 4.0f, 2.0f}}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-
-    auto output = sampler.forward(logits);
-
-    EXPECT_EQ(output.token_ids.item<int64_t>(), 2);
-    checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
-}
-
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
@@ -988,17 +976,16 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
         createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
     auto sp_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
     sp_buffer->propose_step = gamma;
-    sp_buffer->tokens       = torch::empty({1, gamma + 1}, torch::kInt32);
+    sp_buffer->tokens       = torch::empty({1, 1}, torch::kInt32);
     stream->setSPOutputBuffer(sp_buffer);
 
-    auto proposal_cpu = torch::tensor({3, 2, 1}, torch::kInt32);
-    auto proposal_gpu = proposal_cpu.to(torch::kCUDA);
-    auto draft_probs  = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.4f, 0.3f, 0.2f, 0.1f, 0.0f, 0.1f, 0.8f, 0.1f})
-                           .reshape({1, gamma, vocab_size})
-                           .to(torch::kCUDA);
-    StreamSpecUpdateInfo spec_update_info{
-        torch::tensor({{2}}, torch::kInt32), 1, -1, torch::Tensor(), draft_probs, proposal_gpu, proposal_cpu};
+    // Simulate the commit-only prefill handoff: append the first target token
+    // but leave proposal/probability/hidden state empty. The first decode
+    // round must produce its proposal at the round head.
+    StreamSpecUpdateInfo spec_update_info{torch::tensor({{2}}, torch::kInt32), 1, -1, {}, {}};
     stream->specUpdate(spec_update_info);
+    EXPECT_TRUE(stream->getProposeToken().empty());
+    EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
     stream->logits_processor_list_.push_back(processor);
@@ -1048,14 +1035,14 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
 
     // Commit call: dense verify rows at the old prefix (accept-independent).
     GptModelInputs commit_input;
-    commit_input.combo_tokens       = torch::tensor({1, 0, 0, 0}, torch::kInt32);
+    commit_input.combo_tokens       = target_input.combo_tokens;
     commit_input.input_lengths      = torch::tensor({gamma + 1}, torch::kInt32);
     commit_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
     commit_input.lm_output_indexes  = torch::tensor({0, 1, 2, 3}, torch::kInt32);
     commit_input.last_hidden_states = target_aux_features;
 
     GptModelOutputs commit_output;
-    commit_output.hidden_states = torch::zeros({0, 2}, torch::kFloat32).to(torch::kCUDA);
+    commit_output.hidden_states = torch::zeros({gamma + 1, 2}, torch::kFloat32).to(torch::kCUDA);
 
     GptModelOutputs draft_output;
     draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);
@@ -1334,7 +1321,7 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
 }
 
-TEST_F(MtpExecutorTest, testDSparkRuntimeGammaThreeFakeDecodeAndFullProposalBufferShapes) {
+TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 16;
 
@@ -1350,22 +1337,17 @@ TEST_F(MtpExecutorTest, testDSparkRuntimeGammaThreeFakeDecodeAndFullProposalBuff
         MtpExecutor::createMinFakeDecodeStream(gamma, model_config, runtime_config, resource_context, vocab_size, true);
     auto sp_buffer = stream->getSPOutputBuffer();
     ASSERT_NE(sp_buffer, nullptr);
-    EXPECT_EQ((std::vector<int64_t>{1, gamma + 1}), sp_buffer->tokens.sizes().vec());
-    EXPECT_EQ((std::vector<int64_t>{1, gamma, vocab_size}), sp_buffer->all_probs.sizes().vec());
-    EXPECT_EQ((std::vector<int64_t>{1, gamma}), stream->getProposeTokensGpu().sizes().vec());
+    EXPECT_EQ((std::vector<int64_t>{1, 1}), sp_buffer->tokens.sizes().vec());
+    EXPECT_FALSE(sp_buffer->all_probs.defined());
+    EXPECT_FALSE(sp_buffer->hidden_states.defined());
+    EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
-    auto                 proposal = torch::tensor({1, 2, 3}, torch::kInt32);
-    StreamSpecUpdateInfo update_info{torch::tensor({7}, torch::kInt32).reshape({1, 1}),
-                                     1,
-                                     -1,
-                                     torch::Tensor(),
-                                     torch::Tensor(),
-                                     torch::Tensor(),
-                                     proposal};
+    StreamSpecUpdateInfo update_info{
+        torch::tensor({7}, torch::kInt32).reshape({1, 1}), 1, -1, torch::Tensor(), torch::Tensor()};
     stream->specUpdate(update_info);
 
-    EXPECT_EQ((std::vector<int32_t>{7, 1, 2, 3}), toVec<int32_t>(sp_buffer->tokens));
-    EXPECT_EQ((std::vector<int>{7, 1, 2, 3}), stream->getProposeToken());
+    EXPECT_EQ((std::vector<int32_t>{7}), toVec<int32_t>(sp_buffer->tokens));
+    EXPECT_TRUE(stream->getProposeToken().empty());
 }
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {

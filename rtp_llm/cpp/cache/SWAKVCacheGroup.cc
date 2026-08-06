@@ -146,8 +146,7 @@ MatchResult SWAKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
 }
 
-bool SWAKVCacheGroup::malloc(
-    BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step, int* need_blocks) {
+bool SWAKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
     const int  step                    = std::max(1, linear_step_);
     const bool effective_reuse_enabled = effectiveReuseCacheForAllocation(enable_reuse_cache);
     const int  active_tail_blocks      = activeTailBlocks();
@@ -156,9 +155,6 @@ bool SWAKVCacheGroup::malloc(
     const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
     if (new_blocks_len == 0) {
-        if (need_blocks != nullptr) {
-            *need_blocks = 0;
-        }
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
         return true;
     }
@@ -168,9 +164,6 @@ bool SWAKVCacheGroup::malloc(
         if (shouldAllocateBlock(i, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks)) {
             need_alloc_blocks++;
         }
-    }
-    if (need_blocks != nullptr) {
-        *need_blocks = need_alloc_blocks;
     }
 
     if (need_alloc_blocks > 0) {

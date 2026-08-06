@@ -82,6 +82,9 @@ public:
     torch::Tensor all_probs;
     torch::Tensor beam_index;
     torch::Tensor success;
+    // The draft distribution is a one-hot at token_ids and need not be
+    // materialized as [batch, speculative_steps, vocab].
+    bool token_ids_are_point_mass = false;
 };
 
 struct MergedOutput {

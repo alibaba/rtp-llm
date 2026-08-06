@@ -468,9 +468,10 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
             spec_update_infos[stream_idx].draft_token_gpu = propose_token_ids.narrow(0, batch_idx_out, next_batch_size);
         }
 
-        // Fill legacy int only when the tensor is CPU or PD-disagg needs the
-        // gRPC-visible vector. PDFUSION consumes draft_token_gpu and keeps this
-        // at -1, so ensure_cpu_mirror() stays lazy.
+        // Fill the legacy int only when the tensor is CPU or PD-disagg needs
+        // the gRPC-visible one-step MTP proposal. PDFUSION consumes
+        // draft_token_gpu and keeps this at -1, so ensure_cpu_mirror() stays
+        // lazy. DSpARK never reaches this path for commit-only dispatches.
         const bool need_cpu_int = !on_gpu || stream->queryPdSep();
         if (need_cpu_int) {
             const auto& cpu_ids = ensure_cpu_mirror();
@@ -479,13 +480,6 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
                             static_cast<int>(cpu_ids.data_ptr<int64_t>()[batch_idx_out * token_stride + token_stride - 1]) :
                             cpu_ids.data_ptr<int32_t>()[batch_idx_out * token_stride + token_stride - 1];
             spec_update_infos[stream_idx].draft_token = propose_token;
-            if (is_dspark_ && stream->queryPdSep()) {
-                // The decode node cannot reconstruct a block proposal from an
-                // MTP hidden chain; put the complete fixed-gamma row on the PD
-                // wire. This D2H happens in prefill/async bookkeeping only.
-                spec_update_infos[stream_idx].draft_tokens_cpu =
-                    cpu_ids.narrow(0, batch_idx_out, next_batch_size).reshape({-1}).to(torch::kInt32);
-            }
         } else {
             spec_update_infos[stream_idx].draft_token = -1;
         }
@@ -742,9 +736,7 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) 
     return dspark_lm_indexes_cache_.narrow(0, 0, batch_size);
 }
 
-void MtpBatchStreamProcessor::updatePrefillPostDSparkCommitInput(GptModelInputs&      model_input,
-                                                                 const SamplerOutput& sampler_output,
-                                                                 TensorHolder&        host_holder) {
+void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const {
     // The commit call keeps the target's own incremental-prefill geometry:
     // combo = prompt suffix tokens, input_lengths = suffix rows,
     // prefix_lengths = reused prefix, feature rows already loaded into
@@ -755,8 +747,6 @@ void MtpBatchStreamProcessor::updatePrefillPostDSparkCommitInput(GptModelInputs&
     RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark draft width must be positive");
     RTP_LLM_CHECK_WITH_INFO(model_input.last_hidden_states.defined(),
                             "dspark prefill: target MTP hidden buffer did not provide aux features");
-    auto suffix_lengths = toCudaInt32(model_input.input_lengths, host_holder);
-    auto reuse_lengths  = toCudaInt32(model_input.prefix_lengths, host_holder);
 }
 
 void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model_input,
@@ -855,44 +845,22 @@ void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& 
     setVerifyPairInputs(model_input, std::move(verify), batch_size, propose_step_ + 1, host_holder);
 }
 
-void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(
-    GptModelInputs&                              model_input,
-    const torch::Tensor&                         target_features,
-    const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-    size_t                                       batch_size,
-    torch::Tensor&                               hidden_states_d_t,
-    TensorHolder&                                host_holder) {
+void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
+                                                                const torch::Tensor& target_features,
+                                                                size_t               batch_size) {
     const int64_t verify_width = propose_step_ + 1;
     RTP_LLM_CHECK_WITH_INFO(target_features.defined(),
                             "dspark decode tail: target MTP hidden buffer did not provide aux features");
-    RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_len.defined()
-                                && speculative_sampler_output.accept_tokens.defined(),
-                            "dspark decode tail: rejection output is incomplete");
-
-    auto accept_len    = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
-    auto accept_tokens = toCudaInt32(speculative_sampler_output.accept_tokens, host_holder)
-                             .reshape({static_cast<int64_t>(batch_size), verify_width});
-    auto anchor_indexes = (accept_len.to(torch::kInt64) - 1).reshape({static_cast<int64_t>(batch_size), 1});
-
     RTP_LLM_CHECK_WITH_INFO(target_features.size(0) == static_cast<int64_t>(batch_size) * verify_width,
                             "dspark decode tail: aux rows %ld != batch*verify_width %ld",
                             target_features.size(0),
                             static_cast<int64_t>(batch_size) * verify_width);
 
-    // Dense commit, exactly like the MTP decode tail: all gamma+1 verify rows
-    // are committed at the old prefix, and the rows past each accepted length
-    // are overwritten in place by the next round. The commit call therefore
-    // carries no acceptance information at all.
-    model_input.combo_tokens =
-        toCudaInt32(speculative_sampler_output.accept_tokens, host_holder).reshape({-1}).contiguous();
+    // Dense commit reuses the target verify geometry verbatim. In particular,
+    // combo_tokens remains [anchor, p1, ..., p_gamma], independent of the
+    // rejection result; later rounds overwrite rows beyond the accepted
+    // prefix. Only the rank-local target feature tensor is rebound here.
     model_input.last_hidden_states = target_features;
-    hidden_states_d_t              = model_input.last_hidden_states;
-
-    // prefix/input_lengths/sequence_lengths/lm_output_indexes stay exactly as
-    // the verify step built them (setVerifyPairInputs): the dense commit call
-    // IS the verify geometry.
-    auto old_prefix            = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
-    model_input.prefix_lengths = old_prefix;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
@@ -1036,8 +1004,11 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         }
 
         // speculative decoding info
-        torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        torch::Tensor propose_all_probs;
+        if (draft_sampler_output.all_probs.defined()) {
+            propose_all_probs =
+                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        }
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_dspark_) {
@@ -1079,8 +1050,11 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto next_batch_size = stream->nextBatchSize();
 
         // speculative decoding info
-        torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        torch::Tensor propose_all_probs;
+        if (draft_sampler_output.all_probs.defined()) {
+            propose_all_probs =
+                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        }
 
         // This scalar read runs on the bookkeeping worker after accept_len is
         // ready, so it does not sync the main thread. Move to main thread only

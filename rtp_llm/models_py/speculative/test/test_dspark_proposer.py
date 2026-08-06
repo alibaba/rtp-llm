@@ -219,7 +219,7 @@ class CommitStepTest(unittest.TestCase):
             ),
         )
 
-        proposer.run_commit_step(inputs, torch.device("cpu"))
+        outputs = proposer.run_commit_step(inputs, torch.device("cpu"))
 
         torch.testing.assert_close(proposer.seen_features, hidden)
         self.assertEqual(proposer.seen_features.data_ptr(), hidden.data_ptr())
@@ -228,6 +228,8 @@ class CommitStepTest(unittest.TestCase):
         self.assertEqual(req.tolist(), [0, 0, 0, 1])
         self.assertEqual(positions.tolist(), [10, 11, 12, 20])
         self.assertEqual(committed_ends.tolist(), [13, 21])
+        torch.testing.assert_close(outputs.hidden_states, hidden)
+        self.assertEqual(outputs.hidden_states.data_ptr(), hidden.data_ptr())
 
 
 if __name__ == "__main__":
