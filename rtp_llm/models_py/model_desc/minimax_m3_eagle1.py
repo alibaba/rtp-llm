@@ -12,7 +12,6 @@ from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
-
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
 
 
@@ -80,11 +79,6 @@ class MiniMaxM3Eagle1DecoderLayer(nn.Module):
 
 
 class MiniMaxM3Eagle1Model(GptModelBase):
-    # Draft prefill CUDA graph keeps max_bs*num_tokens_per_bs rows for fc/GEMM/MoE
-    # while attention consumes per-request qlen via cu_seqlens. Padded inactive
-    # rows reuse the same captured graph instead of requiring an exact token bucket.
-    cuda_graph_prefill_requires_full_token_capacity = True
-
     def __init__(
         self,
         model_config: ModelConfig,

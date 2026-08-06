@@ -47,6 +47,15 @@ from rtp_llm.utils.model_weight import W
 
 
 class EagleConfigTest(unittest.TestCase):
+    def test_draft_prefill_cuda_graph_uses_compact_token_capacity(self):
+        self.assertFalse(
+            getattr(
+                MiniMaxM3Eagle1Model,
+                "cuda_graph_prefill_requires_full_token_capacity",
+                False,
+            )
+        )
+
     def test_loads_yarn_rope_scaling(self):
         with TemporaryDirectory() as tmpdir:
             config = {

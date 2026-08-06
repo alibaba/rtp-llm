@@ -964,10 +964,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // sp_prefill_cuda_graph_mode: "auto" keeps the MegaMoE policy below,
             // "on" forces the graph, "off" forces eager. The two env vars still
             // win over it so existing diagnostic flows keep working.
-            const std::string& sp_prefill_mode = model_params.hw_kernel_config.sp_prefill_cuda_graph_mode;
-            const bool         mode_on         = sp_prefill_mode == "on";
-            const bool         mode_off        = sp_prefill_mode == "off";
-            const bool force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv || mode_on;
+            const std::string& sp_prefill_mode             = model_params.hw_kernel_config.sp_prefill_cuda_graph_mode;
+            const bool         mode_on                     = sp_prefill_mode == "on";
+            const bool         mode_off                    = sp_prefill_mode == "off";
+            const bool         force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv || mode_on;
             // Keep speculative prefill replay disabled for a distributed MegaMoE
             // engine unless it is explicitly forced for diagnostics. Even when
             // the draft itself is dense, replay has shown rank-local latency
@@ -979,7 +979,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                 params.parallelism_config.ep_size > 1 || mtp_params->parallelism_config.ep_size > 1;
             const bool disable_sp_prefill_for_mega_moe =
                 uses_mega_moe && uses_ep_collective && !force_sp_prefill_cuda_graph;
-            const bool disable_sp_prefill_by_mode    = mode_off && !kForceSpPrefillCudaGraphByEnv;
+            const bool disable_sp_prefill_by_mode = mode_off && !kForceSpPrefillCudaGraphByEnv;
             const bool disable_sp_prefill_cuda_graph =
                 disable_sp_prefill_by_env || disable_sp_prefill_by_mode || disable_sp_prefill_for_mega_moe;
             RTP_LLM_LOG_INFO("[speculative decoding] enable_cuda_graph=%d disable_sp_prefill_cuda_graph=%d "
@@ -1482,7 +1482,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
-    StreamGroups    stream_groups(streams);
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
@@ -1510,6 +1509,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     bool                          spec_logits_processor_present           = false;
 
     waitPreviousBookkeepingAndKvSwaps(streams);
+    // StreamGroups snapshots host-side stream state (batch sizes, execute-token
+    // counts, sequence lengths, and context/decode classification) in its
+    // constructor. Building it before the wait races specUpdate() in the
+    // previous bookkeeping worker and permanently retains a mixed old/new
+    // snapshot for this decode step.
+    StreamGroups stream_groups(streams);
     prepareGrpcMtpDeviceState(streams, buffer_holder_);
 
     {
