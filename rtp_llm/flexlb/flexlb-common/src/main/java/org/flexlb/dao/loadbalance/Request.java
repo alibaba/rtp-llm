@@ -40,4 +40,7 @@ public class Request {
 
     @JsonProperty("max_new_tokens")
     private int maxNewTokens = 1;
+
+    @JsonProperty("priority")
+    private int priority;
 }

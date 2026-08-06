@@ -1,5 +1,6 @@
 package org.flexlb.mock.grpc;
 
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
@@ -8,7 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -21,7 +22,9 @@ class PriorityPassThroughAssertionTest extends FlexLBMockTestBase {
 
     @Test
     void mockCapturesGenerateConfigForEngineSideAssertions() throws Exception {
-        Response response = submitRequest(9101).get(5, TimeUnit.SECONDS);
+        BalanceContext ctx = createBalanceContext(9101);
+        ctx.getRequest().setPriority(40);
+        Response response = scheduler.submit(ctx).get(5, TimeUnit.SECONDS);
         assertTrue(response.isSuccess());
 
         // The mock records the complete EnqueueBatch payload — dig out the
@@ -32,14 +35,17 @@ class PriorityPassThroughAssertionTest extends FlexLBMockTestBase {
         assertEquals(9101, input.getRequestId());
         assertEquals(8, input.getGenerateConfig().getMaxNewTokens());
         assertEquals(77, input.getGenerateConfig().getGroupTimeout().getValue());
+        // Stage 2b: normalized priority injected by PrefillEndpoint.buildInput
+        // survives the wire to the engine side.
+        assertEquals(40, input.getGenerateConfig().getPriority());
     }
 
     @Test
-    void generateConfigHasNoPriorityFieldBeforeStage2ProtoChange() {
-        // Parity guard: the priority field is a Stage 2 protocol change. When
-        // it lands, this assertion flips and the capture above becomes the
-        // vehicle for asserting engine-side priority pass-through.
-        assertNull(EngineRpcService.GenerateConfigPB.getDescriptor().findFieldByName("priority"),
-                "GenerateConfigPB.priority not expected before the Stage 2 proto change");
+    void generateConfigHasPriorityFieldAfterStage2bProtoChange() {
+        // Flipped Stage 2 parity guard: the Stage 2b proto change added
+        // GenerateConfigPB.priority, so the field must now be present and the
+        // capture above asserts engine-side priority pass-through.
+        assertNotNull(EngineRpcService.GenerateConfigPB.getDescriptor().findFieldByName("priority"),
+                "GenerateConfigPB.priority expected after the Stage 2b proto change");
     }
 }

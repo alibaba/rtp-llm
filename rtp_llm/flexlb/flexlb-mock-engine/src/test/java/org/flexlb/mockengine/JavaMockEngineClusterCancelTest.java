@@ -156,11 +156,15 @@ class JavaMockEngineClusterCancelTest {
         assertEquals(12, captured.getRequestId());
         assertEquals(1, captured.getGenerateConfig().getMaxNewTokens());
 
-        // Priority pass-through parity guard: the engine GenerateConfigPB has
-        // no priority field yet. When the Stage 2 protocol change lands, this
-        // assertion flips and the captured value becomes assertable here.
-        assertNull(EngineRpcService.GenerateConfigPB.getDescriptor().findFieldByName("priority"),
-                "GenerateConfigPB.priority not expected before the Stage 2 proto change");
+        // Flipped Stage 2 parity guard: the Stage 2b proto change added
+        // GenerateConfigPB.priority, so the field is present and the captured
+        // value is assertable through the capture path.
+        assertNotNull(EngineRpcService.GenerateConfigPB.getDescriptor().findFieldByName("priority"),
+                "GenerateConfigPB.priority expected after the Stage 2b proto change");
+        EngineRpcService.GenerateInputPB.Builder withPriority = input(13, 10).toBuilder();
+        withPriority.getGenerateConfigBuilder().setPriority(40);
+        enqueue(prefill, batch(53, slot(0, withPriority.build())));
+        assertEquals(40, prefill.capturedInput(13).getGenerateConfig().getPriority());
     }
 
     // ==================== fixtures ====================

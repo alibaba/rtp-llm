@@ -28,6 +28,28 @@ bool useStreamAsyncReserveTokens() {
     return enabled;
 }
 
+static kmonitor::MetricsTags priority_tag_30("priority", "30");
+static kmonitor::MetricsTags priority_tag_40("priority", "40");
+static kmonitor::MetricsTags priority_tag_50("priority", "50");
+static kmonitor::MetricsTags priority_tag_60("priority", "60");
+static kmonitor::MetricsTags priority_tag_70("priority", "70");
+const kmonitor::MetricsTags* getPriorityTag(int priority) {
+    switch (priority) {
+        case 30:
+            return &priority_tag_30;
+        case 40:
+            return &priority_tag_40;
+        case 50:
+            return &priority_tag_50;
+        case 60:
+            return &priority_tag_60;
+        case 70:
+            return &priority_tag_70;
+        default:
+            return nullptr;  // 0 or invalid → no tag
+    }
+}
+
 }  // namespace
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
@@ -1219,8 +1241,9 @@ void GenerateStream::reportStreamMetrics() {
         }
         // pass tag will cause default tags deep copy
         static kmonitor::MetricsTags timeout_tag("timeout", "true");
-        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(timeout ? &timeout_tag : nullptr,
-                                                                                     &collector);
+        int                          priority = generate_input_->generate_config->priority;
+        const kmonitor::MetricsTags* tag      = timeout ? &timeout_tag : getPriorityTag(priority);
+        metrics_reporter_->report<RtpLLMStreamMetrics, RtpLLMStreamMetricsCollector>(tag, &collector);
     }
 }
 

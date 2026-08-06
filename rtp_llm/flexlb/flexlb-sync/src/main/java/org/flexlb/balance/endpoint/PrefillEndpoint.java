@@ -577,6 +577,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
         generateConfig.clearRoleAddrs();
         addRoleAddr(generateConfig, item.prefill());
         addRoleAddr(generateConfig, item.decode());
+        // Auto-TPM: pass normalized priority to engine for metrics tagging only
+        int priority = item.ctx().getRequest().getPriority();
+        if (priority > 0) {
+            generateConfig.setPriority(priority);
+        }
         return input.build();
     }
 

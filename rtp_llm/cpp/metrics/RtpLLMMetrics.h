@@ -500,8 +500,10 @@ private:
 template<typename MetricsType, typename CollectType>
 class MetricsLoopReporter {
 public:
-    explicit MetricsLoopReporter(const kmonitor::MetricsReporterPtr metrics_reporter, int interval_ms = 1000):
-        collector_(CollectType()), interval_ms_(interval_ms), metrics_reporter_(metrics_reporter) {
+    explicit MetricsLoopReporter(const kmonitor::MetricsReporterPtr metrics_reporter,
+                                 int                                interval_ms = 1000,
+                                 const kmonitor::MetricsTags*       tags        = nullptr):
+        collector_(CollectType()), interval_ms_(interval_ms), metrics_reporter_(metrics_reporter), tags_(tags) {
         if (metrics_reporter_) {
             metrics_reporter_thread_ = std::thread(&MetricsLoopReporter<MetricsType, CollectType>::reportLoop, this);
         }
@@ -578,13 +580,13 @@ private:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (collector_.hasMetrics()) {
-                    metrics_reporter_->report<MetricsType, CollectType>(nullptr, &collector_);
+                    metrics_reporter_->report<MetricsType, CollectType>(tags_, &collector_);
                     collector_ = CollectType();
                 } else if (active_count_ == 0) {
                     // Idle service should emit 0 TPS. An in-flight long step with no completed sample stays silent
                     // until its step-interval-normalized TPS is known.
                     collector_.markIdleWindow();
-                    metrics_reporter_->report<MetricsType, CollectType>(nullptr, &collector_);
+                    metrics_reporter_->report<MetricsType, CollectType>(tags_, &collector_);
                     collector_ = CollectType();
                 }
             }
@@ -600,16 +602,20 @@ private:
     int                          interval_ms_  = 1000;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+    const kmonitor::MetricsTags* tags_             = nullptr;
 };
 
 template<typename MetricsType, typename CollectType>
 class WallClockMetricsLoopReporter {
 public:
-    explicit WallClockMetricsLoopReporter(const kmonitor::MetricsReporterPtr metrics_reporter, int interval_ms = 1000):
+    explicit WallClockMetricsLoopReporter(const kmonitor::MetricsReporterPtr metrics_reporter,
+                                          int                                interval_ms = 1000,
+                                          const kmonitor::MetricsTags*       tags        = nullptr):
         collector_(CollectType()),
         interval_ms_(interval_ms),
         last_report_time_(std::chrono::steady_clock::now()),
-        metrics_reporter_(metrics_reporter) {
+        metrics_reporter_(metrics_reporter),
+        tags_(tags) {
         if (metrics_reporter_) {
             metrics_reporter_thread_ =
                 std::thread(&WallClockMetricsLoopReporter<MetricsType, CollectType>::reportLoop, this);
@@ -708,7 +714,7 @@ private:
                 }
             }
             if (should_report) {
-                metrics_reporter_->report<MetricsType, CollectType>(nullptr, &report_collector);
+                metrics_reporter_->report<MetricsType, CollectType>(tags_, &report_collector);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
         }
@@ -723,6 +729,7 @@ private:
     std::chrono::steady_clock::time_point last_report_time_;
     std::thread                           metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
+    const kmonitor::MetricsTags*          tags_             = nullptr;
 };
 
 class RtpLLMExecutorMetricsCollector final {

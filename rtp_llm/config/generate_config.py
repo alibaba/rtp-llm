@@ -180,6 +180,8 @@ class GenerateConfig(BaseModel):
 
     unique_key: str = ""
 
+    priority: int = 0  # 0 = unset; valid: {30,40,50,60,70}; metrics tag only
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0

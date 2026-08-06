@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
@@ -104,6 +105,12 @@ private:
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    // Per-priority TPS bucket reporters, keyed by priority {30,40,50,60,70}.
+    // Metrics tag only; priority MUST NOT affect scheduling.
+    std::unordered_map<int, MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>>
+        priority_tps_reporters_;
+    std::unordered_map<int, WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>>
+         priority_wall_tps_reporters_;
     bool enable_ffn_disaggregate_ = false;
     bool enable_detail_log_       = false;
 

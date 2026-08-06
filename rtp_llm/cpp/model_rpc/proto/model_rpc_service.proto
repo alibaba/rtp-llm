@@ -110,6 +110,9 @@ message GenerateConfigPB {
     google.protobuf.StringValue ebnf = 61;
     google.protobuf.StringValue structural_tag = 62;
     google.protobuf.StringValue response_format = 63;
+    // Priority tag for metrics only. 0 = unset (no tag emitted).
+    // Valid: {30,40,50,60,70}; engine MUST NOT use for scheduling.
+    int32 priority = 64;
 }
 
 message MMPreprocessConfigPB {

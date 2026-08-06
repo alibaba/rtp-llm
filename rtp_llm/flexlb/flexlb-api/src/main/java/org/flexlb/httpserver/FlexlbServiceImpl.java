@@ -224,8 +224,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         // Auto-TPM: normalize priority from proto field and/or gRPC header
-        ctx.setPriority(priorityNormalizer.normalize(
-                pb.getPriority(), GrpcServerTimingInterceptor.getPriorityHeader()));
+        int priority = priorityNormalizer.normalize(
+                pb.getPriority(), GrpcServerTimingInterceptor.getPriorityHeader());
+        ctx.setPriority(priority);
+        request.setPriority(priority);
 
         return ctx;
     }

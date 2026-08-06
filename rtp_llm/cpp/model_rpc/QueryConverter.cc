@@ -98,6 +98,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->enable_remote_cache = config_proto->enable_remote_cache();
     TRANS_OPTIONAL(trace_id);
     TRANS_OPTIONAL(group_timeout);
+    generate_config->priority = config_proto->priority();
 
     return generate_config;
 }

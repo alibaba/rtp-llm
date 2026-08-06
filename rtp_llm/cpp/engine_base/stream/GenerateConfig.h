@@ -95,6 +95,7 @@ public:
     std::string        trace_id;
     std::optional<int> group_timeout;
     std::string        unique_key;
+    int                priority = 0;  // 0 = unset, valid: {30,40,50,60,70}; metrics tag only
 
     bool top1() {
         return top_k == 1;
@@ -155,7 +156,8 @@ public:
                      << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
                      << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache
-                     << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key << "}";
+                     << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key
+                     << ", priority: " << priority << "}";
         return debug_string.str();
     }
 
@@ -244,6 +246,7 @@ public:
         JSONIZE(aux_info);
         JSONIZE_OPTIONAL(group_timeout);
         JSONIZE(unique_key);
+        JSONIZE(priority);
 #undef JSONIZE
 #undef JSONIZE_OPTIONAL
     }

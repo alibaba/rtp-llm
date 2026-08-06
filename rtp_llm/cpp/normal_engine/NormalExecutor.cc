@@ -45,6 +45,32 @@ void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inpu
     holder.hold_host(inputs.cum_log_probs);
 }
 
+// Priority tag pool for per-priority TPS bucket reporters; metrics tag only,
+// priority MUST NOT affect scheduling.
+constexpr int kPriorityLevels[] = {30, 40, 50, 60, 70};
+
+const kmonitor::MetricsTags* getPriorityTag(int priority) {
+    static kmonitor::MetricsTags priority_tag_30("priority", "30");
+    static kmonitor::MetricsTags priority_tag_40("priority", "40");
+    static kmonitor::MetricsTags priority_tag_50("priority", "50");
+    static kmonitor::MetricsTags priority_tag_60("priority", "60");
+    static kmonitor::MetricsTags priority_tag_70("priority", "70");
+    switch (priority) {
+        case 30:
+            return &priority_tag_30;
+        case 40:
+            return &priority_tag_40;
+        case 50:
+            return &priority_tag_50;
+        case 60:
+            return &priority_tag_60;
+        case 70:
+            return &priority_tag_70;
+        default:
+            return nullptr;  // 0 or invalid → no tag
+    }
+}
+
 }  // namespace
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
@@ -82,6 +108,18 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
+    // Per-priority TPS bucket reporters, one pair per priority level, each bound
+    // to its static priority tag. Metrics tag only; never used for scheduling.
+    const auto priority_metrics_reporter = tp_rank_ == 0 && !warm_up ? metrics_reporter_ : nullptr;
+    for (int p : kPriorityLevels) {
+        const auto* tag = getPriorityTag(p);
+        priority_tps_reporters_.emplace(std::piecewise_construct,
+                                        std::forward_as_tuple(p),
+                                        std::forward_as_tuple(priority_metrics_reporter, 1000, tag));
+        priority_wall_tps_reporters_.emplace(std::piecewise_construct,
+                                             std::forward_as_tuple(p),
+                                             std::forward_as_tuple(priority_metrics_reporter, 1000, tag));
+    }
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =
             std::make_shared<ModelInputsLogger>(params.parallelism_config.world_rank,
@@ -433,6 +471,56 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
                                    tps_execute_time_us);
         tps_reporter_.report(&tps_collector);
         wall_tps_reporter_.report(&tps_collector);
+
+        // Per-priority TPS bucket accumulation, appended after the untouched
+        // global report above. priority == 0 (unset) streams are skipped so the
+        // default path stays bit-identical.
+        struct PriorityTokenBucket {
+            int64_t context_token_num            = 0;
+            int64_t context_token_num_with_cache = 0;
+            int64_t generate_token_num           = 0;
+            int64_t total_token_num              = 0;
+        };
+        std::unordered_map<int, PriorityTokenBucket> priority_buckets;
+        for (const auto& stream : stream_groups.contextStreams()) {
+            const int p = stream->generateConfig()->priority;
+            if (p == 0) {
+                continue;
+            }
+            auto&         bucket             = priority_buckets[p];
+            const int64_t execute_token_size = stream->currentExecuteTokenSize();
+            const int64_t reuse_length       = stream->reuseLength();
+            bucket.context_token_num += execute_token_size;
+            bucket.context_token_num_with_cache += execute_token_size;
+            if (reuse_length > 0) {
+                bucket.context_token_num_with_cache += reuse_length * stream->currentBatchSize();
+            }
+            bucket.total_token_num += execute_token_size;
+        }
+        for (const auto& stream : stream_groups.decodeStreams()) {
+            const int p = stream->generateConfig()->priority;
+            if (p == 0) {
+                continue;
+            }
+            auto& bucket = priority_buckets[p];
+            bucket.generate_token_num += stream->currentBatchSize();
+            bucket.total_token_num += stream->currentExecuteTokenSize();
+        }
+        for (const auto& [p, bucket] : priority_buckets) {
+            auto tps_it      = priority_tps_reporters_.find(p);
+            auto wall_tps_it = priority_wall_tps_reporters_.find(p);
+            if (tps_it == priority_tps_reporters_.end() || wall_tps_it == priority_wall_tps_reporters_.end()) {
+                continue;  // invalid priority value → no bucket report
+            }
+            RtpLLMTokenPSMetricsCollector bucket_collector;
+            bucket_collector.addTokenSize(bucket.context_token_num,
+                                          bucket.context_token_num_with_cache,
+                                          bucket.generate_token_num,
+                                          bucket.total_token_num,
+                                          tps_execute_time_us);
+            tps_it->second.report(&bucket_collector);
+            wall_tps_it->second.report(&bucket_collector);
+        }
     }
 }
 
