@@ -147,12 +147,6 @@ class CPFlashInferImpl(FMHAImplBase):
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
-        self.attn_inputs = attn_inputs
-
-    def support(self) -> bool:
-        """Check if this implementation supports current inputs."""
-        return self.fmha_impl.support(self.attn_inputs)
-
     @classmethod
     def support(cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs):
         return True
@@ -168,10 +162,10 @@ class CPFlashInferImpl(FMHAImplBase):
         self,
         qkv: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
-        need_rope_kv_cache: bool = True,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
-        if need_rope_kv_cache:
+        if self.need_rope_kv_cache:
             fmha_input = self.rope_kvcache_impl.forward(qkv, None, self.rope_params)
         else:
             fmha_input = qkv
