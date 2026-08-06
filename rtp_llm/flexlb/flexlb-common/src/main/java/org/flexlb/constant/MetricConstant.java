@@ -699,6 +699,18 @@ public class MetricConstant {
     public static final String AUTO_TPM_PREEMPT_RATE_PER_MIN = "preempt_rate_per_min";
 
     /**
+     * TTFT by priority — scheduler-side approximation (D10): submit arrival
+     * to engine enqueue ACK, not the true engine first-token time.
+     */
+    public static final String AUTO_TPM_TTFT_MS = "ttft_ms";
+
+    /**
+     * Deadline miss count by priority (D10): items cleared on the queue
+     * deadline paths (legacy expiry and yielded-queue-deadline rejection).
+     */
+    public static final String AUTO_TPM_DEADLINE_MISS_COUNT = "deadline_miss.count";
+
+    /**
      * Tag key for priority dimension.
      */
     public static final String TAG_PRIORITY = "priority";

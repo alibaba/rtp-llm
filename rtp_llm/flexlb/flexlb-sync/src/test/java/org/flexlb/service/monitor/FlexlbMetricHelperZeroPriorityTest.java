@@ -1,13 +1,17 @@
 package org.flexlb.service.monitor;
 
 import org.flexlb.constant.MetricConstant;
+import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -38,6 +42,8 @@ class FlexlbMetricHelperZeroPriorityTest {
         helper.reportAutoTpmQueueReject(30, 0);
         helper.reportAutoTpmRunningCancel(0, 70, "success");
         helper.reportAutoTpmRunningCancel(30, 0, "success");
+        helper.reportAutoTpmTtft(0, 12L);
+        helper.reportAutoTpmDeadlineMiss(0);
 
         verify(monitor, never()).report(anyString(), any(), anyDouble());
     }
@@ -49,7 +55,31 @@ class FlexlbMetricHelperZeroPriorityTest {
         helper.reportAutoTpmNormalPlacement(50);
         helper.reportAutoTpmQueueReject(30, 70);
         helper.reportAutoTpmRunningCancel(30, 70, "success");
+        helper.reportAutoTpmTtft(50, 12L);
+        helper.reportAutoTpmDeadlineMiss(50);
 
-        verify(monitor, times(5)).report(anyString(), any(), anyDouble());
+        verify(monitor, times(7)).report(anyString(), any(), anyDouble());
+    }
+
+    // ---- D10: ttft_ms / deadline_miss.count shape (name, tags, value) ----
+
+    @Test
+    void ttft_reportedWithPriorityAndPathTags() {
+        helper.reportAutoTpmTtft(50, 123L);
+
+        ArgumentCaptor<FlexMetricTags> tags = ArgumentCaptor.forClass(FlexMetricTags.class);
+        verify(monitor).report(eq(MetricConstant.AUTO_TPM_TTFT_MS), tags.capture(), eq(123.0));
+        assertEquals("50", tags.getValue().getTags().get(MetricConstant.TAG_PRIORITY));
+        assertEquals(MetricConstant.PATH_BATCH, tags.getValue().getTags().get(MetricConstant.TAG_PATH));
+    }
+
+    @Test
+    void deadlineMiss_reportedWithPriorityAndPathTags() {
+        helper.reportAutoTpmDeadlineMiss(70);
+
+        ArgumentCaptor<FlexMetricTags> tags = ArgumentCaptor.forClass(FlexMetricTags.class);
+        verify(monitor).report(eq(MetricConstant.AUTO_TPM_DEADLINE_MISS_COUNT), tags.capture(), eq(1.0));
+        assertEquals("70", tags.getValue().getTags().get(MetricConstant.TAG_PRIORITY));
+        assertEquals(MetricConstant.PATH_BATCH, tags.getValue().getTags().get(MetricConstant.TAG_PATH));
     }
 }

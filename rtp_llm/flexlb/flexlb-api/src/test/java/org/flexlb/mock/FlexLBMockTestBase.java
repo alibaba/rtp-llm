@@ -198,7 +198,7 @@ public abstract class FlexLBMockTestBase {
         // 11. Create real scheduler
         scheduler = new BatchScheduler(
                 configService, router, endpointRegistry, reporter, inflightStore,
-                new FlexlbMetricHelper(null, MetricConstant.PATH_BATCH));
+                createMetricHelper());
 
         // 12. Register prefill endpoint (dispatch pipeline lives in the endpoint itself)
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
@@ -274,6 +274,14 @@ public abstract class FlexLBMockTestBase {
 
     protected EngineWorkerStatus createEngineWorkerStatus() {
         return mock(EngineWorkerStatus.class);
+    }
+
+    /**
+     * Override to observe scheduler-level metric reporting (e.g. wrap a mock
+     * {@code FlexMonitor}). Default: no-op helper (null monitor).
+     */
+    protected FlexlbMetricHelper createMetricHelper() {
+        return new FlexlbMetricHelper(null, MetricConstant.PATH_BATCH);
     }
 
     protected Router createRouter() {

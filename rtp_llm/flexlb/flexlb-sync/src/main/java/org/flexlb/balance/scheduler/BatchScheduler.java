@@ -184,10 +184,24 @@ public class BatchScheduler extends AbstractScheduler {
             // TTL expiry, cancel) releases the decode reservation and repacks the
             // prefill batch. Both operations are idempotent (CAS / computeIfPresent),
             // so overlapping with the endpoint-side terminal paths is safe.
+            //
+            // D10 metrics piggyback on the same settlement hook (gated on
+            // AUTO_TPM_ENABLED for off-state parity; the helper centrally
+            // drops the 0 sentinel): success emits the scheduler-side TTFT
+            // approximation (submit arrival → engine enqueue ACK), failure
+            // emits deadline_miss.count when the item was cleared on a
+            // queue-deadline path.
+            boolean autoTpmMetricsOn = configService.loadBalanceConfig().isAutoTpmEnabled();
             future.whenComplete((response, throwable) -> {
                 if (throwable != null || response == null || !response.isSuccess()) {
                     item.rollbackOnce();
                     item.removeFromPrefillBatch();
+                    if (autoTpmMetricsOn && item.deadlineMissed()) {
+                        metricHelper.reportAutoTpmDeadlineMiss(item.priority());
+                    }
+                } else if (autoTpmMetricsOn) {
+                    metricHelper.reportAutoTpmTtft(item.priority(),
+                            System.currentTimeMillis() - ctx.getStartTime());
                 }
             });
 

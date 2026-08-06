@@ -33,6 +33,9 @@ public final class RejectionPolicy {
         if (item.future().isDone()) {
             return false;
         }
+        // D10: yielded-queue-deadline clearing is a deadline miss — mark for
+        // the scheduler's whenComplete metric hook (deadline_miss.count).
+        item.markDeadlineMiss();
         item.rollbackOnce();
         Response errorResp = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
         errorResp.setErrorMessage("auto_tpm: yielded for priority=" + incomingPriority);

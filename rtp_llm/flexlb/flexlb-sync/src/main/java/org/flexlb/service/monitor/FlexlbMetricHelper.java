@@ -58,6 +58,8 @@ public class FlexlbMetricHelper {
         monitor.register(MetricConstant.AUTO_TPM_QUEUE_REJECT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.AUTO_TPM_RUNNING_CANCEL_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.AUTO_TPM_PREEMPT_RATE_PER_MIN, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.AUTO_TPM_TTFT_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.AUTO_TPM_DEADLINE_MISS_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
     // ==================== Individual report methods ====================
@@ -260,5 +262,33 @@ public class FlexlbMetricHelper {
         }
         FlexMetricTags tags = FlexMetricTags.of(MetricConstant.TAG_PATH, path);
         monitor.report(MetricConstant.AUTO_TPM_PREEMPT_RATE_PER_MIN, tags, currentPerMin);
+    }
+
+    /**
+     * Report the scheduler-side TTFT approximation with priority dimension
+     * (D10): submit arrival to engine enqueue ACK.
+     */
+    public void reportAutoTpmTtft(int priority, long ttftMs) {
+        if (monitor == null || priority <= 0) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                MetricConstant.TAG_PRIORITY, String.valueOf(priority),
+                MetricConstant.TAG_PATH, path);
+        monitor.report(MetricConstant.AUTO_TPM_TTFT_MS, tags, ttftMs);
+    }
+
+    /**
+     * Report a deadline miss (D10): the item was cleared on a queue-deadline
+     * path (legacy expiry or yielded-queue-deadline rejection).
+     */
+    public void reportAutoTpmDeadlineMiss(int priority) {
+        if (monitor == null || priority <= 0) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                MetricConstant.TAG_PRIORITY, String.valueOf(priority),
+                MetricConstant.TAG_PATH, path);
+        monitor.report(MetricConstant.AUTO_TPM_DEADLINE_MISS_COUNT, tags, 1.0);
     }
 }

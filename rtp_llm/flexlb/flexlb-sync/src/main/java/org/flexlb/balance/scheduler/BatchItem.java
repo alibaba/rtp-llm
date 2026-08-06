@@ -64,6 +64,14 @@ public final class BatchItem {
      */
     final AtomicBoolean rolledBack = new AtomicBoolean(false);
 
+    /**
+     * D10 deadline-miss marker: set only by the two queue-deadline clearing
+     * paths ({@link #failExpired} and the yielded-queue-deadline rejection in
+     * {@code RejectionPolicy.rejectYielded}). Read by the scheduler's
+     * {@code whenComplete} hook to emit {@code deadline_miss.count{priority}}.
+     */
+    private volatile boolean deadlineMiss;
+
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -103,6 +111,12 @@ public final class BatchItem {
 
     /** Set by {@link PrefillEndpoint#submitBatch} just before async dispatch. */
     public void setDispatchedAtMs(long dispatchedAtMs) { this.dispatchedAtMs = dispatchedAtMs; }
+
+    /** Mark this item as cleared on a queue-deadline path (D10 metric marker). */
+    public void markDeadlineMiss() { this.deadlineMiss = true; }
+
+    /** Whether this item was cleared on a queue-deadline path (D10 metric marker). */
+    public boolean deadlineMissed() { return deadlineMiss; }
 
     // -- derived accessors --
 
@@ -160,6 +174,7 @@ public final class BatchItem {
         if (future.isDone()) {
             return;
         }
+        markDeadlineMiss();
         rollbackOnce();
         removeFromPrefillBatch();
         completeError(StrategyErrorType.BATCH_SLO_EXPIRED,
