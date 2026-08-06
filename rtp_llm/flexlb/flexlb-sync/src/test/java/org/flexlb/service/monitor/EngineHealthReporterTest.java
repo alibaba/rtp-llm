@@ -3,11 +3,13 @@ package org.flexlb.service.monitor;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.TaskStateEnum;
+import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
@@ -35,8 +37,10 @@ class EngineHealthReporterTest {
 
     private final FlexMonitor monitor = mock(FlexMonitor.class);
     private final CacheMetricsReporter cacheMetricsReporter = mock(CacheMetricsReporter.class);
+    private final CacheMatchConfiguration cacheMatchConfiguration = mock(CacheMatchConfiguration.class);
     private final EngineGrpcClient engineGrpcClient = mock(EngineGrpcClient.class);
     private final LoopResources loopResources = mock(LoopResources.class);
+    private final LocalStandbyConfig localStandbyConfig = new LocalStandbyConfig();
 
     private EngineHealthReporter reporter;
 
@@ -45,7 +49,10 @@ class EngineHealthReporterTest {
         when(loopResources.onServer(true)).thenReturn(mock(EventLoopGroup.class));
         when(loopResources.onServerSelect(true)).thenReturn(mock(EventLoopGroup.class));
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(mock(EventLoopGroup.class));
-        reporter = new EngineHealthReporter(monitor, cacheMetricsReporter, engineGrpcClient, loopResources);
+        when(cacheMatchConfiguration.isLocalStandbyEnabled()).thenReturn(true);
+        when(cacheMatchConfiguration.getLocalStandbyConfig()).thenReturn(localStandbyConfig);
+        reporter = new EngineHealthReporter(
+                monitor, cacheMetricsReporter, cacheMatchConfiguration, engineGrpcClient, loopResources);
     }
 
     @Test
@@ -73,6 +80,7 @@ class EngineHealthReporterTest {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.ratio",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.local.standby.block.size", FlexMetricType.GAUGE);
     }
 
     @Test
@@ -215,6 +223,7 @@ class EngineHealthReporterTest {
                 "engineIp", "10.0.0.1",
                 "role", "PREFILL");
         verify(monitor).report("app.cache.block.size", expectedTags, 64.0);
+        verify(monitor).report("app.cache.local.standby.block.size", expectedTags, 64.0);
         verify(monitor).report("app.cache.used.kv.cache.tokens", expectedTags, 200.0);
         verify(monitor).report("app.cache.available.kv.cache.tokens", expectedTags, 800.0);
         verify(monitor).report("app.cache.total.kv.cache.tokens", expectedTags, 1000.0);
@@ -231,10 +240,37 @@ class EngineHealthReporterTest {
         reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0, 0);
 
         verify(monitor, never()).report(eq("app.cache.block.size"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
+                any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.cache.used.kv.cache.tokens"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.cache.available.kv.cache.tokens"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.cache.total.kv.cache.tokens"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.cache.used.kv.cache.ratio"), any(FlexMetricTags.class), anyDouble());
+    }
+
+    @Test
+    void shouldReportConfiguredLocalStandbyBlockSize() {
+        localStandbyConfig.setBlockSize(4096);
+        WorkerStatus workerStatus = workerStatusWithCacheStatus();
+
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0, 0);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL");
+        verify(monitor).report("app.cache.local.standby.block.size", expectedTags, 4096.0);
+    }
+
+    @Test
+    void shouldNotReportLocalStandbyBlockSizeWhenStandbyIsDisabled() {
+        when(cacheMatchConfiguration.isLocalStandbyEnabled()).thenReturn(false);
+        WorkerStatus workerStatus = workerStatusWithCacheStatus();
+
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0, 0);
+
+        verify(monitor, never()).report(eq("app.cache.local.standby.block.size"),
+                any(FlexMetricTags.class), anyDouble());
     }
 
     @Test
@@ -254,8 +290,8 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportCacheHitComparisonTokenMetricsWithStableDimensions() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1", 8080,
-                "running", 200, 64, 4096, 100, 80, true, 120, 20, 40);
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
+                "running", 200, 100, 80, true, 120, 20, 40);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 
@@ -307,8 +343,8 @@ class EngineHealthReporterTest {
     @Test
     void shouldNotReportLocalStandbyMetricsWhenPredictionIsUnavailable() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group", "10.0.0.1", 8080,
-                "running", 200, 64, 0, 100, 0, false, 120, 20, 0);
+                "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group", "10.0.0.1",
+                "running", 200, 100, 0, false, 120, 20, 0);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 
@@ -329,9 +365,9 @@ class EngineHealthReporterTest {
     @Test
     void shouldReportKvcmLocalP2pAndEffectiveDeltasWhenAvailable() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1", 8080,
-                "running", 200, 64, 0, 60,
-                true, 40, 80, 100,
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
+                "running", 200, 60,
+                true,
                 0, false, 120, 60, 80, 20, 0);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
@@ -351,8 +387,8 @@ class EngineHealthReporterTest {
     @Test
     void shouldNotReportRatiosWithoutInputTokens() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1", 8080,
-                "running", 0, 64, 4096, 100, 80, true, 120, 20, 40);
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
+                "running", 0, 100, 80, true, 120, 20, 40);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 

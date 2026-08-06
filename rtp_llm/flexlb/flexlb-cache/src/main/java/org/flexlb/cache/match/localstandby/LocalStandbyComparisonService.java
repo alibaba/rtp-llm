@@ -83,15 +83,14 @@ public class LocalStandbyComparisonService {
         long localStandbyPredictedHitTokens = match == null
                 ? 0
                 : match.localMatchBlocks() * standbyPrediction.blockSize();
-        return result(feedback, standbyPrediction.blockSize(), localStandbyPredictedHitTokens, true);
+        return result(feedback, localStandbyPredictedHitTokens, true);
     }
 
     private CacheHitComparisonResult withoutLocalStandbyPrediction(CacheHitFeedback feedback) {
-        return feedback == null ? null : result(feedback, 0, 0, false);
+        return feedback == null ? null : result(feedback, 0, false);
     }
 
-    private CacheHitComparisonResult result(CacheHitFeedback feedback, long localStandbyBlockSize,
-                                            long localStandbyPredictedHitTokens,
+    private CacheHitComparisonResult result(CacheHitFeedback feedback, long localStandbyPredictedHitTokens,
                                             boolean localStandbyPredictionAvailable) {
         long localStandbyDeltaHitTokens = localStandbyPredictionAvailable
                 ? feedback.actualHitTokens() - localStandbyPredictedHitTokens
@@ -109,16 +108,10 @@ public class LocalStandbyComparisonService {
                 feedback.role(),
                 feedback.group(),
                 feedback.workerIp(),
-                feedback.workerPort(),
                 feedback.taskState(),
                 feedback.inputTokens(),
-                feedback.blockSize(),
-                localStandbyBlockSize,
                 feedback.predictedHitTokens(),
                 feedback.kvcmMatchAvailable(),
-                feedback.kvcmLocalMatchTokens(),
-                feedback.kvcmP2pFetchTokens(),
-                feedback.kvcmP2pTotalMatchTokens(),
                 localStandbyPredictedHitTokens,
                 localStandbyPredictionAvailable,
                 feedback.actualHitTokens(),

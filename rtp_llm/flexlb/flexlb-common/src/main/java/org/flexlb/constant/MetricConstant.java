@@ -239,6 +239,11 @@ public class MetricConstant {
     public static final String CACHE_LOCAL_STANDBY_MAPPING_COUNT = "app.cache.local.standby.mapping.count";
 
     /**
+     * Effective default Local Standby block size. A configured value of zero reuses the engine block size.
+     */
+    public static final String CACHE_LOCAL_STANDBY_BLOCK_SIZE = "app.cache.local.standby.block.size";
+
+    /**
      * Current cache matching source. The active source is reported as 1 and the inactive source as 0.
      */
     public static final String CACHE_MATCH_ACTIVE_SOURCE = "app.cache.match.active.source";

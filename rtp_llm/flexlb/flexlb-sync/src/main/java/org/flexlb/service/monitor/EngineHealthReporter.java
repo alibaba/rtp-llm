@@ -7,11 +7,13 @@ import lombok.Data;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -50,6 +52,7 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STAN
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_VISITOR_RT;
@@ -100,6 +103,8 @@ public class EngineHealthReporter {
 
     private final CacheMetricsReporter cacheMetricsReporter;
 
+    private final CacheMatchConfiguration cacheMatchConfiguration;
+
     private final EngineGrpcClient engineGrpcClient;
 
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
@@ -107,10 +112,12 @@ public class EngineHealthReporter {
     @Autowired
     public EngineHealthReporter(FlexMonitor monitor,
                                 CacheMetricsReporter cacheMetricsReporter,
+                                CacheMatchConfiguration cacheMatchConfiguration,
                                 EngineGrpcClient engineGrpcClient,
                                 LoopResources serverLoopResources) {
         this.monitor = monitor;
         this.cacheMetricsReporter = cacheMetricsReporter;
+        this.cacheMatchConfiguration = cacheMatchConfiguration;
         this.engineGrpcClient = engineGrpcClient;
 
         this.eventLoopGroupMap = Map.of(
@@ -165,6 +172,7 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_FAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_BLOCK_SIZE, FlexMetricType.GAUGE);
+        this.monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -386,6 +394,7 @@ public class EngineHealthReporter {
         if (cacheStatus.getBlockSize() > 0) {
             monitor.report(CACHE_BLOCK_SIZE, metricTags, cacheStatus.getBlockSize());
         }
+        reportLocalStandbyBlockSize(metricTags, cacheStatus.getBlockSize());
         long usedKvCacheTokens = workerStatus.getUsedKvCacheTokens().get();
         long availableKvCacheTokens = workerStatus.getAvailableKvCacheTokens().get();
         long totalKvCacheTokens = usedKvCacheTokens + availableKvCacheTokens;
@@ -396,6 +405,21 @@ public class EngineHealthReporter {
         if (totalKvCacheTokens > 0) {
             double usedRatio = (usedKvCacheTokens * 1.0 / totalKvCacheTokens) * 100;
             monitor.report(CACHE_USED_KV_CACHE_RATIO, metricTags, usedRatio);
+        }
+    }
+
+    private void reportLocalStandbyBlockSize(FlexMetricTags metricTags, long engineBlockSize) {
+        if (!cacheMatchConfiguration.isLocalStandbyEnabled()) {
+            return;
+        }
+        LocalStandbyConfig localStandbyConfig = cacheMatchConfiguration.getLocalStandbyConfig();
+        if (localStandbyConfig == null) {
+            return;
+        }
+        long configuredBlockSize = localStandbyConfig.getBlockSize();
+        long effectiveBlockSize = configuredBlockSize > 0 ? configuredBlockSize : engineBlockSize;
+        if (effectiveBlockSize > 0) {
+            monitor.report(CACHE_LOCAL_STANDBY_BLOCK_SIZE, metricTags, effectiveBlockSize);
         }
     }
 

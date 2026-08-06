@@ -64,9 +64,6 @@ class LocalStandbyComparisonServiceTest {
         assertEquals(4096, result.localStandbyPredictedHitTokens());
         assertEquals(6000, result.actualHitTokens());
         assertEquals(1616, result.routingDeltaHitTokens());
-        assertEquals(4000, result.kvcmLocalPredictedHitTokens());
-        assertEquals(8000, result.kvcmP2pFetchTokens());
-        assertEquals(10000, result.kvcmP2pTotalMatchTokens());
         assertEquals(2000, result.kvcmLocalDeltaHitTokens());
         assertEquals(-4000, result.kvcmP2pTotalMatchDeltaHitTokens());
         assertEquals(1904, result.localStandbyDeltaHitTokens());

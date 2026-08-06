@@ -124,8 +124,8 @@ class GrpcWorkerStatusCheckRunnerTest {
                 "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group", "127.0.0.1", 8080,
                 "running", 200, 64, 100, 120, 20);
         CacheHitComparisonResult unifiedComparison = new CacheHitComparisonResult(
-                "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group", "127.0.0.1", 8080,
-                "running", 200, 64, 4096, 100, 80, true, 120, 20, 40);
+                "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group", "127.0.0.1",
+                "running", 200, 100, 80, true, 120, 20, 40);
         when(cacheAwareService.buildCacheHitComparison(expected))
                 .thenReturn(CompletableFuture.completedFuture(unifiedComparison));
 
