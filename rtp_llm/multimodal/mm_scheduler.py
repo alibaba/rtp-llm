@@ -16,7 +16,6 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
-from rtp_llm.multimodal.multimodal_util import vit_emb_cache_
 from rtp_llm.utils.time_util import Timer, current_time_ms
 
 if TYPE_CHECKING:
@@ -39,8 +38,8 @@ def _run_embedding(
     """Run one GPU forward over `items` and write results back.
 
     Performs the batched forward, guards the output count, writes
-    embedding_result onto each work item, and inserts cacheable results into
-    vit_emb_cache_. Any forward error or count mismatch propagates unchanged.
+    embedding_result onto each work item, and completes its cache claim. Any
+    forward error or count mismatch propagates unchanged.
     """
     data_list = [wi.preprocess_result for wi in items]
     type_list = [wi.mm_type for wi in items]
@@ -64,8 +63,9 @@ def _run_embedding(
 
     for wi, result in zip(items, batch_outputs):
         wi.embedding_result = result
-        if wi.need_check_cache:
-            vit_emb_cache_.insert_cache(wi.cache_key, result)
+        complete_cache = getattr(wi, "complete_cache", None)
+        if complete_cache is not None:
+            complete_cache(result)
 
 
 class _EmbeddingRequest:

@@ -22,6 +22,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provider
+from rtp_llm.multimodal.mm_embedding_cache import (
+    MMEmbeddingAsyncCache,
+    MMEmbeddingCache,
+    MMEmbeddingCacheEntry,
+)
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import MMScheduler
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
@@ -104,7 +109,7 @@ class LocalPreprocessExecutor(PreprocessExecutor):
         self.preprocess_params = preprocess_params
 
     def submit(self, work_item: "MMWorkItem") -> None:
-        if work_item.embedding_result is not None:
+        if not work_item.should_preprocess:
             return
 
         try:
@@ -197,7 +202,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self._create_pool()
 
     def submit(self, work_item: "MMWorkItem") -> None:
-        if work_item.embedding_result is not None:
+        if not work_item.should_preprocess:
             return
 
         try:
@@ -312,104 +317,54 @@ class MMEmbeddingRes:
         return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
 
 
-class MMEmbeddingCacheEntry:
-    """Three-state cache entry for async embedding computation.
+def _derive_embedding_cache_max_bytes(
+    mm_part: MultiModalEmbeddingInterface,
+    model_config: ModelConfig,
+    max_items: int,
+) -> Optional[int]:
+    """Translate the existing item limit into a model-derived byte budget."""
 
-    States: PENDING (event not set) -> COMPLETE (result set) or ERROR (error set).
-    """
+    if max_items <= 0:
+        return 0
+    budget = mm_part.get_batch_work_budget(1)
+    if budget is None:
+        return None
+    if not isinstance(budget, MMWorkEstimate):
+        raise TypeError(
+            "get_batch_work_budget must return MMWorkEstimate or None, got "
+            f"{type(budget).__name__}"
+        )
+    if budget.output_tokens <= 0:
+        return None
 
-    def __init__(self):
-        self._event = threading.Event()
-        self.result: Optional[Any] = None
-        self.error: Optional[Exception] = None
-        # GreenNet verdict is a SEPARATE signal from the embedding result so the
-        # ``WaitGreenNetVerdict`` RPC can unblock as soon as content inspection
-        # decides — independently of (and usually before) the ViT embedding
-        # completing. Set by _async_compute's inspect done-callback.
-        self._greennet_event = threading.Event()
-        self._greennet_verdict: Optional[GreenNetVerdict] = None
+    hidden_size = int(getattr(model_config, "hidden_size", 0) or 0)
+    if hidden_size <= 0:
+        word_embeddings = getattr(mm_part, "word_embedding_weight", None)
+        if isinstance(word_embeddings, torch.Tensor) and word_embeddings.ndim >= 2:
+            hidden_size = int(word_embeddings.shape[-1])
+    if hidden_size <= 0:
+        visual = getattr(mm_part, "visual", None)
+        hidden_size = int(getattr(visual, "out_hidden_size", 0) or 0)
+    if hidden_size <= 0:
+        return None
 
-    def wait(self, timeout: Optional[float] = None) -> Any:
-        if not self._event.wait(timeout=timeout):
-            raise TimeoutError("Waiting for embedding result timed out")
-        if self.error is not None:
-            raise self.error
-        return self.result
-
-    def complete(self, result: Any) -> None:
-        self.result = result
-        self._event.set()
-
-    def fail(self, error: Exception) -> None:
-        self.error = error
-        self._event.set()
-
-    @property
-    def is_done(self) -> bool:
-        return self._event.is_set()
-
-    def set_greennet_verdict(self, verdict: GreenNetVerdict) -> None:
-        self._greennet_verdict = verdict
-        self._greennet_event.set()
-
-    def wait_greennet(self, timeout: Optional[float] = None) -> GreenNetVerdict:
-        if not self._greennet_event.wait(timeout=timeout):
-            raise TimeoutError("Waiting for greennet verdict timed out")
-        return self._greennet_verdict
-
-    @property
-    def is_greennet_decided(self) -> bool:
-        return self._greennet_event.is_set()
-
-
-class MMEmbeddingAsyncCache:
-    """Cache with three states per key: miss, in_progress, complete."""
-
-    def __init__(self, max_size: int = 10):
-        self._lock = threading.Lock()
-        self._entries: dict = {}
-        self._max_size = max_size
-
-    def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
-        with self._lock:
-            # mm_cache_item_num=0 disables caching: always miss, never store.
-            # Without this, duplicate cache_keys (e.g. repeated images) would
-            # be served from cache even when the operator intended no caching.
-            if self._max_size <= 0:
-                return ("miss", MMEmbeddingCacheEntry())
-            if cache_key in self._entries:
-                entry = self._entries[cache_key]
-                if entry.is_done:
-                    return ("complete", entry)
-                else:
-                    return ("in_progress", entry)
-            else:
-                entry = MMEmbeddingCacheEntry()
-                self._entries[cache_key] = entry
-                self._evict_if_needed()
-                return ("miss", entry)
-
-    def _evict_if_needed(self) -> None:
-        if len(self._entries) <= self._max_size:
-            return
-        done_keys = [k for k, v in self._entries.items() if v.is_done]
-        for k in done_keys[: len(self._entries) - self._max_size]:
-            del self._entries[k]
-
-    def remove(self, cache_key: str) -> None:
-        with self._lock:
-            self._entries.pop(cache_key, None)
-
-    def resize(self, max_size: int) -> None:
-        with self._lock:
-            self._max_size = max_size
+    try:
+        dtype_bytes = torch.empty((), dtype=mm_part._data_type).element_size()
+    except (AttributeError, NotImplementedError, TypeError):
+        return None
+    return max_items * budget.output_tokens * hidden_size * dtype_bytes
 
 
 class MMWorkItem:
     """Represents a work item for processing multimodal inputs."""
 
     def __init__(
-        self, mm_inputs: List[MultimodalInput], mm_timeout_ms: Optional[int] = 120000
+        self,
+        mm_inputs: List[MultimodalInput],
+        mm_timeout_ms: Optional[int] = 120000,
+        embedding_cache: Optional[MMEmbeddingCache] = None,
+        cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
+        defer_cache_complete: bool = False,
     ):
         if not mm_inputs:
             raise ValueError("No mm_input for work item")
@@ -429,14 +384,56 @@ class MMWorkItem:
         self.work_estimate: Optional[MMWorkEstimate] = None
 
         self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url != ""
+        self.embedding_cache = embedding_cache
+        self.cache_key: Optional[str] = None
+        self.cache_entry: Optional[MMEmbeddingCacheEntry] = None
+        self.cache_state: Optional[str] = None
+        self.defer_cache_complete = defer_cache_complete
 
-        self.cache_key = (
-            self.mm_inputs[0].cache_key() if self.need_check_cache else None
-        )
-        self.embedding_result = vit_emb_cache_.check_cache(self.cache_key)
+        if cache_claim is not None:
+            if not self.need_check_cache:
+                raise ValueError("cache_claim requires one non-empty multimodal input")
+            self.cache_key, self.cache_entry, self.cache_state = cache_claim
+            if self.cache_state == "complete":
+                self.embedding_result = self.cache_entry.wait()
+        elif self.need_check_cache and self.embedding_cache is not None:
+            self.cache_key = self.mm_inputs[0].cache_key()
+            self.cache_state, self.cache_entry = self.embedding_cache.try_acquire(
+                self.cache_key
+            )
+            if self.cache_state == "complete":
+                self.embedding_result = self.cache_entry.wait()
 
         # future 可以是 ApplyResult (multiprocess) 或 _LocalResult (local)
         self.future: Optional[Any] = None
+
+    @property
+    def waiting_for_cache(self) -> bool:
+        return self.cache_state == "in_progress" and self.embedding_result is None
+
+    @property
+    def should_preprocess(self) -> bool:
+        return self.embedding_result is None and not self.waiting_for_cache
+
+    def complete_cache(self, result: Any, force: bool = False) -> None:
+        if (
+            (self.defer_cache_complete and not force)
+            or self.embedding_cache is None
+            or self.cache_key is None
+            or self.cache_entry is None
+        ):
+            return
+        self.embedding_cache.complete(self.cache_key, self.cache_entry, result)
+
+    def fail_cache(self, error: Exception) -> None:
+        if (
+            self.embedding_cache is None
+            or self.cache_key is None
+            or self.cache_entry is None
+            or self.cache_state != "miss"
+        ):
+            return
+        self.embedding_cache.fail(self.cache_key, self.cache_entry, error)
 
 
 class MMProcessEngine:
@@ -517,11 +514,29 @@ class MMProcessEngine:
             profiling_debug_logging_config.log_file_backup_count,
         )
 
-        vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
         url_data_cache_.resize_cache(self.vit_config.url_cache_item_num)
+        # Some non-visual multimodal mixins use this as a model-internal,
+        # per-item lookup cache. Scheduler-level embedding results no longer use
+        # it, but its existing operator-controlled capacity must be preserved.
+        vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
 
-        self._async_cache = MMEmbeddingAsyncCache(
-            max_size=self.vit_config.mm_cache_item_num
+        cache_max_bytes = _derive_embedding_cache_max_bytes(
+            self.mm_part,
+            model_config,
+            self.vit_config.mm_cache_item_num,
+        )
+        self._embedding_cache = MMEmbeddingCache(
+            max_size=self.vit_config.mm_cache_item_num,
+            max_bytes=cache_max_bytes,
+            report_metrics=True,
+        )
+        # Keep the old private name as an alias for callers/tests that inspect
+        # async submission state. Both paths now use the same cache instance.
+        self._async_cache = self._embedding_cache
+        logging.info(
+            "MMProcessEngine: unified embedding cache max_items=%d max_bytes=%s",
+            self.vit_config.mm_cache_item_num,
+            cache_max_bytes if cache_max_bytes is not None else "count-fallback",
         )
 
         # GreenNet (content safety) integration. The provider is a no-op when
@@ -660,17 +675,80 @@ class MMProcessEngine:
         cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
         with inspect, then the verdict gates the result. Raises
         FtRuntimeException(UNSAFE_INPUT_CONTENT) on a non-passing verdict."""
-        rewritten, verdict_future, handle = self._begin_greennet(mm_inputs)
+        if len(mm_inputs) != 1 or mm_inputs[0].url == "":
+            rewritten, verdict_future, handle = self._begin_greennet(mm_inputs)
+            work_items: List[MMWorkItem] = []
+            try:
+                result, work_items = self._mm_embedding_impl(
+                    rewritten, defer_cache_complete=True
+                )
+                verdict = GreenNetVerdict(passed=True)
+                if verdict_future is not None:
+                    verdict = verdict_future.result(timeout=self._greennet_timeout_s)
+                    if not verdict.passed:
+                        raise FtRuntimeException(
+                            ExceptionType.UNSAFE_INPUT_CONTENT,
+                            verdict.message or "data inspection failed",
+                        )
+                for work_item in work_items:
+                    if work_item.cache_entry is not None:
+                        work_item.cache_entry.set_greennet_verdict(verdict)
+                    if work_item.embedding_result is not None:
+                        work_item.complete_cache(work_item.embedding_result, force=True)
+                return result
+            except Exception as error:
+                for work_item in work_items:
+                    work_item.fail_cache(error)
+                raise
+            finally:
+                self._cancel_greennet(handle)
+
+        cache_key = mm_inputs[0].cache_key()
+        state, entry = self._embedding_cache.try_acquire(cache_key)
+        handle = None
         try:
-            result = self.mm_embedding_impl(rewritten)
-            if verdict_future is not None:
-                verdict = verdict_future.result(timeout=self._greennet_timeout_s)
+            if state == "miss":
+                rewritten, verdict_future, handle = self._begin_greennet(
+                    mm_inputs, entry
+                )
+            else:
+                # The owner already ran GreenNet and owns any URL rewrite. A
+                # waiter consumes the canonical raw embedding from the entry.
+                rewritten, verdict_future = mm_inputs, None
+
+            result, work_items = self._mm_embedding_impl(
+                rewritten,
+                cache_claim=(cache_key, entry, state),
+                defer_cache_complete=state == "miss",
+            )
+
+            if state == "miss":
+                verdict = (
+                    verdict_future.result(timeout=self._greennet_timeout_s)
+                    if verdict_future is not None
+                    else GreenNetVerdict(passed=True)
+                )
                 if not verdict.passed:
                     raise FtRuntimeException(
                         ExceptionType.UNSAFE_INPUT_CONTENT,
                         verdict.message or "data inspection failed",
                     )
+                raw_result = work_items[0].embedding_result
+                if raw_result is None:
+                    raise RuntimeError("sync embedding did not produce a cache value")
+                self._embedding_cache.complete(cache_key, entry, raw_result)
+            elif self._greennet_enabled():
+                verdict = entry.wait_greennet(timeout=self._greennet_timeout_s)
+                if verdict is not None and not verdict.passed:
+                    raise FtRuntimeException(
+                        ExceptionType.UNSAFE_INPUT_CONTENT,
+                        verdict.message or "data inspection failed",
+                    )
             return result
+        except Exception as error:
+            if state == "miss":
+                self._embedding_cache.fail(cache_key, entry, error)
+            raise
         finally:
             self._cancel_greennet(handle)
 
@@ -731,7 +809,24 @@ class MMProcessEngine:
 
     def mm_embedding_impl(self, mm_inputs: List[MultimodalInput]) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
+        result, _ = self._mm_embedding_impl(mm_inputs)
+        return result
+
+    def _mm_embedding_impl(
+        self,
+        mm_inputs: List[MultimodalInput],
+        cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
+        defer_cache_complete: bool = False,
+    ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
+        """Internal implementation that also exposes canonical work-item values.
+
+        Async submit owns the cache PENDING entry before GreenNet rewrites the
+        URL. It passes that claim here and defers completion until the verdict
+        passes, so sync and async callers share one value and unsafe results are
+        never made visible.
+        """
         logging.debug(f"{self.server_id} request received")
+        work_items: List[MMWorkItem] = []
         try:
             with self.profiler.profile_request():
                 with torch.profiler.record_function("mm_embedding_impl"):
@@ -745,7 +840,11 @@ class MMProcessEngine:
                         self._access_logger.log_query_access(mm_inputs)
 
                     with torch.profiler.record_function("preprocess"):
-                        work_items = self._create_work_items(mm_inputs)
+                        work_items = self._create_work_items(
+                            mm_inputs,
+                            cache_claim=cache_claim,
+                            defer_cache_complete=defer_cache_complete,
+                        )
                         self._wait_for_preprocessing(work_items)
 
                     with torch.profiler.record_function("compute_embeddings"):
@@ -762,8 +861,10 @@ class MMProcessEngine:
                     if not self.is_proxy_mode:
                         kmonitor.report(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
 
-            return result
+            return result, work_items
         except Exception as e:
+            for work_item in work_items:
+                work_item.fail_cache(e)
             torch.cuda.empty_cache()
             gc.collect()
             if not self.is_proxy_mode:
@@ -773,8 +874,15 @@ class MMProcessEngine:
         finally:
             self.dec_query_num()
 
-    def _create_work_items(self, mm_inputs: List[MultimodalInput]) -> List[MMWorkItem]:
+    def _create_work_items(
+        self,
+        mm_inputs: List[MultimodalInput],
+        cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
+        defer_cache_complete: bool = False,
+    ) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
+        if cache_claim is not None and len(mm_inputs) != 1:
+            raise ValueError("cache_claim is only valid for one multimodal input")
         batch_size = (
             self.mm_preprocess_batch_size
             if self.mm_preprocess_batch_size != -1
@@ -784,9 +892,15 @@ class MMProcessEngine:
         work_items = []
         for index in range(0, len(mm_inputs), batch_size):
             batch = mm_inputs[index : index + batch_size]
-            work_item = MMWorkItem(batch, mm_timeout_ms=self.vit_config.mm_timeout_ms)
-            self.preprocess_executor.submit(work_item)
+            work_item = MMWorkItem(
+                batch,
+                mm_timeout_ms=self.vit_config.mm_timeout_ms,
+                embedding_cache=self._embedding_cache,
+                cache_claim=cache_claim if index == 0 else None,
+                defer_cache_complete=defer_cache_complete,
+            )
             work_items.append(work_item)
+            self.preprocess_executor.submit(work_item)
 
         return work_items
 
@@ -796,6 +910,16 @@ class MMProcessEngine:
     ) -> None:
         """Wait for all preprocessing tasks to complete."""
         for work_item in work_items:
+            if work_item.waiting_for_cache:
+                timeout_s = (
+                    work_item.mm_timeout_ms / 1000.0
+                    if work_item.mm_timeout_ms is not None
+                    and work_item.mm_timeout_ms > 0
+                    else 120.0
+                )
+                work_item.embedding_result = work_item.cache_entry.wait(
+                    timeout=timeout_s
+                )
             self.preprocess_executor.get_result(work_item)
             if work_item.embedding_result is None:
                 estimate = self.mm_part.estimate_work(
@@ -829,6 +953,15 @@ class MMProcessEngine:
             if len(result) > 2:
                 tensor_res.extend(maybe_tensor_to_list(result[2], ndim_threshold=1))
         return emb_res, pos_res, tensor_res
+
+    @staticmethod
+    def _work_item_result_to_response(result: Any) -> MMEmbeddingRes:
+        emb_res = maybe_tensor_to_list(result[0], ndim_threshold=2)
+        pos_res = maybe_tensor_to_list(result[1], ndim_threshold=2)
+        extra_res = (
+            maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
+        )
+        return MMEmbeddingRes(emb_res, pos_res, extra_res)
 
     def async_submit(self, mm_inputs: List[MultimodalInput]) -> List[str]:
         """Asynchronously submit multimodal URLs for embedding computation.
@@ -880,7 +1013,8 @@ class MMProcessEngine:
             if state == "miss":
                 self._async_compute([mm_input], cache_key, entry)
 
-            results.append(entry.wait(timeout=timeout_ms / 1000.0))
+            raw_result = entry.wait(timeout=timeout_ms / 1000.0)
+            results.append(self._work_item_result_to_response(raw_result))
 
         return results
 
@@ -897,19 +1031,27 @@ class MMProcessEngine:
             # finishes, so WaitGreenNetVerdict unblocks independently of ViT.
             rewritten, verdict_future, handle = self._begin_greennet(mm_inputs, entry)
             # ViT embedding runs concurrently with inspection.
-            result = self.mm_embedding_impl(rewritten)
+            _, work_items = self._mm_embedding_impl(
+                rewritten,
+                cache_claim=(cache_key, entry, "miss"),
+                defer_cache_complete=True,
+            )
             if verdict_future is not None:
                 verdict = verdict_future.result(timeout=self._greennet_timeout_s)
                 if not verdict.passed:
-                    entry.fail(
+                    self._embedding_cache.fail(
+                        cache_key,
+                        entry,
                         FtRuntimeException(
                             ExceptionType.UNSAFE_INPUT_CONTENT,
                             verdict.message or "data inspection failed",
-                        )
+                        ),
                     )
-                    self._async_cache.remove(cache_key)
                     return
-            entry.complete(result)
+            raw_result = work_items[0].embedding_result
+            if raw_result is None:
+                raise RuntimeError("async embedding did not produce a cache value")
+            self._embedding_cache.complete(cache_key, entry, raw_result)
         except Exception as e:
             # If greennet never decided (preprocess crash etc.), surface a
             # process-error verdict so WaitGreenNetVerdict doesn't hang.
@@ -917,8 +1059,7 @@ class MMProcessEngine:
                 entry.set_greennet_verdict(
                     GreenNetVerdict(passed=False, code=11, message=str(e))
                 )
-            entry.fail(e)
-            self._async_cache.remove(cache_key)
+            self._embedding_cache.fail(cache_key, entry, e)
         finally:
             self._cancel_greennet(handle)
 
@@ -927,3 +1068,4 @@ class MMProcessEngine:
         self.preprocess_executor.shutdown()
         self._scheduler.close()
         self._shutdown_greennet_loop()
+        self._embedding_cache.clear(RuntimeError("MMProcessEngine stopped"))

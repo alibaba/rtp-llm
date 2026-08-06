@@ -1085,19 +1085,229 @@ bazelisk test \
    稳定算法？
 7. packed attention 实现后，哪些 GPU 预处理操作仍然是主要开销？
 
-## 14. 推荐执行顺序
+## 14. 后续执行清单（2026-08-05）
 
-推荐关键路径：
+当前已经完成 packed varlen attention、成本估算和组批、GPU row hash、packed
+BF16 buffer、单 segment exact-grid CUDA Graph，以及统一 weighted embedding
+cache。token-budget packed Graph POC 已经完成并因性能回退撤销。后续重点处理
+多 worker 调度和 ViT 低精度计算。
+
+### 14.1 P0：token-budget packed CUDA Graph（POC 已停止）
+
+当前 M3VL 只有单 segment 能进入 CUDA Graph；高并发请求和单请求多图形成的
+packed batch 仍然走 eager。下一步参考 vLLM 的 token-budget Graph 和 SGLang 的
+batch/max-seqlen bucket，但必须保持 M3VL 的媒体 segment attention 隔离。
+
+实现范围：
+
+- 在通用多模态接口中增加 model-owned Graph contract，由模型提供每个媒体的
+  input patch、output token 和 segment 信息；
+- 从模型最小/最大 work estimate 自动生成少量 token budget，不增加必填配置；
+- M3VL Graph bucket 至少包含 `total_patches_budget`、
+  `segment_count_bucket` 和 `max_segment_len_bucket`，不能只按总 token padding；
+- 为 pixel values、`cu_seqlens`、真实 segment length、grid metadata 和输出预分配
+  持久 buffer；padding token 必须在 attention 和 patch merge 中都不可见；
+- scheduler 在有界范围内将媒体放入最小可容纳 bucket，执行后恢复原请求顺序；
+- 不支持的超大输入、视频动态裁剪或 Graph capture 失败继续走 eager；
+- 保留 hit、miss、fallback、padding ratio、copy time 和 replay time 指标。
+
+验收门槛：
+
+- 多请求、多图、不同宽高比和图像/视频混合场景不串 embedding；
+- 与 eager 的 embedding 数值误差保持在当前 BF16 测试阈值内；
+- 448x448 C32/C64 吞吐提升至少 5%，P99 不回退超过 3%；
+- 1080p 和 2K 吞吐不回退超过 2%，显存峰值不超过相同 work budget 的 eager；
+- 如果持久 buffer 加 Graph I/O 仍无法达到 5%，停止该方向，不合入复杂 padding。
+
+参考：
+
+- [vLLM Vision Encoder CUDA Graph](https://github.com/vllm-project/vllm/blob/main/docs/design/cuda_graphs_multimodal.md)
+- [SGLang Vision Attention](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/vision.py)
+
+#### 2026-08-05 POC 结论
+
+POC 使用 `total_patches_budget + segment_count_bucket + max_segment_len_bucket`
+作为 Graph identity。padding 被放入独立 dummy segment，真实 segment 不与 padding
+互相 attention；patch merge 后只截取真实输出。FlashInfer `cute-dsl` 探针验证了
+固定总 token、固定 segment 数和固定 `max_seqlen` 上界下，可以在 replay 前更新
+持久 `cu_seqlens`。等长分段、不同分段边界和零长度占位段相对 eager 的最大 BF16
+误差均为 `0.007812`，专项测试也覆盖了三图到混合尺寸的 bucket 复用，不存在串图。
+
+真实 M3VL 448x448 C64 使用 10 秒、3 次重复进行 Graph/eager A/B。每次 Graph
+运行都稳定命中，结果如下：
+
+| 模式 | 吞吐中位数 | 三次吞吐均值 | P50 | P99 | GPU 平均利用率 | allocated 增量 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| packed Graph | 444.06 req/s | 438.87 req/s | 128.55 ms | 623.62 ms | 76.1% | 3110 MiB |
+| packed eager | 478.85 req/s | 478.54 req/s | 129.38 ms | 204.55 ms | 85.3% | 4083 MiB |
+
+Graph 吞吐中位数回退 `7.3%`，三次均值回退 `8.3%`。显存增量下降约 `23.8%`，
+但 static pixel input、RoPE metadata 和输出 copy 抵消了 kernel launch 收益，P99
+也明显变差。因此该 POC 未达到 `+5%` 验收门槛，代码已经回退，保留现有 packed
+eager 和单 segment exact-grid Graph。除非后续 scheduler 能直接填充 Graph 的
+持久输入且 profile 证明 copy 已消除，否则不再继续复杂 padding Graph。
+
+### 14.2 P0：统一并按实际成本管理 embedding cache（已完成）
+
+当前同步 `vit_emb_cache_` 和异步 `MMEmbeddingAsyncCache` 分别按条目数管理，无法
+区分小图和大图，也不能为同一份 embedding 提供统一的引用和淘汰生命周期。
+
+实现范围：
+
+- 合并为一个包含 `PENDING`、`COMPLETE` 和 `ERROR` 状态的并发 LRU，保留
+  in-flight miss 去重；
+- 每个 entry 按 `output_tokens * hidden_size * dtype_bytes` 计费；
+- 为避免增加必填参数，默认容量从
+  `mm_cache_item_num * model_max_output_tokens_per_item` 推导，保持旧配置的最坏
+  显存上限，同时允许缓存更多小图；
+- cache identity 包含媒体内容、完整预处理配置、模型 revision 和 weight epoch；
+- 模型 reload、失败请求和取消请求正确释放引用并使旧 embedding 失效；
+- 增加 hit/miss、resident tokens/bytes、eviction 和 in-flight dedup 指标。
+
+验收门槛：
+
+- 混合 448/1080p/2K 输入时，resident bytes 不超过预算；
+- cache hit 不再执行 CPU preprocess 和 ViT forward；
+- 重复媒体并发只执行一次 ViT，错误不会永久污染 cache；
+- 唯一媒体 workload 的延迟和吞吐不回退超过 1%。
+
+暂不实现跨 worker 全局 embedding cache。只有生产指标证明跨 worker 媒体复用率
+足够高，且远程读取 embedding 明显快于重新执行 ViT 时再评估。
+
+参考：
+
+- [vLLM EncoderCacheManager](https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/encoder_cache_manager.py)
+- [vLLM Multimodal Caching](https://github.com/vllm-project/vllm/blob/main/docs/configuration/optimization.md)
+
+#### 实现状态：2026-08-05
+
+当前工作树已完成统一 weighted embedding cache：
+
+- 新增 engine-local 的并发 LRU，统一同步和异步路径，entry 使用
+  `PENDING -> COMPLETE/ERROR` 状态机；同 key 的并发 miss 只允许一个 owner
+  执行 CPU preprocess 和 ViT，其余请求等待同一个 entry。
+- 沿用 `MM_CACHE_ITEM_NUM`，不增加配置。支持 `MMWorkEstimate` 的模型按
+  `item_num * max_output_tokens * hidden_size * dtype_bytes` 推导 byte budget，
+  entry 完成后按实际持有 tensor 的字节数计费；未提供 work budget 的模型继续
+  按旧 entry count 淘汰。
+- GreenNet URL rewrite 前先按原始输入取得 cache claim，安全检查、同步请求和
+  AsyncSubmit/Get 共享同一 key；只有 verdict 通过后才发布 embedding，失败会
+  删除 entry 并唤醒 waiter。
+- cache 生命周期绑定 `MMProcessEngine`，因此模型 reload/weight epoch 切换会自然
+  创建新 cache；媒体内容和完整预处理配置继续由 `MultimodalInput.cache_key()`
+  提供，不需要额外 revision 参数。
+- scheduler 不再直接写全局 `vit_emb_cache_`，而是完成 work item 自己持有的
+  claim。少数模型内部直接使用的 `vit_emb_cache_` 仍保留，不改变其模型内语义。
+- 新增 hit、miss、in-flight dedup、eviction、resident tokens 和 resident bytes
+  指标；`stop()`、预处理失败、ViT 失败和安全检查失败都会清理 pending entry。
+
+缓存管理微基准使用 M3VL `hidden_size=6144`、BF16、byte budget
+`71,024,640`，每点 20,000 次操作、7 次重复取中位数：
+
+| 输出规模 | 唯一 key：旧 -> 新 | cache hit：旧 -> 新 | 新缓存可驻留条目 |
+| --- | ---: | ---: | ---: |
+| 64 token 小图 | 0.731 -> 12.461 us | 0.323 -> 0.961 us | 90 |
+| 448 token | 0.741 -> 11.948 us | 0.330 -> 0.963 us | 12 |
+| 578 token 大图 | 0.744 -> 11.898 us | 0.321 -> 0.955 us | 9 |
+
+唯一媒体路径增加约 `11.2-11.7 us`，相对 Stage 2 的 M3VL C1 P50
+`17.5-18.5 ms` 约为 `0.06%`，低于 1% 回退门槛。578-token entry 还包含
+position ID，因此严格按实际 resident bytes 计费时为 9 条；小图则可在同一预算
+下从固定 10 条提升到约 90 条。该优化的收益是提高混合尺寸 workload 的有效
+cache 容量并消除同步/异步重复计算，不改变唯一媒体的 ViT forward。
+
+验证结果：
+
+| 验证 | 结果 |
+| --- | --- |
+| scheduler 单测 | 29/29 通过 |
+| cache、同步/异步去重、GreenNet rewrite 等定向流程测试 | 31/31 通过 |
+| 完整多模态流程测试 | 50/51 通过；唯一失败为原有 multiprocessing worker 在 30 秒启动超时，连续两次复现，定向路径均通过 |
+| M3VL ViT 测试 | 16 项通过，4 项按原条件跳过 |
+| M3VL TP4/EP4 生产 smoke | 1/1 请求成功，golden compare diff 为 0；实际 ViT 输出为 `[553, 6144]` |
+
+### 14.3 P0：多 ViT worker 工作债务和 cache-aware 路由
+
+当前 VIT worker status 只表示存活，不能反映一个 worker 已排队的大图、预计完成
+时间或 cache 命中情况。唯一 ViT IP 可以保证一次请求的一致性，但不等于最优
+负载均衡。
+
+实现范围：
+
+- worker 以轻量原子快照上报 queued/running patches、output tokens、oldest wait、
+  EWMA ms/patch、可用显存和本地 cache 摘要；
+- FlexLB 使用 `queued_work / observed_rate + incoming_work / observed_rate` 估算
+  完成时间，cache hit 作为有限权重的 affinity，不能压过明显的排队差异；
+- AsyncSubmit/Get/Release 按 work item 保持 sticky routing；
+- 只有单请求多图成为线上主要 RT 来源时，才允许把独立媒体拆到多个 ViT worker，
+  并按原始 index gather；普通单图请求继续按请求路由。
+
+验收门槛：
+
+- 单 worker 性能无回退，多 worker 混合尺寸压测的 patch debt 明显更均衡；
+- worker status/heartbeat 不执行 GPU synchronize，也不受高 CPU 利用率长时间阻塞；
+- worker 故障、超时、重试和 cache miss 不会造成 Get/Release 路由漂移；
+- 以线上流量分布验证 P95/P99，不能只用同尺寸合成 workload。
+
+参考：
+
+- [SGLang EPD Disaggregation](https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/epd_disaggregation.md)
+- [vLLM Disaggregated Encoder](https://github.com/vllm-project/vllm/blob/main/docs/features/disagg_encoder.md)
+
+### 14.4 P1：混合尺寸 bounded lookahead 组批
+
+固定 `gpu_batch_wait_ms` 保持不变。此前基于 quiet time 的自适应等待会缩小平均
+batch，在高并发下已经验证为负优化，不再采用。
+
+新的调度仅在队列已有工作时扫描有限窗口，例如 `2 * gpu_max_batch_size`，选择
+能装入当前 work/Graph bucket 的 chunk。被跳过的 chunk 保留 enqueue sequence 和
+年龄；超过有限轮次后必须优先执行，防止大图饥饿。
+
+验收门槛：混合 448/1080p/2K 高并发吞吐提升至少 5%，同尺寸 C1/C32/C64 不
+回退超过 2%，且大图 P99 没有无界增长。达不到门槛则保留严格 FIFO。
+
+### 14.5 P1：ViT Linear FP8 POC
+
+M3VL vision tower 有 32 层，`hidden_size=1280`、`intermediate_size=5120`。只有
+profile 证明 `qkv_proj/out_proj/fc1/fc2` GEMM 占 ViT forward 的主要时间后，才做
+离线 FP8 POC：
+
+- 优先量化 QKV、attention output 和 MLP linear；
+- LayerNorm、RoPE、residual、patch embedding 和最终 projector 先保持 BF16/FP32；
+- 使用代表性图片和视频做静态 scale 校准；
+- 同时检查 embedding cosine/relative L2、smoke 输出和视觉评测集精度。
+
+不优先做 FP8 attention。vLLM 的结果显示其主要在 QHD/4K 或多大图时获益，HD
+可能变慢，而当前 M3VL processor 的目标边长上限约为 1008。Linear FP8 若不能
+带来至少 5% ViT throughput 提升，或评测下降超出噪声范围，则不合入。
+
+参考：
+
+- [vLLM FP8 ViT Encoder Attention](https://docs.vllm.ai/en/stable/features/quantization/fp8_vit_attn/)
+- [SGLang Quantization](https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/quantization.md)
+
+### 14.6 暂停或不再投入的方向
+
+- 整体 `torch.compile`：本地动态 packed 路径没有收益，vLLM 报告的 encoder
+  端到端提升也约为 4.5%，低于当前门槛；
+- NPP ragged resize：完整路径只有 0%-2% 提升，并改变 embedding 数值；
+- 全流程多 CUDA stream 预处理：增加同步和 buffer 生命周期复杂度，不采用；
+- 简单自适应 batch wait：已验证高并发吞吐回退；
+- 只优化 patch embedding：它不是当前 32 层 ViT 的主要耗时；
+- ViT tensor parallel：优先使用独立 worker 水平扩展，避免小 ViT 的通信开销；
+- Stage 3 跨请求 preprocess pipeline：保持跳过，除非新的生产 profile 证明存在
+  可隐藏的 GPU 空洞，而不是请求自身最长 preprocess 决定 RT。
+
+### 14.7 执行和提交顺序
 
 ```text
-可观测性
-  -> M3VL packed varlen attention
-  -> 成本感知 batching
-  -> 流式预处理流水线
-  -> GPU row hash
-  -> cache 与路由
-  -> CUDA Graph 和预处理 kernel 后续优化
+1. token-budget packed CUDA Graph POC：已完成，性能回退，未合入
+2. 统一 weighted embedding cache：已完成
+3. worker work-debt status + FlexLB cache-aware routing
+4. mixed-size bounded lookahead A/B
+5. ViT Linear FP8 POC
 ```
 
-前三个改变行为的阶段解决当前 M3VL 路径中已经确认的最大问题。cache、路由和
-CUDA Graph 应在新成本模型和 packed 执行路径提供稳定测量结果与接口后再进行。
+每个任务单独提交，不混入 renderer、frontend thinking 或 benchmark 生成物。每项
+都使用当前 Stage 6 数据作为基线，先跑专项单测和多图不串结果测试，再跑
+448/1080p/2K 的 C1/C32/C64 benchmark，最后运行生产 smoke。
