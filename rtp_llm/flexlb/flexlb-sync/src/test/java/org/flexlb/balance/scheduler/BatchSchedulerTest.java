@@ -1,7 +1,9 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.BatchDispatchExecutor;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -233,7 +235,8 @@ class BatchSchedulerTest {
 
     @Test
     void route_failure_completes_without_batch_enqueue() throws Exception {
-        Response failure = Response.error(StrategyErrorType.NO_PREFILL_WORKER);
+        RouteResult failure = RouteResult.failure(StrategyErrorType.NO_PREFILL_WORKER,
+                StrategyErrorType.NO_PREFILL_WORKER.getErrorMsg());
         when(router.route(any(BalanceContext.class))).thenReturn(failure);
 
         Response response = scheduler.submit(context(21)).get(1, TimeUnit.SECONDS);
@@ -499,18 +502,18 @@ class BatchSchedulerTest {
         return input.toByteArray();
     }
 
-    private static Response successRoute(long requestId) {
+    private RouteResult successRoute(long requestId) {
         return successRouteWithPrefillDp(requestId, 0);
     }
 
-    private static Response successRouteWithPrefillDp(long requestId, long dpRank) {
-        Response response = new Response();
-        response.setSuccess(true);
-        response.setServerStatus(List.of(
+    private RouteResult successRouteWithPrefillDp(long requestId, long dpRank) {
+        List<ServerStatus> statuses = List.of(
                 server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, requestId, dpRank),
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, requestId)
-        ));
-        return response;
+        );
+        PrefillEndpoint prefillEp = endpointRegistry.getPrefill("10.0.0.1:8080");
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode("10.0.0.2:8081");
+        return RouteResult.success(prefillEp, decodeEp, statuses);
     }
 
     private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {

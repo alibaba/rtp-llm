@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.InflightStore;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
@@ -454,14 +455,14 @@ public abstract class FlexLBMockTestBase {
         return input.toByteArray();
     }
 
-    private Response successRoute(long requestId) {
-        Response response = new Response();
-        response.setSuccess(true);
-        response.setServerStatus(List.of(
+    private RouteResult successRoute(long requestId) {
+        List<ServerStatus> statuses = List.of(
                 serverStatus(RoleType.PREFILL, prefillIp, prefillHttpPort, prefillGrpcPort, requestId),
                 serverStatus(RoleType.DECODE, decodeIp, decodeHttpPort, decodeGrpcPort, requestId)
-        ));
-        return response;
+        );
+        PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(decodeIpPort);
+        return RouteResult.success(prefillEp, decodeEp, statuses);
     }
 
     private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {

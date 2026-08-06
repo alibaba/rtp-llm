@@ -13,6 +13,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.util.Logger;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -89,37 +90,26 @@ public class BatchScheduler extends AbstractScheduler {
                 return future;
             }
 
-            Response routeResponse = router.route(ctx);
-            if (routeResponse == null || !routeResponse.isSuccess()) {
-                if (routeResponse != null) {
-                    future.complete(routeResponse);
-                } else {
-                    completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER, null);
-                }
+            RouteResult result = router.route(ctx);
+            if (!result.isSuccess()) {
+                future.complete(result.toResponse());
                 return future;
             }
 
-            ServerStatus prefill = findServer(routeResponse, RoleType.PREFILL);
-            ServerStatus decode = findServer(routeResponse, RoleType.DECODE);
-            if (prefill == null) {
-                rollback(routeResponse);
-                completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
-                return future;
-            }
-
-            String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-            PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
+            // EP refs are already resolved by DefaultRouter — no ip:port
+            // re-lookup needed.
+            PrefillEndpoint prefillEp = result.prefillEp();
             if (prefillEp == null) {
-                rollback(routeResponse);
+                rollbackDecode(result, ctx.getRequestId());
                 completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
                 return future;
             }
 
-            DecodeEndpoint decodeEp = null;
-            if (decode != null) {
-                String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
-                decodeEp = endpointRegistry.getDecode(decodeIpPort);
-            }
+            DecodeEndpoint decodeEp = result.decodeEp();
+
+            // ServerStatus metadata (dpRank, group, debugInfo) for BatchItem.
+            ServerStatus prefill = findServer(result.serverStatusList(), RoleType.PREFILL);
+            ServerStatus decode = findServer(result.serverStatusList(), RoleType.DECODE);
 
             // Backfill EP references on the InflightItem so that TTL/cancel
             // terminal transitions can directly release EP-level resources
@@ -140,6 +130,7 @@ public class BatchScheduler extends AbstractScheduler {
                 }
             }
 
+            Response routeResponse = result.toResponse();
             BatchItem item = new BatchItem(ctx, future, routeResponse,
                     BatchItem.copyOf(prefill), BatchItem.copyOf(decode),
                     prefillEp, decodeEp, System.currentTimeMillis());
@@ -176,28 +167,13 @@ public class BatchScheduler extends AbstractScheduler {
     // ==================== Internal: resource rollback (pre-BatchItem paths) ====================
 
     /**
-     * Rollback using route response — used only in submit() early-return paths
-     * where BatchItem has not been created yet.
+     * Release the decode reservation (if any) using the direct endpoint
+     * reference from {@link RouteResult}. Called only in submit() early-return
+     * paths where BatchItem has not been created yet.
      */
-    private void rollback(Response routeResponse) {
-        if (routeResponse == null || routeResponse.getServerStatus() == null) {
-            return;
-        }
-        for (ServerStatus serverStatus : routeResponse.getServerStatus()) {
-            rollback(serverStatus);
-        }
-    }
-
-    private void rollback(ServerStatus serverStatus) {
-        if (serverStatus == null) {
-            return;
-        }
-        if (serverStatus.getRole() == RoleType.DECODE) {
-            String ipPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
-            if (ep != null) {
-                ep.release(serverStatus.getRequestId());
-            }
+    private void rollbackDecode(RouteResult result, long requestId) {
+        if (result.decodeEp() != null) {
+            result.decodeEp().release(requestId);
         }
     }
 
@@ -214,11 +190,11 @@ public class BatchScheduler extends AbstractScheduler {
 
     // ==================== Internal: static utilities ====================
 
-    private static ServerStatus findServer(Response response, RoleType roleType) {
-        if (response.getServerStatus() == null) {
+    private static ServerStatus findServer(List<ServerStatus> serverStatusList, RoleType roleType) {
+        if (serverStatusList == null) {
             return null;
         }
-        for (ServerStatus serverStatus : response.getServerStatus()) {
+        for (ServerStatus serverStatus : serverStatusList) {
             if (serverStatus != null && roleType == serverStatus.getRole()) {
                 return serverStatus;
             }

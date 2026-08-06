@@ -18,6 +18,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -75,9 +76,8 @@ class QueueSchedulerTest {
     @Test
     void routeAndComplete_shouldCompleteOnSuccess() throws Exception {
         BalanceContext ctx = createContext(1L);
-        Response successResponse = new Response();
-        successResponse.setSuccess(true);
-        when(router.route(ctx)).thenReturn(successResponse);
+        RouteResult successResult = RouteResult.success(null, null, List.of());
+        when(router.route(ctx)).thenReturn(successResult);
 
         scheduler.routeAndComplete(ctx, ctx.getFuture());
 
@@ -89,8 +89,9 @@ class QueueSchedulerTest {
     @Test
     void routeAndComplete_shouldRetryOnRetryableError() {
         BalanceContext ctx = createContext(1L);
-        Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
-        when(router.route(ctx)).thenReturn(errorResponse);
+        RouteResult errorResult = RouteResult.failure(StrategyErrorType.NO_AVAILABLE_WORKER,
+                StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
+        when(router.route(ctx)).thenReturn(errorResult);
 
         scheduler.routeAndComplete(ctx, ctx.getFuture());
 
@@ -103,8 +104,9 @@ class QueueSchedulerTest {
     @Test
     void routeAndComplete_shouldNotRetryOnNonRetryableError() throws Exception {
         BalanceContext ctx = createContext(1L);
-        Response errorResponse = Response.error(StrategyErrorType.INVALID_REQUEST);
-        when(router.route(ctx)).thenReturn(errorResponse);
+        RouteResult errorResult = RouteResult.failure(StrategyErrorType.INVALID_REQUEST,
+                StrategyErrorType.INVALID_REQUEST.getErrorMsg());
+        when(router.route(ctx)).thenReturn(errorResult);
 
         scheduler.routeAndComplete(ctx, ctx.getFuture());
 
@@ -122,8 +124,9 @@ class QueueSchedulerTest {
             ctx.incrementRetryCount();
         }
 
-        Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
-        when(router.route(ctx)).thenReturn(errorResponse);
+        RouteResult errorResult = RouteResult.failure(StrategyErrorType.NO_AVAILABLE_WORKER,
+                StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
+        when(router.route(ctx)).thenReturn(errorResult);
 
         scheduler.routeAndComplete(ctx, ctx.getFuture());
 

@@ -2,7 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.policy.GroupRoutingPolicy;
@@ -11,7 +13,6 @@ import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.RoutingResult;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -57,17 +58,20 @@ public class DefaultRouter implements Router {
      * Routes a request to appropriate worker nodes based on model requirements and role types.
      *
      * <p>This method implements the core routing logic for load balancing across different
-     * worker types (Prefill, Decode, PDFusion, VIT).
+     * worker types (Prefill, Decode, PDFusion, VIT). On success the returned
+     * {@link RouteResult} carries direct {@link PrefillEndpoint} / {@link DecodeEndpoint}
+     * references resolved from the {@link EndpointRegistry}, so downstream schedulers
+     * skip the ip:port re-lookup dance.
      *
      * @param balanceContext the context containing request information and model details
-     * @return Response containing selected server statuses or error information
+     * @return RouteResult containing endpoint references and server statuses, or error info
      */
     @Override
-    public Response route(BalanceContext balanceContext) {
+    public RouteResult route(BalanceContext balanceContext) {
         // 1. Validate request
-        Response validationResponse = validateRequest(balanceContext);
-        if (validationResponse != null) {
-            return validationResponse;
+        StrategyErrorType validationError = validateRequest(balanceContext);
+        if (validationError != null) {
+            return RouteResult.failure(validationError, validationError.getErrorMsg());
         }
 
         // 2. Get routing configuration
@@ -75,36 +79,36 @@ public class DefaultRouter implements Router {
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
         if (CollectionUtils.isEmpty(roleTypeList)) {
             Logger.warn("No worker roles registered yet (total workers: {})", workerStatus.getWorkerTotalCount());
-            return Response.error(NO_AVAILABLE_WORKER);
+            return RouteResult.failure(NO_AVAILABLE_WORKER, NO_AVAILABLE_WORKER.getErrorMsg());
         }
 
         // 3. Execute routing decision
         RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
 
-        // 4. Build response based on routing result
+        // 4. Build RouteResult based on routing outcome
         if (routingResult.success()) {
-            return buildSuccessResponse(routingResult.serverStatusList());
+            return buildSuccessRouteResult(routingResult.serverStatusList());
         }
 
         rollBackRoutingFailure(balanceContext, routingResult);
-        return buildFailureResponse(routingResult);
+        return buildFailureRouteResult(routingResult);
     }
 
     /**
      * Validates the incoming request and checks model availability.
      *
      * @param balanceContext the context to validate
-     * @return error response if validation fails, null if validation succeeds
+     * @return error type if validation fails, null if validation succeeds
      */
-    private Response validateRequest(BalanceContext balanceContext) {
+    private StrategyErrorType validateRequest(BalanceContext balanceContext) {
         if (balanceContext.getRequest() == null) {
             Logger.error("masterRequest is null");
-            return Response.error(StrategyErrorType.INVALID_REQUEST);
+            return StrategyErrorType.INVALID_REQUEST;
         }
 
         if (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS == null) {
             Logger.error("targetModelRoleWorkerStatus is null");
-            return Response.error(NO_AVAILABLE_WORKER);
+            return NO_AVAILABLE_WORKER;
         }
 
         return null;
@@ -182,21 +186,27 @@ public class DefaultRouter implements Router {
         }
     }
 
-    private Response buildSuccessResponse(List<ServerStatus> serverStatusList) {
-        Response response = new Response();
-        response.setSuccess(true);
-        response.setServerStatus(serverStatusList);
-        return response;
+    /**
+     * Build a success RouteResult by resolving endpoint references from the
+     * registry based on the strategy-selected ServerStatus list.
+     */
+    private RouteResult buildSuccessRouteResult(List<ServerStatus> serverStatusList) {
+        PrefillEndpoint prefillEp = null;
+        DecodeEndpoint decodeEp = null;
+        for (ServerStatus ss : serverStatusList) {
+            String ipPort = ss.getServerIp() + ":" + ss.getHttpPort();
+            if (ss.getRole() == RoleType.PREFILL && prefillEp == null) {
+                prefillEp = endpointRegistry.getPrefill(ipPort);
+            } else if (ss.getRole() == RoleType.DECODE && decodeEp == null) {
+                decodeEp = endpointRegistry.getDecode(ipPort);
+            }
+        }
+        return RouteResult.success(prefillEp, decodeEp, serverStatusList);
     }
 
-    private Response buildFailureResponse(RoutingResult routingResult) {
+    private RouteResult buildFailureRouteResult(RoutingResult routingResult) {
         StrategyErrorType errorType = routingResult.failedRoleType().getErrorType();
         String detailMessage = routingResult.errorMessage();
-
-        Response response = new Response();
-        response.setSuccess(false);
-        response.setCode(errorType.getErrorCode());
-        response.setErrorMessage(errorType.getErrorMsg() + ": " + detailMessage);
-        return response;
+        return RouteResult.failure(errorType, errorType.getErrorMsg() + ": " + detailMessage);
     }
 }

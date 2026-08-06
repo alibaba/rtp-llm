@@ -10,7 +10,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
@@ -147,24 +146,24 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertNotNull(response, "Response should not be null");
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_AVAILABLE_WORKER");
+        assertNotNull(result, "RouteResult should not be null");
+        assertFalse(result.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.errorType().getErrorCode(), "Error code should match NO_AVAILABLE_WORKER");
         // Note: The method logs an error but doesn't fail when status is null
     }
 
     @Test
     void should_return_response_with_no_available_worker_error_when_model_not_in_worker_status_map() {
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertNotNull(response, "Response should not be null");
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_AVAILABLE_WORKER");
+        assertNotNull(result, "RouteResult should not be null");
+        assertFalse(result.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.errorType().getErrorCode(), "Error code should match NO_AVAILABLE_WORKER");
         // Note: The method logs an error but doesn't fail when model is missing
     }
 
@@ -197,12 +196,12 @@ class DefaultRouterTest {
         when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        assertTrue(result.isSuccess(), "Response should be successful");
+        assertNotNull(result.serverStatusList(), "Server status list should not be null");
+        assertEquals(2, result.serverStatusList().size(), "Should have 2 server statuses");
     }
 
     @Test
@@ -219,12 +218,12 @@ class DefaultRouterTest {
         when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), isNull())).thenReturn(prefillServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorMessage(), "Error message should not be null");
+        assertFalse(result.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), result.errorType().getErrorCode(), "Error code should match");
+        assertNotNull(result.errorMessage(), "Error message should not be null");
     }
 
     @Test
@@ -244,12 +243,12 @@ class DefaultRouterTest {
         when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
+        assertTrue(result.isSuccess(), "Response should be successful");
+        assertNotNull(result.serverStatusList(), "Server status list should not be null");
+        assertEquals(1, result.serverStatusList().size(), "Should have 1 server status");
     }
 
     @Test
@@ -266,12 +265,12 @@ class DefaultRouterTest {
         when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_PDFUSION_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorMessage(), "Error message should not be null");
+        assertFalse(result.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_PDFUSION_WORKER.getErrorCode(), result.errorType().getErrorCode(), "Error code should match");
+        assertNotNull(result.errorMessage(), "Error message should not be null");
     }
 
     @Test
@@ -303,12 +302,12 @@ class DefaultRouterTest {
         when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        assertTrue(result.isSuccess(), "Response should be successful");
+        assertNotNull(result.serverStatusList(), "Server status list should not be null");
+        assertEquals(2, result.serverStatusList().size(), "Should have 2 server statuses");
     }
 
     @Test
@@ -338,12 +337,12 @@ class DefaultRouterTest {
         when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorMessage(), "Error message should not be null");
+        assertFalse(result.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(), result.errorType().getErrorCode(), "Error code should match");
+        assertNotNull(result.errorMessage(), "Error message should not be null");
     }
 
     @Test
@@ -352,10 +351,10 @@ class DefaultRouterTest {
         when(balanceContext.getRequest()).thenReturn(null);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertNotNull(response, "Response should not be null");
+        assertNotNull(result, "RouteResult should not be null");
     }
 
     @Test
@@ -372,11 +371,11 @@ class DefaultRouterTest {
         when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any())).thenReturn(decodeServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_DECODE_WORKER");
+        assertFalse(result.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(), result.errorType().getErrorCode(), "Error code should match NO_DECODE_WORKER");
     }
 
     @Test
@@ -410,11 +409,11 @@ class DefaultRouterTest {
                 .thenReturn(org.mockito.Mockito.mock(WorkerEndpoint.class));
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
+        assertFalse(result.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), result.errorType().getErrorCode(), "Error code should match NO_PREFILL_WORKER");
         verify(decodeStrategy).rollBack(any(WorkerEndpoint.class), anyLong());
     }
 
@@ -433,12 +432,12 @@ class DefaultRouterTest {
         when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(1, response.getServerStatus().size(), "Should have 1 server status");
+        assertTrue(result.isSuccess(), "Response should be successful");
+        assertNotNull(result.serverStatusList(), "Server status list should not be null");
+        assertEquals(1, result.serverStatusList().size(), "Should have 1 server status");
     }
 
     @Test
@@ -455,12 +454,12 @@ class DefaultRouterTest {
         when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), isNull())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertFalse(response.isSuccess(), "Response should not be successful");
-        assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(), response.getCode(), "Error code should match");
-        assertNotNull(response.getErrorMessage(), "Error message should not be null");
+        assertFalse(result.isSuccess(), "Response should not be successful");
+        assertEquals(StrategyErrorType.NO_VIT_WORKER.getErrorCode(), result.errorType().getErrorCode(), "Error code should match");
+        assertNotNull(result.errorMessage(), "Error message should not be null");
     }
 
     @Test
@@ -492,12 +491,12 @@ class DefaultRouterTest {
         when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        assertTrue(result.isSuccess(), "Response should be successful");
+        assertNotNull(result.serverStatusList(), "Server status list should not be null");
+        assertEquals(2, result.serverStatusList().size(), "Should have 2 server statuses");
     }
 
     @Test
@@ -541,12 +540,12 @@ class DefaultRouterTest {
         when(vitStrategy.select(any(BalanceContext.class), eq(RoleType.VIT), any())).thenReturn(vitServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertNotNull(response.getServerStatus(), "Server status list should not be null");
-        assertEquals(3, response.getServerStatus().size(), "Should have 3 server statuses");
+        assertTrue(result.isSuccess(), "Response should be successful");
+        assertNotNull(result.serverStatusList(), "Server status list should not be null");
+        assertEquals(3, result.serverStatusList().size(), "Should have 3 server statuses");
     }
 
     @Test
@@ -585,11 +584,11 @@ class DefaultRouterTest {
         when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"))).thenReturn(prefillServerStatus);
 
         // Execute
-        Response response = defaultRouter.route(balanceContext);
+        RouteResult result = defaultRouter.route(balanceContext);
 
         // Verify
-        assertTrue(response.isSuccess(), "Response should be successful");
-        assertEquals(2, response.getServerStatus().size(), "Should have 2 server statuses");
+        assertTrue(result.isSuccess(), "Response should be successful");
+        assertEquals(2, result.serverStatusList().size(), "Should have 2 server statuses");
         verify(decodeStrategy).select(any(BalanceContext.class), eq(RoleType.DECODE), eq("long-group"));
         verify(prefillStrategy).select(any(BalanceContext.class), eq(RoleType.PREFILL), eq("long-group"));
     }

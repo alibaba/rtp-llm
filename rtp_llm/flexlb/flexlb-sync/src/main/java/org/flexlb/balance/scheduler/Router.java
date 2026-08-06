@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Response;
 
 /**
  * Router interface - responsible for selecting appropriate worker nodes based on load balancing context.
@@ -20,8 +19,8 @@ public interface Router {
      * Route requests based on load balancing strategy and select appropriate worker nodes.
      *
      * @param balanceContext Load balancing context containing request information and available worker list
-     * @return Response containing selected worker node information
+     * @return RouteResult containing direct endpoint references and selected server statuses
      */
-    Response route(BalanceContext balanceContext);
+    RouteResult route(BalanceContext balanceContext);
 
 }

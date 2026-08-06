@@ -56,7 +56,8 @@ public class DirectScheduler extends AbstractScheduler {
      */
     protected void routeAndComplete(BalanceContext ctx, CompletableFuture<Response> future) {
         try {
-            Response response = router.route(ctx);
+            RouteResult result = router.route(ctx);
+            Response response = result.toResponse();
             onRouteResult(ctx, future, response);
         } catch (Exception e) {
             Logger.error("Failed to route request id: {}", ctx.getRequestId(), e);

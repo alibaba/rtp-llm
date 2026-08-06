@@ -1,5 +1,8 @@
 package org.flexlb.mock.grpc;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -127,10 +130,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
      * Build a routing response that points to either worker A or worker B
      * for the prefill role, and always to the shared decode worker.
      */
-    private Response buildRouteResponse(long requestId, boolean useWorkerB) {
-        Response response = new Response();
-        response.setSuccess(true);
-
+    private RouteResult buildRouteResponse(long requestId, boolean useWorkerB) {
         // Prefill: worker A or B
         ServerStatus prefill = new ServerStatus();
         prefill.setSuccess(true);
@@ -159,7 +159,10 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         decode.setGroup("test-group");
         decode.setRequestId(requestId);
 
-        response.setServerStatus(List.of(prefill, decode));
-        return response;
+        List<ServerStatus> statuses = List.of(prefill, decode);
+        String prefillIpPortStr = useWorkerB ? workerBIpPort : prefillIpPort;
+        PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPortStr);
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(decodeIpPort);
+        return RouteResult.success(prefillEp, decodeEp, statuses);
     }
 }

@@ -4,11 +4,13 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DynamicWorkerManager;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.InflightStore;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RoutingQueueReporter;
@@ -19,9 +21,12 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
@@ -77,50 +82,49 @@ class RouteServiceTest {
 
     @Test
     void should_report_recent_cache_key_once_after_queued_route_success() throws Exception {
-        Response response = successResponse();
+        RouteResult routeResult = RouteResult.success(null, null, List.of());
         flexlbConfig.setDefaultScheduleMode("QUEUE");
         lenient().when(dynamicWorkerManager.tryAcquirePermit(anyLong(), any())).thenReturn(true);
-        when(defaultRouter.route(any(BalanceContext.class))).thenReturn(response);
+        when(defaultRouter.route(any(BalanceContext.class))).thenReturn(routeResult);
         routeService.start(); // start the queue consumer workers
 
         BalanceContext balanceContext = createContext(1L);
         Response actual = routeService.route(balanceContext).get(5, TimeUnit.SECONDS);
 
-        assertSame(response, actual);
+        assertTrue(actual.isSuccess());
         assertSame(flexlbConfig, balanceContext.getConfig());
         verify(defaultRouter).route(balanceContext);
-        assertSame(response, balanceContext.getResponse());
+        assertTrue(balanceContext.getResponse().isSuccess());
         verify(recentCacheKeyTraceReporter, timeout(1000)).report(balanceContext);
     }
 
     @Test
     void should_report_recent_cache_key_once_after_direct_route_success() throws Exception {
-        Response response = successResponse();
+        RouteResult routeResult = RouteResult.success(null, null, List.of());
         flexlbConfig.setDefaultScheduleMode("DIRECT");
-        when(defaultRouter.route(any(BalanceContext.class))).thenReturn(response);
+        when(defaultRouter.route(any(BalanceContext.class))).thenReturn(routeResult);
 
         BalanceContext balanceContext = createContext(2L);
         Response actual = routeService.route(balanceContext).get(5, TimeUnit.SECONDS);
 
-        assertSame(response, actual);
+        assertTrue(actual.isSuccess());
         assertSame(flexlbConfig, balanceContext.getConfig());
         verify(defaultRouter).route(balanceContext);
-        assertSame(response, balanceContext.getResponse());
+        assertTrue(balanceContext.getResponse().isSuccess());
         verify(recentCacheKeyTraceReporter).report(balanceContext);
     }
 
     @Test
     void should_not_report_recent_cache_key_after_route_failure() throws Exception {
-        Response response = new Response();
-        response.setSuccess(false);
+        RouteResult failure = RouteResult.failure(StrategyErrorType.NO_AVAILABLE_WORKER, "test failure");
         flexlbConfig.setDefaultScheduleMode("DIRECT");
-        when(defaultRouter.route(any(BalanceContext.class))).thenReturn(response);
+        when(defaultRouter.route(any(BalanceContext.class))).thenReturn(failure);
 
         BalanceContext balanceContext = createContext(3L);
         Response actual = routeService.route(balanceContext).get(5, TimeUnit.SECONDS);
 
-        assertSame(response, actual);
-        assertSame(response, balanceContext.getResponse());
+        assertFalse(actual.isSuccess());
+        assertFalse(balanceContext.getResponse().isSuccess());
         verify(recentCacheKeyTraceReporter, never()).report(any(BalanceContext.class));
     }
 
@@ -131,11 +135,5 @@ class RouteServiceTest {
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
         return ctx;
-    }
-
-    private static Response successResponse() {
-        Response response = new Response();
-        response.setSuccess(true);
-        return response;
     }
 }
