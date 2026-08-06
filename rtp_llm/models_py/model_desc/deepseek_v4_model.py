@@ -1194,6 +1194,18 @@ class DeepSeekV4Model(GptModelBase):
         return buf[:requested]
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        from rtp_llm.models_py.modules.dsv4.moe import topk_dump
+
+        with topk_dump.forward_context(
+            is_decode_role=self._is_decode_role,
+            is_fake_stream=bool(getattr(inputs, "is_fake_stream", False)),
+            model_name=type(self).__name__,
+        ):
+            return self._forward_impl(inputs, fmha_impl)
+
+    def _forward_impl(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
         """qwen3-style dispatcher — per-arm orchestration lives in the
         prefill / decode runtime modules.
 

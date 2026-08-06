@@ -184,6 +184,15 @@ py_test(
 )
 
 py_test(
+    name = "test_mega_moe_topk_dump",
+    srcs = ["test_mega_moe_topk_dump.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_mega_moe_gate_pack",
     srcs = ["test_mega_moe_gate_pack.py"],
     deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
