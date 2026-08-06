@@ -199,6 +199,21 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
+torch::Tensor MtpExecutor::dsparkPointMassDraftProbs(const torch::Tensor& draft_tokens) const {
+    // The DSpark proposal tail is deterministic argmax, so rejection sampling
+    // must see its actual point-mass q distribution: softmax over the draft
+    // logits would be both semantically wrong (the draft never samples from
+    // it) and an avoidable full-vocabulary exp inside the propose graph.
+    RTP_LLM_CHECK_WITH_INFO(draft_tokens.dim() == 2, "dspark draft_tokens must be [B, gamma]");
+    auto ids = draft_tokens.to(torch::kInt64).unsqueeze(-1);
+    if (!ids.is_cuda()) {
+        ids = ids.to(torch::kCUDA);
+    }
+    auto q = torch::zeros({draft_tokens.size(0), draft_tokens.size(1), (int64_t)vocab_size_},
+                          torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    return q.scatter_(-1, ids, 1.0f);
+}
+
 void MtpExecutor::buildDSparkProposeOrPlaceholder(GptModelInputs&      model_input,
                                                   const torch::Tensor& anchors,
                                                   const torch::Tensor& committed_ends) {
@@ -962,11 +977,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_sample)");
         if (is_dspark_) {
-            RTP_LLM_CHECK_WITH_INFO(draft_model_output.draft_tokens.defined()
-                                        && draft_model_output.draft_probs.defined(),
-                                    "dspark draft forward did not emit draft_tokens/draft_probs");
+            RTP_LLM_CHECK_WITH_INFO(draft_model_output.draft_tokens.defined(),
+                                    "dspark draft forward did not emit draft_tokens");
             draft_sampler_output.token_ids = draft_model_output.draft_tokens;
-            draft_sampler_output.all_probs = draft_model_output.draft_probs;
+            draft_sampler_output.all_probs = dsparkPointMassDraftProbs(draft_model_output.draft_tokens);
         } else {
             fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
@@ -1528,11 +1542,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_sample)");
         if (is_dspark_) {
-            RTP_LLM_CHECK_WITH_INFO(draft_prefill_model_output.draft_tokens.defined()
-                                        && draft_prefill_model_output.draft_probs.defined(),
-                                    "dspark tail draft forward did not emit draft_tokens/draft_probs");
+            RTP_LLM_CHECK_WITH_INFO(draft_prefill_model_output.draft_tokens.defined(),
+                                    "dspark tail draft forward did not emit draft_tokens");
             draft_prefill_sampler_output.token_ids = draft_prefill_model_output.draft_tokens;
-            draft_prefill_sampler_output.all_probs = draft_prefill_model_output.draft_probs;
+            draft_prefill_sampler_output.all_probs =
+                dsparkPointMassDraftProbs(draft_prefill_model_output.draft_tokens);
         } else {
             auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;

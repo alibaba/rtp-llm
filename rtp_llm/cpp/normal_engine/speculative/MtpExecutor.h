@@ -149,6 +149,7 @@ protected:
     // Fill the DSpARK propose-call input after the commit forward. Ranks
     // without the anchors (non-root, fake streams) build placeholder shapes
     // for the subsequent broadcast/sync to fill.
+    torch::Tensor dsparkPointMassDraftProbs(const torch::Tensor& draft_tokens) const;
     void buildDSparkProposeOrPlaceholder(GptModelInputs&      model_input,
                                          const torch::Tensor& anchors,
                                          const torch::Tensor& committed_ends);

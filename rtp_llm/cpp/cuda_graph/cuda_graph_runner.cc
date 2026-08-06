@@ -584,7 +584,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         const auto& hold = graph_instances_[state.current_real_graph_seq_len].mem_hold_;
         if (hold.draft_tokens_.defined()) {
             outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
-            outputs.draft_probs  = hold.draft_probs_.slice(0, 0, state.current_batch_size).clone();
+            // The DSpark proposal is deterministic argmax: the captured graph
+            // emits tokens only and the engine reconstructs the point-mass q.
+            if (hold.draft_probs_.defined()) {
+                outputs.draft_probs = hold.draft_probs_.slice(0, 0, state.current_batch_size).clone();
+            }
         }
     } else {
         {
@@ -597,7 +601,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         const auto& hold = graph_instances_[state.current_real_graph_bs].mem_hold_;
         if (hold.draft_tokens_.defined()) {
             outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
-            outputs.draft_probs  = hold.draft_probs_.slice(0, 0, state.current_batch_size).clone();
+            // The DSpark proposal is deterministic argmax: the captured graph
+            // emits tokens only and the engine reconstructs the point-mass q.
+            if (hold.draft_probs_.defined()) {
+                outputs.draft_probs = hold.draft_probs_.slice(0, 0, state.current_batch_size).clone();
+            }
         }
     }
     // record forward done event
@@ -1028,10 +1036,16 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
             auto& hold = graph_instances_[key].mem_hold_;
             if (hold.draft_tokens_.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(outputs.draft_tokens.defined() && outputs.draft_probs.defined(),
-                                        "DSpARK CUDA graph draft outputs disappeared during capture");
+                RTP_LLM_CHECK_WITH_INFO(outputs.draft_tokens.defined(),
+                                        "DSpARK CUDA graph draft tokens disappeared during capture");
                 hold.draft_tokens_.copy_(outputs.draft_tokens);
-                hold.draft_probs_.copy_(outputs.draft_probs);
+                // The deterministic-argmax proposal emits tokens only; the
+                // engine rebuilds the point-mass q outside the graph.
+                if (hold.draft_probs_.defined()) {
+                    RTP_LLM_CHECK_WITH_INFO(outputs.draft_probs.defined(),
+                                            "DSpARK CUDA graph draft probs disappeared during capture");
+                    hold.draft_probs_.copy_(outputs.draft_probs);
+                }
             }
             graph.capture_end();
         }

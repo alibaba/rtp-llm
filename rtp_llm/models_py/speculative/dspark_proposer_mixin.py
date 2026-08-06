@@ -234,11 +234,6 @@ class DSparkProposerMixin:
         outputs.draft_tokens = torch.zeros(
             (batch_size, width), dtype=torch.int32, device=device
         )
-        outputs.draft_probs = torch.zeros(
-            (batch_size, width, self._dspark_vocab_size),
-            dtype=torch.float32,
-            device=device,
-        )
         return outputs
 
     def run_commit_step(
@@ -376,26 +371,27 @@ class DSparkProposerMixin:
             return self.dspark_empty_outputs(0, device)
 
         normalized, base_logits = self.compute_draft_logits(hidden)
-        draft_tokens, draft_probs = self._sample_sequential_markov(
-            base_logits, anchors
-        )
+        draft_tokens = self._sample_sequential_markov(base_logits, anchors)
         outputs = PyModelOutputs(normalized)
         outputs.draft_tokens = draft_tokens
-        outputs.draft_probs = draft_probs
         return outputs
 
     def _sample_sequential_markov(
         self,
         base_logits: torch.Tensor,
         anchor_ids: torch.Tensor,
-        need_probabilities: bool = True,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         """Run the left-to-right greedy Markov correction chain.
 
-        Numerics follow the reference proposer exactly: per step,
-        ``probs = softmax(base + bias)`` in fp32 and the argmax over ``probs``
-        becomes both the proposal token and the next step's Markov input.
-        No host synchronization occurs.
+        Numerics follow the reference proposer exactly: per step the argmax
+        over ``base + bias`` (softmax is monotone, so it never changes the
+        argmax) becomes both the proposal token and the next step's Markov
+        input.  No host synchronization occurs.
+
+        The proposal is deterministic, so its q distribution is the point
+        mass on the emitted token; rejection sampling receives that one-hot
+        from the engine (built C++-side) instead of a full-vocabulary
+        softmax materialized here.
         """
         if self.markov_head is None:
             raise RuntimeError("DSpark markov head is not loaded")
@@ -417,20 +413,10 @@ class DSparkProposerMixin:
 
         previous = anchor_ids
         tokens = []
-        probabilities = [] if need_probabilities else None
         for step in range(width):
             logits = base_logits[:, step] + self.markov_head.bias(previous)
-            probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-            next_token = torch.argmax(probs, dim=-1)
-            if probabilities is not None:
-                probabilities.append(probs)
+            next_token = torch.argmax(logits.float(), dim=-1)
             tokens.append(next_token.to(torch.int32))
             previous = self.map_draft_to_target(next_token)
 
-        draft_tokens = torch.stack(tokens, dim=1).contiguous()
-        draft_probs = (
-            torch.stack(probabilities, dim=1).contiguous()
-            if probabilities is not None
-            else None
-        )
-        return draft_tokens, draft_probs
+        return torch.stack(tokens, dim=1).contiguous()
