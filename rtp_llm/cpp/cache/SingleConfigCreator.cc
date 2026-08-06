@@ -51,6 +51,10 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         auto indexer_dim             = model_config.attn_config.indexer_head_dim;
         config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
         config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+        // Sized by the indexer, not by the KV heads: every attention-TP rank keeps
+        // the whole thing, so a head partition of the data block must not be
+        // applied to this region.
+        config.scale_region_is_head_partitioned = false;
     } else if (!config.use_mla && model_config.attn_config.indexer_head_dim > 0) {
         // MiniMax-M3 MSA: the sparse-attention layers maintain a BF16 indexer K
         // cache (idx_K, one head, indexer_head_dim per token). Rather than a
@@ -69,6 +73,9 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
         // (single kv_/kv_scale_ blocks) like GLM5/DSV4, so prefill-store and
         // decode-load keys/sizes match and the cache-store load completes.
         config.use_opaque_kv_cache_store = true;
+        // idx_K is a single head sized by indexer_head_dim, so unlike a real
+        // quantization scale it is identical on every attention-TP rank.
+        config.scale_region_is_head_partitioned = false;
     }
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;

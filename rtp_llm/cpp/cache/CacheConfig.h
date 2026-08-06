@@ -39,6 +39,14 @@ struct CacheConfig {
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
     bool                           disable_decode_first_malloc_device_reuse = false;
+    // True while the scale region really holds a per-KV-head quantization scale, so a
+    // head partition of the data block implies the same partition of the scale. The
+    // config creators clear it where the scale slot is instead repurposed as a
+    // head-independent side cache (MiniMax-M3 MSA parks its BF16 indexer-K cache
+    // there, and every attention-TP rank holds that in full). Read by
+    // DecodeRpcServer::loadCache to decide whether kv_scale_ takes the same
+    // partition as kv_ during a P-CP -> D-TP transfer.
+    bool                           scale_region_is_head_partitioned         = true;
 
     // Model configuration
     rtp_llm::DataType dtype;
@@ -196,6 +204,7 @@ struct CacheConfig {
         OUTPUT_FIELD(use_typed_cache_regions);
         OUTPUT_FIELD(use_opaque_kv_cache_store);
         OUTPUT_FIELD(disable_decode_first_malloc_device_reuse);
+        OUTPUT_FIELD(scale_region_is_head_partitioned);
         os << indent1 << "group_block_nums=" << rtp_llm::vectorToString(group_block_nums) << "\n";
         os << "\n";
 

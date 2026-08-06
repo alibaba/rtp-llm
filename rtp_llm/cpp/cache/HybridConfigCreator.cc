@@ -159,6 +159,9 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
         const auto indexer_dim           = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
         config.kv_scale_stride_bytes     = indexer_dim * 2 * full_spec->seq_size_per_block;
         config.use_opaque_kv_cache_store = true;
+        // See SingleConfigCreator: the scale slot now carries the head-independent
+        // MSA indexer-K cache, so it must not follow the data block's head partition.
+        config.scale_region_is_head_partitioned = false;
     }
     config.kv_scale_size_bytes = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
     config.block_size_bytes    = config.kv_block_size_bytes + config.kv_scale_size_bytes;

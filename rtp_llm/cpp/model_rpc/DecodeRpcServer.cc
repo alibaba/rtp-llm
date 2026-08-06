@@ -919,6 +919,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_size) : 0;
     const int32_t opaque_kv_partition_id =
         slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_rank) : 0;
+    // The scale block only follows the data block's head partition when it actually
+    // holds a per-head quantization scale. M3 MSA parks a head-independent indexer-K
+    // cache in that slot, and prefill stores it whole -- asking for half of it makes
+    // prefill reject the load. partition_count 1 means "the whole stored block".
+    const bool slice_opaque_scale_by_head =
+        slice_opaque_kv_by_head && cache_config.scale_region_is_head_partitioned;
+    const int32_t opaque_scale_partition_count =
+        slice_opaque_scale_by_head ? static_cast<int32_t>(decode_attn_tp_size) : (slice_opaque_kv_by_head ? 1 : 0);
+    const int32_t opaque_scale_partition_id =
+        slice_opaque_scale_by_head ? static_cast<int32_t>(decode_attn_tp_rank) : 0;
 
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
@@ -1213,9 +1223,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         if (parts.size() == 2) {
                             addBufBlock("kv_scale_" + cache_key,
                                         parts[1],
-                                        /*partition_kv_halves=*/false,
-                                        /*partition_count=*/slice_opaque_kv_by_head ? 1 : 0,
-                                        /*partition_id=*/0);
+                                        slice_opaque_scale_by_head,
+                                        opaque_scale_partition_count,
+                                        opaque_scale_partition_id);
                         }
                     } else {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 2 || parts.size() == 4,
@@ -1411,6 +1421,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                     mtp_slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_size) : 0;
                                 const int32_t mtp_opaque_kv_partition_id =
                                     mtp_slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_rank) : 0;
+                                // The draft is a plain MHA module, so its scale slot really is a
+                                // per-head quantization scale and follows the data block -- unlike
+                                // the M3 target, whose scale slot holds the MSA indexer-K cache.
+                                const bool mtp_slice_opaque_scale_by_head =
+                                    mtp_slice_opaque_kv_by_head && mtp_cache_cfg.scale_region_is_head_partitioned;
+                                const int32_t mtp_opaque_scale_partition_count =
+                                    mtp_slice_opaque_scale_by_head ? static_cast<int32_t>(decode_attn_tp_size) :
+                                                                     (mtp_slice_opaque_kv_by_head ? 1 : 0);
+                                const int32_t mtp_opaque_scale_partition_id =
+                                    mtp_slice_opaque_scale_by_head ? static_cast<int32_t>(decode_attn_tp_rank) : 0;
 
                                 auto addBufBlock = [&](const std::string& key,
                                                        const BlockInfo&   block,
@@ -1444,9 +1464,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                     if (parts.size() == 2) {
                                         addBufBlock("kv_scale_" + cache_key,
                                                     parts[1],
-                                                    /*partition_kv_halves=*/false,
-                                                    /*partition_count=*/mtp_slice_opaque_kv_by_head ? 1 : 0,
-                                                    /*partition_id=*/0);
+                                                    mtp_slice_opaque_scale_by_head,
+                                                    mtp_opaque_scale_partition_count,
+                                                    mtp_opaque_scale_partition_id);
                                     }
                                 } else {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 2 || parts.size() == 4,

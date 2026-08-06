@@ -176,6 +176,9 @@ void setupIndependentPoolSizes(CacheConfig& config, const ModelConfig& model_con
             const auto indexer_dim           = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
             kernel_scale                     = indexer_dim * 2 * spec->seq_size_per_block;
             config.use_opaque_kv_cache_store = true;
+            // See SingleConfigCreator: the scale slot now carries the head-independent
+            // MSA indexer-K cache, so it must not follow the data block's head partition.
+            config.scale_region_is_head_partitioned = false;
         }
         const size_t group_bpk                  = kernelBlocksPerKvBlockForGroup(config, gid);
         const size_t kv_stride                  = kernel_kv_stride * group_bpk;
