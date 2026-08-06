@@ -40,6 +40,13 @@ public class EngineTask<E> implements InflightEvictor.TtlTracked {
     private final AtomicLong progressBaseMs;
     private volatile boolean running;
 
+    /**
+     * Engine-reported iterate count (generated tokens so far). Refreshed on
+     * every decode observation; used by Auto-TPM victim selection to prefer
+     * shallow-progress requests. Stays 0 for prefill batch tasks.
+     */
+    private volatile long iterateCount;
+
     public EngineTask(E entry, EngineTaskPhase phase, long round, long acceptedAtMs) {
         this.entry = entry;
         this.phase = phase;
@@ -83,6 +90,10 @@ public class EngineTask<E> implements InflightEvictor.TtlTracked {
         return running;
     }
 
+    public long iterateCount() {
+        return iterateCount;
+    }
+
     /**
      * Record an observation from the current calibrate round: refresh the
      * phase and lastSeenRound, and update the progress anchor.
@@ -96,5 +107,14 @@ public class EngineTask<E> implements InflightEvictor.TtlTracked {
                 running = true;
             }
         }
+    }
+
+    /**
+     * Observation variant carrying the engine-reported iterate count
+     * (decode call sites pass {@code TaskInfo.iterateCount}).
+     */
+    public void observe(EngineTaskPhase newPhase, long round, long statusMs, long iterateCount) {
+        this.iterateCount = iterateCount;
+        observe(newPhase, round, statusMs);
     }
 }

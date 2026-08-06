@@ -54,7 +54,7 @@ class CancelMidFlightTest extends FlexLBMockTestBase {
         // Cancel mid-flight: CAS on the item, scheduler hook, engine-side RPC.
         assertTrue(item.cancel(), "cancel should win the CAS while in flight");
         item.fireOnCancel();
-        EngineRpcService.EmptyPB ack = grpcClient.cancelAsync(
+        EngineRpcService.CancelResponsePB ack = grpcClient.cancelAsync(
                 prefillIp, prefillGrpcPort,
                 EngineRpcService.CancelRequestPB.newBuilder().setRequestId(9001).build(),
                 2_000L).get(3, TimeUnit.SECONDS);
@@ -99,6 +99,10 @@ class CancelMidFlightTest extends FlexLBMockTestBase {
 
         InflightItem item = inflightStore.get("9002");
         assertNotNull(item, "terminal item remains as tombstone until TTL");
+        // The terminal transition runs in a whenComplete callback that may fire
+        // after future.get() returns — wait for it before racing the CAS.
+        awaitTrue(() -> item.state().isTerminal(), 3_000,
+                "item should reach a terminal state after the success response");
         assertFalse(item.cancel(), "cancel after completion must lose the CAS");
 
         // Successful batches are released by the engine's finished report

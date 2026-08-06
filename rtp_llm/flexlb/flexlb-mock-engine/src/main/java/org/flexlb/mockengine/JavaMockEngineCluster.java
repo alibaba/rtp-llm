@@ -512,7 +512,7 @@ public final class JavaMockEngineCluster {
 
         @Override
         public void cancel(EngineRpcService.CancelRequestPB request,
-                           StreamObserver<EngineRpcService.EmptyPB> observer) {
+                           StreamObserver<EngineRpcService.CancelResponsePB> observer) {
             long requestId = request.getRequestId();
             // Settle exactly once: removing from runningTasks claims the task
             // against the scheduled completion callback.
@@ -532,7 +532,11 @@ public final class JavaMockEngineCluster {
                 recordCancelledFinish(task);
             }
             statusVersion.incrementAndGet();
-            observer.onNext(EngineRpcService.EmptyPB.newBuilder().build());
+            // Minimal response for the new Cancel contract; reason awareness
+            // and phase/already_finished reporting land in a later stage.
+            observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
+                    .setFound(task != null)
+                    .build());
             observer.onCompleted();
         }
 

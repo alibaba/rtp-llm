@@ -426,6 +426,16 @@ enum TaskPhase {
     TASK_PHASE_RUNNING = 3;
 }
 
+// Engine-side cancel attribution. Named with the Engine* prefix because this
+// file shares the (package-less) protobuf global scope with
+// flexlb_schedule_service.proto, whose CancelReasonPB would otherwise clash.
+enum EngineCancelReasonPB {
+    ENGINE_CANCEL_REASON_UNSPECIFIED = 0;
+    ENGINE_CANCEL_REASON_USER_CANCELLED = 1;
+    ENGINE_CANCEL_REASON_PRIORITY_PREEMPTED = 2;   // Auto-TPM 优先级让位
+    ENGINE_CANCEL_REASON_ADMIN = 3;
+}
+
 message TaskInfoPB {
     int64 request_id = 1;
     reserved 2;
@@ -445,6 +455,10 @@ message TaskInfoPB {
     int64 batch_id = 11;
     TaskPhase phase = 12;
     int64 execution_time_ms = 13;
+    // Structured cancel attribution (D7): set on finished tasks terminated via
+    // the Cancel RPC so FlexLB can attribute the terminal state without
+    // string-matching error messages.
+    EngineCancelReasonPB cancel_reason = 14;
 }
 
 message UpdateWeightsRequestPB {
@@ -730,6 +744,14 @@ message FetchRequestPB {
 
 message CancelRequestPB {
     int64 request_id = 1;
+    EngineCancelReasonPB reason = 2;
+    string source = 3;  // optional: FlexLB instance id, for audit
+}
+
+message CancelResponsePB {
+    bool found = 1;
+    TaskPhase phase = 2;
+    bool already_finished = 3;
 }
 
 service RpcService {
@@ -760,7 +782,7 @@ service RpcService {
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
-    rpc Cancel(CancelRequestPB) returns (EmptyPB);
+    rpc Cancel(CancelRequestPB) returns (CancelResponsePB);
 }
 
 service MultimodalRpcService {

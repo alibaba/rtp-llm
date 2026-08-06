@@ -203,10 +203,10 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     @Override
     public void cancel(EngineRpcService.CancelRequestPB request,
-                       StreamObserver<EngineRpcService.EmptyPB> responseObserver) {
+                       StreamObserver<EngineRpcService.CancelResponsePB> responseObserver) {
         cancelledRequests.add(request);
         log.info("MockRpcService cancel: request_id={}", request.getRequestId());
-        responseObserver.onNext(EngineRpcService.EmptyPB.newBuilder().build());
+        responseObserver.onNext(EngineRpcService.CancelResponsePB.newBuilder().build());
         responseObserver.onCompleted();
     }
 }

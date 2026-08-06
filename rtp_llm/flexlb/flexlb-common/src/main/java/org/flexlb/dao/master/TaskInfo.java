@@ -35,5 +35,9 @@ public class TaskInfo {
     private TaskPhase phase;
     @JsonProperty("execution_time_ms")
     private long executionTimeMs = -1;
+    // Structured cancel attribution (D7): mirrors TaskInfoPB.cancel_reason
+    // (EngineCancelReasonPB numeric value; 2 = PRIORITY_PREEMPTED, 0 = unset).
+    @JsonProperty("cancel_reason")
+    private int cancelReason;
 
 }

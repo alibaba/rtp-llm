@@ -19,6 +19,12 @@ import java.util.Map;
 @Getter
 public enum StrategyErrorType {
 
+    // Auto-TPM preemption (42xx = non-retryable): the request was a running
+    // decode victim cancelled by the engine to make room for a strictly
+    // higher-priority request. Maps to HTTP 429 / gRPC RESOURCE_EXHAUSTED
+    // (Throttling.Aborted).
+    AUTO_TPM_PREEMPTED(4290),
+
     // connect error (42xx = non-retryable mirror of 82xx)
     CONNECT_FAILED(4202),
     CONNECT_TIMEOUT(4203),

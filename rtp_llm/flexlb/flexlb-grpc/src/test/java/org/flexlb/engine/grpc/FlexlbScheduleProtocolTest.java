@@ -26,7 +26,10 @@ class FlexlbScheduleProtocolTest {
         assertEquals("Schedule", service.findMethodByName("Schedule").getName());
         assertEquals("GetRequestState", service.findMethodByName("GetRequestState").getName());
         assertNull(EngineRpcService.GenerateInputPB.getDescriptor().findFieldByNumber(10));
-        assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(14));
+        // Auto-TPM Stage 3: field 14 is the structured cancel attribution (D7)
+        var cancelReason = EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(14);
+        assertEquals("cancel_reason", cancelReason.getName());
+        assertEquals(Descriptors.FieldDescriptor.Type.ENUM, cancelReason.getType());
         assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(15));
         assertEquals(Descriptors.FieldDescriptor.Type.STRING,
                 EngineRpcService.WorkerStatusPB.getDescriptor().findFieldByNumber(1).getType());

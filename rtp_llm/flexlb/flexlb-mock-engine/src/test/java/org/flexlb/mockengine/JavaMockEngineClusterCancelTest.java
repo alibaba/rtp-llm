@@ -259,7 +259,7 @@ class JavaMockEngineClusterCancelTest {
         return unary(observer -> service.enqueueBatch(request, observer));
     }
 
-    private static EngineRpcService.EmptyPB cancel(
+    private static EngineRpcService.CancelResponsePB cancel(
             JavaMockEngineCluster.FastRpcService service, long requestId) {
         return unary(observer -> service.cancel(
                 EngineRpcService.CancelRequestPB.newBuilder().setRequestId(requestId).build(),

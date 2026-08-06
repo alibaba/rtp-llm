@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.autotpm.PriorityRegistry;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -48,6 +49,13 @@ public class BatchScheduler extends AbstractScheduler {
     private final EndpointRegistry endpointRegistry;
     private final BatchSchedulerReporter reporter;
 
+    /**
+     * Auto-TPM requestId → priority registry. The engine does not report
+     * priority, so victim selection reads this master-side record. Entries
+     * live from InflightStore registration to future settlement.
+     */
+    private final PriorityRegistry priorityRegistry = new PriorityRegistry();
+
     public BatchScheduler(ConfigService configService,
                           Router router,
                           EndpointRegistry endpointRegistry,
@@ -88,6 +96,13 @@ public class BatchScheduler extends AbstractScheduler {
                         "duplicate request_id: " + ctx.getRequestId());
                 return future;
             }
+
+            // Auto-TPM priority bookkeeping: register right after winning the
+            // InflightStore registration; every terminal path settles the
+            // future (exactly-once), so whenComplete reliably drops the entry.
+            long requestId = ctx.getRequestId();
+            priorityRegistry.register(requestId, ctx.getPriority());
+            future.whenComplete((response, throwable) -> priorityRegistry.remove(requestId));
 
             Response routeResponse = router.route(ctx);
             if (routeResponse == null || !routeResponse.isSuccess()) {
@@ -229,6 +244,11 @@ public class BatchScheduler extends AbstractScheduler {
     }
 
     // ==================== Metrics ====================
+
+    /** Auto-TPM priority registry accessor (preemption orchestration wiring). */
+    public PriorityRegistry priorityRegistry() {
+        return priorityRegistry;
+    }
 
     /**
      * Report BATCH-specific metrics: the number of active (non-terminal)

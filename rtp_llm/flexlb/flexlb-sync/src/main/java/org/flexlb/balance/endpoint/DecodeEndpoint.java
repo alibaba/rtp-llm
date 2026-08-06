@@ -1,5 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.autotpm.PriorityRegistry;
+import org.flexlb.autotpm.VictimCandidate;
 import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.InflightItem;
 import org.flexlb.balance.scheduler.InflightStore;
@@ -213,7 +215,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
             EngineTask<RequestInflight> existing = engineTasks.get(requestId);
             if (existing != null) {
-                existing.observe(EngineTaskPhase.fromDecode(reported), round, statusMs);
+                existing.observe(EngineTaskPhase.fromDecode(reported), round, statusMs, task.getIterateCount());
                 continue;
             }
 
@@ -381,6 +383,45 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Real KV total capacity reported by the engine. */
     public long decodeKvTotal() {
         return status.getTotalKvCacheTokens().get();
+    }
+
+    // ==================== Auto-TPM (victim selection support) ====================
+
+    /**
+     * Whether the engine still tracks {@code requestId} in layer 2. Used by
+     * the preemption bounded-wait loop to poll for the victim's release
+     * (the entry disappears once calibrate processes the finished report).
+     */
+    public boolean hasEngineTask(long requestId) {
+        return engineTasks.containsKey(requestId);
+    }
+
+    /**
+     * Snapshot the RUNNING-phase layer-2 tasks as preemption candidates.
+     * Only requests with a registered priority are emitted — the engine does
+     * not report priority, so requests this master never registered (foreign
+     * traffic, non-BATCH paths) are not eligible.
+     *
+     * <p>Weakly consistent: iterates the live map without locking, which is
+     * acceptable for scheduling decisions (same stance as the other views).
+     */
+    public List<VictimCandidate> snapshotRunningCandidates(PriorityRegistry registry) {
+        List<VictimCandidate> candidates = new ArrayList<>();
+        for (Map.Entry<Long, EngineTask<RequestInflight>> entry : engineTasks.entrySet()) {
+            EngineTask<RequestInflight> task = entry.getValue();
+            if (task.phase() != EngineTaskPhase.RUNNING) {
+                continue;
+            }
+            Integer priority = registry.priorityOf(entry.getKey());
+            if (priority == null) {
+                continue;
+            }
+            // progressBaseMs freezes on the first RUNNING observation, so it
+            // doubles as the running-since anchor for the grace-period check.
+            candidates.add(new VictimCandidate(entry.getKey(), priority, task.iterateCount(),
+                    task.entry().kvTokens(), task.progressBaseMs(), ipPort()));
+        }
+        return candidates;
     }
 
     // ==================== Metrics ====================
