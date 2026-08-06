@@ -71,7 +71,6 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
 
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
         self.assertEqual(tuple(outputs.draft_tokens.shape), (2, 3))
-        self.assertEqual(tuple(outputs.draft_probs.shape), (2, 3, 17))
 
     def test_padded_graph_slot_maps_no_rows_with_prefix_sum_starts(self) -> None:
         # A graph bucket of two requests replays a one-request batch. Rows

@@ -227,9 +227,7 @@ void registerPyOpDefs(pybind11::module& m) {
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
         .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
-        .def_readwrite("draft_tokens", &PyModelOutputs::draft_tokens, "Optional [batch, gamma] DSpARK draft tokens")
-        .def_readwrite(
-            "draft_probs", &PyModelOutputs::draft_probs, "Optional [batch, gamma, vocab] DSpARK draft probabilities");
+        .def_readwrite("draft_tokens", &PyModelOutputs::draft_tokens, "Optional [batch, gamma] DSpARK draft tokens");
 }
 
 }  // namespace torch_ext

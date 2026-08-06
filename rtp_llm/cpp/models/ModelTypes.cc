@@ -11,21 +11,6 @@
 
 namespace rtp_llm {
 
-CacheStoreTensorSyncMetadata getCacheStoreTensorSyncMetadata(const GptModelInputs& inputs) {
-    CacheStoreTensorSyncMetadata metadata;
-    metadata.input_lengths_count =
-        inputs.cache_store_input_lengths.defined() ? inputs.cache_store_input_lengths.numel() : 0;
-    metadata.prefix_lengths_count =
-        inputs.cache_store_prefix_lengths.defined() ? inputs.cache_store_prefix_lengths.numel() : 0;
-    if (inputs.cache_store_input_lengths.defined() && inputs.cache_store_input_lengths.is_cuda()) {
-        metadata.device_bits |= GptModelInputDeviceBit::kDeviceBitCacheStoreInputLengths;
-    }
-    if (inputs.cache_store_prefix_lengths.defined() && inputs.cache_store_prefix_lengths.is_cuda()) {
-        metadata.device_bits |= GptModelInputDeviceBit::kDeviceBitCacheStorePrefixLengths;
-    }
-    return metadata;
-}
-
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
     shape_hints[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
@@ -81,9 +66,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
-    const auto cache_store_sync_metadata = getCacheStoreTensorSyncMetadata(inputs);
-    shape_hints[GptModelInputIndex::cacheStoreInputLengths] = cache_store_sync_metadata.input_lengths_count;
-    shape_hints[GptModelInputIndex::cacheStorePrefixLengths] = cache_store_sync_metadata.prefix_lengths_count;
 
     uint32_t device_bits = 0;
     if (inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()) {
@@ -101,7 +83,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
     }
-    device_bits |= cache_store_sync_metadata.device_bits;
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     return shape_hints;
 }
@@ -304,18 +285,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         } else {
             inputs.last_hidden_states = torch::Tensor();
         }
-        if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
-            inputs.cache_store_input_lengths =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {checkedHint(GptModelInputIndex::cacheStoreInputLengths, "cacheStoreInputLengths")},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheStoreInputLengths));
-        }
-        if (shape_hints_ptr[GptModelInputIndex::cacheStorePrefixLengths]) {
-            inputs.cache_store_prefix_lengths =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {checkedHint(GptModelInputIndex::cacheStorePrefixLengths, "cacheStorePrefixLengths")},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheStorePrefixLengths));
-        }
         if (text_tokens_mask_size) {
             inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {text_tokens_mask_size});
         }
@@ -383,12 +352,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     if (hidden_states_size) {
         collect(inputs.last_hidden_states);
-    }
-    if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
-        collect(inputs.cache_store_input_lengths);
-    }
-    if (shape_hints_ptr[GptModelInputIndex::cacheStorePrefixLengths]) {
-        collect(inputs.cache_store_prefix_lengths);
     }
 
     // Classify tensors by device type (runtime check) and calculate packed sizes.

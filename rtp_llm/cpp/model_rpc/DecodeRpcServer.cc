@@ -247,29 +247,32 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                     maga_init_params_.sp_config.gen_num_per_cycle);
         }
 
-        generate_stream->setReuseLength(generate_stream->seqLength() - 1);
-        generate_stream->setSpEditRun(false);
-        generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
-        generate_stream->setContainProposeToken(true);
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        RTP_LLM_CHECK_WITH_INFO(propose_tokens.size() >= 2,
-                                "decode rpc propose_tokens should contain target and draft token, count=%zu",
-                                propose_tokens.size());
-        generate_stream->setProposeToken(propose_tokens);
+        // A DSpark seeding handoff carries no proposal (commit-only prefill);
+        // the decode round head produces the first one, so the stream enters
+        // the engine exactly like a steady decode stream. MTP/Eagle always
+        // send target+draft tokens.
+        if (propose_tokens.size() >= 2) {
+            generate_stream->setReuseLength(generate_stream->seqLength() - 1);
+            generate_stream->setSpEditRun(false);
+            generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
+            generate_stream->setContainProposeToken(true);
+            generate_stream->setProposeToken(propose_tokens);
 
-        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->propose_step = propose_step;
-        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
-                                                torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-        memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
+            auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+            sp_output_buffer->propose_step = propose_step;
+            sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                    torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+            memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
-        auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
-        auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
+            auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+            auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
-        sp_output_buffer->tensors_holder.push_back(std::move(propose_probs_t));
-        sp_output_buffer->tensors_holder.push_back(std::move(propose_hidden_t));
-        generate_stream->setSPOutputBuffer(sp_output_buffer);
+            sp_output_buffer->tensors_holder.push_back(std::move(propose_probs_t));
+            sp_output_buffer->tensors_holder.push_back(std::move(propose_hidden_t));
+            generate_stream->setSPOutputBuffer(sp_output_buffer);
+        }
     }
 
     generate_stream->resetBeginTime(currentTimeUs());

@@ -39,6 +39,7 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+from rtp_llm.models_py.modules.dsv4.cp import take_dspark_commit_cp_ctx
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
@@ -72,8 +73,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     paged-cache injection, FlashMLA non-causal top-k indices and the
     ``mtp.*`` checkpoint weights.
 
-    Output ``draft_tokens`` and ``draft_probs`` are respectively
-    ``[B, gamma]`` and ``[B, gamma, vocab]``.
+    Output ``draft_tokens`` is ``[B, gamma]``; the rejection-sampling q is
+    reconstructed engine-side as a point mass on the emitted tokens.
     """
 
     # Draft side: carries the capture ids for the shared-buffer row-width
@@ -119,6 +120,24 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self._dspark_target_layer_ids = tuple(int(v) for v in target_layer_ids)
         self._dspark_markov_rank = int(markov_rank)
         self.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+        # Commit-side CP context: on a PD prefill worker with a sharded
+        # prefill-CP KV cache, the draft pool is byte-sliced exactly like the
+        # target's SWA pool and commit writes must go through the CP-sliced
+        # FP8 writer. Decode workers restore full-width blocks over PD and
+        # single-node deployments never slice, so this stays None there.
+        self._dspark_commit_cp_ctx = None
+        _cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
+        if (
+            _cp_cfg is not None
+            and bool(getattr(_cp_cfg, "kv_cache_sharded", False))
+            and self.tp_size > 1
+            and not self._is_decode_role
+        ):
+            self._dspark_commit_cp_ctx = SimpleNamespace(
+                cp_size=self.tp_size,
+                cp_rank=int(getattr(parallelism_config, "tp_rank", 0) or 0),
+                kv_cache_sharded=True,
+            )
 
         if self._gen_num_per_cycle <= 0:
             raise ValueError(
@@ -361,9 +380,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         """Temporarily point one draft layer's attention at this model's
         paged SWA cache and yield ``(attn, entries_per_block, pool)``.
 
-        The draft's SWA pool is window-bounded, so it is exempt from CP
-        byte-slicing (CacheConfigCreator keeps window-bounded draft modules
-        full-width) — the packed 3-D view exists in every deployment."""
+        ``entries_per_block`` is the full ring-entry domain of one block
+        (both CP slices together under a sharded prefill); ``pool`` is the
+        packed 3-D FP8 view, or None when the pool is CP byte-sliced and only
+        the raw per-rank slice exists — the writer dispatches on
+        ``attn._swa_cp_byte_sliced()`` accordingly."""
         attn = self.v4.layers[layer_idx].attn
         if int(attn.compress_ratio) != 0:
             raise RuntimeError(
@@ -372,11 +393,14 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             )
         previous_cache = attn._kv_cache
         previous_tables = attn._block_tables_by_type
+        previous_cp_ctx = attn._cp_ctx
         attn._kv_cache = self.kv_cache
         attn._block_tables_by_type = {int(SWA_KV): block_table}
+        if attn._cp_ctx is None and self._dspark_commit_cp_ctx is not None:
+            attn._cp_ctx = self._dspark_commit_cp_ctx
         try:
             attn._ensure_freqs_cis_bound()
-            entries_per_block = int(attn._pool_entries_per_block(SWA_KV))
+            entries_per_block = int(attn._swa_entries_per_block())
             pool = attn._pool_view_3d_fp8(SWA_KV)
             if entries_per_block <= 0 or pool is None:
                 raise RuntimeError(
@@ -386,6 +410,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         finally:
             attn._kv_cache = previous_cache
             attn._block_tables_by_type = previous_tables
+            attn._cp_ctx = previous_cp_ctx
 
     def _commit_layer_features(
         self,
@@ -397,16 +422,25 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table: torch.Tensor,
         tokens_per_block: int,
         batch_size: int,
+        gathered_req_ids: Optional[torch.Tensor] = None,
+        gathered_positions: Optional[torch.Tensor] = None,
     ) -> None:
         """Insert committed target features through one layer's own
         wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
-        generations carry a -1 slot and are ignored by the FP8 writer."""
+        generations carry a -1 slot and are ignored by the FP8 writer.
+
+        Under sharded-CP prefill ``main_x``/``context_positions`` are the
+        rank-local zigzag rows; the projected KV is all-gathered across the
+        CP group (proj-then-gather: the per-row wkv/RoPE projection commutes
+        with the row split, and the projected rows are an order of magnitude
+        narrower than the raw feature rows) and the write then covers the
+        full domain described by ``gathered_req_ids``/``gathered_positions``.
+        """
         with self._swa_cache_bound(layer_idx, block_table) as (
             attn,
             entries_per_block,
             pool,
         ):
-            context_rows = int(main_x.shape[0])
             safe_context_pos = context_positions.to(torch.long).clamp_min(0)
             context_freqs = attn.freqs_cis.index_select(
                 0, safe_context_pos
@@ -418,6 +452,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 int(attn.rope_head_dim),
                 eps=float(attn.eps),
             )
+            if gathered_positions is not None:
+                from rtp_llm.models_py.distributed.collective_torch import (
+                    Group,
+                    all_gather,
+                )
+
+                context_kv = all_gather(context_kv.contiguous(), group=Group.TP)
+                context_req_ids = gathered_req_ids
+                context_positions = gathered_positions
+            context_rows = int(context_positions.numel())
             context_slots = compute_swa_slot_mapping_from_positions(
                 block_table=block_table[:batch_size]
                 .to(device=main_x.device, dtype=torch.int32)
@@ -430,14 +474,82 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 tokens_per_block_for_block_table=tokens_per_block,
                 ring_entries=entries_per_block,
             )
-            decode_write_swa_fp8(
-                kv=context_kv,
-                slot_mapping=context_slots,
-                swa_pool_3d=pool,
-                bsz=context_rows,
-                q_len=1,
-                head_dim=int(attn.head_dim),
+            if attn._swa_cp_byte_sliced():
+                # Sharded prefill: same full-domain slots, but each rank owns
+                # only its byte slice of every block — route through the
+                # target pool's CP-sliced FP8 writer (used by the target's
+                # own SWA layers) instead of the plain 3-D writer.
+                from rtp_llm.models_py.modules.dsv4.fp8 import (
+                    _swa_kv_insert_triton as insert_ops,
+                )
+
+                compaction = attn._build_swa_cp_byte_compaction(
+                    context_slots,
+                    full_entries_per_block=entries_per_block,
+                    validation_site=f"dspark.commit.layer_{layer_idx}",
+                    negative_mode="skip_minus_one",
+                )
+                if compaction is None:
+                    raise RuntimeError(
+                        f"DSpark layer {layer_idx}: CP-sliced slot compaction "
+                        "is unavailable"
+                    )
+                insert_ops.quantize_and_insert_k_cache_cp_byte_sliced(
+                    context_kv.reshape(-1, int(attn.head_dim)).to(torch.bfloat16),
+                    attn._pool_raw_u8(SWA_KV),
+                    context_slots,
+                    full_entries_per_block=entries_per_block,
+                    cp_rank=int(attn._cp_ctx.cp_rank),
+                    cp_size=int(attn._cp_ctx.cp_size),
+                    compaction=compaction,
+                )
+            else:
+                decode_write_swa_fp8(
+                    kv=context_kv,
+                    slot_mapping=context_slots,
+                    swa_pool_3d=pool,
+                    bsz=context_rows,
+                    q_len=1,
+                    head_dim=int(attn.head_dim),
+                )
+
+    def map_commit_rows(
+        self,
+        starts: torch.Tensor,
+        lengths: torch.Tensor,
+        committed_ends: torch.Tensor,
+        row_count: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Sharded-CP prefill hands the commit the target's rank-local zigzag
+        rows, so their (request, position) map comes from the CPContext the
+        target prefill just published — the packed ``starts``/``lengths``
+        layout only describes the non-CP row order."""
+        if self._dspark_commit_cp_ctx is None:
+            return super().map_commit_rows(starts, lengths, committed_ends, row_count)
+        cp_ctx = take_dspark_commit_cp_ctx()
+        if cp_ctx is None:
+            raise RuntimeError(
+                "DSpark sharded-CP commit expects the CPContext published by "
+                "the target prefill forward; none is pending"
             )
+        positions = cp_ctx.global_positions
+        if int(positions.numel()) != int(row_count):
+            raise RuntimeError(
+                "DSpark sharded-CP commit row mismatch: buffer supplied "
+                f"{row_count} rank-local rows, CPContext maps "
+                f"{int(positions.numel())}"
+            )
+        valid = cp_ctx.local_is_real.to(positions.device)
+        req = cp_ctx.req_id_per_token
+        if req is None:
+            req = torch.zeros_like(valid, dtype=torch.int32)
+        req32 = req.to(device=positions.device, dtype=torch.int32)
+        pos32 = positions.to(torch.int32)
+        # Padding slots must never reach the ring: -1 rows are skipped by the
+        # slot mapping / FP8 writer on every rank after the gather.
+        req32 = torch.where(valid, req32, torch.full_like(req32, -1))
+        pos32 = torch.where(valid, pos32, torch.full_like(pos32, -1))
+        return req32.contiguous(), pos32.contiguous()
 
     def commit_feature_rows(
         self,
@@ -458,6 +570,22 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
         )
+        gathered_req_ids: Optional[torch.Tensor] = None
+        gathered_positions: Optional[torch.Tensor] = None
+        if self._dspark_commit_cp_ctx is not None:
+            # Proj-then-gather: the row map is gathered once here; each
+            # layer's projected KV is gathered inside _commit_layer_features.
+            from rtp_llm.models_py.distributed.collective_torch import (
+                Group,
+                all_gather,
+            )
+
+            gathered_req_ids = all_gather(
+                context_req_ids.contiguous(), group=Group.TP
+            )
+            gathered_positions = all_gather(
+                context_positions.contiguous(), group=Group.TP
+            )
         for layer_idx in range(len(self.v4.layers)):
             self._commit_layer_features(
                 layer_idx,
@@ -468,6 +596,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 block_table,
                 tokens_per_block,
                 batch_size,
+                gathered_req_ids=gathered_req_ids,
+                gathered_positions=gathered_positions,
             )
             # PD-separated prefill publishes each committed draft-layer cache
             # from the commit call: the published range is exactly the

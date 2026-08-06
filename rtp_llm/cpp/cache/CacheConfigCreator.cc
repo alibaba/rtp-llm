@@ -187,23 +187,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                bool                               is_eagle) {
     CacheConfig score_config = CacheConfigCreator::createBasicConfig(
         score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle);
-    // A draft module whose layers are all sliding-window attention keeps a
-    // window-bounded KV ring: its pool is O(window x concurrency) regardless
-    // of context length, so CP byte-slicing buys no memory and only
-    // complicates feature injection. Keep such pools full-width on every
-    // rank; context-sized draft modules (e.g. MTP's full layer) keep the
-    // sharded layout. Both roles evaluate the same predicate from the model
-    // config, so prefill and decode agree on the module's layout.
-    const auto& propose_ratios = propose_model_config.attn_config.layer_compress_ratios;
-    const bool  propose_window_bounded =
-        !propose_ratios.empty()
-        && std::all_of(propose_ratios.begin(), propose_ratios.end(), [](int ratio) { return ratio == 0; });
-    ParallelismConfig propose_parallelism = parallelism_config;
-    if (propose_window_bounded) {
-        propose_parallelism.prefill_cp_config.kv_cache_sharded = false;
-    }
     CacheConfig propose_config = CacheConfigCreator::createBasicConfig(
-        propose_model_config, propose_parallelism, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle);
+        propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle);
 
     if (kv_cache_config.kernel_seq_size_per_block > 0) {
         const size_t kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);

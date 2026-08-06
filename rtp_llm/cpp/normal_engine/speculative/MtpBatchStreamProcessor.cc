@@ -133,27 +133,25 @@ torch::Tensor pickOneStepTargetLastToken(const GenerateStreamPtr& stream) {
     return columnAsFlat(sp_output_buffer->tokens, 0);
 }
 
-torch::Tensor pickDSparkProposeRow(const GenerateStreamPtr& stream, int64_t propose_step) {
-    torch::Tensor row = stream->getProposeTokensGpu();
-    if (!row.defined()) {
-        auto sp_output_buffer = stream->getSPOutputBuffer();
-        if (sp_output_buffer) {
-            row = sp_output_buffer->propose_tokens_gpu;
-            if (!row.defined() && sp_output_buffer->tokens.defined()) {
-                row = sp_output_buffer->tokens;
-            }
-        }
+// DSpark anchor: the stream's newest committed token. Steady streams read the
+// per-round GPU accept state; a fresh stream (first round after PD handoff)
+// falls back to host token ids, where the handoff wrote the first generated
+// token. The SPOutputBuffer is deliberately not consulted: prepareStreams
+// zero-initializes it for dspark streams, so its content is noise here.
+torch::Tensor dsparkNewestToken(const GenerateStreamPtr& stream) {
+    const auto& accept_tokens = stream->getAcceptTokensGpu();
+    const auto& accept_len    = stream->getAcceptLenGpu();
+    if (accept_tokens.defined() && accept_tokens.is_cuda() && accept_len.defined() && accept_len.is_cuda()) {
+        auto idx_t = (accept_len - 1).to(torch::kLong);
+        return accept_tokens.squeeze(0).index_select(/*dim=*/0, idx_t);
     }
-    if (!row.defined()) {
-        return torch::Tensor();
+    if (stream->isFakeStream()) {
+        return torch::zeros({1}, cudaInt32Options());
     }
-    row = row.reshape({-1});
-    // PD side channels store {anchor, p1..p_gamma}; device state stores only
-    // the proposal row. Accept both forms at this boundary.
-    if (row.numel() == propose_step + 1) {
-        row = row.slice(0, 1);
-    }
-    return row;
+    return stream->completeTokenIds()
+        .index({0, static_cast<int64_t>(stream->seqLength()) - 1})
+        .reshape({1})
+        .to(torch::kInt32);
 }
 
 torch::Tensor pickOneStepDraftToken(const GenerateStreamPtr& stream) {
@@ -748,22 +746,19 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) 
 
 void MtpBatchStreamProcessor::updatePrefillPostDSparkCommitInput(GptModelInputs&      model_input,
                                                                  const SamplerOutput& sampler_output,
-                                                                 torch::Tensor&       anchors_out,
-                                                                 torch::Tensor&       committed_ends_out,
                                                                  TensorHolder&        host_holder) {
     // The commit call keeps the target's own incremental-prefill geometry:
     // combo = prompt suffix tokens, input_lengths = suffix rows,
     // prefix_lengths = reused prefix, feature rows already loaded into
-    // last_hidden_states by the shared MTP buffer override (or the CP
-    // bridge). CacheStore keys derive from these standard fields, which
-    // describe exactly the committed prompt — no override channel needed.
+    // last_hidden_states by the shared MTP buffer override (rank-local rows
+    // under CP; the draft commit gathers only the projected KV). CacheStore
+    // keys derive from these standard fields, which describe exactly the
+    // committed prompt — no override channel needed.
     RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark draft width must be positive");
     RTP_LLM_CHECK_WITH_INFO(model_input.last_hidden_states.defined(),
                             "dspark prefill: target MTP hidden buffer did not provide aux features");
-    anchors_out         = toCudaInt32(lastColumnAsFlat(sampler_output.token_ids), host_holder);
     auto suffix_lengths = toCudaInt32(model_input.input_lengths, host_holder);
     auto reuse_lengths  = toCudaInt32(model_input.prefix_lengths, host_holder);
-    committed_ends_out  = reuse_lengths + suffix_lengths;
 }
 
 void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model_input,
@@ -785,38 +780,65 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
     model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
 }
 
+void MtpBatchStreamProcessor::buildDSparkProposeInputFromStreams(const StreamGroups& stream_groups,
+                                                                 GptModelInputs&     model_input,
+                                                                 TensorHolder&       host_holder) {
+    const int64_t batch_size = static_cast<int64_t>(stream_groups.size());
+    if (batch_size == 0) {
+        return;
+    }
+    // Round-head propose: the anchor is the last accepted token and the
+    // committed end is the current committed length — the exact per-stream
+    // state the verify input reads. A freshly handed-over PD stream carries
+    // its first generated token and prompt length in the same fields, so new
+    // and old streams take one identical path here.
+    std::vector<torch::Tensor> anchors;
+    std::vector<torch::Tensor> next_seq_lengths;
+    anchors.reserve(batch_size);
+    next_seq_lengths.reserve(batch_size);
+    bool have_all_next_seq_lengths = true;
+    for (const auto& stream : stream_groups.allStreams()) {
+        anchors.push_back(toCudaInt32(dsparkNewestToken(stream), host_holder).reshape({1}));
+        const auto& next_seq_len = stream->getNextSeqLenGpu();
+        if (next_seq_len.defined() && next_seq_len.is_cuda()) {
+            next_seq_lengths.push_back(next_seq_len.reshape({1}));
+        } else {
+            have_all_next_seq_lengths = false;
+        }
+    }
+    auto          anchors_cat = torch::cat(anchors, 0);
+    torch::Tensor committed_ends;
+    if (have_all_next_seq_lengths && static_cast<int64_t>(next_seq_lengths.size()) == batch_size) {
+        committed_ends = (torch::cat(next_seq_lengths, 0) - 1).to(torch::kInt32);
+    } else {
+        committed_ends = toCudaInt32(model_input.sequence_lengths, host_holder).clone();
+    }
+    buildDSparkProposeInput(model_input, anchors_cat, committed_ends, host_holder);
+}
+
 void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
                                                             GptModelInputs&     model_input,
+                                                            const torch::Tensor& proposals,
                                                             TensorHolder&       host_holder) {
     const int64_t batch_size = static_cast<int64_t>(stream_groups.size());
     if (batch_size == 0) {
         return;
     }
 
+    RTP_LLM_CHECK_WITH_INFO(proposals.defined() && proposals.dim() == 2 && proposals.size(0) == batch_size
+                                && proposals.size(1) == propose_step_,
+                            "dspark verify: round-head proposals must be [%ld, %d]",
+                            batch_size,
+                            propose_step_);
+
     std::vector<torch::Tensor> anchors;
-    std::vector<torch::Tensor> proposal_rows;
     std::vector<torch::Tensor> next_seq_lengths;
     anchors.reserve(batch_size);
-    proposal_rows.reserve(batch_size);
     next_seq_lengths.reserve(batch_size);
     bool have_all_next_seq_lengths = true;
 
     for (const auto& stream : stream_groups.allStreams()) {
-        auto anchor = pickOneStepTargetLastToken(stream);
-        auto row    = pickDSparkProposeRow(stream, propose_step_);
-        RTP_LLM_CHECK_WITH_INFO(anchor.defined(),
-                                "dspark verify: anchor missing for stream %ld",
-                                stream->streamId());
-        if (stream->isFakeStream() && (!row.defined() || row.numel() != propose_step_)) {
-            row = torch::zeros({propose_step_}, cudaInt32Options());
-        }
-        RTP_LLM_CHECK_WITH_INFO(row.defined() && row.numel() == propose_step_,
-                                "dspark verify: proposal width %ld != fixed gamma %d for stream %ld",
-                                row.defined() ? row.numel() : -1,
-                                propose_step_,
-                                stream->streamId());
-        anchors.push_back(toCudaInt32(anchor, host_holder));
-        proposal_rows.push_back(toCudaInt32(row, host_holder));
+        anchors.push_back(toCudaInt32(dsparkNewestToken(stream), host_holder).reshape({1}));
 
         const auto& next_seq_len = stream->getNextSeqLenGpu();
         if (next_seq_len.defined() && next_seq_len.is_cuda()) {
@@ -827,8 +849,7 @@ void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& 
     }
 
     auto anchor_col = torch::cat(anchors, 0).reshape({batch_size, 1});
-    auto proposals  = torch::stack(proposal_rows, 0).reshape({batch_size, propose_step_});
-    auto verify     = torch::cat({anchor_col, proposals}, 1).reshape({-1});
+    auto verify     = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
     if (have_all_next_seq_lengths && static_cast<int64_t>(next_seq_lengths.size()) == batch_size) {
         model_input.prefix_lengths = (torch::cat(next_seq_lengths, 0) - 1).to(torch::kInt32);
     } else {
@@ -837,43 +858,11 @@ void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& 
     setVerifyPairInputs(model_input, std::move(verify), batch_size, propose_step_ + 1, host_holder);
 }
 
-void MtpBatchStreamProcessor::updateDSparkDraftSamplerOutput(const StreamGroups& stream_groups,
-                                                             SamplerOutput&      draft_sampler_output,
-                                                             torch::Tensor&      draft_token_probs_d_t,
-                                                             TensorHolder&       host_holder) {
-    std::vector<torch::Tensor> token_rows;
-    std::vector<torch::Tensor> prob_rows;
-    token_rows.reserve(stream_groups.size());
-    prob_rows.reserve(stream_groups.size());
-
-    for (const auto& stream : stream_groups.allStreams()) {
-        auto row = pickDSparkProposeRow(stream, propose_step_);
-        RTP_LLM_CHECK_WITH_INFO(row.defined() && row.numel() == propose_step_,
-                                "dspark sampler: proposal row missing for stream %ld",
-                                stream->streamId());
-        token_rows.push_back(toCudaInt32(row, host_holder));
-
-        auto        sp_output = stream->getSPOutputBuffer();
-        const auto& dev_probs = stream->getDraftAllProbsGpu();
-        auto probs = dev_probs.defined() ? dev_probs : (sp_output ? sp_output->all_probs : torch::Tensor());
-        RTP_LLM_CHECK_WITH_INFO(probs.defined() && probs.dim() == 3 && probs.size(1) == propose_step_,
-                                "dspark sampler: draft_probs must be [1, gamma, vocab] for stream %ld",
-                                stream->streamId());
-        prob_rows.push_back(probs);
-    }
-
-    draft_sampler_output.token_ids = torch::stack(token_rows, 0).to(torch::kInt32);
-    draft_token_probs_d_t          = torch::cat(prob_rows, 0).contiguous();
-    draft_sampler_output.all_probs = draft_token_probs_d_t;
-}
-
 void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(
     GptModelInputs&                              model_input,
     const torch::Tensor&                         target_features,
     const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
     size_t                                       batch_size,
-    torch::Tensor&                               anchors_out,
-    torch::Tensor&                               committed_ends_out,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
     const int64_t verify_width = propose_step_ + 1;
@@ -887,7 +876,6 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(
     auto accept_tokens = toCudaInt32(speculative_sampler_output.accept_tokens, host_holder)
                              .reshape({static_cast<int64_t>(batch_size), verify_width});
     auto anchor_indexes = (accept_len.to(torch::kInt64) - 1).reshape({static_cast<int64_t>(batch_size), 1});
-    anchors_out = accept_tokens.gather(1, anchor_indexes).reshape({static_cast<int64_t>(batch_size)});
 
     RTP_LLM_CHECK_WITH_INFO(target_features.size(0) == static_cast<int64_t>(batch_size) * verify_width,
                             "dspark decode tail: aux rows %ld != batch*verify_width %ld",
@@ -907,7 +895,6 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(
     // the verify step built them (setVerifyPairInputs): the dense commit call
     // IS the verify geometry.
     auto old_prefix            = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();
-    committed_ends_out         = old_prefix + accept_len;
     model_input.prefix_lengths = old_prefix;
 }
 

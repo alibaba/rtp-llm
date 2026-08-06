@@ -814,21 +814,20 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
         torch::tensor({10, 101, 20, 202}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
             .reshape({2, 2});
 
-    TensorHolder  host_holder;
-    torch::Tensor anchors;
-    torch::Tensor committed_ends;
+    TensorHolder host_holder;
     model_input.last_hidden_states = target_features;
-    processor.updatePrefillPostDSparkCommitInput(
-        model_input, sampler_output, anchors, committed_ends, host_holder);
+    processor.updatePrefillPostDSparkCommitInput(model_input, sampler_output, host_holder);
 
     // The commit call keeps the target's own incremental-prefill geometry.
     EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{7, 4}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ(5, model_input.last_hidden_states.size(0));
     EXPECT_EQ(12, model_input.last_hidden_states.size(1));
-    EXPECT_EQ((std::vector<int32_t>{101, 202}), toVec<int32_t>(anchors));
-    EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(committed_ends));
 
+    // Anchors / committed ends now come from stream state at the decode round
+    // head (buildDSparkProposeInputFromStreams); feed equivalent values here.
+    torch::Tensor anchors        = torch::tensor({101, 202}, torch::kInt32);
+    torch::Tensor committed_ends = torch::tensor({10, 6}, torch::kInt32);
     processor.buildDSparkProposeInput(model_input, anchors, committed_ends, host_holder);
 
     EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, 202, mask_id, mask_id}),
@@ -872,12 +871,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillCacheStoreUsesCommittedProm
         {static_cast<int64_t>(prompt_lengths.size()), 2},
         torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
-    TensorHolder  host_holder;
-    torch::Tensor anchors;
-    torch::Tensor committed_ends;
+    TensorHolder host_holder;
     model_input.last_hidden_states = target_features;
-    processor.updatePrefillPostDSparkCommitInput(
-        model_input, sampler_output, anchors, committed_ends, host_holder);
+    processor.updatePrefillPostDSparkCommitInput(model_input, sampler_output, host_holder);
 
     // CacheStore keys derive from the commit call's standard fields, which
     // describe exactly the committed prompt: the speculative gamma rows live

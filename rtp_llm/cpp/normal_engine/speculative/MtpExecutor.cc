@@ -214,22 +214,6 @@ torch::Tensor MtpExecutor::dsparkPointMassDraftProbs(const torch::Tensor& draft_
     return q.scatter_(-1, ids, 1.0f);
 }
 
-void MtpExecutor::buildDSparkProposeOrPlaceholder(GptModelInputs&      model_input,
-                                                  const torch::Tensor& anchors,
-                                                  const torch::Tensor& committed_ends) {
-    if (anchors.defined()) {
-        batch_stream_processor_->buildDSparkProposeInput(model_input, anchors, committed_ends, buffer_holder_);
-        return;
-    }
-    const auto    cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    const int64_t batch    = model_input.input_lengths.numel();
-    model_input.combo_tokens       = torch::empty({batch * static_cast<int64_t>(propose_step_)}, cuda_i32);
-    model_input.last_hidden_states = torch::Tensor();
-    model_input.prefix_lengths     = torch::empty({batch}, cuda_i32);
-    model_input.input_lengths      = torch::empty({batch}, cuda_i32);
-    model_input.lm_output_indexes  = torch::empty({batch}, cuda_i32);
-}
-
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                                        ModelBase&      source,
                                                        bool            request_actual_rows) {
@@ -300,8 +284,6 @@ void MtpExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const cha
     to_cuda(model_input.prefix_lengths, "prefix_lengths");
     to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
-    to_cuda(model_input.cache_store_input_lengths, "cache_store_input_lengths");
-    to_cuda(model_input.cache_store_prefix_lengths, "cache_store_prefix_lengths");
     checkModelInputsOnCuda(model_input, tag);
 }
 
@@ -326,8 +308,6 @@ void MtpExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, cons
     check(model_input.prefix_lengths, "prefix_lengths");
     check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     check(model_input.lm_output_indexes, "lm_output_indexes");
-    check(model_input.cache_store_input_lengths, "cache_store_input_lengths");
-    check(model_input.cache_store_prefix_lengths, "cache_store_prefix_lengths");
     RTP_LLM_LOG_DEBUG("[mtp-device-input] %s metadata tensors are CUDA", tag);
 }
 
@@ -804,9 +784,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     SamplerOutput   draft_sampler_output;
     torch::Tensor   draft_last_hidden_states;
 
-    // placeholder for some tensors
-    torch::Tensor                      draft_probs;
-    torch::Tensor                      draft_token_ids;
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
     int64_t                            model_forward_us = 0;
 
@@ -870,8 +847,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     // target model sample
     // DSpARK: filled by the commit-input update, consumed by the propose call.
-    torch::Tensor dspark_seed_anchors;
-    torch::Tensor dspark_seed_committed_ends;
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
         if (model_input.is_fake_stream) {
@@ -881,7 +856,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                     torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
                 maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
                 batch_stream_processor_->updatePrefillPostDSparkCommitInput(
-                    model_input, sampler_output, dspark_seed_anchors, dspark_seed_committed_ends, buffer_holder_);
+                    model_input, sampler_output, buffer_holder_);
             } else {
                 model_input.last_hidden_states = model_output.all_hidden_states;
             }
@@ -900,17 +875,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.input_lengths = saved_input_lengths;
             }
             if (is_dspark_) {
-                // Under (sharded-only) CP the target restored a global-order
-                // feature copy on every rank during its forward; each rank
-                // commits its own byte slice from the full values. Non-CP
-                // loads the buffer view via the shared MTP override.
-                if (cp_enabled) {
-                    model_input.last_hidden_states = model_->getDsparkGatheredPrefillFeatures();
-                } else {
-                    maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
-                }
+                // Same shared-MTP-buffer reload as MTP: under CP the buffer
+                // holds the rank-local zigzag rows; the draft commit projects
+                // them locally and all-gathers the projected KV (Python side)
+                // instead of gathering the wide feature rows here.
+                maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
                 batch_stream_processor_->updatePrefillPostDSparkCommitInput(
-                    model_input, sampler_output, dspark_seed_anchors, dspark_seed_committed_ends, buffer_holder_);
+                    model_input, sampler_output, buffer_holder_);
             } else {
                 batch_stream_processor_->updatePrefillPostDraftModelInput(
                     model_input, model_output, sampler_output, buffer_holder_);
@@ -921,22 +892,18 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
-        // Under prefill CP the hidden rows are re-derivable on every rank —
-        // MTP reloads the rank-local pre-hc residual from the Python MTP
-        // buffer (the CP input processor slices it with the same zigzag plan
-        // as combo_tokens), and the DSpARK commit reloads the CP-gathered
-        // feature copy each rank restored during the target forward. Avoid
-        // broadcasting the large tensor in both cases.
-        if (cp_enabled) {
+        // Skip broadcasting the large hidden tensor whenever every rank can
+        // rebind it locally from the shared MTP hidden buffer below: always
+        // under CP (the input processor slices the buffer with the same
+        // zigzag plan as combo_tokens), and for DSpARK also without CP — its
+        // target writes the buffer on every TP rank, the same invariant the
+        // decode path hard-asserts. Non-CP MTP keeps the broadcast: legacy
+        // MTP models without the Python-side buffer rely on it and the
+        // override below is a no-op for them.
+        if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = torch::Tensor();
         }
         tpSyncModelInputs(model_input, parallelism_config_);
-        if (cp_enabled && is_dspark_) {
-            model_input.last_hidden_states = model_->getDsparkGatheredPrefillFeatures();
-            RTP_LLM_CHECK_WITH_INFO(model_input.last_hidden_states.defined()
-                                        && model_input.last_hidden_states.numel() > 0,
-                                    "DSpARK CP prefill commit requires gathered target features");
-        }
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
@@ -944,19 +911,24 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         // Source = main (just ran prefill; its pre-hc buffer is current).
-        if (!is_dspark_) {
-            maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
-        }
+        // MTP and DSpARK reload identically: under CP the buffer holds the
+        // rank-local zigzag rows and the DSpARK commit all-gathers only the
+        // projected per-layer KV before its byte-sliced ring write.
+        maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
         if (is_dspark_) {
-            // Commit: prompt-suffix feature rows into the draft feature KV
-            // (the call keeps the target's own incremental-prefill geometry;
-            // output intentionally unused), then the fixed-width propose
-            // block against the committed KV.
+            // Seeding = commit only: prompt-suffix feature rows into the
+            // draft feature KV (the call keeps the target's own
+            // incremental-prefill geometry; output intentionally unused).
+            // Proposals are produced exclusively at the decode round head —
+            // this worker's ring may be CP byte-sliced and is never read by
+            // a propose block. The PD handoff carries a zero placeholder in
+            // the legacy proposal slot purely to keep the wire format; the
+            // decode side never reads it.
             (void)draft_model_->forward(model_input);
-            buildDSparkProposeOrPlaceholder(model_input, dspark_seed_anchors, dspark_seed_committed_ends);
-            tpSyncModelInputs(model_input, parallelism_config_);
+            draft_model_output = GptModelOutputs();
+        } else {
+            draft_model_output = std::move(draft_model_->forward(model_input));
         }
-        draft_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -977,10 +949,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_sample)");
         if (is_dspark_) {
-            RTP_LLM_CHECK_WITH_INFO(draft_model_output.draft_tokens.defined(),
-                                    "dspark draft forward did not emit draft_tokens");
-            draft_sampler_output.token_ids = draft_model_output.draft_tokens;
-            draft_sampler_output.all_probs = dsparkPointMassDraftProbs(draft_model_output.draft_tokens);
+            // Seeding is commit-only: there is no proposal to sample. The
+            // decode worker produces the first proposal at its round head.
         } else {
             fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
@@ -1215,8 +1185,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor              draft_token_ids_t;
     torch::Tensor              spec_token_ids_t;
     // DSpARK: filled by the commit-input update, consumed by the propose call.
-    torch::Tensor              dspark_anchors;
-    torch::Tensor              dspark_committed_ends;
     std::vector<torch::Tensor> draft_probs_list;
     torch::Event               accept_len_ready_event = cuda_graph::makeGraphEvent();
     int64_t                    model_forward_us       = 0;
@@ -1257,11 +1225,47 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // TODO(yinzhi): consider beam search & lora
 
+    // DSpARK round head: the proposal for THIS round is produced here, from
+    // the draft ring as of the previous round's commit. The propose input
+    // (anchor = last accepted token, committed_end = committed length) is
+    // exactly the state the verify input reads, so a freshly handed-over PD
+    // stream needs no special case — its first proposal is produced on its
+    // first decode round. The prefill worker no longer proposes at all.
+    torch::Tensor dspark_round_proposals;
+    if (is_dspark_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dspark_round_head_propose)");
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        // Run on a shallow copy: the propose call overwrites the token/length
+        // and draft cache-geometry fields, while the verify flow below must
+        // see the untouched target-side gather output.
+        GptModelInputs propose_input = model_input;
+        if (isTpRank0()) {
+            batch_stream_processor_->buildDSparkProposeInputFromStreams(stream_groups, propose_input, buffer_holder_);
+            ensureModelInputsOnCuda(propose_input, "decode.dspark_round_head_propose");
+        }
+        tpSyncModelInputs(propose_input, parallelism_config_);
+        if (propose_input.skip_run) {
+            return absl::OkStatus();
+        }
+        const auto& mtp_cache_cfg             = cache_manager_->getMTPModuleCacheConfig(0);
+        propose_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
+        propose_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
+        propose_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+        auto propose_output                   = runDraftPrefillForward(propose_input);
+        RTP_LLM_CHECK_WITH_INFO(propose_output.draft_tokens.defined(),
+                                "dspark round-head propose did not emit draft_tokens");
+        dspark_round_proposals         = propose_output.draft_tokens;
+        draft_sampler_output.token_ids = dspark_round_proposals;
+        draft_sampler_output.all_probs = dsparkPointMassDraftProbs(dspark_round_proposals);
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_decode_input_and_tp_sync)");
         if (isTpRank0()) {
             if (is_dspark_) {
-                batch_stream_processor_->prepareDSparkVerifyModelInput(stream_groups, model_input, buffer_holder_);
+                batch_stream_processor_->prepareDSparkVerifyModelInput(
+                    stream_groups, model_input, dspark_round_proposals, buffer_holder_);
             } else if (propose_step_ == 1) {
                 batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input, buffer_holder_);
             } else {
@@ -1367,8 +1371,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
         if (!model_input.is_fake_stream) {
             if (is_dspark_) {
-                batch_stream_processor_->updateDSparkDraftSamplerOutput(
-                    stream_groups, draft_sampler_output, draft_token_probs_d_t, buffer_holder_);
+                // Round-head propose already populated draft_sampler_output.
             } else if (propose_step_ == 1) {
                 batch_stream_processor_->updateOneStepDraftSamplerOutput(
                     stream_groups, draft_sampler_output, draft_token_probs_d_t, buffer_holder_);
@@ -1471,8 +1474,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                                        target_features,
                                                                        speculative_sampler_output,
                                                                        batch_size,
-                                                                       dspark_anchors,
-                                                                       dspark_committed_ends,
                                                                        hidden_states_d_t,
                                                                        buffer_holder_);
         } else {
@@ -1520,14 +1521,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        if (is_dspark_) {
-            // Commit: dense verify rows into the draft feature KV
-            // (incremental-prefill shape; output intentionally unused), then
-            // the fixed-width propose block against the committed KV.
-            (void)runDraftPrefillForward(model_input);
-            buildDSparkProposeOrPlaceholder(model_input, dspark_anchors, dspark_committed_ends);
-            broadcastPostRejectionInputs(model_input);
-        }
+        // DSpARK tail = commit only: dense verify rows into the draft
+        // feature KV (incremental-prefill shape; output unused). The next
+        // round's proposal is produced at the next round head, from this
+        // freshly committed ring.
         draft_prefill_model_output = runDraftPrefillForward(model_input);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
@@ -1542,11 +1539,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_sample)");
         if (is_dspark_) {
-            RTP_LLM_CHECK_WITH_INFO(draft_prefill_model_output.draft_tokens.defined(),
-                                    "dspark tail draft forward did not emit draft_tokens");
-            draft_prefill_sampler_output.token_ids = draft_prefill_model_output.draft_tokens;
-            draft_prefill_sampler_output.all_probs =
-                dsparkPointMassDraftProbs(draft_prefill_model_output.draft_tokens);
+            // Tail is commit-only; the proposal lives and dies inside one
+            // round, so no bookkeeping/PD channel carries it anymore.
         } else {
             auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
@@ -1882,6 +1876,12 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         execBroadcast({{model_input.last_hidden_states}, 0});
         execBroadcast({{model_input.lm_output_indexes}, 0});
         if (is_dspark_) {
+            // Not an unconverged special case: the DSpARK commit geometry
+            // depends on rank 0's per-request accept counts, which only exist
+            // after rejection sampling, so these two fields carry dynamic
+            // data. MTP's next-step geometry is static on every rank —
+            // broadcasting unconditionally would add two collectives to the
+            // MTP decode hot path for nothing.
             execBroadcast({{model_input.input_lengths}, 0});
             execBroadcast({{model_input.prefix_lengths}, 0});
         }
@@ -2312,7 +2312,9 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
 
     torch::Tensor accept_len_all     = to_cuda_i32(spec_decode_output.accept_len);
     torch::Tensor accept_tokens_all  = to_cuda_i32(spec_decode_output.accept_tokens);
-    torch::Tensor propose_tokens_all = to_cuda_i32(draft_prefill_output.sampler_output.token_ids);
+    torch::Tensor propose_tokens_all = draft_prefill_output.sampler_output.token_ids.defined() ?
+                                           to_cuda_i32(draft_prefill_output.sampler_output.token_ids) :
+                                           torch::Tensor();
     torch::Tensor draft_all_probs_full =
         draft_prefill_output.sampler_output.all_probs.defined() ?
             toCudaWithHostHold(draft_prefill_output.sampler_output.all_probs, buffer_holder_) :

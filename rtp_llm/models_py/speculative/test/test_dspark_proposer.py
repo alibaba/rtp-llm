@@ -60,23 +60,21 @@ class SampleSequentialMarkovTest(unittest.TestCase):
         )
 
     def test_matches_reference_chain_exactly(self) -> None:
-        expected_tokens, expected_probs = _reference_chain(
+        expected_tokens, _ = _reference_chain(
             self.base_logits, self.anchors, self.proposer.w1, self.proposer.w2
         )
 
-        tokens, probs = self.proposer._sample_sequential_markov(
+        tokens = self.proposer._sample_sequential_markov(
             self.base_logits, self.anchors
         )
 
         self.assertTrue(torch.equal(tokens, expected_tokens))
-        assert probs is not None
-        self.assertTrue(torch.equal(probs, expected_probs))
 
     def test_tokens_feed_next_step_bias(self) -> None:
         # Step 0 must consume the anchor bias; step 1 must consume the step-0
         # winner, not the anchor.
         head = self.proposer.markov_head
-        tokens, _ = self.proposer._sample_sequential_markov(
+        tokens = self.proposer._sample_sequential_markov(
             self.base_logits, self.anchors
         )
         step0 = self.base_logits[:, 0] + head.bias(self.anchors)
@@ -98,11 +96,12 @@ class SampleSequentialMarkovTest(unittest.TestCase):
             )
         )
 
-    def test_probabilities_can_be_skipped(self) -> None:
-        tokens, probs = self.proposer._sample_sequential_markov(
-            self.base_logits, self.anchors, need_probabilities=False
+    def test_output_shape(self) -> None:
+        # The chain is deterministic argmax; its q distribution is the point
+        # mass built engine-side, so tokens are the sole output here.
+        tokens = self.proposer._sample_sequential_markov(
+            self.base_logits, self.anchors
         )
-        self.assertIsNone(probs)
         self.assertEqual(tuple(tokens.shape), (self.batch, self.width))
 
     def test_rejects_bad_geometry(self) -> None:
@@ -162,8 +161,6 @@ class ProposerContractTest(unittest.TestCase):
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
         self.assertEqual(tuple(outputs.draft_tokens.shape), (2, 3))
         self.assertEqual(outputs.draft_tokens.dtype, torch.int32)
-        self.assertEqual(tuple(outputs.draft_probs.shape), (2, 3, 17))
-        self.assertEqual(outputs.draft_probs.dtype, torch.float32)
 
     def test_hooks_require_subclass_implementation(self) -> None:
         proposer = DSparkProposerMixin()

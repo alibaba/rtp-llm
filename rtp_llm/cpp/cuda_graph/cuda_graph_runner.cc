@@ -583,12 +583,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 0, 0, state.current_seq_len);
         const auto& hold = graph_instances_[state.current_real_graph_seq_len].mem_hold_;
         if (hold.draft_tokens_.defined()) {
-            outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
             // The DSpark proposal is deterministic argmax: the captured graph
             // emits tokens only and the engine reconstructs the point-mass q.
-            if (hold.draft_probs_.defined()) {
-                outputs.draft_probs = hold.draft_probs_.slice(0, 0, state.current_batch_size).clone();
-            }
+            outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
         }
     } else {
         {
@@ -600,12 +597,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 0, 0, state.seq_len_sum);
         const auto& hold = graph_instances_[state.current_real_graph_bs].mem_hold_;
         if (hold.draft_tokens_.defined()) {
-            outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
             // The DSpark proposal is deterministic argmax: the captured graph
             // emits tokens only and the engine reconstructs the point-mass q.
-            if (hold.draft_probs_.defined()) {
-                outputs.draft_probs = hold.draft_probs_.slice(0, 0, state.current_batch_size).clone();
-            }
+            outputs.draft_tokens = hold.draft_tokens_.slice(0, 0, state.current_batch_size).clone();
         }
     }
     // record forward done event
@@ -687,17 +681,8 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return tryGetRealGraphDecodeBatchSize(inputs, state);
     }
 
-    if (is_dspark_draft_) {
-        // Commit calls carry feature rows (ragged, eager); the fixed-width
-        // propose call carries none and is the graphed shape.
-        if (!enable_cuda_graph_ || inputs.input_hiddens.defined()) {
-            return false;
-        }
-        return tryGetRealGraphDecodeBatchSize(inputs, state);
-    }
-
     if (!enable_cuda_graph_
-        || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_ && !is_dspark_draft_)) {
+        || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
         return false;
     }
 
@@ -905,11 +890,11 @@ void CudaGraphRunner::initCapture() {
         // feature input — a defined input_hiddens would route the captured
         // forward into the eager commit arm. Generic/MTP graphs retain the
         // historical T x hc*hidden defaults populated in the constructor.
-        if (!is_dspark_draft_) {
-            inputs.input_hiddens = torch::zeros(
-                {static_cast<int64_t>(max_bs_) * input_hidden_rows_per_bs_, static_cast<int64_t>(input_hidden_size_)},
-                options_cuda_float_);
-        }
+        // "No feature rows" is uniformly encoded as a 0-row tensor so the
+        // replay slice below needs no per-model special case.
+        const int64_t hidden_rows = is_dspark_draft_ ? 0 : static_cast<int64_t>(max_bs_) * num_tokens_per_bs_;
+        inputs.input_hiddens =
+            torch::empty({hidden_rows, static_cast<int64_t>(hidden_size_) * hc_mult_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -932,8 +917,7 @@ void CudaGraphRunner::initCapture() {
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         capture_mem_hold_.setOptionalOutputs(
-            probe_outputs.draft_tokens.defined() ? torch::zeros_like(probe_outputs.draft_tokens) : torch::Tensor(),
-            probe_outputs.draft_probs.defined() ? torch::zeros_like(probe_outputs.draft_probs) : torch::Tensor());
+            probe_outputs.draft_tokens.defined() ? torch::zeros_like(probe_outputs.draft_tokens) : torch::Tensor());
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
 
@@ -1038,14 +1022,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             if (hold.draft_tokens_.defined()) {
                 RTP_LLM_CHECK_WITH_INFO(outputs.draft_tokens.defined(),
                                         "DSpARK CUDA graph draft tokens disappeared during capture");
-                hold.draft_tokens_.copy_(outputs.draft_tokens);
                 // The deterministic-argmax proposal emits tokens only; the
                 // engine rebuilds the point-mass q outside the graph.
-                if (hold.draft_probs_.defined()) {
-                    RTP_LLM_CHECK_WITH_INFO(outputs.draft_probs.defined(),
-                                            "DSpARK CUDA graph draft probs disappeared during capture");
-                    hold.draft_probs_.copy_(outputs.draft_probs);
-                }
+                hold.draft_tokens_.copy_(outputs.draft_tokens);
             }
             graph.capture_end();
         }
@@ -1092,9 +1071,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const int token_slice_len =
         draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
-    inputs.input_hiddens = is_dspark_draft_ ?
-                               torch::Tensor() :
-                               capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
+    inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =
@@ -1160,10 +1137,7 @@ CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs
     auto draft_tokens = capture_mem_hold_.draft_tokens_.defined() ?
                             capture_mem_hold_.draft_tokens_.slice(0, 0, batch_size) :
                             torch::Tensor();
-    auto draft_probs = capture_mem_hold_.draft_probs_.defined() ?
-                           capture_mem_hold_.draft_probs_.slice(0, 0, batch_size) :
-                           torch::Tensor();
-    hold.setOptionalOutputs(std::move(draft_tokens), std::move(draft_probs));
+    hold.setOptionalOutputs(std::move(draft_tokens));
     return hold;
 }
 

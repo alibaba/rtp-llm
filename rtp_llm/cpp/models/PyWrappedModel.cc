@@ -104,10 +104,6 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     return result.cast<torch::Tensor>();
 }
 
-torch::Tensor PyWrappedModel::getDsparkGatheredPrefillFeatures() {
-    return dspark_gathered_features_;
-}
-
 torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
     if (!py_model_) {
         return torch::Tensor();
@@ -473,12 +469,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_store_async_writer_.get(),
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
-        if (inputs.cache_store_input_lengths.defined()) {
-            cache_store_inputs.store_input_lengths = async_to_pinned_host(inputs.cache_store_input_lengths);
-        }
-        if (inputs.cache_store_prefix_lengths.defined()) {
-            cache_store_inputs.store_prefix_lengths = async_to_pinned_host(inputs.cache_store_prefix_lengths);
-        }
         params = cache_store_inputs;
     }
     return params;
@@ -606,7 +596,6 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     auto outputs              = callForwardPostLayers(hidden_states, inputs, false);
     outputs.draft_tokens      = merge_optional_output(&PyModelOutputs::draft_tokens, "draft_tokens");
-    outputs.draft_probs       = merge_optional_output(&PyModelOutputs::draft_probs, "draft_probs");
     return outputs;
 }
 
@@ -813,7 +802,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         auto       attach_dspark_outputs = [&py_model_outputs](GptModelOutputs outputs) {
             outputs.draft_tokens = py_model_outputs.draft_tokens;
-            outputs.draft_probs  = py_model_outputs.draft_probs;
             return outputs;
         };
         if (is_dspark_draft_) {
@@ -838,22 +826,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
             } else {
                 num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            }
-            if (is_dspark_target_) {
-                // Sharded-CP feature supply: restore the rank-local aux rows
-                // of the shared MTP hidden buffer to global order. Every CP
-                // rank participates in the all-gather here, so each holds the
-                // full bf16 feature values and can commit its own byte slice
-                // of the feature KV. -2 = rank-local rows, empty tolerated:
-                // init-time warmup probes run without a KV cache and write no
-                // rows.
-                auto aux = getMtpTargetHiddenStates(-2);
-                if (aux.defined() && aux.numel() > 0) {
-                    auto aux_global = aux.clone();
-                    const auto aux_valid_tokens =
-                        context_parallel_processor_->handleOutputs(aux_global, inputs, cp_params);
-                    dspark_gathered_features_ = aux_global.narrow(0, 0, static_cast<int64_t>(aux_valid_tokens));
-                }
             }
             if (!need_full_hidden) {
                 return attach_dspark_outputs(forwardPostLayersLastHidden(hidden_states, inputs));

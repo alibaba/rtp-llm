@@ -74,8 +74,6 @@ public:
     // committed feature KV).
     void updatePrefillPostDSparkCommitInput(GptModelInputs&      model_input,
                                             const SamplerOutput& sampler_output,
-                                            torch::Tensor&       anchors_out,
-                                            torch::Tensor&       committed_ends_out,
                                             TensorHolder&        host_holder);
 
     void buildDSparkProposeInput(GptModelInputs&      model_input,
@@ -83,21 +81,23 @@ public:
                                  const torch::Tensor& committed_ends,
                                  TensorHolder&        host_holder);
 
-    void prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
-                                       GptModelInputs&     model_input,
-                                       TensorHolder&       host_holder);
+    // Round-head propose input from per-stream state (anchor = last accepted
+    // token, committed_end = committed length). New PD streams and steady
+    // streams take the same path.
+    void buildDSparkProposeInputFromStreams(const StreamGroups& stream_groups,
+                                            GptModelInputs&     model_input,
+                                            TensorHolder&       host_holder);
 
-    void updateDSparkDraftSamplerOutput(const StreamGroups& stream_groups,
-                                        SamplerOutput&      draft_sampler_output,
-                                        torch::Tensor&      draft_token_probs_d_t,
-                                        TensorHolder&       host_holder);
+    void prepareDSparkVerifyModelInput(const StreamGroups&  stream_groups,
+                                       GptModelInputs&      model_input,
+                                       const torch::Tensor& proposals,
+                                       TensorHolder&        host_holder);
+
 
     void updateDecodePostDSparkCommitInput(GptModelInputs&                              model_input,
                                            const torch::Tensor&                         target_features,
                                            const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                            size_t                                       batch_size,
-                                           torch::Tensor&                               anchors_out,
-                                           torch::Tensor&                               committed_ends_out,
                                            torch::Tensor&                               hidden_states_d_t,
                                            TensorHolder&                                host_holder);
 

@@ -89,8 +89,6 @@ enum GptModelInputIndex : size_t {
     // last_hidden_states can have a different row count from combo_tokens for
     // DSpARK prefill seeding, so transmit its leading dimension explicitly.
     mtpHiddenStatesRows,
-    cacheStoreInputLengths,
-    cacheStorePrefixLengths,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
@@ -107,17 +105,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitSequenceLengths  = 1u << 2,
     kDeviceBitPrefixLengths    = 1u << 3,
     kDeviceBitLmOutputIndexes  = 1u << 4,
-    kDeviceBitCacheStoreInputLengths  = 1u << 5,
-    kDeviceBitCacheStorePrefixLengths = 1u << 6,
 };
 
-struct CacheStoreTensorSyncMetadata {
-    int64_t  input_lengths_count  = 0;
-    int64_t  prefix_lengths_count = 0;
-    uint32_t device_bits          = 0;
-};
-
-CacheStoreTensorSyncMetadata getCacheStoreTensorSyncMetadata(const GptModelInputs& inputs);
 GptModelInputShapeHints       getModelInputShapeHints(const GptModelInputs& inputs);
 torch::Tensor                 makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
 std::array<int64_t, 2>        decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
@@ -159,15 +148,10 @@ public:
     //
     // The producer writes the buffer in verify (req-major) layout
     // ``[r0_v0, r0_v1, …, r0_v_ps, r1_v0, …]``: each request occupies
-    // DSpARK sharded-CP prefill: the target restores its rank-local aux rows
-    // to global order during the prefill forward. The draft evaluates the
-    // full block on every CP rank (CP-bypassing) and each rank commits its
-    // own byte slice of the feature KV, so every rank needs the full
-    // feature values.
-    virtual torch::Tensor getDsparkGatheredPrefillFeatures() {
-        return torch::Tensor();
-    }
-
+    // ``propose_step + 1`` consecutive rows. ``num_tokens >= 0`` returns that
+    // many leading rows; ``num_tokens < 0`` asks the producer for its last
+    // written row count (CP prefill keeps rank-local rows in the buffer, so
+    // the count cannot be derived from the global token count).
     virtual torch::Tensor getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
     }

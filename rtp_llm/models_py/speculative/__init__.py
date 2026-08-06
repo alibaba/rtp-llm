@@ -1,7 +1,5 @@
-from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
-    DSparkMarkovHead,
-    DSparkProposerMixin,
-    map_context_rows,
-)
+"""Model-independent speculative-decoding building blocks.
 
-__all__ = ["DSparkMarkovHead", "DSparkProposerMixin", "map_context_rows"]
+Import directly from the submodule, e.g.
+``from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin``.
+"""

@@ -91,12 +91,14 @@ def optional_tensor(value: Any) -> Optional[torch.Tensor]:
 def map_context_rows(
     starts: torch.Tensor,
     lengths: torch.Tensor,
-    prefix_lengths: torch.Tensor,
+    committed_ends: torch.Tensor,
     row_count: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Map source feature rows to request ids and absolute positions.
 
-    Rows outside every ``[start, start + length)`` interval are padding from a
+    ``committed_ends`` is each request's sequence length after this commit
+    (``prefix + newly committed``); row positions count back from it.  Rows
+    outside every ``[start, start + length)`` interval are padding from a
     dense target-verify output and receive ``(-1, -1)``.  Keeping this
     transform independent from the feature projection also makes its
     packed/dense layout semantics directly unit-testable on CPU.
@@ -118,7 +120,7 @@ def map_context_rows(
     valid = valid & (rows < starts[safe_req] + lengths[safe_req])
 
     local_offset = rows - starts[safe_req]
-    positions = prefix_lengths[safe_req] - lengths[safe_req] + local_offset
+    positions = committed_ends[safe_req] - lengths[safe_req] + local_offset
     req = torch.where(valid, req, torch.full_like(req, -1))
     positions = torch.where(valid, positions, torch.full_like(positions, -1))
     return req.to(torch.int32), positions.to(torch.int32)
@@ -181,13 +183,28 @@ class DSparkProposerMixin:
         main_x: torch.Tensor,
         context_req_ids: torch.Tensor,
         context_positions: torch.Tensor,
-        prefix_lengths: torch.Tensor,
+        committed_ends: torch.Tensor,
         inputs: PyModelInputs,
     ) -> None:
         """Write projected feature rows ``main_x`` into every draft layer's
         KV cache (per-layer KV projection of the same rows — features are not
-        propagated through the layers)."""
+        propagated through the layers).  ``committed_ends`` is each request's
+        sequence length after this commit."""
         raise NotImplementedError
+
+    def map_commit_rows(
+        self,
+        starts: torch.Tensor,
+        lengths: torch.Tensor,
+        committed_ends: torch.Tensor,
+        row_count: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Map each committed feature row to ``(request id, absolute
+        position)``.  The default assumes the rows are the request-major
+        packed layout described by ``starts``/``lengths``; models whose
+        engine supplies a different row layout (e.g. rank-local rows under
+        sharded-CP prefill) override this hook."""
+        return map_context_rows(starts, lengths, committed_ends, row_count)
 
     def forward_query_block(
         self,
@@ -289,8 +306,10 @@ class DSparkProposerMixin:
 
         # Row windows are the plain prefix sum of the standard input_lengths;
         # positions continue each request's committed prefix. All rows are
-        # payload — the commit call's geometry is exactly its row layout.
-        req, positions = map_context_rows(
+        # payload — the commit call's geometry is exactly its row layout
+        # (models with a different engine-supplied layout override
+        # map_commit_rows).
+        req, positions = self.map_commit_rows(
             starts, lengths, prefix_lengths + lengths, row_count
         )
 

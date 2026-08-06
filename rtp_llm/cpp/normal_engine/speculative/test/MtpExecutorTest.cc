@@ -1026,7 +1026,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     const auto main_thread_id = std::this_thread::get_id();
 
     GptModelInputs target_input;
-    target_input.combo_tokens      = torch::tensor({2, 3, 2, 1}, torch::kInt32);
+    target_input.combo_tokens      = torch::tensor({2, 2, 1, 3}, torch::kInt32);
     target_input.input_lengths     = torch::tensor({gamma + 1}, torch::kInt32);
     target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     target_input.lm_output_indexes = torch::arange(0, gamma + 1, torch::kInt32);
@@ -1060,6 +1060,15 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
 
+    // Round-head propose call: fixed-width block anchored on the stream's
+    // current last token at its own position (committed_end = seq_len - 1),
+    // no feature input.
+    GptModelInputs draft_input;
+    draft_input.combo_tokens      = torch::tensor({2, 0, 0}, torch::kInt32);
+    draft_input.input_lengths     = torch::tensor({gamma}, torch::kInt32);
+    draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    draft_input.lm_output_indexes = torch::tensor({0}, torch::kInt32);
+
     // Commit call: dense verify rows at the old prefix (accept-independent).
     GptModelInputs commit_input;
     commit_input.combo_tokens       = torch::tensor({1, 0, 0, 0}, torch::kInt32);
@@ -1068,35 +1077,13 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     commit_input.lm_output_indexes  = torch::tensor({0, 1, 2, 3}, torch::kInt32);
     commit_input.last_hidden_states = target_aux_features;
 
-    // Propose call: fixed-width block at the accepted committed end, no
-    // feature input.
-    GptModelInputs draft_input;
-    draft_input.combo_tokens      = torch::tensor({1, 0, 0}, torch::kInt32);
-    draft_input.input_lengths     = torch::tensor({gamma}, torch::kInt32);
-    draft_input.prefix_lengths    = torch::tensor({3}, torch::kInt32);
-    draft_input.lm_output_indexes = torch::tensor({0}, torch::kInt32);
-
     GptModelOutputs commit_output;
     commit_output.hidden_states = torch::zeros({0, 2}, torch::kFloat32).to(torch::kCUDA);
 
     GptModelOutputs draft_output;
     draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);
-    draft_output.draft_probs  = torch::tensor({0.1f,
-                                               0.7f,
-                                               0.1f,
-                                               0.1f,
-                                               0.1f,
-                                               0.1f,
-                                               0.7f,
-                                               0.1f,
-                                               0.1f,
-                                               0.1f,
-                                               0.1f,
-                                               0.7f})
-                                    .reshape({1, gamma, vocab_size})
-                                    .to(torch::kCUDA);
-    components.fake_draft_model->setInputs({commit_input, draft_input});
-    components.fake_draft_model->setOutputs({commit_output, draft_output});
+    components.fake_draft_model->setInputs({draft_input, commit_input});
+    components.fake_draft_model->setOutputs({draft_output, commit_output});
 
     setupFakeModels(components.executor.get(),
                     std::move(components.fake_target_model),
@@ -1109,7 +1096,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_NE(std::thread::id(), processor->invocationThreadId());
     EXPECT_NE(main_thread_id, processor->invocationThreadId());
-    EXPECT_EQ((std::vector<int32_t>{3, 2, 1}), processor->observedDraftTokens());
+    EXPECT_EQ((std::vector<int32_t>{2, 1, 3}), processor->observedDraftTokens());
 }
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {

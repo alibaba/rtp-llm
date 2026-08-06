@@ -265,9 +265,6 @@ struct PyCacheStoreInputs {
     int cp_size = 1;
     int cp_rank = 0;
 
-    // Undefined keeps the attention input/prefix lengths.
-    torch::Tensor store_input_lengths;
-    torch::Tensor store_prefix_lengths;
 };
 
 struct PyPrefillCudaGaphCopyParams {
@@ -357,7 +354,6 @@ struct PyModelOutputs {
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
     torch::Tensor          draft_tokens;
-    torch::Tensor          draft_probs;
 
     PyModelOutputs() = default;
 
