@@ -479,8 +479,7 @@ class SparseMlaImpl(MlaImplBase):
         )
         self._cos_sin_cache = cos_sin_cache
         self._is_neox_style = attn_configs.rope_config.is_neox_style
-        self._glm_cuda_dag_metadata = {}
-        self._glm_cuda_dag_storage_plans = {}
+        self._cuda_dag_indexer_metadata = None
 
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -651,21 +650,8 @@ class SparseMlaImpl(MlaImplBase):
         else:
             self.prepare(attn_inputs, forbid_realloc=True)
 
-        if self._glm_cuda_dag_metadata:
-            self._prepare_cudadag_metadata(attn_inputs)
-
-    def _prepare_cudadag_metadata(self, attn_inputs: PyAttentionInputs) -> None:
-        """Refresh the graph-stable E1 schedule after RTP attention params."""
-        block_table = attn_inputs.kv_cache_block_id_device
-        if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
-            return
-        key = (
-            int(self.fmha_params.expanded_seq_lens.numel()),
-            int(block_table.size(0)),
-        )
-        metadata = self._glm_cuda_dag_metadata.get(key)
-        if metadata is not None:
-            metadata.prepare()
+        if self._cuda_dag_indexer_metadata is not None:
+            self._cuda_dag_indexer_metadata.prepare()
 
     # -- BMMs ----------------------------------------------------------------
 

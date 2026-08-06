@@ -1,4 +1,3 @@
-import logging
 import os
 from typing import Any, Dict, Optional
 
@@ -20,7 +19,6 @@ from rtp_llm.models_py.modules import (
     GroupTopK,
     LinearFactory,
     MlaAttention,
-    RMSNorm,
     RMSResNorm,
     SelectTopk,
     SigmoidGateScaleAdd,
@@ -30,7 +28,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 )
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.models_py.modules.hybrid.glm52_cuda_dag import (
-    Glm52CudaDagAdapter,
+    Glm52CudaDag,
     resolve_glm52_cuda_dag_enabled,
     should_enable_glm52_cudadag,
 )
@@ -285,7 +283,7 @@ class GenericMoeLayer(nn.Module):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
-        """Consume router/quant buffers already written by cuda-dag-runtime."""
+        """Consume router/quant resources already written by cuda-dag-runtime."""
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
         experts_output = self.fused_moe.forward_prepacked(hidden_states)
@@ -483,8 +481,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
-        self._glm52_cuda_dag_adapter = (
-            Glm52CudaDagAdapter(
+        self.cuda_dag = (
+            Glm52CudaDag(
                 layer_idx=layer_idx,
                 config=config,
                 parallelism_config=parallelism_config,
@@ -557,15 +555,81 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_input_scale_ue8m0 = self._fuse_input_scale_ue8m0
         clone._fuse_post_norm_quant = self._fuse_post_norm_quant
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
-        clone._glm52_cuda_dag_adapter = (
+        clone.cuda_dag = (
             None
-            if self._glm52_cuda_dag_adapter is None
-            else self._glm52_cuda_dag_adapter.clone_for_cuda_graph(
+            if self.cuda_dag is None
+            else self.cuda_dag.clone_for_cuda_graph(
                 mlp=clone.mlp,
                 draft_prefill=draft_prefill,
             )
         )
         return clone
+
+    def _forward_cudadag(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        prev_topk_indices: Optional[torch.Tensor],
+    ) -> DecodeLayerOutput:
+        """Run the CUDA-DAG attention and MoE preparation path."""
+        cuda_dag = self.cuda_dag
+        if cuda_dag is None:
+            raise RuntimeError("CUDA-DAG execution was not initialized")
+        # Prepare MLA inputs with internal streams and PDL.
+        output_residual, mla_query, scores_or_indices = (
+            cuda_dag.mla_prologue_without_topk(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                prev_topk_indices,
+            )
+        )
+
+        # Keep TopK explicit so RTP can replace the implementation independently.
+        if cuda_dag.has_indexer:
+            topk_indices = cuda_dag.exact_topk_and_globalize(
+                scores_or_indices, fmha_impl
+            )
+        else:
+            topk_indices = scores_or_indices
+
+        # Keep SparseMLA explicit for the same framework-level substitution point.
+        mla_output = cuda_dag.sparse_mla(
+            mla_query,
+            topk_indices,
+            fmha_impl,
+            kv_cache,
+        )
+
+        # Project attention output and optionally prepare routed MoE input.
+        mla_post = cuda_dag.mla_post_moe_pre(mla_output, output_residual, fmha_impl)
+        if cuda_dag.has_moe:
+            moe_hidden_states, output_residual, routed_indices, routed_weights = (
+                mla_post
+            )
+            hidden_states = self.mlp.forward_prepacked(
+                moe_hidden_states,
+                routed_indices,
+                routed_weights,
+            )
+        else:
+            # Dense layers preserve the existing post-attention norm + MLP.
+            hidden_states, output_residual = mla_post
+            dense_input = cuda_dag.add_norm_quant(
+                hidden_states,
+                output_residual,
+            )
+            hidden_states = self.mlp(
+                hidden_states,
+                x_fp8=dense_input.hidden_fp8,
+                x_scale=dense_input.hidden_scale,
+            )
+            output_residual = dense_input.residual
+
+        return DecodeLayerOutput(hidden_states, output_residual, topk_indices)
 
     def forward(
         self,
@@ -577,25 +641,12 @@ class GenericMoeDecoderLayer(nn.Module):
         enable_cudadag: bool = False,
     ) -> DecodeLayerOutput:
         if enable_cudadag:
-            adapter = self._glm52_cuda_dag_adapter
-            if adapter is None:
-                raise RuntimeError("CUDA-DAG execution was not initialized")
-            cuda_dag_output = adapter.forward(
+            return self._forward_cudadag(
                 hidden_states,
                 residual,
                 fmha_impl,
                 kv_cache,
                 prev_topk_indices,
-            )
-            hidden_states = self.mlp.forward_prepacked(
-                cuda_dag_output.moe_hidden_states,
-                cuda_dag_output.routed_indices,
-                cuda_dag_output.routed_weights,
-            )
-            return DecodeLayerOutput(
-                hidden_states,
-                cuda_dag_output.residual,
-                cuda_dag_output.topk_indices,
             )
 
         topk_indices = None
