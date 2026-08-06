@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from filelock import FileLock
 
@@ -209,14 +210,23 @@ def modify_bazel_wrapper_pythonpath(wrapper_path):
         return False
 
 
-def setup_jit_cache(cache_dir=None, packages=None):
-    # Use defaults if not provided
-    if cache_dir is None:
-        cache_dir = Path.home().as_posix() + "/.cache"
-    if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+def bootstrap_remote_jit_dir():
+    # Request 0700 for a new directory without changing an existing shared remote.
+    remote = os.environ.get("REMOTE_JIT_DIR", "").strip()
+    if not remote or urlparse(remote).scheme:
+        return
+    try:
+        Path(remote).mkdir(parents=True, mode=0o700, exist_ok=True)
+    except OSError as e:
+        os.environ.pop("REMOTE_JIT_DIR", None)  # child servers inherit the env
+        logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
 
-    runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
+
+def setup_jit_cache():
+    bootstrap_remote_jit_dir()
+
+    cache_dir = Path.home().as_posix() + "/.cache"
+    packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []

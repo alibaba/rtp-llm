@@ -3,59 +3,48 @@ import io
 import json
 import logging
 import os
-import re
 import shutil
-import socket
 import tarfile
 import tempfile
 import threading
 import time
-from contextlib import contextmanager, nullcontext, suppress
+from collections import namedtuple
+from contextlib import suppress
 from pathlib import Path
+from urllib.parse import urlparse
 
 import zstandard as zstd
 
-SNAPSHOT_SUFFIX = ".jit_snapshot.tar.zst"
-# Enough headroom so GC never unlinks a snapshot an in-flight restore is reading.
-SNAPSHOT_KEEP = 20
-REMOTE_READY_TIMEOUT_S = 120.0
-# Age gate: GC never unlinks a file a live upload/restore may still be touching.
-IDLE_REAP_S = REMOTE_READY_TIMEOUT_S * 10
-STALE_BATON_S = 1800.0
-# tarfile only preserves whole-second mtime; ninja compares nanoseconds.
-MTIME_MANIFEST = ".jit_mtime_ns.json"
+SNAPSHOT_SUFFIX, MTIME_MANIFEST = ".jit_snapshot.tar.zst", ".jit_mtime_ns.json"
+SNAPSHOT_KEEP, STALE_REMOTE_TMP_S, STALE_BATON_S = 20, 1800.0, 7200.0
 
 
-def sanitize(text: str, fallback: str) -> str:
-    return re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_") or fallback
+class SnapshotRaced(RuntimeError):
+    """A tracked file changed while packing; defer the generation."""
 
 
-def pack_zstd_tar(archive: Path, source: Path) -> None:
-    # Symlinks are skipped; _safe_members rejects them on restore anyway. dereference
-    # packs hardlinked members as full content, never as tar hardlink references.
-    mtimes = {}
-    with zstd.open(archive, "wb") as body, tarfile.open(
-        fileobj=body, mode="w|", dereference=True
-    ) as tar:
+def _file_sig(path: Path) -> tuple[int, int, int, int]:
+    st = path.stat()
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
-        def keep(info: tarfile.TarInfo):
-            path = source / info.name
-            if path.is_symlink() or path.name == MTIME_MANIFEST:
-                return None
-            if info.isfile():
-                mtimes[info.name] = path.stat().st_mtime_ns
-            return info
 
-        tar.add(source, arcname=".", filter=keep)
-        manifest = json.dumps(mtimes).encode()
+def pack_zstd_tar(archive: Path, files: dict[str, Path]) -> None:
+    before = {name: _file_sig(path) for name, path in files.items()}
+    with zstd.open(
+        archive, "wb", cctx=zstd.ZstdCompressor(write_checksum=True)
+    ) as body, tarfile.open(fileobj=body, mode="w|", dereference=True) as tar:
+        for name, path in sorted(files.items()):
+            tar.add(path, arcname=name, recursive=False)
+        if any(_file_sig(files[name]) != sig for name, sig in before.items()):
+            raise SnapshotRaced("files changed while packing")
+        manifest = json.dumps({name: sig[3] for name, sig in before.items()}).encode()
         info = tarfile.TarInfo(MTIME_MANIFEST)
         info.size = len(manifest)
         tar.addfile(info, io.BytesIO(manifest))
 
 
 def _safe_path(root: Path, name: str) -> Path:
-    root, path = root.resolve(), (root / name).resolve()
-    if path != root and root not in path.parents:
+    if root not in (path := (root / name).resolve()).parents:
         raise ValueError(f"unsafe JIT snapshot path: {name}")
     return path
 
@@ -69,204 +58,133 @@ def _safe_members(archive, target: Path):
 
 
 def extract_zstd_tar(archive: Path, target: Path) -> None:
-    with zstd.open(archive, "rb") as body, tarfile.open(
-        fileobj=body, mode="r|"
-    ) as source:
-        source.extractall(target, members=_safe_members(source, target))
-    manifest = target / MTIME_MANIFEST
-    if manifest.exists():
-        mtimes = json.loads(manifest.read_text())
-        manifest.unlink()
-        for name, mtime_ns in mtimes.items():
-            os.utime(_safe_path(target, name), ns=(mtime_ns, mtime_ns))
-
-
-@contextmanager
-def restore_lock(target: Path):
-    # Pure mutual exclusion: the kernel frees the flock on fd close or process
-    # death, so a crash never wedges it. Claiming the tree (.ready) is separate.
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(target.with_name(f"{target.name}.lock"), os.O_CREAT | os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
-
-
-def is_lock_file(name: str) -> bool:
-    # torch's FileBaton uses a bare "lock"; our builders use *_lock / *.lock.
-    return name == "lock" or name.endswith(("_lock", ".lock"))
-
-
-def reap_dead_lock(path: Path) -> None:
-    # Unlink a lock no live builder holds: a non-blocking flock grab fails iff a
-    # builder still holds it. torch's bare "lock" baton is never flocked so it
-    # always grabs free; there fall back to mtime and spare a fresh (maybe-live) one.
-    try:
-        fd = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return
+    target = target.resolve()  # _safe_path compares against a resolved root
+    with zstd.open(archive, "rb") as body, tarfile.open(fileobj=body, mode="r|") as tar:
+        kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+        tar.extractall(target, members=_safe_members(tar, target), **kwargs)
+    mtimes = json.loads((manifest := target / MTIME_MANIFEST).read_text())
+    manifest.unlink()
+    for name, mtime_ns in mtimes.items():
+        os.utime(_safe_path(target, name), ns=(mtime_ns, mtime_ns))
+    for path in (target, *target.rglob("*")):  # the tar filter drops shared write bits
         with suppress(OSError):
-            if (
-                path.name == "lock"
-                and time.time() - path.stat().st_mtime < STALE_BATON_S
-            ):
-                return
-            path.unlink()
-    finally:
+            if not path.is_symlink():  # Linux has no lchmod: chmod would follow it
+                path.chmod(0o777 if path.is_dir() else 0o666)
+
+
+def acquire_flock(path: Path, blocking: bool = True) -> int | None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        return fd
+    except BaseException as error:
         os.close(fd)
+        if isinstance(error, BlockingIOError):
+            return None
+        raise
 
 
-def _tree_is_warm(root: Path) -> bool:
-    # Warm = holds a real artifact (not a lock corpse or the mtime manifest). Restore
-    # must skip a warm tree; artifact-free leftovers (lock corpses, empty scope dirs)
-    # are clobberable so a killed cold start can retry.
+def reap_stale_batons(root: Path) -> None:
+    cutoff = time.time() - STALE_BATON_S
+    for path in (p for name in ("lock", "lock_*") for p in root.rglob(name)):
+        with suppress(OSError):
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                logging.warning("reaped stale baton %s", path)
+
+
+def scope_root_usable(root: Path) -> bool:
     with suppress(OSError):
-        return any(
-            name != MTIME_MANIFEST and not is_lock_file(name)
-            for _, _, files in os.walk(root)
-            for name in files
-        )
+        return any(path.is_file() for path in root.rglob("*"))
     return False
 
 
-def _signature(path: Path) -> tuple[int, int, int, int]:
-    stat = path.stat()
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+def commit_restore(staging: Path, scope_root: Path) -> bool:
+    with suppress(OSError):
+        for path in (*sorted(scope_root.rglob("*"), reverse=True), scope_root):
+            with suppress(OSError):
+                path.rmdir()
+    try:
+        os.rename(staging, scope_root)
+        return True
+    except OSError:
+        logging.warning("JIT restore skipped; local tree already in use")
+        shutil.rmtree(staging, ignore_errors=True)
+        return False
+
+
+Restored = namedtuple("Restored", "staging snapshot")
 
 
 class RemoteSnapshotStore:
-    def __init__(self, remote_root: Path):
-        self.remote_root = remote_root
+    def __init__(self, remote_root: Path, mounted: str = ""):
+        self.remote_root, self._mounted = remote_root, mounted
+        self._mount_lock, self._closed = threading.Lock(), False
 
-    def _snapshots(self) -> list[Path]:
-        return sorted(self.remote_root.glob(f"*{SNAPSHOT_SUFFIX}"))
-
-    @staticmethod
-    def _wait_remote_ready(path: Path, source: Path) -> None:
-        # Some FUSE mounts expose st_size before the tail is readable.
-        def tail(file: Path, offset: int) -> bytes:
-            with file.open("rb", buffering=0) as handle:
-                handle.seek(offset)
-                return handle.read()
-
-        size = source.stat().st_size
-        offset = max(0, size - 4096)
-        expected = tail(source, offset)
-        deadline, delay = time.monotonic() + REMOTE_READY_TIMEOUT_S, 0.05
-        while time.monotonic() < deadline:
-            with suppress(OSError):
-                if path.stat().st_size == size and tail(path, offset) == expected:
-                    return
-            time.sleep(delay)
-            delay = min(delay * 2, 2.0)
-        raise TimeoutError(f"remote snapshot did not become ready: {path}")
-
-    def restore(
-        self,
-        target: Path,
-        cancel: threading.Event | None = None,
-        commit=None,
-    ) -> bool:
-        # commit: context manager entered around every tree swap/claim so the
-        # caller's adopt-vs-abandon decision is atomic; providing it means the
-        # caller already holds restore_lock(target).
-        if commit is None:
-            with restore_lock(target):
-                return self.restore(target, cancel, nullcontext())
-        ready = target.with_name(f"{target.name}.ready")
-        if ready.exists() or (cancel and cancel.is_set()):
-            return False
-        if _tree_is_warm(target):
-            ready.touch()  # claim: built by a peer that never ran restore
-            return False
-
-        snapshots = self._snapshots()
-        staging = target.with_name(f"{target.name}.stage.{time.time_ns()}")
-        try:
-            for snapshot in reversed(snapshots):
-                shutil.rmtree(staging, ignore_errors=True)
-                staging.mkdir(parents=True)
+    def close(self):
+        with self._mount_lock:
+            self._closed = True
+            if self._mounted:
                 try:
-                    extract_zstd_tar(snapshot, staging)
+                    from rtp_llm.utils.fuser import umount_file
+
+                    umount_file(self._mounted)
+                    self._mounted = ""
                 except Exception:
-                    logging.warning("JIT snapshot unusable: %s", snapshot)
-                    continue
-                with commit:
-                    if cancel and cancel.is_set():
-                        return False
-                    shutil.rmtree(target, ignore_errors=True)
-                    os.rename(staging, target)
-                    ready.touch()
-                return True
-            if not snapshots:
-                with commit:
-                    if not (cancel and cancel.is_set()):
-                        ready.touch()  # empty remote: claim, cold build fills it
-            # all snapshots unusable: leave unclaimed so a later start retries
-            return False
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+                    logging.warning("JIT unmount failed", exc_info=True)
 
-    def publish_snapshot(self, scan) -> bool:
-        # Each archive is one complete local generation, never an old-snapshot overlay.
-        files = scan()
-        if not files:
-            return True
-        with tempfile.TemporaryDirectory(prefix=".jit_snapshot.") as tmp:
-            staging = Path(tmp) / "staging"
-            staging.mkdir()
-            signatures = {name: _signature(path) for name, path in files.items()}
-            # Hardlink into staging instead of copying (cheap, no data move);
-            # pack_zstd_tar dereferences, so even shared inodes pack as full
-            # content, never hardlink members. Fall back to copy2 across devices.
-            for name, source in sorted(files.items()):
-                destination = _safe_path(staging, name)
-                destination.parent.mkdir(parents=True, exist_ok=True)
+    def prepare_restore(self, staging_root: Path) -> Restored | None:
+        staging_root.mkdir(parents=True, exist_ok=True)
+        for snapshot in reversed(sorted(self.remote_root.glob(f"*{SNAPSHOT_SUFFIX}"))):
+            staging = Path(tempfile.mkdtemp(prefix="stage.", dir=staging_root))
+            try:
+                extract_zstd_tar(snapshot, staging)
+                return Restored(staging, snapshot)
+            except Exception:
+                logging.warning("JIT snapshot unusable: %s", snapshot)
+                shutil.rmtree(staging, ignore_errors=True)
+
+    def publish_snapshot(self, files: dict[str, Path]):
+        # close() unmounts: a cut copy truncates, a later one hits a bare mountpoint.
+        with self._mount_lock:
+            if self._closed or not files:
+                return
+            with tempfile.TemporaryDirectory(prefix=".jit_snapshot.") as tmp:
+                archive = Path(tmp) / "candidate.tar.zst"
+                pack_zstd_tar(archive, files)
+                name = f"{time.time_ns():020d}-{os.uname().nodename}{SNAPSHOT_SUFFIX}"
+                remote_tmp = self.remote_root / f"{name}.tmp"
                 try:
-                    os.link(source, destination)
-                except OSError:
-                    shutil.copy2(source, destination)
+                    shutil.copyfile(archive, remote_tmp)
+                    os.rename(remote_tmp, self.remote_root / name)
+                finally:
+                    with suppress(OSError):
+                        remote_tmp.unlink()
+                cutoff = time.time() - STALE_REMOTE_TMP_S
+                old = sorted(self.remote_root.glob(f"*{SNAPSHOT_SUFFIX}"))
+                stale = self.remote_root.glob(f"*{SNAPSHOT_SUFFIX}.tmp")
+                for path in (*old[:-SNAPSHOT_KEEP], *stale):
+                    with suppress(OSError):
+                        if path.suffix != ".tmp" or path.stat().st_mtime < cutoff:
+                            path.unlink()
+                logging.info("JIT published %s: %d bytes", name, archive.stat().st_size)
 
-            archive = Path(tmp) / "candidate.tar.zst"
-            pack_zstd_tar(archive, staging)
-            # Staging aliases the live tree: only a post-pack rescan proves the
-            # packed generation stayed self-consistent. A change is a benign
-            # race with a live build; the caller retries after the next quiet period.
-            try:
-                changed = {
-                    name: _signature(path) for name, path in scan().items()
-                } != signatures
-            except OSError:
-                changed = True
-            if changed:
-                logging.warning("JIT cache changed during snapshot; deferring publish")
-                return False
-            host = sanitize(socket.gethostname(), "host")
-            committed = self.remote_root / (
-                f"{time.time_ns():020d}-{host}{SNAPSHOT_SUFFIX}"
-            )
-            remote_tmp = committed.with_name(f"{committed.name}.tmp")
-            try:
-                shutil.copyfile(archive, remote_tmp)
-                self._wait_remote_ready(remote_tmp, archive)
-                os.rename(remote_tmp, committed)
-            finally:
-                with suppress(OSError):
-                    remote_tmp.unlink()
 
-        # Age gate: unlink-while-open is unsafe on OSS/FUSE; backlog <= publish rate * IDLE_REAP_S.
-        cutoff = time.time() - IDLE_REAP_S
-        stale = self._snapshots()[:-SNAPSHOT_KEEP]
-        stale.extend(self.remote_root.glob(f"*{SNAPSHOT_SUFFIX}.tmp"))
-        for path in stale:
-            with suppress(OSError):
-                if path.stat().st_mtime < cutoff:
-                    path.unlink()
-        return True
+def resolve_remote(value, version: str, scope_id: str):
+    text, mounted = str(value or "").strip(), ""
+    try:
+        if urlparse(text).scheme:
+            from rtp_llm.utils.fuser import MountRwMode
+            from rtp_llm.utils.fuser import fetch_remote_file_to_local as fetch
+
+            text = mounted = fetch(text, MountRwMode.RWMODE_RW, True)
+        root = Path(text).expanduser()
+        if not text or not root.is_absolute() or not root.is_dir():
+            raise OSError(f"invalid remote directory {text}")
+        # umask is 0: co-tenants can publish into the same version/scope dir
+        (root := root / version / scope_id).mkdir(parents=True, exist_ok=True)
+        return RemoteSnapshotStore(root, mounted)
+    except Exception:
+        logging.warning("JIT_CACHE_FAIL_OPEN: remote unavailable", exc_info=True)
+        RemoteSnapshotStore(Path(), mounted).close()

@@ -9,5 +9,13 @@ def init_jit_group_args(parser, jit_config):
         bind_to=(jit_config, "remote_jit_dir"),
         type=str,
         default="",
-        help="JIT远程cache目录，必须是已存在的本地绝对路径或可通过FUSE挂载的远端URI；为空时仅使用统一的本地cache",
+        help="JIT远程v1快照根（可信绝对路径或FUSE URI）；为空仍使用固定/tmp本地树，预设组件cache环境变量可退出对应组件托管",
+    )
+    jit_group.add_argument(
+        "--jit_cache_setup_timeout_s",
+        env_name="JIT_CACHE_SETUP_TIMEOUT_S",
+        bind_to=(jit_config, "jit_cache_setup_timeout_s"),
+        type=int,
+        default=180,
+        help="JIT缓存恢复预算秒数，超时转为本地冷编译",
     )

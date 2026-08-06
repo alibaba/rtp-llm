@@ -329,14 +329,5 @@ def umount_file(path: str, force: bool = False):
         _nfs_manager.unmount_nfs_path(path)
 
 
-def umount_all() -> None:
-    # Shutdown hook for os._exit() paths that bypass atexit. FUSE unmount may raise;
-    # finally keeps NFS unmount running so nas:// mounts don't leak across restarts.
-    try:
-        _get_fuser().umount_all(force=True)
-    finally:
-        _nfs_manager.unmount_all()
-
-
 def fuse_available() -> bool:
     return _get_fuser().available
