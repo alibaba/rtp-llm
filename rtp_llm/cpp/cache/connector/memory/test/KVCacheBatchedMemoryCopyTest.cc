@@ -34,6 +34,10 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo&) {
     return {false, 0};
 }
 
+MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo&, size_t, InitCapacityMode) const {
+    return MallocStatus::NONE;
+}
+
 BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionName, int block_id) const {
     return convertIndexToAddr(layer_id, block_id);
 }
@@ -588,8 +592,8 @@ void runDsv4TypedStagedCopyRoundTrip(const std::set<KVCacheRegionName>& host_reg
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
 
     KVCacheConfig kv_config;
-    kv_config.memory_cache_size_mb         = 64;
-    kv_config.memory_cache_sync_timeout_ms = 1000;
+    kv_config.memory_cache_size_mb            = 64;
+    kv_config.memory_cache_sync_timeout_ms    = 1000;
     kv_config.enable_prefix_tree_memory_cache = false;
 
     auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config, /*payload_gap_bytes=*/8, host_regions);
@@ -722,8 +726,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     kv_config.memory_cache_sync_timeout_ms = 1000;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(
-        config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     const auto slots = connector->layerRegionSlots();
     ASSERT_TRUE(connector->isDsv4TypedCacheLayout(slots));
 
@@ -774,8 +778,8 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     kv_config.enable_legacy_memory_connector_fallback = false;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(
-        config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
 
@@ -785,7 +789,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
         ASSERT_NE(slot.region_name, KVCacheRegionName::HCA_STATE);
     }
 
-    const int hca_layer = 3;
+    const int   hca_layer        = 3;
     const auto& hca_layer_groups = config.layer_region_to_group_id[static_cast<size_t>(hca_layer)];
     ASSERT_EQ(hca_layer_groups[static_cast<size_t>(KVCacheRegionName::HCA_KV)], 1);
     ASSERT_EQ(hca_layer_groups[static_cast<size_t>(KVCacheRegionName::HCA_STATE)], 5);
@@ -809,12 +813,12 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     bool       no_need_write     = true;
     auto       plan              = connector->buildPrefixCopyPlanForWrite(resource.cacheKeys(),
-                                                                          resource.blockDependencies(),
-                                                                          layer_attn_blocks,
-                                                                          slots,
-                                                                          /*start_index=*/0,
-                                                                          /*write_num=*/2,
-                                                                          no_need_write);
+                                                       resource.blockDependencies(),
+                                                       layer_attn_blocks,
+                                                       slots,
+                                                       /*start_index=*/0,
+                                                       /*write_num=*/2,
+                                                       no_need_write);
     ASSERT_NE(plan, nullptr);
     EXPECT_FALSE(no_need_write);
     ASSERT_EQ(plan->copy_infos.size(), 3u);
@@ -866,7 +870,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     const auto slots = connector->layerRegionSlots();
     ASSERT_TRUE(connector->isDsv4TypedCacheLayout(slots));
 
-    const int hca_layer = 3;
+    const int       hca_layer = 3;
     KVCacheResource resource;
     resource.cacheKeys() = {901, 902};
     resource.initGroups(static_cast<int>(config.group_types.size()),
@@ -927,7 +931,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     const auto slots = connector->layerRegionSlots();
     ASSERT_TRUE(connector->isDsv4TypedCacheLayout(slots));
 
-    const int hca_layer = 3;
+    const int       hca_layer = 3;
     KVCacheResource resource;
     resource.cacheKeys() = {901, 902};
     resource.initGroups(static_cast<int>(config.group_types.size()),
@@ -990,7 +994,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
     ASSERT_TRUE(connector->init());
 
-    const auto slots = connector->layerRegionSlots();
+    const auto          slots = connector->layerRegionSlots();
     std::vector<size_t> state_slots;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (connector->kindForSlot(slots[i]) == CacheBlockKind::STATE_SWA_KV) {
@@ -1036,7 +1040,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeBlockZeroAndNullSlotsAreNotCopiedFo
         FAIL() << "target slot not found";
     };
 
-    const auto& valid_slot = slots[state_slots[0]];
+    const auto& valid_slot      = slots[state_slots[0]];
     const auto  valid_gpu_block = static_cast<BlockIdxType>(7);
     setBlockInfosContent(allocator->convertIndexToBuffer(valid_slot.layer_id, valid_slot.region_name, valid_gpu_block),
                          'V');
@@ -1100,9 +1104,9 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
 
     KVCacheConfig kv_config;
-    kv_config.memory_cache_size_mb             = 64;
-    kv_config.memory_cache_sync_timeout_ms     = 1000;
-    kv_config.enable_prefix_tree_memory_cache  = true;
+    kv_config.memory_cache_size_mb                    = 64;
+    kv_config.memory_cache_sync_timeout_ms            = 1000;
+    kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
     auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(config);
@@ -1112,7 +1116,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeD2HMergeSourceKeepsOldSlotsAndOverl
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
 
-    const auto slots = connector->layerRegionSlots();
+    const auto          slots = connector->layerRegionSlots();
     std::vector<size_t> state_slots;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (connector->kindForSlot(slots[i]) == CacheBlockKind::STATE_SWA_KV) {
@@ -1203,7 +1207,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesDisjointSlotMas
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
 
-    const auto slots = connector->layerRegionSlots();
+    const auto          slots = connector->layerRegionSlots();
     std::vector<size_t> state_slots;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (connector->kindForSlot(slots[i]) == CacheBlockKind::STATE_SWA_KV) {
@@ -1282,7 +1286,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesDisjointSlotMas
     std::vector<uint8_t> required(slots.size(), 0);
     required[state_slots[0]] = 1;
     required[state_slots[1]] = 1;
-    auto match = connector->prefix_block_cache_->match(901, CacheBlockKind::STATE_SWA_KV, required);
+    auto match               = connector->prefix_block_cache_->match(901, CacheBlockKind::STATE_SWA_KV, required);
     ASSERT_TRUE(match.found);
     EXPECT_EQ(match.block_index, new_block);
     verify_prefix_slot(new_block, state_slots[0], 'O');
@@ -1304,7 +1308,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesOverlappingSlot
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
     ASSERT_TRUE(connector->init());
 
-    const auto slots = connector->layerRegionSlots();
+    const auto          slots = connector->layerRegionSlots();
     std::vector<size_t> state_slots;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (connector->kindForSlot(slots[i]) == CacheBlockKind::STATE_SWA_KV) {
@@ -1384,7 +1388,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitConflictMergesOverlappingSlot
     connector->putPrefixToCache(new_info, rootDep(0), slots);
 
     const auto required = make_mask({state_slots[0], state_slots[1], state_slots[2]});
-    auto match = connector->prefix_block_cache_->match(902, CacheBlockKind::STATE_SWA_KV, required);
+    auto       match    = connector->prefix_block_cache_->match(902, CacheBlockKind::STATE_SWA_KV, required);
     ASSERT_TRUE(match.found);
     EXPECT_EQ(match.block_index, new_block);
     verify_prefix_slot(new_block, state_slots[0], 'A');
@@ -1407,7 +1411,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitCoveredMaskReleasesRejectedBa
     auto connector = std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, server_addrs);
     ASSERT_TRUE(connector->init());
 
-    const auto slots = connector->layerRegionSlots();
+    const auto          slots = connector->layerRegionSlots();
     std::vector<size_t> state_slots;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (connector->kindForSlot(slots[i]) == CacheBlockKind::STATE_SWA_KV) {
@@ -1418,9 +1422,9 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitCoveredMaskReleasesRejectedBa
 
     auto blocks = connector->state_swa_pool_->malloc(2);
     ASSERT_EQ(blocks.size(), 2u);
-    const auto old_block = blocks[0];
+    const auto old_block      = blocks[0];
     const auto rejected_block = blocks[1];
-    auto make_mask = [&](std::initializer_list<size_t> targets) {
+    auto       make_mask      = [&](std::initializer_list<size_t> targets) {
         std::vector<uint8_t> mask(slots.size(), 0);
         for (auto target : targets) {
             mask[target] = 1;
@@ -1449,27 +1453,26 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeCommitCoveredMaskReleasesRejectedBa
     connector->putPrefixToCache(rejected_info, rootDep(0), slots);
 
     EXPECT_EQ(connector->state_swa_pool_->freeBlocksNum(), free_after_old_commit + 1);
-    auto match = connector->prefix_block_cache_->match(903,
-                                                       CacheBlockKind::STATE_SWA_KV,
-                                                       make_mask({state_slots[0], state_slots[1]}));
+    auto match = connector->prefix_block_cache_->match(
+        903, CacheBlockKind::STATE_SWA_KV, make_mask({state_slots[0], state_slots[1]}));
     ASSERT_TRUE(match.found);
     EXPECT_EQ(match.block_index, old_block);
 }
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDoubleFreePartialBlocks) {
-    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+    auto config                        = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
     config.group_kv_block_stride_bytes = std::vector<size_t>(config.group_kv_block_stride_bytes.size(), 3072);
     config.group_kv_scale_stride_bytes = std::vector<size_t>(config.group_kv_scale_stride_bytes.size(), 0);
 
     KVCacheConfig kv_config;
-    kv_config.memory_cache_size_mb             = 1;
-    kv_config.memory_cache_sync_timeout_ms     = 1000;
-    kv_config.enable_prefix_tree_memory_cache  = true;
+    kv_config.memory_cache_size_mb                    = 1;
+    kv_config.memory_cache_sync_timeout_ms            = 1000;
+    kv_config.enable_prefix_tree_memory_cache         = true;
     kv_config.enable_legacy_memory_connector_fallback = false;
 
     std::vector<std::string> server_addrs = {"127.0.0.1:1"};
-    auto connector = std::make_shared<KVCacheMemoryConnector>(
-        config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
     ASSERT_TRUE(connector->init());
     ASSERT_TRUE(connector->usePrefixTreeMemoryCache());
     ASSERT_EQ(connector->compressed_pool_->totalBlocksNum(), 1u);
@@ -1493,8 +1496,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
             if (gid < 0) {
                 continue;
             }
-            auto& blocks = resource.mutableBlockIds(
-                static_cast<int>(layer), static_cast<KVCacheRegionName>(region));
+            auto& blocks = resource.mutableBlockIds(static_cast<int>(layer), static_cast<KVCacheRegionName>(region));
             blocks.setAt(0, static_cast<BlockIdxType>(10 + gid));
             blocks.setAt(1, static_cast<BlockIdxType>(20 + gid));
         }
