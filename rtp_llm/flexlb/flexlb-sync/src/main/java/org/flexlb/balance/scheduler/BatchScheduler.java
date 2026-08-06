@@ -98,6 +98,31 @@ public class BatchScheduler extends AbstractScheduler {
                 return future;
             }
 
+            // Auto-TPM D11 (task40): with the switch on, a prioritized request
+            // whose SLO deadline (startTime + resolveSloMs(seqLen)) has already
+            // passed is rejected right at the admission gate (8400) — remaining
+            // budget ≤ 0 is not schedulable work. Switch off keeps the pre-D11
+            // parity; the 0 sentinel (D12) stays on the full legacy path and is
+            // never deadline-rejected here.
+            var d11Cfg = configService.loadBalanceConfig();
+            if (d11Cfg.isAutoTpmEnabled() && ctx.getPriority() > 0) {
+                long sloMs = d11Cfg.resolveSloMs(
+                        ctx.getRequest() != null ? ctx.getRequest().getSeqLen() : 0);
+                if (sloMs > 0) {
+                    long deadlineMs = ctx.getStartTime() + sloMs;
+                    long nowMs = System.currentTimeMillis();
+                    if (deadlineMs <= nowMs) {
+                        Logger.info("FlexLB auto-tpm slo deadline exceeded, reject "
+                                        + "request_id={} priority={} deadline_ms={} now_ms={}",
+                                ctx.getRequestId(), ctx.getPriority(), deadlineMs, nowMs);
+                        completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER,
+                                "slo deadline exceeded: deadline_ms=" + deadlineMs
+                                        + " now_ms=" + nowMs);
+                        return future;
+                    }
+                }
+            }
+
             // Atomic registration — duplicate request IDs (active or tombstone
             // within TTL) are rejected here without a check-then-act window.
             InflightItem existing = register(ctx, future);
