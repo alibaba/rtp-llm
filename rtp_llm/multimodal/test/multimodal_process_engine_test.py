@@ -511,6 +511,29 @@ class MMEmbeddingAsyncCacheTest(TestCase):
         cache.resize(20)
         self.assertEqual(cache._max_size, 20)
 
+    def test_weighted_lru_evicts_by_actual_tensor_bytes(self):
+        cache = MMEmbeddingAsyncCache(max_size=1, max_bytes=32)
+        _, e1 = cache.try_acquire("k1")
+        e1.complete((torch.zeros((2, 2)), None))  # 16 bytes
+        _, e2 = cache.try_acquire("k2")
+        e2.complete((torch.zeros((2, 2)), None))  # 16 bytes
+
+        # Weighted mode can retain more entries than the legacy count cap.
+        self.assertEqual(cache.stats()["resident_entries"], 2)
+        self.assertEqual(cache.try_acquire("k1")[0], "complete")
+
+        _, e3 = cache.try_acquire("k3")
+        e3.complete((torch.zeros((2, 2)), None))
+
+        # k1 was touched, so k2 is the least-recently-used completed entry.
+        self.assertNotIn("k2", cache._entries)
+        self.assertIn("k1", cache._entries)
+        self.assertIn("k3", cache._entries)
+        stats = cache.stats()
+        self.assertEqual(stats["resident_bytes"], 32)
+        self.assertEqual(stats["resident_tokens"], 4)
+        self.assertEqual(stats["eviction"], 1)
+
 
 class AsyncSubmitGetEmbeddingTest(TestCase):
     def _make_engine(self, mm_part=None):
@@ -618,6 +641,39 @@ class AsyncSubmitGetEmbeddingTest(TestCase):
             self.assertEqual(len(r), 1)
         # Both should finish in roughly one embedding time, not two
         self.assertLess(elapsed, FakeSlowEmbeddingInterface.delay * 2)
+        engine.stop()
+
+    def test_async_and_sync_same_key_share_one_embedding(self):
+        class CountingSlowEmbedding(FakeMultiModalEmbeddingInterface):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+                self.lock = threading.Lock()
+
+            @torch.inference_mode()
+            def embedding(self, data, **kwargs):
+                with self.lock:
+                    self.calls += 1
+                time.sleep(0.2)
+                return torch.tensor([[1.0]]), None
+
+        mm_part = CountingSlowEmbedding()
+        engine = self._make_engine(mm_part)
+        inp = self._make_input("fake://sync-async-dedup")
+
+        engine.async_submit([inp])
+        sync_result = engine.mm_embedding_cpp(
+            [inp.url],
+            [MMUrlType.IMAGE],
+            [torch.empty(0)],
+            [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+        )
+        async_result = engine.get_embedding_result([inp])
+
+        self.assertEqual(mm_part.calls, 1)
+        self.assertEqual(sync_result.embeddings[0].item(), 1.0)
+        self.assertEqual(async_result[0].embeddings[0].item(), 1.0)
+        self.assertGreaterEqual(engine._embedding_cache.stats()["inflight_dedup"], 1)
         engine.stop()
 
     def test_error_clears_cache(self):
@@ -792,6 +848,47 @@ class MMProcessEngineGreenNetTest(TestCase):
         self.assertTrue(
             any(u.endswith("#rewritten") for u in _UrlRecordingEmbedding.seen_urls),
             f"ViT did not see rewritten url: {_UrlRecordingEmbedding.seen_urls}",
+        )
+        engine.stop()
+
+    def test_rewritten_sync_and_async_share_original_key(self):
+        class SlowRecordingEmbedding(_UrlRecordingEmbedding):
+            calls = 0
+            lock = threading.Lock()
+
+            @torch.inference_mode()
+            def embedding(self, data, **kwargs):
+                with self.lock:
+                    self.calls += 1
+                time.sleep(0.2)
+                return torch.tensor([[1.0]]), None
+
+        _UrlRecordingEmbedding.seen_urls = []
+        part = SlowRecordingEmbedding()
+        engine = self._make_engine(part)
+        provider = _StubGreenNetProvider(
+            GreenNetVerdict(passed=True, code=1), rewrite_suffix="#rewritten"
+        )
+        engine._greennet_provider = provider
+        inp = self._make_input(
+            "./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg?gn_dedup"
+        )
+
+        engine.async_submit([inp])
+        sync_result = engine.mm_embedding_cpp(
+            [inp.url],
+            [MMUrlType.IMAGE],
+            [torch.empty(0)],
+            [[-1, -1, -1, -1, -1, -1, -1, [], 30000]],
+        )
+        async_result = engine.get_embedding_result([inp])
+
+        self.assertEqual(part.calls, 1)
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(sync_result.embeddings[0].item(), 1.0)
+        self.assertEqual(async_result[0].embeddings[0].item(), 1.0)
+        self.assertTrue(
+            any(u.endswith("#rewritten") for u in _UrlRecordingEmbedding.seen_urls)
         )
         engine.stop()
 

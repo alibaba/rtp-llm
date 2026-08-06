@@ -71,6 +71,10 @@ class AccMetrics(Enum):
     VIT_CUDA_GRAPH_MISS_QPS_METRIC = "py_rtp_vit_cuda_graph_miss_qps"
     VIT_CUDA_GRAPH_CAPTURE_QPS_METRIC = "py_rtp_vit_cuda_graph_capture_qps"
     VIT_CUDA_GRAPH_FALLBACK_QPS_METRIC = "py_rtp_vit_cuda_graph_fallback_qps"
+    VIT_EMBEDDING_CACHE_HIT_QPS_METRIC = "py_rtp_vit_embedding_cache_hit_qps"
+    VIT_EMBEDDING_CACHE_MISS_QPS_METRIC = "py_rtp_vit_embedding_cache_miss_qps"
+    VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
+    VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
 
 
 class GaugeMetrics(Enum):
@@ -112,6 +116,8 @@ class GaugeMetrics(Enum):
     # to see the scheduling overhead.
     VIT_EMBEDDING_BATCH_RT_METRIC = "py_rtp_vit_embedding_batch_rt"
     VIT_CUDA_GRAPH_PADDING_RATIO_METRIC = "py_rtp_vit_cuda_graph_padding_ratio"
+    VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
+    VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
 
     TOOL_CALL_LOOP_REPEAT_COUNT_METRIC = "py_rtp_tool_call_loop_repeat_count"
     TOOL_CALL_LOOP_CURRENT_SPAN_TOKENS_METRIC = (
