@@ -115,13 +115,13 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
 std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cache_config,
                                                   const KVCacheAllocatorPtr& allocator) {
     if (!allocator) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator is null");
+        RTP_LLM_LOG_ERROR("allocator is null");
         return {};
     }
     const auto allocator_groups = allocator->cacheGroups();
     const auto group_count      = static_cast<size_t>(cache_config.groupNums());
     if (allocator_groups.size() != group_count) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator/topology group count mismatch, allocator=%zu topology=%zu",
+        RTP_LLM_LOG_ERROR("allocator/topology group count mismatch, allocator=%zu topology=%zu",
                           allocator_groups.size(),
                           group_count);
         return {};
@@ -130,18 +130,17 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
     std::vector<KVCacheGroupPtr> aligned(group_count);
     for (const auto& group : allocator_groups) {
         if (!group || !group->blockPool()) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator group/direct pool must be non-null");
+            RTP_LLM_LOG_ERROR("allocator group/direct pool must be non-null");
             return {};
         }
         const int group_id = group->group_id();
         if (group_id < 0 || static_cast<size_t>(group_id) >= group_count) {
-            RTP_LLM_LOG_ERROR(
-                "createBlockTreeCache: allocator group_id=%d out of range [0, %zu)", group_id, group_count);
+            RTP_LLM_LOG_ERROR("allocator group_id=%d out of range [0, %zu)", group_id, group_count);
             return {};
         }
         auto& aligned_group = aligned[static_cast<size_t>(group_id)];
         if (aligned_group != nullptr) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: duplicate allocator group_id=%d", group_id);
+            RTP_LLM_LOG_ERROR("duplicate allocator group_id=%d", group_id);
             return {};
         }
         aligned_group = group;
@@ -150,7 +149,7 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
     for (size_t group_id = 0; group_id < group_count; ++group_id) {
         const auto& group = aligned[group_id];
         if (group == nullptr) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator is missing group_id=%zu", group_id);
+            RTP_LLM_LOG_ERROR("allocator is missing group_id=%zu", group_id);
             return {};
         }
         const auto& actual   = group->config();
@@ -162,7 +161,7 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
             || actual.kernel_seq_size_per_block != declared.kernel_seq_size_per_block
             || actual.kv_block_stride_bytes != declared.kv_block_stride_bytes
             || actual.kv_scale_stride_bytes != declared.kv_scale_stride_bytes) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator group_id=%zu does not exactly match topology", group_id);
+            RTP_LLM_LOG_ERROR("allocator group_id=%zu does not exactly match topology", group_id);
             return {};
         }
     }
@@ -188,7 +187,7 @@ std::shared_ptr<HostBlockPool> createHostPool(const std::string& name, size_t pa
 std::shared_ptr<BlockTreeDiskMountGuard>
 createDiskMountGuard(const KVCacheConfig& config, int64_t local_world_size, int64_t local_rank) {
     if (config.memory_cache_disk_paths.empty()) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: disk cache paths are empty");
+        RTP_LLM_LOG_ERROR("disk cache paths are empty");
         return nullptr;
     }
     auto       guard = std::make_shared<BlockTreeDiskMountGuard>();
@@ -328,7 +327,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
 
     const int group_count = cache_config.groupNums();
     if (group_count <= 0) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: topology must contain at least one group");
+        RTP_LLM_LOG_ERROR("topology must contain at least one group");
         return nullptr;
     }
     const auto groups = alignAllocatorGroups(cache_config, allocator);
@@ -338,16 +337,15 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     std::vector<DeviceBlockPoolPtr> group_pools(static_cast<size_t>(group_count));
     const auto&                     independent_pools = allocator->groupBlockPools();
     if (!independent_pools.empty() && independent_pools.size() != static_cast<size_t>(group_count)) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: independent pool/topology count mismatch, pools=%zu topology=%d",
-                          independent_pools.size(),
-                          group_count);
+        RTP_LLM_LOG_ERROR(
+            "independent pool/topology count mismatch, pools=%zu topology=%d", independent_pools.size(), group_count);
         return nullptr;
     }
     for (int group_id = 0; group_id < group_count; ++group_id) {
         auto pool = independent_pools.empty() ? allocator->getDeviceBlockPool() :
                                                 independent_pools[static_cast<size_t>(group_id)];
         if (!pool || groups[static_cast<size_t>(group_id)]->blockPool() != pool) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator/group direct pool mismatch for group_id %d", group_id);
+            RTP_LLM_LOG_ERROR("allocator/group direct pool mismatch for group_id %d", group_id);
             return nullptr;
         }
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
@@ -356,11 +354,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     const bool host_enabled = kv_cache_config.enable_memory_cache;
     const bool disk_enabled = kv_cache_config.enable_disk_cache;
     if (host_enabled && kv_cache_config.memory_cache_size_mb <= 0) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: host cache size must be positive");
+        RTP_LLM_LOG_ERROR("host cache size must be positive");
         return nullptr;
     }
     if (disk_enabled && kv_cache_config.memory_cache_disk_size_mb <= 0) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: disk cache size must be positive");
+        RTP_LLM_LOG_ERROR("disk cache size must be positive");
         return nullptr;
     }
 
@@ -399,7 +397,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         const size_t bytes  = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: host budget is too small for one complete tree coordinate");
+            RTP_LLM_LOG_ERROR("host budget is too small for one complete tree coordinate");
             return nullptr;
         }
         for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
@@ -416,7 +414,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         const size_t bytes  = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: disk budget is too small for one complete tree coordinate");
+            RTP_LLM_LOG_ERROR("disk budget is too small for one complete tree coordinate");
             return nullptr;
         }
         auto guard =
@@ -456,9 +454,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                         std::move(host_pools[group_set_id]),
                                         std::move(disk_pools[group_set_id]));
         group_set->initialize(group_set_id, cache_config.topologyPtr(), std::move(group_ids));
-        RTP_LLM_LOG_INFO("createBlockTreeCache: group_set[%zu] membership sealed: payload_bytes=%zu",
-                         group_set_id,
-                         group_set->payloadBytes());
+        RTP_LLM_LOG_INFO(
+            "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());
         group_sets.push_back(std::move(group_set));
     }
 
@@ -497,8 +494,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         const int64_t staging_block_count = kv_cache_config.memory_cache_disk_staging_block_count;
         if (staging_block_count <= 0
             || static_cast<uint64_t>(staging_block_count) > std::numeric_limits<size_t>::max()) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: memory_cache_disk_staging_block_count must be > 0, got %ld",
-                              staging_block_count);
+            RTP_LLM_LOG_ERROR("memory_cache_disk_staging_block_count must be > 0, got %ld", staging_block_count);
             return nullptr;
         }
         config.device_disk_staging_block_count = static_cast<size_t>(staging_block_count);
@@ -523,7 +519,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                    std::move(transfer_dispatcher),
                                                    std::move(task_pool));
     if (!result->init()) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: BlockTreeCache init failed");
+        RTP_LLM_LOG_ERROR("BlockTreeCache init failed");
         return nullptr;
     }
     return result;

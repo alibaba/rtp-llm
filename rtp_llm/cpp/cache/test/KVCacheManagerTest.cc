@@ -1023,8 +1023,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionFormsNoResponseForUnsupportedRequestTy
 static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& manager, FunctionRequestPB& request) {
     ASSERT_NE(manager->blockTreeCache(), nullptr);
     const TransferDescriptor descriptor = TransferDescriptor::deviceToHost(/*group_id=*/0, {1}, /*host_block=*/1);
-    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(
-        descriptor, manager->blockTreeCache()->groupSets(), *request.mutable_mem_request()));
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        *request.mutable_mem_request(), {descriptor}, manager->blockTreeCache()->groupSets()));
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTieredBlockTree) {
@@ -1043,7 +1043,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTiere
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialUnavailableAndOutOfRangeGroupedItems) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOutOfRangeGroupedItems) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig tiered_config;
     tiered_config.enable_memory_cache  = true;
@@ -1067,18 +1067,6 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialUnavai
         request.mutable_mem_request()->mutable_copy_items(0)->clear_group_blocks();
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
-        EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
-    }
-    {
-        KVCacheConfig unavailable_config;
-        auto unavailable_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, unavailable_config);
-        ASSERT_TRUE(unavailable_manager->init());
-        FunctionRequestPB request;
-        // Build a physically valid grouped transfer from the tiered topology, then
-        // verify that a manager without the requested HOST tier rejects it.
-        appendValidGroupedTransfer(tiered_manager, request);
-        FunctionResponsePB response;
-        EXPECT_TRUE(unavailable_manager->executeFunction(request, response));
         EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
     }
     {

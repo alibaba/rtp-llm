@@ -56,7 +56,7 @@ bool BlockTreeDiskMountGuard::init(const std::string& mount_path) {
         unlockAndClose();
         return false;
     }
-    RTP_LLM_LOG_INFO("disk kv mount guard init success: %s", debugString().c_str());
+    RTP_LLM_LOG_INFO("init success: %s", debugString().c_str());
     return true;
 }
 

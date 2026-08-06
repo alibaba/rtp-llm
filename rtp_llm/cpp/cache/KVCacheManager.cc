@@ -600,21 +600,16 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 
     MemoryOperationResponsePB* memory_response = response.mutable_mem_response();
     memory_response->set_code(MemoryOperationResponsePB::FAILED);
-    const MemoryOperationRequestPB& memory_request = request.mem_request();
-    if (memory_request.copy_items_size() == 0) {
-        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: memory request contains no transfer item");
+    std::vector<TransferDescriptor> descriptors;
+    if (!BlockTransferRequestConverter::decodeTransfer(
+            request.mem_request(), descriptors, block_tree_cache_->groupSets())) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
         return true;
     }
 
-    for (int item_index = 0; item_index < memory_request.copy_items_size(); ++item_index) {
-        const TransferDescriptor descriptor =
-            BlockTransferRequestConverter::decodeTransfer(memory_request, item_index, block_tree_cache_->groupSets());
-        if (!descriptor.isExecutable()) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer item, index=%d", item_index);
-            return true;
-        }
+    for (const TransferDescriptor& descriptor : descriptors) {
         if (!block_tree_cache_->executeTransfer(descriptor)) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed, index=%d", item_index);
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
             return true;
         }
     }

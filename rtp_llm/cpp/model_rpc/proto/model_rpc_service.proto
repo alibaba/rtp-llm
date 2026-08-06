@@ -496,23 +496,9 @@ service EmbeddingRpcService {
 message MemoryOperationRequestPB {
     message CopyItem {
         int32 mem_block = 1;
-        reserved 2;
-        bool is_complete = 3;
-        BackingType backing_type = 4;
-        oneof disk_slot_presence {
-            int32 disk_slot = 5;
-        }
-        CacheBlockKind cache_block_kind = 6;
-        oneof src_mem_block_presence {
-            int32 src_mem_block = 7;
-        }
-        repeated uint32 slot_valid_mask = 8;
-        BackingType src_backing_type = 9;
-        oneof src_disk_slot_presence {
-            int32 src_disk_slot = 10;
-        }
-        repeated GroupBlockPB group_blocks = 11;
-        uint64 group_set_id = 12;
+        int32 disk_block = 2;
+        repeated GroupBlockPB group_blocks = 3;
+        uint64 group_set_id = 4;
     }
     enum CopyDirection {
         H2D = 0;
@@ -521,16 +507,6 @@ message MemoryOperationRequestPB {
         DISK2H = 3;
         D2DISK = 4;
         DISK2D = 5;
-    }
-    enum BackingType {
-        MEMORY = 0;
-        DISK = 1;
-    }
-    enum CacheBlockKind {
-        COMPLETE_KV = 0;
-        INCOMPLETE_KV = 1;
-        COMPRESSED_KV = 2;
-        STATE_SWA_KV = 3;
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;

@@ -600,8 +600,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
         EXPECT_EQ(worker_request.copy_direction(), MemoryOperationRequestPB::DISK2D);
         ASSERT_EQ(worker_request.copy_items_size(), 1);
         const MemoryOperationRequestPB::CopyItem& request_item = worker_request.copy_items(0);
-        EXPECT_EQ(request_item.src_disk_slot(), disk_block);
-        EXPECT_TRUE(isNullBlockIdx(request_item.mem_block()));
+        EXPECT_EQ(request_item.disk_block(), disk_block);
         expectSingleGroupBlock(request_item, 0, 0, device_block);
     }
 }
@@ -661,8 +660,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
     for (const MemoryOperationRequestPB& worker_request : state->requests) {
         EXPECT_EQ(worker_request.copy_direction(), MemoryOperationRequestPB::H2DISK);
         EXPECT_EQ(worker_request.copy_items_size(), 1);
-        EXPECT_EQ(worker_request.copy_items(0).src_mem_block(), host_block);
-        EXPECT_EQ(worker_request.copy_items(0).disk_slot(), disk_slot);
+        EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
+        EXPECT_EQ(worker_request.copy_items(0).disk_block(), disk_slot);
         EXPECT_EQ(worker_request.copy_items(0).group_set_id(), 0u);
     }
 }
@@ -718,7 +717,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     for (const MemoryOperationRequestPB& request : state->requests) {
         EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
         ASSERT_EQ(request.copy_items_size(), 1);
-        EXPECT_EQ(request.copy_items(0).disk_slot(), resource.disk_slot);
+        EXPECT_EQ(request.copy_items(0).disk_block(), resource.disk_slot);
         expectSingleGroupBlock(request.copy_items(0), 0, 0, device_block);
     }
 }
@@ -856,16 +855,14 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
     std::vector<TransferDescriptor> descriptors;
     ASSERT_TRUE(cache->evictor_.taskRunner().buildTransferBatch(plan, descriptors));
     MemoryOperationRequestPB request;
-    for (const TransferDescriptor& descriptor : descriptors) {
-        ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(descriptor, cache->groupSets(), request));
-    }
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, descriptors, cache->groupSets()));
     ASSERT_EQ(request.copy_items_size(), 2);
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2DISK);
-    EXPECT_EQ(request.copy_items(0).src_mem_block(), 3);
-    EXPECT_EQ(request.copy_items(0).disk_slot(), 4);
+    EXPECT_EQ(request.copy_items(0).mem_block(), 3);
+    EXPECT_EQ(request.copy_items(0).disk_block(), 4);
     EXPECT_EQ(request.copy_items(0).group_set_id(), 0u);
-    EXPECT_EQ(request.copy_items(1).src_mem_block(), 5);
-    EXPECT_EQ(request.copy_items(1).disk_slot(), 6);
+    EXPECT_EQ(request.copy_items(1).mem_block(), 5);
+    EXPECT_EQ(request.copy_items(1).disk_block(), 6);
     EXPECT_EQ(request.copy_items(1).group_set_id(), 1u);
 }
 

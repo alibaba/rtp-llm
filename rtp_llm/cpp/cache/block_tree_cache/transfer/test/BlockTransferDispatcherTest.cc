@@ -9,6 +9,7 @@
 #include <thread>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
@@ -148,10 +149,13 @@ TEST(BlockTransferDispatcherTest, PerRankBatchStopsAtFirstFailure) {
 TEST(BlockTransferDispatcherTest, MultiRankFailureDoesNotFallbackToPerRank) {
     auto per_rank_engine = std::make_shared<ScriptedPerRankEngine>(
         std::deque<std::shared_ptr<AsyncContext>>{okContext()});
-    auto multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(std::vector<GroupSetPtr>{}, nullptr);
+    auto group_set = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, nullptr, nullptr);
+    auto multi_rank_engine =
+        std::make_shared<MultiRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set}, nullptr);
     BlockTransferDispatcher dispatcher(per_rank_engine, multi_rank_engine);
 
-    EXPECT_FALSE(dispatcher.executeMultiRank({descriptor(0)}, 100));
+    const TransferDescriptor unsupported;
+    EXPECT_FALSE(dispatcher.executeMultiRank({unsupported}, 100));
     EXPECT_EQ(per_rank_engine->submitCount(), 0u);
 }
 

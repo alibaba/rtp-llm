@@ -20,32 +20,14 @@ bool MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>
     }
 
     MemoryOperationRequestPB request;
-    for (const TransferDescriptor& descriptor : descriptors) {
-        if (!BlockTransferRequestConverter::appendTransfer(descriptor, group_sets_, request)) {
-            RTP_LLM_LOG_WARNING("failed to encode transfer, "
-                                "group_set=%zu source=%s target=%s",
-                                descriptor.group_set_id,
-                                tierName(descriptor.source_tier),
-                                tierName(descriptor.target_tier));
-            return false;
-        }
-    }
-
-    const size_t worker_count = broadcast_manager_->workerNum();
-    if (worker_count == 0) {
-        RTP_LLM_LOG_WARNING("no worker configured");
+    if (!BlockTransferRequestConverter::encodeTransfer(request, descriptors, group_sets_)) {
+        RTP_LLM_LOG_WARNING("failed to encode transfer batch, item_count=%zu", descriptors.size());
         return false;
     }
-
+    const size_t              worker_count = broadcast_manager_->workerNum();
     FunctionRequestPB         function_request;
-    MemoryOperationRequestPB* memory_request = function_request.mutable_mem_request();
-    if (memory_request == nullptr) {
-        RTP_LLM_LOG_WARNING("failed to create memory request");
-        return false;
-    }
-    memory_request->CopyFrom(request);
+    function_request.mutable_mem_request()->CopyFrom(request);
     std::vector<FunctionRequestPB> requests(worker_count, function_request);
-
     auto broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         requests,
         timeout_ms,
@@ -76,7 +58,7 @@ bool MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>
                      responses.size());
     }
 
-    bool transfer_failure_seen = false;
+    bool transfer_success = true;
     for (size_t rank = 0; rank < responses.size(); ++rank) {
         const FunctionResponsePB& response = responses[rank];
         if (!response.has_mem_response()) {
@@ -87,7 +69,7 @@ bool MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>
                 break;
             case MemoryOperationResponsePB::FAILED:
                 RTP_LLM_LOG_WARNING("worker transfer failed, rank=%zu", rank);
-                transfer_failure_seen = true;
+                transfer_success = false;
                 break;
             default:
                 RTP_LLM_FAIL("multi-rank transfer aborted, unexpected mem_response code, rank=%zu code=%d",
@@ -95,7 +77,7 @@ bool MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>
                              static_cast<int>(response.mem_response().code()));
         }
     }
-    return !transfer_failure_seen;
+    return transfer_success;
 }
 
 }  // namespace rtp_llm
