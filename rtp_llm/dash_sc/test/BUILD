@@ -7,6 +7,14 @@ py_test(
 )
 
 py_test(
+    name = "xgrammar_safety_test",
+    srcs = ["xgrammar_safety_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
     name = "think_test",
     srcs = ["think_test.py"],
     main = "think_test.py",

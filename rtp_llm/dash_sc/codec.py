@@ -26,6 +26,10 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
+from rtp_llm.dash_sc.xgrammar_safety import (
+    XGrammarSafetyError,
+    validate_xgrammar_length_safety,
+)
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _INT32_MIN = -2_147_483_648
@@ -550,6 +554,11 @@ def _parse_grammar_controls(
             if structural_tag is None:
                 structural_tag = response_structural_tag
             response_format = None
+
+    try:
+        validate_xgrammar_length_safety(response_format, structural_tag)
+    except XGrammarSafetyError as e:
+        raise DashScParameterError(str(e)) from None
 
     return (
         _jsonable_to_string(response_format),

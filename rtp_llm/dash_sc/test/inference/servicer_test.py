@@ -2048,6 +2048,68 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "response_format")
 
+    async def test_deepseek_xml_unsafe_length_is_rejected_before_enqueue(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            {
+                "format": {
+                    "type": "tag",
+                    "begin": "<result>",
+                    "content": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {
+                                "result": {"type": "string", "maxLength": 129}
+                            },
+                        },
+                        "style": "deepseek_xml",
+                    },
+                    "end": "</result>",
+                }
+            }
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "deepseek_xml")
+
+    async def test_plain_json_huge_min_length_is_rejected_before_enqueue(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["response_format"].string_param = json.dumps(
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "result": {"type": "string", "minLength": 50000}
+                        },
+                    }
+                },
+            }
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "minLength=50000")
+
     async def test_parser_type_error_is_not_masked_as_parameter_error(
         self,
     ) -> None:
