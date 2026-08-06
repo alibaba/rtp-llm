@@ -223,7 +223,7 @@ class DecodeEndpointTest {
         running.setPhase(TaskPhase.RUNNING);
         updateStatus(Map.of("100", running), null, 10000); // round 1: accepted
 
-        // Absent from the next staleEvictRounds (3) reports -> evicted
+        // Absent from the next flexlbStaleEvictRounds (3) reports -> evicted
         updateStatus(null, null, 10000); // round 2
         updateStatus(null, null, 10000); // round 3
         assertEquals(1, endpoint.decodeEngineWorkCount());
@@ -251,7 +251,7 @@ class DecodeEndpointTest {
 
     @Test
     void calibrate_untrackedAcceptedTaskStillCounted() {
-        // legacy confirmedRunningCount counted every reported accepted task,
+        // legacy flat counter counted every reported accepted task,
         // reserved locally or not — decodeTotalLoad keeps that coverage
         TaskInfo foreign = task(999L);
         foreign.setPhase(TaskPhase.RUNNING);

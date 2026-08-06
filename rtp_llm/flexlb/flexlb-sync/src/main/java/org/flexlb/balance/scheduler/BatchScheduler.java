@@ -39,8 +39,8 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>TTL expiry of a batch item follows the unified inflight semantics:
  * {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED} (see
- * {@link InflightItem#timeoutWithError()}); batch dispatch timeouts keep
- * {@code BATCH_SLO_EXPIRED} inside {@link BatchItem}.
+ * {@link InflightItem#complete(Response, InflightState)}); batch dispatch
+ * timeouts keep {@code BATCH_SLO_EXPIRED} inside {@link BatchItem}.
  */
 public class BatchScheduler extends AbstractScheduler {
 

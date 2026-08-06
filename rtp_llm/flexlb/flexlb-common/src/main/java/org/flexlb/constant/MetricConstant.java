@@ -125,7 +125,8 @@ public class MetricConstant {
 
     /**
      * FlexLB inflight TTL eviction QPS — count of RUNNING items timed out via
-     * {@code InflightItem#timeoutWithError()} in the evictor sweep.
+     * {@code InflightItem#complete(Response.error(INFLIGHT_TTL_EXPIRED), TIMED_OUT)}
+     * in the evictor sweep.
      * Reported by {@link org.flexlb.balance.scheduler.InflightStore#evict()}.
      */
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";

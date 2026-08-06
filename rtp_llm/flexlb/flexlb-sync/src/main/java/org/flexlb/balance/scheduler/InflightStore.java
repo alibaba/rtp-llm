@@ -1,6 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -22,7 +24,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Provides O(1) put / get / remove backed by {@link ConcurrentHashMap}.
  * A background evictor thread periodically sweeps the store: RUNNING items
  * older than the configured inflight TTL are timed out with an error
- * response ({@link InflightItem#timeoutWithError()}), and tombstones (items
+ * response ({@link InflightItem#complete(Response, InflightState)} with
+ * {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED}), and tombstones (items
  * that have reached a terminal state) are removed after a safety TTL,
  * preventing unbounded growth from leaked entries that were never
  * explicitly removed.
@@ -211,10 +214,10 @@ public class InflightStore implements DiagnosticsProvider {
      * <ul>
      *   <li>RUNNING items whose age exceeds the configured inflight TTL
      *       ({@code flexlbInflightTtlMs}) are timed out via
-     *       {@link InflightItem#timeoutWithError()} — the TTL safety net for
-     *       requests that never reached a terminal state (e.g. a lost ACK).
-     *       Error semantics and resource rollback are owned by the item; the
-     *       resulting tombstone is evicted on a later sweep.</li>
+     *       {@link InflightItem#complete(Response, InflightState)} with
+     *       {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED} — the TTL safety
+     *       net for requests that never reached a terminal state (e.g. a lost
+     *       ACK). The resulting tombstone is evicted on a later sweep.</li>
      *   <li>Terminated items (tombstones) older than {@code flexlbTombstoneTtlMs} are
      *       removed from the store.</li>
      * </ul>
@@ -232,7 +235,8 @@ public class InflightStore implements DiagnosticsProvider {
             store.forEach((reqId, item) -> {
                 if (item.state() == InflightState.RUNNING
                         && (now - item.createdAtMs()) > inflightTtlMs) {
-                    if (item.timeoutWithError()) {
+                    if (item.complete(Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED,
+                            "inflight TTL expired"), InflightState.TIMED_OUT)) {
                         Logger.warn("FlexLB inflight TTL expired: request_id={}", reqId);
                         reporter.reportInflightTtlExpired();
                     }

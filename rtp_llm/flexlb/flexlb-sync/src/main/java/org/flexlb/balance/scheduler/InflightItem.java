@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * provides CAS-guarded idempotent terminal transition.
  *
  * <p>Thread-safety: the {@code state} AtomicReference ensures
- * {@link #terminate(TerminalReason)} succeeds at most once. All binding
+ * {@link #complete(Response, InflightState)} succeeds at most once. All binding
  * fields are {@code volatile} so that other threads (e.g. the cancel path
  * via {@link InflightStore}) observe the latest endpoint references
  * when performing cleanup.
@@ -94,9 +94,10 @@ public final class InflightItem {
 
     /**
      * Package-private on purpose: the future's completion authority belongs to
-     * this item's terminal methods ({@link #complete}, {@link #fail},
-     * {@link #timeout}, {@link #cancel}, {@link #timeoutWithError}). External
-     * code should query {@link #isTerminated()} / {@link #state()} instead.
+     * this item's terminal methods ({@link #complete(Response, InflightState)},
+     * {@link #terminate(TerminalReason, Throwable)}, {@link #fail},
+     * {@link #timeout}). External code should query
+     * {@link #isTerminated()} / {@link #state()} instead.
      */
     CompletableFuture<Response> future() {
         return future;
@@ -193,63 +194,60 @@ public final class InflightItem {
     // ---- terminal state management ----
 
     /**
-     * Atomically transition this item to a terminal state.
+     * Convenience: terminate with a reason (no cause).
      *
-     * <p>CAS-guarded: only the first caller wins. On success, releases EP-level
-     * resources (Phase 2), notifies the batch, and completes the future
-     * exceptionally with {@link TerminalReason#toException()}.
-     *
-     * @return {@code true} if this call won the CAS (first terminal transition),
-     *         {@code false} if the item was already terminal
+     * @return {@code true} if this call won the CAS
      */
     public boolean terminate(TerminalReason reason) {
         return terminate(reason, null);
     }
 
     /**
-     * Overloaded terminate that preserves the original cause in the future completion.
+     * Convenience terminate that preserves the original cause's message in the
+     * error {@link Response}. Internally builds an error response and delegates
+     * to {@link #complete(Response, InflightState)}.
      *
      * @param reason the terminal reason
-     * @param cause  optional cause for the exceptional completion (null → use reason.toException())
+     * @param cause  optional cause whose message is used in the error response
      * @return {@code true} if this call won the CAS
      */
     public boolean terminate(TerminalReason reason, Throwable cause) {
-        if (!transitionTo(toInflightState(reason))) return false;
-        if (prefillEp != null) prefillEp.release(ctx.getRequestId());
-        if (decodeEp != null) decodeEp.release(ctx.getRequestId());
-        reportTerminalMetric(reason);
-        future.completeExceptionally(cause != null ? cause : reason.toException());
-        return true;
+        InflightState targetState = toInflightState(reason);
+        String message = cause != null ? cause.getMessage() : reason.toException().getMessage();
+        Response errorResp = Response.error(toStrategyErrorType(reason), message);
+        return complete(errorResp, targetState);
     }
 
     /**
-     * Complete the request normally with the given response.
-     *
-     * <p>Shares the same {@code state} CAS as {@link #terminate(TerminalReason)},
-     * so only one terminal transition (success or failure) can take effect.
-     * On success, releases EP-level resources (Phase 2) and completes the
-     * future normally.
+     * Convenience: complete with a response, deriving the target state from
+     * {@code response.isSuccess()} (success → COMPLETED, failure → FAILED).
      */
     public void complete(Response response) {
         boolean success = response.isSuccess();
-        complete(response,
-                success ? InflightState.COMPLETED : InflightState.FAILED,
-                success ? TerminalReason.COMPLETED : TerminalReason.FAILED);
+        complete(response, success ? InflightState.COMPLETED : InflightState.FAILED);
     }
 
     /**
-     * Shared CAS-guarded settle path delivering a {@link Response} through the
-     * future: transition to the target terminal state, release EP-level
-     * resources, report the terminal metric, and complete the future with
-     * the response.
+     * Unified CAS-guarded settle path: transition to the target terminal state,
+     * release EP-level resources, report the terminal metric, and complete the
+     * future with the given response (never {@code completeExceptionally}).
      *
-     * @return {@code true} if this call won the CAS (first terminal transition)
+     * <p>All terminal paths funnel through this method:
+     * <ul>
+     *   <li>success → {@code complete(successResp, COMPLETED)}</li>
+     *   <li>failure → {@code complete(Response.error(FAILED, msg), FAILED)}</li>
+     *   <li>timeout → {@code complete(Response.error(INFLIGHT_TTL_EXPIRED, msg), TIMED_OUT)}</li>
+     *   <li>cancel  → {@code complete(Response.error(CANCELLED, msg), CANCELLED)}</li>
+     * </ul>
+     *
+     * @return {@code true} if this call won the CAS (first terminal transition),
+     *         {@code false} if the item was already terminal
      */
-    private boolean complete(Response response, InflightState targetState, TerminalReason reason) {
+    public boolean complete(Response response, InflightState targetState) {
         if (!transitionTo(targetState)) return false;
         if (prefillEp != null) prefillEp.release(ctx.getRequestId());
         if (decodeEp != null) decodeEp.release(ctx.getRequestId());
-        reportTerminalMetric(reason);
+        reportTerminalMetric(toTerminalReason(targetState));
         future.complete(response);
         return true;
     }
@@ -288,17 +286,29 @@ public final class InflightItem {
         };
     }
 
-    /**
-     * Cancel the request.
-     *
-     * @return {@code true} if this call won the CAS, {@code false} if already terminal (tombstone)
-     */
-    public boolean cancel() {
-        return terminate(TerminalReason.CANCELLED);
+    /** Map an {@link InflightState} back to the corresponding {@link TerminalReason}. */
+    private static TerminalReason toTerminalReason(InflightState state) {
+        return switch (state) {
+            case COMPLETED -> TerminalReason.COMPLETED;
+            case FAILED -> TerminalReason.FAILED;
+            case CANCELLED -> TerminalReason.CANCELLED;
+            case TIMED_OUT -> TerminalReason.TIMED_OUT;
+            case RUNNING -> throw new IllegalArgumentException("RUNNING is not a terminal state");
+        };
+    }
+
+    /** Map a {@link TerminalReason} to the corresponding {@link StrategyErrorType}. */
+    private static StrategyErrorType toStrategyErrorType(TerminalReason reason) {
+        return switch (reason) {
+            case FAILED -> StrategyErrorType.WORKER_EXECUTION_FAILED;
+            case TIMED_OUT -> StrategyErrorType.INFLIGHT_TTL_EXPIRED;
+            case CANCELLED -> StrategyErrorType.CANCELLED;
+            case COMPLETED -> throw new IllegalArgumentException("COMPLETED is not an error");
+        };
     }
 
     /**
-     * Fail the request with the given cause.
+     * Convenience: fail the request with the given cause.
      *
      * @return {@code true} if this call won the CAS
      */
@@ -307,33 +317,12 @@ public final class InflightItem {
     }
 
     /**
-     * Time out the request.
+     * Convenience: time out the request.
      *
      * @return {@code true} if this call won the CAS
      */
     public boolean timeout() {
         return terminate(TerminalReason.TIMED_OUT);
-    }
-
-    /**
-     * Time out the request with an error {@link Response} delivered through
-     * the future — TTL safety net for requests that never reached a terminal
-     * state (e.g. a lost ACK). All scheduling paths (BATCH/QUEUE/DIRECT)
-     * uniformly expire with {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED};
-     * the batch dispatch-timeout paths keep their own
-     * {@code BATCH_SLO_EXPIRED} semantics inside {@link BatchItem}.
-     *
-     * <p>Reuses the CAS-guarded {@link #complete} settle path with the
-     * {@link TerminalReason#TIMED_OUT} terminal kind, so the error response,
-     * resource release, and metric reporting all happen inside the single
-     * terminal transition — no external future completion.
-     *
-     * @return {@code true} if this call won the CAS
-     */
-    public boolean timeoutWithError() {
-        Response errorResp = Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED);
-        errorResp.setErrorMessage("inflight TTL expired");
-        return complete(errorResp, InflightState.TIMED_OUT, TerminalReason.TIMED_OUT);
     }
 
     // ---- terminal metric reporting ----

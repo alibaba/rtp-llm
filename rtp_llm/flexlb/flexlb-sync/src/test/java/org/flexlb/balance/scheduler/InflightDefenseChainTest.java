@@ -22,12 +22,10 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.slf4j.LoggerFactory;
 
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -42,15 +40,18 @@ import static org.mockito.Mockito.verify;
  *
  * <ol>
  *   <li><b>TTL safety net</b> — {@link InflightStore#evict()} driving
- *       {@link InflightItem#timeoutWithError()} for over-age RUNNING items:
- *       terminal state, unified error code, future completion, exactly-once
- *       activeCount decrement, decode-EP KV reservation release, eviction
- *       log, and terminal metric. Plus the negative guards: terminal
- *       tombstones and fresh RUNNING items are never killed.</li>
- *   <li><b>Cancel</b> — {@link InflightItem#cancel()} resource cleanup:
- *       immediate KV release (no TTL wait), terminal state, exceptional
- *       future completion, activeCount decrement, cancel metric, and
- *       idempotent second cancel.</li>
+ *       {@link InflightItem#complete(Response, InflightState)} with
+ *       {@link StrategyErrorType#INFLIGHT_TTL_EXPIRED} for over-age RUNNING
+ *       items: terminal state, unified error code, future completion,
+ *       exactly-once activeCount decrement, decode-EP KV reservation
+ *       release, eviction log, and terminal metric. Plus the negative
+ *       guards: terminal tombstones and fresh RUNNING items are never
+ *       killed.</li>
+ *   <li><b>Cancel</b> — {@link InflightItem#complete(Response, InflightState)}
+ *       with {@link StrategyErrorType#CANCELLED}: immediate KV release (no
+ *       TTL wait), terminal state, error-response future completion,
+ *       activeCount decrement, cancel metric, and idempotent second
+ *       cancel.</li>
  * </ol>
  *
  * <p>The third path (STALE round-based engine-task eviction) is EP-layer
@@ -61,6 +62,12 @@ import static org.mockito.Mockito.verify;
  * matching the approach of {@link InflightItemTtlExpiryTest}.
  */
 class InflightDefenseChainTest {
+
+    /** Helper: cancel an item via the unified complete() API. */
+    private static boolean cancel(InflightItem item) {
+        return item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
+                InflightState.CANCELLED);
+    }
 
     private ch.qos.logback.classic.Logger flexlbLogger;
     private ListAppender<ILoggingEvent> logAppender;
@@ -175,7 +182,7 @@ class InflightDefenseChainTest {
 
             // a second sweep and a late terminal attempt must not decrement again
             store.evict();
-            assertFalse(item.cancel());
+            assertFalse(cancel(item));
             assertEquals(0, store.activeCount(), "activeCount must never go negative");
             // KV release is also exactly-once: counters stay at zero, not negative
             assertEquals(0, decodeEp.decodeInflightHardKvReserved());
@@ -247,7 +254,8 @@ class InflightDefenseChainTest {
             store.putIfAbsent(item.requestId(), item);
             assertEquals(1, store.activeCount());
 
-            assertTrue(item.cancel());
+            assertTrue(item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
+                    InflightState.CANCELLED));
 
             // KV reservation released immediately, not by the TTL sweep
             assertEquals(0, decodeEp.decodeInflightCount());
@@ -258,10 +266,10 @@ class InflightDefenseChainTest {
             assertEquals(InflightState.CANCELLED, item.state());
             assertTrue(item.isTerminated());
 
-            // future completed exceptionally with CancellationException
-            // (CompletableFuture surfaces it directly from get(), unwrapped)
-            assertTrue(future.isCompletedExceptionally());
-            assertThrows(CancellationException.class, future::get);
+            // future completed with an error Response (not exceptional)
+            assertTrue(future.isDone());
+            assertFalse(future.join().isSuccess());
+            assertEquals(StrategyErrorType.CANCELLED.getErrorCode(), future.join().getCode());
 
             // activeCount decremented; cancel metric reported
             assertEquals(0, store.activeCount());
@@ -284,8 +292,8 @@ class InflightDefenseChainTest {
             item.setMetricHelper(new FlexlbMetricHelper(monitor, MetricConstant.PATH_QUEUE));
             store.putIfAbsent(item.requestId(), item);
 
-            assertTrue(item.cancel());
-            assertFalse(item.cancel(), "second cancel must lose the CAS and return false");
+            assertTrue(cancel(item));
+            assertFalse(cancel(item), "second cancel must lose the CAS and return false");
 
             // no double decrement / double KV release
             assertEquals(0, store.activeCount());

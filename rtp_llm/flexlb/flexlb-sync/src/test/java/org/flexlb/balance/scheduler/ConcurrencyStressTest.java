@@ -10,6 +10,7 @@ import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -58,7 +59,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>The three races covered:
  * <ul>
- *   <li><b>UT-C1</b> — {@code InflightItem.cancel()} vs {@code complete()}:
+ *   <li><b>UT-C1</b> — {@code InflightItem.complete(CANCELLED)} vs
+ *       {@code complete(successResponse)}:
  *       the CAS-guarded terminal transition must fire exactly once; EP
  *       {@code release} must run at most once per endpoint; the
  *       {@link InflightStore#activeCount} must return to zero.</li>
@@ -156,8 +158,8 @@ class ConcurrencyStressTest {
     // ==================== UT-C1: concurrent cancel vs complete ====================
 
     /**
-     * UT-C1: Concurrent {@code cancel()} vs {@code complete()} on the same
-     * {@link InflightItem}.
+     * UT-C1: Concurrent {@code complete(CANCELLED)} vs {@code complete(success)}
+     * on the same {@link InflightItem}.
      *
      * <p>Both methods share the same {@code state} AtomicReference CAS, so
      * only one terminal transition can succeed. The winner releases EP
@@ -199,7 +201,8 @@ class ConcurrencyStressTest {
                 CyclicBarrier barrier = new CyclicBarrier(2);
                 Future<?> cancelFuture = pool.submit(() -> {
                     barrier.await();
-                    item.cancel();
+                    item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
+                            InflightState.CANCELLED);
                     return null;
                 });
                 Future<?> completeFuture = pool.submit(() -> {
@@ -396,7 +399,7 @@ class ConcurrencyStressTest {
 
     /**
      * UT-C4: Concurrent STALE eviction (via {@code calibrate → evictStaleEngineTasks
-     * → terminateBoundItem → item.terminate(FAILED)}) vs {@code item.complete(successResponse)}.
+     * → terminateBoundItem → item.complete(errorResp, FAILED)}) vs {@code item.complete(successResponse)}.
      *
      * <p>Both paths share the same {@code state} AtomicReference CAS on
      * {@link InflightItem}, so only one terminal transition can succeed.
@@ -405,7 +408,7 @@ class ConcurrencyStressTest {
      *
      * <p>Setup per round: reserve on a real {@link DecodeEndpoint} (layer 1),
      * then 3 calibrate rounds to migrate to layer 2 and advance the STALE
-     * counter (staleEvictRounds = 3). The 4th calibrate triggers eviction.
+     * counter (flexlbStaleEvictRounds = 3). The 4th calibrate triggers eviction.
      *
      * <p>Race window: T1 releases the {@link CyclicBarrier} and calls
      * {@code onWorkerStatusUpdate} (round 4 → STALE eviction), while T2

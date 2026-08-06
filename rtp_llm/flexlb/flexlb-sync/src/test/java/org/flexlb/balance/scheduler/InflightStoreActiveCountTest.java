@@ -5,6 +5,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -38,6 +39,12 @@ class InflightStoreActiveCountTest {
         return new InflightStore(Mockito.mock(BatchSchedulerReporter.class), configService);
     }
 
+    /** Helper: cancel an item via the unified complete() API. */
+    private static boolean cancel(InflightItem item) {
+        return item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
+                InflightState.CANCELLED);
+    }
+
     private static InflightItem newItem(long requestId) {
         return newItem(requestId, null);
     }
@@ -68,7 +75,7 @@ class InflightStoreActiveCountTest {
             assertNull(store.putIfAbsent("1", item));
             assertEquals(1, store.activeCount());
 
-            assertTrue(item.cancel());
+            assertTrue(cancel(item));
             assertEquals(0, store.activeCount());
 
             // second terminal attempt loses the CAS and must not decrement again
@@ -99,17 +106,17 @@ class InflightStoreActiveCountTest {
             assertEquals(1, store.activeCount(direct));
 
             // terminating the DIRECT item must not touch the BATCH bucket
-            assertTrue(directItem.cancel());
+            assertTrue(cancel(directItem));
             assertEquals(2, store.activeCount());
             assertEquals(1, store.activeCount(batch));
             assertEquals(0, store.activeCount(direct));
 
             // second terminal attempt loses the CAS: bucket not double-decremented
-            assertTrue(batchItem.cancel());
+            assertTrue(cancel(batchItem));
             batchItem.timeout();
             assertEquals(0, store.activeCount(batch));
 
-            assertTrue(unowned.cancel());
+            assertTrue(cancel(unowned));
             assertEquals(0, store.activeCount());
         } finally {
             store.shutdown();
@@ -122,7 +129,7 @@ class InflightStoreActiveCountTest {
         try {
             AbstractScheduler batch = newScheduler();
             InflightItem item = newItem(20L, batch);
-            assertTrue(item.cancel());
+            assertTrue(cancel(item));
 
             // terminal before registration: compensation path must roll the
             // bucket back together with the global counter
@@ -141,7 +148,7 @@ class InflightStoreActiveCountTest {
             // Terminate before registration: transitionTo sees a null callback,
             // so putIfAbsent's compensation path must claim and run the decrement.
             InflightItem item = newItem(2L);
-            assertTrue(item.cancel());
+            assertTrue(cancel(item));
 
             assertNull(store.putIfAbsent("2", item));
             assertEquals(0, store.activeCount());
@@ -168,7 +175,7 @@ class InflightStoreActiveCountTest {
                 });
                 Future<?> terminate = pool.submit(() -> {
                     barrier.await();
-                    item.cancel();
+                    cancel(item);
                     return null;
                 });
                 register.get(5, TimeUnit.SECONDS);

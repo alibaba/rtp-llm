@@ -45,7 +45,7 @@ import static org.mockito.Mockito.mock;
  * (red-team audit: zero triggers in integration tests).
  *
  * <p>Boundary condition (verified against the code): an engine task is
- * evicted when {@code round - lastSeenRound >= staleEvictRounds} (3);
+ * evicted when {@code round - lastSeenRound >= flexlbStaleEvictRounds} (3);
  * strictly below the threshold it survives. The exact-boundary tests
  * already exist in {@code DecodeEndpointTest#calibrate_staleEngineTaskEvictedAfterMissingRounds}
  * and {@code PrefillEndpointTest#staleEngineTaskEvictedAfterMissingRounds};

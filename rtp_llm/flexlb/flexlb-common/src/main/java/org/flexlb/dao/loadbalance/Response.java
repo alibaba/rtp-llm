@@ -46,6 +46,21 @@ public class Response {
         return result;
     }
 
+    /**
+     * Create an error response with a custom error message.
+     *
+     * @param strategyErrorType the error type (provides the error code)
+     * @param message          the error message; if {@code null}, falls back to
+     *                         {@code strategyErrorType.getErrorMsg()}
+     */
+    public static Response error(StrategyErrorType strategyErrorType, String message) {
+        Response result = new Response();
+        result.setSuccess(false);
+        result.setCode(strategyErrorType.getErrorCode());
+        result.setErrorMessage(message != null ? message : strategyErrorType.getErrorMsg());
+        return result;
+    }
+
     @Data
     public static class WorkerRoleSummary {
         private int discovered;

@@ -48,8 +48,8 @@ public abstract class AbstractScheduler implements DiagnosticsProvider {
      * <p>Uses {@link InflightStore#putIfAbsent} — duplicate request IDs
      * (active or tombstone within TTL) are rejected without a check-then-act
      * window. On successful insert the item's terminal state is driven by
-     * the future's completion (success → {@link InflightItem#complete},
-     * failure → {@link InflightItem#fail}); the item then remains in the
+     * the future's completion (success → {@link InflightItem#complete(Response)},
+     * failure → {@link InflightItem#fail(Throwable)}); the item then remains in the
      * store as a tombstone until the TTL evictor removes it.
      *
      * @param ctx    the request context

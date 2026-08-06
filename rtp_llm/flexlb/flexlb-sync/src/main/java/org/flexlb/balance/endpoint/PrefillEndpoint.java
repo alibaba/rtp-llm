@@ -7,13 +7,15 @@ import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DispatchMeta;
 import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.InflightItem;
+import org.flexlb.balance.scheduler.InflightState;
 import org.flexlb.balance.scheduler.InflightStore;
-import org.flexlb.balance.scheduler.TerminalReason;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.balance.strategy.FormulaPredictor;
 import org.flexlb.balance.strategy.LearningPredictor;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -83,20 +85,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /** Monotonic calibrate round counter driving stale engineWork eviction. */
     private final AtomicLong calibrateRound = new AtomicLong(0);
 
-    /**
-     * Evict an engineWork entry absent from both running and finished reports
-     * for this many consecutive calibrate rounds. Configurable via
-     * {@code flexlbStaleEvictRounds} (default 3).
-     */
-    private final int staleEvictRounds;
-
-    /**
-     * Engine-reported waiting queue length from the latest WorkerStatus update.
-     * Reflects requests queued on the engine side that the master hasn't
-     * dispatched yet (e.g. traffic not tracked by the current master).
-     */
-    private volatile long engineWaitingQueryLen = 0;
-
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            EngineGrpcClient grpcClient,
                            BatchDispatchExecutor dispatchExecutor,
@@ -112,7 +100,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.globalActiveCount = globalActiveCount;
         this.reporter = reporter;
         this.inflightStore = inflightStore;
-        this.staleEvictRounds = config.getFlexlbStaleEvictRounds();
         this.predictor = createPredictor(config);
         this.batcher = new WorkerBatcher(status.getIpPort(), this, config, reporter);
         this.inflightEvictor = new InflightEvictor<>(inflightEntries,
@@ -159,7 +146,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         inflightRequestCount.set(0);
         for (InflightItem item : toTerminate) {
             if (!item.isTerminated()) {
-                item.terminate(TerminalReason.FAILED, new RuntimeException(reason));
+                item.complete(Response.error(StrategyErrorType.WORKER_EXECUTION_FAILED, reason),
+                        InflightState.FAILED);
             }
         }
     }
@@ -633,7 +621,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
     @Override
     public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
         super.onWorkerStatusUpdate(ws, resp);
-        engineWaitingQueryLen = resp.getWaitingQueryLen();
         calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
     }
 
@@ -652,7 +639,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      *       layer tracks it (fast path: finished while still in layer 1);
      *       a batch is removed only when all members have finished.</li>
      *   <li>staleness — engineWork entries absent from reports for
-     *       {@link #staleEvictRounds} consecutive rounds are evicted.</li>
+     *       {@code flexlbStaleEvictRounds} consecutive rounds are evicted.</li>
      * </ol>
      */
     private void calibrate(Map<String, TaskInfo> finishedTaskInfo, Map<String, TaskInfo> runningTaskInfo) {
@@ -893,14 +880,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Staleness step: evict engineWork entries that have been absent from both
-     * running and finished reports for {@link #staleEvictRounds}
+     * running and finished reports for {@code flexlbStaleEvictRounds}
      * consecutive calibrate rounds (lost completion report).
      */
     private void evictStaleEngineWork(long round) {
         List<InflightItem> toTerminate = new ArrayList<>();
         for (Map.Entry<Long, EngineTask<PrefillInflightEntry>> entry : engineWork.entrySet()) {
             EngineTask<PrefillInflightEntry> task = entry.getValue();
-            if (round - task.lastSeenRound() < staleEvictRounds) {
+            if (round - task.lastSeenRound() < config.getFlexlbStaleEvictRounds()) {
                 continue;
             }
             if (engineWork.remove(entry.getKey(), task)) {
@@ -915,7 +902,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
         for (InflightItem item : toTerminate) {
             if (!item.isTerminated()) {
-                item.terminate(TerminalReason.FAILED, new RuntimeException("engine evicted as stale"));
+                item.complete(Response.error(StrategyErrorType.WORKER_EXECUTION_FAILED,
+                        "engine evicted as stale"), InflightState.FAILED);
             }
         }
     }
@@ -988,11 +976,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Request-level pending count: total requests the engine will face.
      * Includes master-tracked inflight requests (both layers) + batcher
-     * queue + engine-reported waiting queue (e.g. traffic not tracked by
-     * the current master).
+     * queue + engine-accepted tasks in the WAITING phase (queued on the
+     * engine side but not yet running).
      */
     public long prefillPendingRequestCount() {
-        return inflightRequestCount.get() + batcher.queueSize() + engineWaitingQueryLen;
+        return inflightRequestCount.get() + batcher.queueSize()
+                + countEngineWorkInPhase(EngineTaskPhase.WAITING);
     }
 
     /**

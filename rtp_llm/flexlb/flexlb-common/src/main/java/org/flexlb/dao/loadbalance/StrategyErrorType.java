@@ -46,7 +46,9 @@ public enum StrategyErrorType {
     // on persistent errors such as OOM or input-too-long.
     WORKER_EXECUTION_FAILED(4513),
     // global inflight TTL expiry for non-batch (QUEUE/DIRECT) requests
-    INFLIGHT_TTL_EXPIRED(4514);
+    INFLIGHT_TTL_EXPIRED(4514),
+    // request cancelled by the client or master — non-retryable
+    CANCELLED(4515);
 
     private final int errorCode;
     private final String errorMsg;

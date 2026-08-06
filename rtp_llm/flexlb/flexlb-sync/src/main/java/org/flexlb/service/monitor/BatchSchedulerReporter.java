@@ -239,7 +239,8 @@ public class BatchSchedulerReporter {
 
     /**
      * Report an inflight TTL eviction event (RUNNING item timed out via
-     * {@code InflightItem#timeoutWithError()}) via {@code app.flexlb.inflight.ttl.expired.qps}.
+     * {@code InflightItem#complete(Response.error(INFLIGHT_TTL_EXPIRED), TIMED_OUT)})
+     * via {@code app.flexlb.inflight.ttl.expired.qps}.
      * <p>Called by {@link org.flexlb.balance.scheduler.InflightStore#evict()} on each
      * successful timeout. Uses scheduler-level tags (no engineIp — the TTL sweep is
      * a scheduler-level operation, not per-engine).

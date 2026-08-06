@@ -329,9 +329,11 @@ class PrefillEndpointTest {
         running.put("1", task);
         calibrate(Map.of(), running);
 
-        // Migrated layer 1 -> layer 2: still exactly one tracked entry/request
+        // Migrated layer 1 -> layer 2: still exactly one tracked entry
         assertEquals(1, trackedEntryCount());
-        assertEquals(1, endpoint.prefillPendingRequestCount());
+        // prefillPendingRequestCount = inflightRequestCount(1) + queueSize(0)
+        //   + countEngineWorkInPhase(WAITING)(1) = 2
+        assertEquals(2, endpoint.prefillPendingRequestCount());
 
         // Finished in a later round removes it from layer 2
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -420,7 +422,7 @@ class PrefillEndpointTest {
         running.put("1", task);
         calibrate(Map.of(), running); // round 1: accepted into layer 2
 
-        // Absent from the next staleEvictRounds (3) reports -> evicted
+        // Absent from the next flexlbStaleEvictRounds (3) reports -> evicted
         calibrate(Map.of(), Map.of()); // round 2
         calibrate(Map.of(), Map.of()); // round 3
         assertEquals(1, trackedEntryCount());

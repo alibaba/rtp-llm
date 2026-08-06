@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
- * TTL safety-net error semantics for {@link InflightItem#timeoutWithError()}.
+ * TTL safety-net error semantics for {@link InflightItem#complete(Response, InflightState)}.
  *
  * <p>After the TTL error-code unification, all scheduling paths
  * (BATCH/QUEUE/DIRECT, and items registered without a scheduler) uniformly
@@ -61,7 +61,8 @@ class InflightItemTtlExpiryTest {
             CompletableFuture<Response> future = new CompletableFuture<>();
             InflightItem item = newItem(1L, newBatchScheduler(store), future);
 
-            assertTrue(item.timeoutWithError());
+            assertTrue(item.complete(Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED,
+                    "inflight TTL expired"), InflightState.TIMED_OUT));
 
             Response response = future.join();
             assertFalse(response.isSuccess());
@@ -82,7 +83,8 @@ class InflightItemTtlExpiryTest {
             CompletableFuture<Response> future = new CompletableFuture<>();
             InflightItem item = newItem(2L, direct, future);
 
-            assertTrue(item.timeoutWithError());
+            assertTrue(item.complete(Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED,
+                    "inflight TTL expired"), InflightState.TIMED_OUT));
             assertEquals(StrategyErrorType.INFLIGHT_TTL_EXPIRED.getErrorCode(),
                     future.join().getCode());
         } finally {
@@ -95,7 +97,8 @@ class InflightItemTtlExpiryTest {
         CompletableFuture<Response> future = new CompletableFuture<>();
         InflightItem item = newItem(3L, null, future);
 
-        assertTrue(item.timeoutWithError());
+        assertTrue(item.complete(Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED,
+                "inflight TTL expired"), InflightState.TIMED_OUT));
         assertEquals(StrategyErrorType.INFLIGHT_TTL_EXPIRED.getErrorCode(),
                 future.join().getCode());
         assertEquals(InflightState.TIMED_OUT, item.state());
@@ -104,7 +107,7 @@ class InflightItemTtlExpiryTest {
     // ==================== CAS correctness ====================
 
     @Test
-    void timeoutWithErrorLosesCasWhenAlreadyTerminal() {
+    void completeTimedOutLosesCasWhenAlreadyTerminal() {
         CompletableFuture<Response> future = new CompletableFuture<>();
         InflightItem item = newItem(4L, null, future);
 
@@ -112,19 +115,23 @@ class InflightItemTtlExpiryTest {
         success.setSuccess(true);
         item.complete(success);
 
-        assertFalse(item.timeoutWithError());
+        assertFalse(item.complete(Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED,
+                "inflight TTL expired"), InflightState.TIMED_OUT));
         assertEquals(InflightState.COMPLETED, item.state());
         assertTrue(future.join().isSuccess()); // original response preserved
     }
 
     @Test
-    void secondTimeoutWithErrorIsNoOp() {
+    void secondCompleteTimedOutIsNoOp() {
         CompletableFuture<Response> future = new CompletableFuture<>();
         InflightItem item = newItem(5L, null, future);
 
-        assertTrue(item.timeoutWithError());
-        assertFalse(item.timeoutWithError());
-        assertFalse(item.cancel()); // any later terminal attempt loses the CAS
+        assertTrue(item.complete(Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED,
+                "inflight TTL expired"), InflightState.TIMED_OUT));
+        assertFalse(item.complete(Response.error(StrategyErrorType.INFLIGHT_TTL_EXPIRED,
+                "inflight TTL expired"), InflightState.TIMED_OUT));
+        assertFalse(item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
+                InflightState.CANCELLED)); // any later terminal attempt loses the CAS
         assertEquals(StrategyErrorType.INFLIGHT_TTL_EXPIRED.getErrorCode(),
                 future.join().getCode());
     }

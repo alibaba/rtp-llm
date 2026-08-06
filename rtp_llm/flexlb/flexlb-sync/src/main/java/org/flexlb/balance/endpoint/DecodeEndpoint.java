@@ -4,8 +4,9 @@ import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.InflightItem;
 import org.flexlb.balance.scheduler.InflightState;
 import org.flexlb.balance.scheduler.InflightStore;
-import org.flexlb.balance.scheduler.TerminalReason;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -33,8 +34,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li>layer 2 ({@link #engineWork}) — engine-accepted tasks keyed by
  *       requestId with a phase (PENDING/RECEIVED → WAITING, KV_ALLOCATED →
  *       LOADING, RUNNING → RUNNING) and lastSeenRound. Replaces the legacy
- *       {@code confirmedRunningCount} flat counter with per-request phase
- *       visibility.</li>
+ *       flat {@code confirmedRunningCount} counter with per-request phase
+ *       visibility via {@code countEngineWorkInPhase(RUNNING)}.</li>
  * </ol>
  */
 public class DecodeEndpoint extends WorkerEndpoint {
@@ -58,17 +59,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Monotonic calibrate round counter driving stale engineWork eviction. */
     private final AtomicLong calibrateRound = new AtomicLong(0);
 
-    /**
-     * Evict an engineWork entry absent from both running and finished reports
-     * for this many consecutive calibrate rounds. Configurable via
-     * {@code flexlbStaleEvictRounds} (default 3).
-     */
-    private final int staleEvictRounds;
-
     public DecodeEndpoint(WorkerStatus status, FlexlbConfig config, InflightStore inflightStore) {
         super(status);
         this.config = config;
-        this.staleEvictRounds = config != null ? config.getFlexlbStaleEvictRounds() : 3;
         this.inflightStore = inflightStore;
         this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {
             inflightKvReservedTotal.addAndGet(-req.kvTokens());
@@ -107,7 +100,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         inflightExpectedKvReservedTotal.set(0);
         for (InflightItem item : toTerminate) {
             if (!item.isTerminated()) {
-                item.terminate(TerminalReason.FAILED, new RuntimeException(reason));
+                item.complete(Response.error(StrategyErrorType.WORKER_EXECUTION_FAILED, reason),
+                        InflightState.FAILED);
             }
         }
     }
@@ -132,7 +126,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (inflightStore == null) return;
         InflightItem item = inflightStore.get(String.valueOf(requestId));
         if (item != null && !item.isTerminated()) {
-            item.terminate(TerminalReason.FAILED, new RuntimeException(reason));
+            item.complete(Response.error(StrategyErrorType.WORKER_EXECUTION_FAILED, reason),
+                    InflightState.FAILED);
         }
     }
 
@@ -160,8 +155,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Release the layer-1 reservation for {@code requestId}.
      * <p>Layer 2 is intentionally untouched: engineWork mirror what the
      * engine reports as accepted, so entries leave via finishedTaskInfo or
-     * stale-round eviction — same coverage the legacy
-     * {@code confirmedRunningCount} had (recomputed purely from reports).
+     * stale-round eviction — same coverage the legacy flat counter had
+     * (recomputed purely from reports via
+     * {@code countEngineWorkInPhase(RUNNING)}).
      */
     @Override
     public void release(long requestId) {
@@ -190,7 +186,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *   <li>completion — finished tasks are removed from whichever layer
      *       tracks them (fast path: finished while still in layer 1).</li>
      *   <li>staleness — engineWork entries absent from reports for
-     *       {@link #staleEvictRounds} consecutive rounds are evicted.</li>
+     *       {@code flexlbStaleEvictRounds} consecutive rounds are evicted.</li>
      * </ol>
      */
     private void calibrate(Map<String, TaskInfo> runningTaskInfo, Map<String, TaskInfo> finishedTaskInfo) {
@@ -299,13 +295,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Staleness step: evict engineWork entries that have been absent from both
-     * running and finished reports for {@link #staleEvictRounds}
+     * running and finished reports for {@code flexlbStaleEvictRounds}
      * consecutive calibrate rounds (lost completion report).
      */
     private void evictStaleEngineWork(long round) {
         for (Map.Entry<Long, EngineTask<RequestInflight>> entry : engineWork.entrySet()) {
             EngineTask<RequestInflight> task = entry.getValue();
-            if (round - task.lastSeenRound() < staleEvictRounds) {
+            if (round - task.lastSeenRound() < config.getFlexlbStaleEvictRounds()) {
                 continue;
             }
             if (engineWork.remove(entry.getKey(), task)) {
@@ -388,7 +384,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Total active load: engine-accepted tasks + local inflight
-     * (confirmedRunningCount + inflight in legacy terms).
+     * (countEngineWorkInPhase(RUNNING) + inflight in legacy terms).
      */
     public int decodeTotalLoad() {
         return engineWork.size() + inflightRequests.size();

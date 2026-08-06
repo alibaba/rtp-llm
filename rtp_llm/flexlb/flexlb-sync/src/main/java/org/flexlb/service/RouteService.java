@@ -8,12 +8,14 @@ import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DiagnosticsProvider;
 import org.flexlb.balance.scheduler.DirectScheduler;
 import org.flexlb.balance.scheduler.InflightItem;
+import org.flexlb.balance.scheduler.InflightState;
 import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -125,12 +127,14 @@ public class RouteService {
      * Cancel an inflight request by its string-form request ID.
      *
      * <p>Looks up the {@link InflightItem} in the global {@link InflightStore},
-     * atomically cancels it via CAS, and — when the cancel wins the CAS —
-     * triggers the owning scheduler's {@link AbstractScheduler#onCancel}
-     * hook through {@link InflightItem#fireOnCancel()} to release
-     * path-specific resources (e.g. a queue slot). The owning scheduler
-     * is resolved via {@link InflightItem#scheduler()}, so all three
-     * scheduling paths (BATCH/QUEUE/DIRECT) are covered by the same store.
+     * atomically cancels it via CAS (completing the future with an error
+     * {@link Response} of type {@link StrategyErrorType#CANCELLED}), and — when
+     * the cancel wins the CAS — triggers the owning scheduler's
+     * {@link AbstractScheduler#onCancel} hook through
+     * {@link InflightItem#fireOnCancel()} to release path-specific resources
+     * (e.g. a queue slot). The owning scheduler is resolved via
+     * {@link InflightItem#scheduler()}, so all three scheduling paths
+     * (BATCH/QUEUE/DIRECT) are covered by the same store.
      *
      * <p>Returns {@code false} if the request was not found (already evicted
      * or never tracked) or is already terminal.
@@ -143,7 +147,9 @@ public class RouteService {
         if (item == null) {
             return false;
         }
-        boolean cancelled = item.cancel();
+        boolean cancelled = item.complete(
+                Response.error(StrategyErrorType.CANCELLED, "cancelled"),
+                InflightState.CANCELLED);
         if (cancelled) {
             item.fireOnCancel();
         }

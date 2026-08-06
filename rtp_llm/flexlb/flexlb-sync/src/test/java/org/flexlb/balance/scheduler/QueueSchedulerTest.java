@@ -207,13 +207,16 @@ class QueueSchedulerTest {
         assertEquals(1, scheduler.queueSize());
 
         // Inline the cancel cascade (previously scheduler.cancel("1"),
-        // now owned by RouteService): store.get → item.cancel → fireOnCancel
+        // now owned by RouteService): store.get → item.complete(CANCELLED) → fireOnCancel
         InflightItem item = inflightStore.get("1");
-        assertTrue(item.cancel());
+        assertTrue(item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
+                InflightState.CANCELLED));
         item.fireOnCancel();
 
         assertEquals(0, scheduler.queueSize()); // slot freed, not dead-occupied
-        assertTrue(result.isCompletedExceptionally());
+        // Cancel now completes the future with an error Response (not exceptional)
+        assertTrue(result.isDone());
+        assertFalse(result.join().isSuccess());
         assertTrue(inflightStore.get("1").isTerminated());
     }
 
@@ -222,7 +225,8 @@ class QueueSchedulerTest {
         scheduler.submit(createContext(1L));
         InflightItem item = inflightStore.get("1");
 
-        assertTrue(item.cancel());
+        assertTrue(item.complete(Response.error(StrategyErrorType.CANCELLED, "cancelled"),
+                InflightState.CANCELLED));
         item.fireOnCancel(); // queued → removed
         assertEquals(0, scheduler.queueSize());
         // A second cascade against an absent entry must not throw.
