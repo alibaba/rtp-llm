@@ -800,8 +800,9 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
     """Parse non-sampling request controls.
 
     ``ds_header_attributes`` carries DashScope request-scoped controls that need
-    backend effects (thinking switch, timeout, priority, scheduler headers) even
-    though they are not ordinary sampler behavior.
+    backend effects (timeout, priority, scheduler headers) even though they are
+    not ordinary sampler behavior. ``enable_thinking`` is intentionally read
+    only from the top-level Triton request parameters.
     """
     return_input_ids = False
     inp, raw = _find_input_raw(request, "return_input_ids")
@@ -818,15 +819,7 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
                     return_input_ids = vf != 0.0
 
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
-    enable_thinking = _parse_optional_bool(
-        _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking")
-    )
-    if enable_thinking is None:
-        enable_thinking = _parse_optional_bool(
-            _lookup_ds_request_control(ds_attrs, "enable_thinking")
-        )
-    if enable_thinking is None:
-        enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
+    enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
 
     thinking_mode = _parse_optional_parameter_string(request, "thinking_mode")
     if thinking_mode is None:
