@@ -515,7 +515,7 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
     static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
     auto       begin_time_us       = currentTimeUs();
     while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
-        usleep(100);
+        usleep(1000);
         auto current_time_us = currentTimeUs();
         auto cost_time_us    = current_time_us - begin_time_us;
         if (cost_time_us > max_wait_timeout_us) {

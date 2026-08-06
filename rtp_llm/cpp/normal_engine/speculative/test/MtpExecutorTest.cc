@@ -127,6 +127,9 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         checkInputs(inputs);
+        if (forward_callback_) {
+            forward_callback_();
+        }
         return output_holder.get();
     }
 
@@ -153,9 +156,14 @@ public:
         input_holder.push(inputs);
     }
 
+    void setForwardCallback(std::function<void()> callback) {
+        forward_callback_ = std::move(callback);
+    }
+
 private:
     TestDataHolder<GptModelInputs>  input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
+    std::function<void()>           forward_callback_;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -230,6 +238,9 @@ public:
             inputs.logits_processor_states_ptr->batchProcess(inputs);
         }
         checkInputs(inputs);
+        if (forward_callback_) {
+            forward_callback_();
+        }
         return output_holder.get();
     }
 
@@ -247,9 +258,14 @@ public:
         output_holder.push(outputs);
     }
 
+    void setForwardCallback(std::function<void()> callback) {
+        forward_callback_ = std::move(callback);
+    }
+
 private:
     TestDataHolder<SamplerInputs> input_holder;
     TestDataHolder<SamplerOutput> output_holder;
+    std::function<void()>         forward_callback_;
 };
 
 class RejectDraftTokenSpecProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
@@ -366,7 +382,9 @@ public:
         }
     }
 
-    MtpExecutorComponents createMtpExecutorComponents(const MtpExecutorTestConfig& test_config) {
+    MtpExecutorComponents createMtpExecutorComponents(
+        const MtpExecutorTestConfig&                    test_config,
+        MtpExecutor::CacheStatusSnapshotRefreshCallback cache_status_snapshot_refresh_callback = {}) {
         CustomConfig               config;
         ModelConfig                model_config;
         RuntimeConfig              runtime_config;
@@ -423,7 +441,14 @@ public:
         cache_manager->init();
 
         // Create MtpExecutor
-        auto executor = std::make_unique<MtpExecutor>(params, propose_params, cache_manager);
+        auto executor = std::make_unique<MtpExecutor>(params,
+                                                      propose_params,
+                                                      cache_manager,
+                                                      MlaOpsType::AUTO,
+                                                      /*kv_cache_group_num=*/1,
+                                                      /*kv_cache_layer_to_group=*/std::vector<int32_t>{},
+                                                      /*warm_up=*/false,
+                                                      std::move(cache_status_snapshot_refresh_callback));
 
         // Create fake models
         GptModelInitParams target_model_params(
@@ -913,7 +938,16 @@ TEST_F(MtpExecutorTest, testCudaSelectedMtpLogprobsAvoidDenseAcceptedRowCopy) {
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
-    auto components               = createMtpExecutorComponents(test_config);
+    bool target_forward_finished  = false;
+    bool target_sampler_started   = false;
+    int  refresh_count            = 0;
+    auto components =
+        createMtpExecutorComponents(test_config, [&](const std::list<GenerateStreamPtr>& refresh_streams) {
+            EXPECT_TRUE(target_forward_finished);
+            EXPECT_FALSE(target_sampler_started);
+            EXPECT_EQ(refresh_streams.size(), 1);
+            ++refresh_count;
+        });
 
     size_t batch_size = 1;
 
@@ -935,6 +969,7 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
+    components.fake_target_model->setForwardCallback([&]() { target_forward_finished = true; });
 
     // set fake draft model outputs
     auto draft_input               = GptModelInputs{};
@@ -956,6 +991,7 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({(int64_t)batch_size, 1})};
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
+    components.fake_sampler->setForwardCallback([&]() { target_sampler_started = true; });
 
     // set fake fast topk sampler outputs
     auto fast_topk_sampler_output =
@@ -975,6 +1011,8 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     // Verify executor was created successfully
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(refresh_count, 1);
+    EXPECT_TRUE(target_sampler_started);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});

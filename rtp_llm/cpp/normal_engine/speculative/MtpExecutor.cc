@@ -1212,7 +1212,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          MlaOpsType                                     mla_ops_type,
                          int32_t                                        kv_cache_group_num,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group,
-                         bool                                           warm_up):
+                         bool                                           warm_up,
+                         CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback):
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
@@ -1222,6 +1223,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
+    cache_status_snapshot_refresh_callback_(std::move(cache_status_snapshot_refresh_callback)),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     // These runners intentionally do not inherit PyTorch profiler TLS from the
     // engine loop. Kineto callbacks are thread-affine; propagating an active
@@ -1581,6 +1583,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         model_output                        = std::move(model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+    // The target model's CPU dispatch is complete, but its CUDA work has not yet been consumed by
+    // the sampler. Refresh the cache snapshot in this otherwise idle CPU window instead of after
+    // the full MTP target+draft process, where small models may already have synchronized the GPU.
+    if (cache_status_snapshot_refresh_callback_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(refresh_cache_status_snapshot)");
+        cache_status_snapshot_refresh_callback_(streams);
     }
     model_input.need_all_hidden_states = saved_need_all_hidden_states;
 
