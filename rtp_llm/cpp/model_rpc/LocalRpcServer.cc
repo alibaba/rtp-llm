@@ -230,12 +230,14 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         phase_timing.request_id              = generate_context.request_id;
         const bool request_ok                = generate_context.error_status.ok() && !exception_unwinding;
         if (request_ok && time_info.generation_done) {
-            // outputTokenLen is per returned sequence. Aggregate across the
-            // final active width so Fusion matches the Python CLIENT/root usage
-            // contract for multi-return and beam requests.
+            // Beam rows are an internal search width; Fusion exposes one primary
+            // sequence (the remaining candidates live in beam_responses). Only
+            // ordinary multi-return requests aggregate all active rows.
+            const auto returned_sequence_count = stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) :
+                                                                            stream->currentBatchSize();
             telemetry::setUsageTokenAttributes(*generate_context.trace_span_guard,
                                                (int64_t)stream->inputLength(),
-                                               (int64_t)(stream->outputTokenLen() * stream->currentBatchSize()));
+                                               (int64_t)(stream->outputTokenLen() * returned_sequence_count));
         }
         phase_timing.error_type = request_ok ?
                                       nullptr :
