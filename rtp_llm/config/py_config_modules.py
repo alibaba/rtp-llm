@@ -104,10 +104,7 @@ class ServerConfig:
         self.rank_id = local_rank
 
     def validate_port_layout(self, *, dash_sc_enabled: bool) -> None:
-        if (
-            dash_sc_enabled
-            and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM
-        ):
+        if dash_sc_enabled and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM:
             raise ValueError(
                 "worker_info_port_num must be at least "
                 f"{MIN_WORKER_INFO_PORT_NUM} when DashSc gRPC is enabled; "
@@ -182,9 +179,14 @@ class LoadConfig:
     def __init__(self):
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
+        self.loader_recycle_handles: bool = True
 
     def to_string(self):
-        return f"load_method: {self.load_method}\nforce_cpu_load_weights: {self.force_cpu_load_weights}"
+        return (
+            f"load_method: {self.load_method}\n"
+            f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
+            f"loader_recycle_handles: {self.loader_recycle_handles}"
+        )
 
 
 class RenderConfig:

@@ -412,6 +412,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 ],
                 process_fun=stack_,
                 config=moe_config,
+                enable_pure_tp_preshard=True,
             ),
             MoeAtomicWeight(
                 W.moe_w1,
@@ -431,6 +432,7 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 ],
                 process_fun=stack_moe_w1,
                 config=moe_config,
+                enable_pure_tp_preshard=True,
             ),
         ]
 
@@ -596,6 +598,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
                 process_fun=stack_,
                 config=moe_config,
                 stacked_ckpt_keys=True,
+                enable_pure_tp_preshard=True,
             ),
             MoeAtomicWeight(
                 W.moe_w1,
@@ -603,6 +606,7 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
                 process_fun=transpose_stack_moe_w1,
                 config=moe_config,
                 stacked_ckpt_keys=True,
+                enable_pure_tp_preshard=True,
             ),
         ]
 

@@ -1,21 +1,25 @@
 import functools
 import logging
 import traceback
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 import torch
 from pydantic import BaseModel
 
 from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
+from rtp_llm.model_loader.tensor_source import (
+    DatabaseTensorSource,
+    StackSplitTensorSource,
+    TensorSource,
+)
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     QuantWeight,
     WeightModule,
 )
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import MOE_PURE_TP_LAYOUTS, CkptWeightInfo, W, identity
 
 
 class FfnConfig(BaseModel):
@@ -289,6 +293,12 @@ class MoeConfig(BaseModel):
     align_size: int = 0  # 0 means no padding needed (for MoE)
 
 
+class PreShardedTensor(NamedTuple):
+    """Marker for rank-local tensors that must skip the _split stage."""
+
+    tensor: torch.Tensor
+
+
 class MoeAtomicWeight(AtomicWeight):
     def __init__(
         self,
@@ -298,11 +308,13 @@ class MoeAtomicWeight(AtomicWeight):
         data_type: Optional[torch.dtype] = None,
         config: MoeConfig = None,
         stacked_ckpt_keys: bool = False,
+        enable_pure_tp_preshard: bool = False,
         *args: Any,
         **kwargs: Any,
     ):
         self.config = config
         self.stacked_ckpt_keys = stacked_ckpt_keys
+        self.enable_pure_tp_preshard = enable_pure_tp_preshard
         # Pre-resolve function name for GPU preallocate path dispatch.
         # functools.partial objects have .func instead of __name__.
         if isinstance(process_fun, functools.partial):
@@ -311,9 +323,20 @@ class MoeAtomicWeight(AtomicWeight):
             self._process_fun_name = process_fun.__name__
         super().__init__(name, weights, process_fun, data_type, *args, **kwargs)
 
+    def _split(self, tensor, load_config: LoadConfig):
+        raw_tensor = tensor.get(self.name) if isinstance(tensor, dict) else tensor
+        if isinstance(raw_tensor, PreShardedTensor):
+            return {self.name: raw_tensor.tensor}
+        return super()._split(tensor, load_config)
+
     def _expert_key_pattern(self, idx: int) -> str:
         """Generate a logical per-expert key for the idx-th stacked weight."""
         return f"layers.{{i}}.moe.{self.name}.{{expert_id}}.{idx}"
+
+    def _ckpt_name(self, ckpt_weight: CkptWeightInfo, layer_id: int, expert_id: int):
+        return ckpt_weight.name.format(
+            i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
+        )
 
     def _get_expert_weights(self) -> List[CkptWeightInfo]:
         """Generate per-expert CkptWeightInfo with logical keys for stacked weights."""
@@ -372,6 +395,10 @@ class MoeAtomicWeight(AtomicWeight):
         device: str,
         load_config: LoadConfig,
     ):
+        pre_sharded = self._load_pure_tp(tensor_source, layer_id, device, load_config)
+        if pre_sharded is not None:
+            return {self.name: PreShardedTensor(pre_sharded)}
+
         if self.stacked_ckpt_keys and tensor_source.has_tensor(
             self.weights[0].tensor_name(layer_id)
         ):
@@ -419,9 +446,7 @@ class MoeAtomicWeight(AtomicWeight):
         before_merge_tensors = []
         for ckpt_weight in ckpt_weights:
             for expert_id in selected_experts:
-                name = ckpt_weight.name.format(
-                    i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
-                )
+                name = self._ckpt_name(ckpt_weight, layer_id, expert_id)
                 try:
                     before_merge_tensors.append(
                         ckpt_weight.merge_fun(
@@ -440,6 +465,101 @@ class MoeAtomicWeight(AtomicWeight):
         after_merge_tensor = self.process_fun(before_merge_tensors).to(convert_type)
         return {self.name: after_merge_tensor}
 
+    def _load_pure_tp(
+        self,
+        tensor_source: TensorSource,
+        layer_id: Optional[int],
+        device: str,
+        load_config: LoadConfig,
+    ) -> Optional[torch.Tensor]:
+        supported = (
+            self.enable_pure_tp_preshard
+            and load_config.moe_pure_tp_mode
+            and not load_config.merge_lora
+            and layer_id is not None
+            and isinstance(tensor_source, DatabaseTensorSource)
+            and tensor_source.get_database().is_safetensor
+            and all(weight.merge_fun is identity for weight in self.weights)
+        )
+        layout = MOE_PURE_TP_LAYOUTS.get(
+            (self.name, self.process_fun, len(self.weights))
+        )
+        if not supported or layout is None:
+            return None
+        split_dim, segments, requires_stacked, split_func = layout
+        is_stacked = self.stacked_ckpt_keys and tensor_source.has_tensor(
+            self.weights[0].tensor_name(layer_id)
+        )
+        if requires_stacked and not is_stacked:
+            return None
+        if self._get_split_func() is not split_func:
+            return None
+        experts = list(
+            load_config.get_selected_experts(layer_id, self.config.expert_num)
+        )
+        if not experts:
+            return None
+
+        database = tensor_source.get_database()
+        expert_dims = slice(1, None) if is_stacked else slice(None)
+
+        def shape_of(weight, expert):
+            name = self._ckpt_name(weight, layer_id, expert)
+            return list(database.get_tensor_shape(name))[expert_dims]
+
+        # First and last expert: keeps legacy's shape fail-fast on the fast path.
+        ends = (experts[0], experts[-1])
+        shapes = [shape_of(w, e) for w in self.weights for e in ends]
+        expert_shape = shapes[0]
+        if any(shape != expert_shape for shape in shapes) or len(expert_shape) != 2:
+            return None
+        if expert_shape[split_dim] % (len(segments) * load_config.tp_size):
+            logging.warning(
+                f"{self.name} layer {layer_id}: shape {expert_shape} is not divisible "
+                f"by tp_size {load_config.tp_size}, falling back to legacy split "
+                f"(which floor-splits and drops the remainder)"
+            )
+            return None
+
+        segment_size = expert_shape[split_dim] // len(segments)
+        shard_size = segment_size // load_config.tp_size
+        output_shape = expert_shape.copy()
+        output_shape[split_dim] = shard_size * len(segments) * len(self.weights)
+        dtype = (
+            self.data_type if self.data_type is not None else load_config.compute_dtype
+        )
+        output = torch.empty((len(experts), *output_shape), dtype=dtype, device=device)
+        # Slicing the last dim is a strided read in safetensors, so read the whole
+        # expert into scratch and slice from there instead.
+        read_full_expert = split_dim == 1
+        scratch = (
+            torch.empty(expert_shape, dtype=dtype, device=device)
+            if read_full_expert
+            else None
+        )
+        dst = 0
+        for weight in self.weights:
+            for segment in segments:
+                start = segment * segment_size + load_config.tp_rank * shard_size
+                shard_slice = [slice(None), slice(None)]
+                shard_slice[split_dim] = slice(start, start + shard_size)
+                shard_slice = tuple(shard_slice)
+                read_slice = (
+                    (slice(None), slice(None)) if read_full_expert else shard_slice
+                )
+                for local_expert, expert in enumerate(experts):
+                    name = self._ckpt_name(weight, layer_id, expert)
+                    where = (*((expert,) if is_stacked else ()), *read_slice)
+                    loaded = database.load_tensor_slice(name, where, dtype)
+                    if read_full_expert:
+                        scratch.copy_(loaded)
+                        loaded = scratch[shard_slice]
+                    output[local_expert].narrow(split_dim, dst, shard_size).copy_(
+                        loaded
+                    )
+                dst += shard_size
+        return output
+
     def _load_expert_tensor(
         self,
         ckpt_weight,
@@ -451,11 +571,7 @@ class MoeAtomicWeight(AtomicWeight):
         first_tensor=None,
     ):
         """Load a single expert tensor with error handling."""
-        name = ckpt_weight.name.format(
-            i=str(layer_id),
-            i_1=str(layer_id + 1),
-            expert_id=str(expert_id),
-        )
+        name = self._ckpt_name(ckpt_weight, layer_id, expert_id)
         if first_name is not None and name == first_name:
             return name, first_tensor
         try:
@@ -586,10 +702,7 @@ class MoeAtomicWeight(AtomicWeight):
                 layer_id, self.config.expert_num
             )
             for expert_id in selected_experts:
-                name = ckpt_weight.name.format(
-                    i=str(layer_id), i_1=str(layer_id + 1), expert_id=str(expert_id)
-                )
-                names.add(name)
+                names.add(self._ckpt_name(ckpt_weight, layer_id, expert_id))
         return names
 
 

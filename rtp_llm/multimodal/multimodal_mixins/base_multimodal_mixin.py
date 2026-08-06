@@ -120,7 +120,8 @@ class BaseMultiModalMixin:
         self.mm_mixin_loader.force_clean_cuda_memory()
 
     def create_mm_mixin_loader(self) -> MultimodalMixinLoader:
-        database = CkptDatabase(self.ckpt_path)
+        # Shares checkpoint files with the main loader; never recycle its handles.
+        database = CkptDatabase(self.ckpt_path, recycle_handles=False)
         self._prepare_vit_weights(database)
 
         weights_info: ModelDeployWeightInfo = self.get_multimodal_mixin_weight_info()(

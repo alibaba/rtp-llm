@@ -25,6 +25,19 @@ py_test(
 )
 
 py_test(
+    # Verifies load_tensor_slice / copy-out on a real ROCm build; the filter keeps
+    # the platform-independent cases off the scarce accelerator.
+    name = "ckpt_database_test_rocm",
+    srcs = ["ckpt_database_test.py"],
+    main = "ckpt_database_test.py",
+    args = ["HandleRecyclingTest"],
+    deps = ["//rtp_llm:utils", "//rtp_llm:config", "//rtp_llm:_ft_pickler", "//rtp_llm:lora"],
+    env = {"RTP_LLM_REQUIRE_ACCELERATOR": "1"},
+    tags = ["rocm"],
+    exec_properties = {'gpu': 'MI308X-ROCM7'},
+)
+
+py_test(
     name = "fuser_test",
     srcs = [
         "fuser_test.py",

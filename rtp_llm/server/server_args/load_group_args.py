@@ -22,3 +22,11 @@ def init_load_group_args(parser, load_config, model_args):
         default=False,
         help="强制在CPU上加载权重，用于显存不足的场景",
     )
+    load_group.add_argument(
+        "--loader_recycle_handles",
+        env_name="LOADER_RECYCLE_HANDLES",
+        bind_to=(load_config, "loader_recycle_handles"),
+        type=str2bool,
+        default=True,
+        help="仅 ROCm + safetensors 主模型加载生效：关闭已读 shard 句柄以释放 mmap，置假回滚句柄回收",
+    )

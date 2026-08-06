@@ -20,11 +20,11 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
+    KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,
@@ -57,6 +57,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
         force_cpu_load_weights: bool = False,
+        loader_recycle_handles: bool = False,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -83,6 +84,7 @@ class BaseModel(object):
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
+        self.loader_recycle_handles = loader_recycle_handles
         self.weight = None
         self.weight_manager = None
 
@@ -234,6 +236,7 @@ class BaseModel(object):
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
         skip_python_model: bool = False,
+        loader_recycle_handles: bool = False,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -262,6 +265,7 @@ class BaseModel(object):
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
+            loader_recycle_handles=loader_recycle_handles,
         )
 
         import os
@@ -315,7 +319,9 @@ class BaseModel(object):
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading
         database = CkptDatabase(
-            self.model_config.ckpt_path, self.model_config.ptuning_path
+            self.model_config.ckpt_path,
+            self.model_config.ptuning_path,
+            recycle_handles=self.loader_recycle_handles,
         )
         lora_infos = self.model_config.lora_infos
         static_lora: bool = len(lora_infos) == 1

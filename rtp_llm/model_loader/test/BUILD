@@ -13,6 +13,16 @@ py_test(
 )
 
 py_test(
+    name = "test_pure_tp_preshard",
+    srcs = ["test_pure_tp_preshard.py"],
+    # auto_model, not py_test_deps: this test imports rtp_llm.models weight infos.
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    # Pinned to CPU on purpose: the device hooks are identity stubs, so an
+    # accelerator target would only re-run platform-independent cases.
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
     name = "test_compressed_w4a8_int4_per_channel",
     srcs = ["test_compressed_w4a8_int4_per_channel.py"],
     deps = py_test_deps,
