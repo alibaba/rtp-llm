@@ -13,5 +13,6 @@ py_library(
     ]),
     deps = [
         "//rtp_llm:torch",
+        "//rtp_llm:utils",
     ],
 )

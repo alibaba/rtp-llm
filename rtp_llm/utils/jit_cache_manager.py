@@ -3,118 +3,87 @@ import importlib.metadata
 import logging
 import os
 import platform
+import queue
 import shlex
+import shutil
+import stat
 import subprocess
+import sys
 import sysconfig
 import threading
 import time
+from collections import namedtuple
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
-from urllib.parse import urlparse
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from rtp_llm.utils.jit_cache_store import (
-    RemoteSnapshotStore,
-    is_lock_file,
-    reap_dead_lock,
-    sanitize,
+from rtp_llm.utils import jit_cache_store as store
+
+SYNC_POLL_S, STOP_TIMEOUT_S = 120.0, 10.0
+RTP_JIT_VERSION, CUDA, ROCM = "v1", "cuda", "rocm"
+LOCAL_JIT_ROOT = Path("/tmp/rtp-llm/.jit_cache")  # JIT artifacts embed this path
+GPU_PROBE = (
+    "import torch;a={str(torch.cuda.get_device_properties(i).gcnArchName).split(':')[0] if torch.version.hip "
+    "else 'sm_{}{}'.format(*torch.cuda.get_device_capability(i)) for i in range(torch.cuda.device_count())};"
+    "assert len(a)==1,a;print(a.pop())"
 )
 
-# Quiet period before publishing, so a burst of artifacts coalesces into one upload.
-SYNC_POLL_S = 120.0
-# Bounded shutdown; an unfinished upload is dropped and republished on next cold start.
-SHUTDOWN_TIMEOUT_S = 10
-RTP_JIT_VERSION = "v1"
-# One shared tree per host; restore()'s flock + .ready marker let the first cold start
-# fill it and the rest reuse it (artifacts are content-addressed; builders self-coordinate).
-LOCAL_JIT_DIR = f"/tmp/rtp-llm/.jit_cache/{RTP_JIT_VERSION}"
-CUDA, ROCM = "cuda", "rocm"
+
+def _run(args, timeout: float, stderr=subprocess.STDOUT) -> str:
+    output = subprocess.check_output(args, text=True, timeout=timeout, stderr=stderr)
+    return output.strip()
 
 
-def resolve_remote_root(value) -> Path | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if urlparse(text).scheme:
-        from rtp_llm.utils.fuser import MountRwMode, fetch_remote_file_to_local
-
-        text = fetch_remote_file_to_local(text, MountRwMode.RWMODE_RW, True)
-    base = Path(text).expanduser().absolute()
-    if not base.is_dir():
-        logging.warning("JIT remote cache disabled: invalid directory %s", base)
-        return None
-    root = base / RTP_JIT_VERSION
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def _token(text: str) -> str | None:
-    return sanitize(text, "") or None
-
-
-def _pkg_version(name: str) -> str | None:
+def _accelerator_scope(backend: str, version: str) -> str | None:
     try:
-        return _token(importlib.metadata.version(name))
-    except importlib.metadata.PackageNotFoundError:
-        return None
+        arch = _run([sys.executable, "-c", GPU_PROBE], 60)
+        return f"{backend}-{version}-{arch}" if arch else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        logging.warning("JIT_CACHE_FAIL_OPEN: GPU probe failed", exc_info=True)
 
 
-def _accelerator_scope(backend: str) -> str | None:
-    import torch
-
+def _toolkit_scope(backend: str) -> str | None:
     try:
-        device = torch.cuda.current_device()
-        if backend == CUDA:
-            prefix = "sm_{}{}".format(*torch.cuda.get_device_capability(device))
-            version = torch.version.cuda
-        else:
-            arch = str(torch.cuda.get_device_properties(device).gcnArchName)
-            prefix = _token(arch.split(":", 1)[0])
-            version = torch.version.hip
-        if not version or not prefix:
-            return None
-        return f"{backend}-{str(version).replace('.', '_')}-{prefix}"
-    except Exception:
-        logging.warning("failed to detect GPU architecture", exc_info=True)
-        return None
+        from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
+
+        name, home = ("nvcc", CUDA_HOME) if backend == CUDA else ("hipcc", ROCM_HOME)
+        compiler = Path(home) / "bin" / name if home else shutil.which(name)
+        if not compiler or (home and not compiler.is_file()):
+            raise OSError(f"{name} not found")
+        return f"{name}-{v}" if (v := _run([str(compiler), "--version"], 10)) else None
+    except (ImportError, OSError, ValueError, subprocess.SubprocessError):
+        logging.warning("JIT_CACHE_FAIL_OPEN: GPU toolkit probe failed", exc_info=True)
 
 
 def _cpp_runtime_scope() -> str | None:
     try:
-        compiler = shlex.split(os.environ.get("CXX", "c++"))
-        version = subprocess.check_output(
-            [*compiler, "--version"], text=True, timeout=5
-        ).splitlines()[0]
-        library = Path(
-            subprocess.check_output(
-                [*compiler, "-print-file-name=libstdc++.so.6"], text=True, timeout=5
-            ).strip()
-        )
+        cxx = shlex.split(os.environ.get("CXX", "c++"))
+        version = _run([*cxx, "--version"], 5, stderr=None).splitlines()[0]
+        library = Path(_run([*cxx, "-print-file-name=libstdc++.so.6"], 5, stderr=None))
         if not library.is_file():
             raise OSError(f"unresolved libstdc++: {library}")
         digest = hashlib.sha256(version.encode() + b"\0" + library.read_bytes())
         return f"cxx-{digest.hexdigest()[:16]}"
     except (IndexError, OSError, ValueError, subprocess.SubprocessError):
-        logging.warning("failed to identify C++ runtime for JIT cache", exc_info=True)
+        logging.warning("JIT_CACHE_FAIL_OPEN: C++ probe failed", exc_info=True)
+
+
+def _torch_scope(accelerator: str, cpp: str) -> str | None:
+    from rtp_llm.utils.util import torch_abi_fingerprint
+
+    if not (fingerprint := torch_abi_fingerprint()):
+        logging.warning("JIT_CACHE_FAIL_OPEN: torch ABI flag unavailable")
         return None
+    machine = f"{platform.system()}-{platform.machine()}"
+    soabi = sysconfig.get_config_var("SOABI") or machine
+    parts = (soabi, "-".join(platform.libc_ver()), accelerator, fingerprint[0], cpp)
+    return "-".join(map(str, (*parts, fingerprint[1])))
 
 
-def _torch_scope(accelerator: str | None, cpp: str | None) -> str | None:
-    import torch
-
-    abi = getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", None)
-    host = f"{platform.system().lower()}-{platform.machine().lower()}"
-    soabi = _token(sysconfig.get_config_var("SOABI") or host)
-    libc = _token("-".join(platform.libc_ver()))
-    version = _token(torch.__version__)
-    if not isinstance(abi, bool) or not all((accelerator, cpp, soabi, libc, version)):
-        return None
-    return f"{soabi}-{libc}-{accelerator}-torch-{version}-cxxabi-{int(abi)}-{cpp}"
-
-
+# fmt: off
 @dataclass(frozen=True)
 class Component:
     name: str
@@ -125,218 +94,284 @@ class Component:
     local_dir: Path = Path()
 
     def should_sync(self, rel: str, event_type: str | None = None) -> bool:
-        events = next(
-            (events for suffixes, events in self.rules if rel.endswith(suffixes)), ()
-        )
+        events = next((e for suffixes, e in self.rules if rel.endswith(suffixes)), ())
         parts = rel.split("/")
-        return (
-            (event_type in events if event_type else bool(events))
-            and ".." not in parts
-            and not any(p == "tmp" or p.startswith("tmp.pid_") for p in parts)
-        )
-
-
+        return ((event_type in events if event_type else bool(events)) and ".." not in parts
+                and not any(p == "tmp" or p.startswith("tmp.pid_") for p in parts))
 def rule(events: frozenset[str], *suffixes: str):
     return suffixes, events
-
-
 NINJA = (".so", ".o", "build.ninja", ".ninja_log", ".ninja_deps")
 MOVED = frozenset({"moved"})
 CLOSED = MOVED | {"closed"}
 CREATED = CLOSED | {"created"}
-
-# fmt: off
 COMPONENTS = (
-    Component("flashinfer", "FLASHINFER_WORKSPACE_BASE",
-              (rule(CREATED, ".cu", ".inc", ".h"), rule(CLOSED, *NINJA)),
-              ("torch", "@flashinfer-python"), CUDA),
-    Component("deep_gemm", "DG_JIT_CACHE_DIR",
-              (rule(CREATED, "kernel.cu", "kernel.cubin"),),
-              ("accelerator", "@deep_gemm"), CUDA),
-    Component("trtllm_deep_gemm", "TRTLLM_DG_CACHE_DIR",
-              (rule(CREATED, "nvcc_kernel.cubin"),),
-              ("accelerator", "@flashinfer-python"), CUDA),
-    Component("tilelang", "TILELANG_CACHE_DIR",
-              (rule(CLOSED, ".so", ".pkl", ".cu", ".json", ".cubin", ".py"),),
-              ("torch", "@tilelang"), CUDA),
-    Component("torch_extensions", "TORCH_EXTENSIONS_DIR",
-              (rule(CLOSED, *NINJA, ".cpp", ".cu"),), ("torch",)),
-    Component("aiter", "AITER_JIT_DIR",
-              (rule(CLOSED, *NINJA, ".cu", ".cpp", ".hip", ".h"),),
-              ("torch", "@aiter"), ROCM),
-    Component("flydsl", "FLYDSL_RUNTIME_CACHE_DIR", (rule(MOVED, ".pkl"),),
-              ("accelerator", "@flydsl"), ROCM),
-    Component("tvm_ffi", "TVM_FFI_CACHE_DIR", (rule(CREATED, ".so"),),
-              ("torch", "@apache-tvm-ffi"), CUDA),
-    Component("cute_dsl", "CUTE_DSL_CACHE_DIR", (rule(MOVED, ".mlir"),),
-              ("accelerator", "@nvidia-cutlass-dsl"), CUDA),
-    # triton keys on src+machine only; cxx scope guards against incompatible .so.
-    Component("triton", "TRITON_CACHE_DIR",
-              (rule(frozenset(), ".autotune.json"), rule(CREATED, ".json", ".cubin", ".hsaco", ".so")),
-              ("cxx",)),
+    Component("flashinfer", "FLASHINFER_WORKSPACE_BASE", (rule(CREATED, ".cu", ".inc", ".h"), rule(CLOSED, *NINJA)), ("torch", "@flashinfer-python"), CUDA),
+    Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin"),), ("accelerator", "@deep_gemm"), CUDA),
+    Component("trtllm_deep_gemm", "TRTLLM_DG_CACHE_DIR", (rule(CREATED, "nvcc_kernel.cubin"),), ("accelerator", "@flashinfer-python"), CUDA),
+    Component("tilelang", "TILELANG_CACHE_DIR", (rule(CLOSED, ".so", ".pkl", ".cu", ".json", ".cubin", ".py"),), ("torch", "@tilelang"), CUDA),
+    # rtp_kernel is the only producer here whose outputs are not self-keyed (TIPC content-hashes its subdir).
+    Component("torch_extensions", "TORCH_EXTENSIONS_DIR", (rule(CLOSED, *NINJA, ".cpp", ".cu"),), ("torch", "@rtp_kernel")),
+    Component("aiter", "AITER_JIT_DIR", (rule(CLOSED, *NINJA, ".cu", ".cpp", ".hip", ".h"),), ("torch", "@aiter"), ROCM),
+    Component("flydsl", "FLYDSL_RUNTIME_CACHE_DIR", (rule(MOVED, ".pkl"),), ("accelerator", "@flydsl"), ROCM),
+    Component("tvm_ffi", "TVM_FFI_CACHE_DIR", (rule(CREATED, ".so"),), ("torch", "@apache-tvm-ffi"), CUDA),
+    Component("cute_dsl", "CUTE_DSL_CACHE_DIR", (rule(MOVED, ".mlir"),), ("accelerator", "@nvidia-cutlass-dsl"), CUDA),
+    # First match wins: autotune results remain local.
+    Component("triton", "TRITON_CACHE_DIR", (rule(frozenset(), ".autotune.json"), rule(CREATED, ".json", ".cubin", ".hsaco", ".so")), ("cxx",)),
 )
+Scope = namedtuple("Scope", "scope_id root components")
 # fmt: on
 
 
-def _resolve_components() -> tuple[Component, ...]:
+def resolve_scope(local_root: Path) -> Scope | None:
     import torch
 
-    root = Path(LOCAL_JIT_DIR)
-    backend = ROCM if torch.version.hip else CUDA if torch.version.cuda else None
-    if not backend:
-        return ()
-    accelerator, cpp = _accelerator_scope(backend), _cpp_runtime_scope()
-    scopes = {
-        "accelerator": accelerator,
-        "torch": _torch_scope(accelerator, cpp),
-        "cxx": cpp,
-    }
-    result = []
+    from rtp_llm.utils.util import COMPILE_FLAG_ENVS
+
+    version = torch.version.hip or torch.version.cuda
+    if not version:
+        return None
+    backend = ROCM if torch.version.hip else CUDA
+    accelerator = _accelerator_scope(backend, version)
+    toolkit, cpp = _toolkit_scope(backend), _cpp_runtime_scope()
+    torch_scope = accelerator and toolkit and cpp and _torch_scope(accelerator, cpp)
+    if not torch_scope:
+        return None
+    scopes = {"accelerator": accelerator, "torch": torch_scope, "cxx": cpp}
+    selected, keys = [], [f"toolkit-{toolkit}", accelerator, torch_scope]
+    flags = "\0".join(os.environ.get(name, "") for name in COMPILE_FLAG_ENVS)
+    if flags.strip("\0"):
+        keys.append("flags-" + hashlib.sha256(flags.encode()).hexdigest()[:12])
     for item in COMPONENTS:
-        if item.backend not in (None, backend):
+        if item.backend not in (None, backend) or item.env_name in os.environ:
             continue
-        parts = tuple(
-            _pkg_version(part[1:]) if part.startswith("@") else scopes[part]
-            for part in item.scopes
-        )
-        if parts and all(parts):
-            local = root / item.name / "-".join((item.name, *parts))
-            result.append(replace(item, local_dir=local))
-    return tuple(result)
-
-
-def clear_jit_locks() -> None:
-    # Reap dead builder locks so the next load() doesn't hang on a corpse left by
-    # a killed build; reap_dead_lock spares any a live process still holds.
-    try:
-        for lock in Path(LOCAL_JIT_DIR).rglob("*lock"):
-            if is_lock_file(lock.name):
-                reap_dead_lock(lock)
-    except OSError:
-        logging.warning("JIT lock cleanup skipped", exc_info=True)
-
-
-def setup_jit_cache_env() -> tuple[tuple[Component, ...], bool]:
-    try:
-        components = _resolve_components()
-    except Exception:
-        logging.exception("JIT cache environment setup failed; using upstream defaults")
-        return (), False
-    clear_jit_locks()
-    managed = []
-    for item in components:
-        local = str(item.local_dir)
-        resolved = os.environ.setdefault(item.env_name, local)
-        if resolved == local:
-            managed.append(item)
-        else:
-            logging.warning(
-                "JIT %s uses preset %s=%s; not managed",
-                item.name,
-                item.env_name,
-                resolved,
+        with suppress(importlib.metadata.PackageNotFoundError):
+            parts = tuple(
+                importlib.metadata.version(p[1:]) if p.startswith("@") else scopes[p]
+                for p in item.scopes
             )
-    return tuple(managed), any("torch" in item.scopes for item in managed)
+            if parts and all(parts):
+                selected.append(item)
+                keys.append("-".join((item.name, *parts)))
+    if not selected:
+        logging.warning("JIT_CACHE_FAIL_OPEN: no managed components")
+        return None
+    scope_id = hashlib.sha256("\0".join(keys).encode()).hexdigest()[:16]
+    names = ",".join(x.name for x in selected)
+    logging.info("JIT scope %s at %s: %s", scope_id, local_root, names)
+    root = local_root / RTP_JIT_VERSION / scope_id
+    components = tuple(replace(item, local_dir=root / item.name) for item in selected)
+    return Scope(scope_id, root, components)
 
 
-class _EventHandler(FileSystemEventHandler):
-    def __init__(self, manager: "JitCacheManager"):
-        self.manager = manager
+def setup_jit_cache_env() -> Scope | None:
+    try:
+        local_root = Path(os.getenv("RTP_JIT_LOCAL_ROOT", "").strip() or LOCAL_JIT_ROOT)
+        os.umask(0)  # all local JIT producers must create files for shared users
+        for path in (local_root.parent, local_root):
+            path.mkdir(parents=True, exist_ok=True)
+            if not stat.S_ISDIR(os.lstat(path).st_mode):  # a symlink retargets chmod
+                raise OSError(f"untrusted JIT root {path}")
+            with suppress(OSError):
+                os.chmod(path, 0o1777)  # sticky: co-tenants add, never swap, the tree
+        with suppress(OSError):
+            for path in (p for p in local_root.rglob("*") if not p.is_symlink()):
+                with suppress(OSError):
+                    os.chmod(path, 0o777 if path.is_dir() else 0o666)
+        scope = resolve_scope(local_root)
+        for item in scope.components if scope else ():
+            os.environ[item.env_name] = str(item.local_dir)
+        return scope
+    except OSError as error:
+        logging.warning("JIT_CACHE_FAIL_OPEN: local root unavailable: %s", error)
+    except Exception:
+        logging.exception("JIT_CACHE_FAIL_OPEN: env setup failed")
+
+
+class JitCacheManager(FileSystemEventHandler):
+    def __init__(self, scope: Scope, remote_value: str):
+        self.scope, self._remote_value, self.store = scope, remote_value, None
+        self._observer = self._worker = None
+        self._prepare_thread = self._cleanup_thread = None
+        self._dirty, self._stop = threading.Event(), threading.Event()
+        self._lock, self._prepared = threading.Lock(), queue.Queue(maxsize=1)
+
+    def _discard_prepared(self) -> None:
+        with suppress(queue.Empty):
+            remote_store, prepared, restore_fd = self._prepared.get_nowait()
+            if prepared:
+                shutil.rmtree(prepared.staging, ignore_errors=True)
+            if remote_store:
+                remote_store.close()
+            if restore_fd is not None:
+                os.close(restore_fd)
 
     def on_any_event(self, event) -> None:
-        if event.is_directory or self.manager._stop.is_set():
+        if event.is_directory or self._stop.is_set():
             return
         path = Path(event.dest_path if event.event_type == "moved" else event.src_path)
-        for component in self.manager.components:
-            if component.local_dir not in path.parents:
-                continue
-            with suppress(OSError, ValueError):
-                rel = path.relative_to(component.local_dir).as_posix()
-                if component.should_sync(rel, event.event_type) and path.stat().st_size:
-                    self.manager._last_event_at = time.monotonic()
-                    self.manager._dirty.set()
-                    return
+        for item in self.scope.components:
+            if item.local_dir in path.parents:
+                with suppress(OSError, ValueError):
+                    rel = path.relative_to(item.local_dir).as_posix()
+                    if item.should_sync(rel, event.event_type) and path.stat().st_size:
+                        self._dirty.set()
+                return
 
+    def _lock_path(self, kind: str) -> Path:
+        return self.scope.root.parent / ".locks" / f"{self.scope.scope_id}.{kind}.lock"
 
-class JitCacheManager:
-    def __init__(self, remote_root: Path, components: tuple[Component, ...]):
-        self.local_root = Path(LOCAL_JIT_DIR)
-        self.components = components
-        self.store = RemoteSnapshotStore(remote_root)
-        self._dirty, self._stop = threading.Event(), threading.Event()
-        self._last_event_at = 0.0
-        self._observer = self._sync_thread = None
-
-    def start_background_sync(self, cancel=None, commit=None) -> None:
-        if self._observer:
-            return
+    def _prepare(self, staging_root: Path) -> None:
+        remote_store, prepared, restore_fd = None, None, None
+        root = self.scope.root
         try:
-            if self.store.restore(self.local_root, cancel, commit):
-                logging.info("loaded JIT cache from remote snapshot")
+            if not store.scope_root_usable(root):
+                restore_fd = store.acquire_flock(self._lock_path("restore"))
+            if not self._stop.is_set():
+                remote_store = store.resolve_remote(
+                    self._remote_value, RTP_JIT_VERSION, self.scope.scope_id
+                )
+                cold = remote_store and restore_fd is not None
+                if cold and not store.scope_root_usable(root):
+                    shutil.rmtree(staging_root, ignore_errors=True)
+                    prepared = remote_store.prepare_restore(staging_root)
         except Exception:
-            logging.exception("JIT cache restore failed")
-        if cancel and cancel.is_set():
-            return
+            logging.exception("JIT_CACHE_FAIL_OPEN: restore failed")
+        self._prepared.put((remote_store, prepared, restore_fd))
+        if self._stop.is_set():
+            self._discard_prepared()
 
-        observer = Observer()
+    def bootstrap(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        staging_root = self.scope.root.parent / ".staging" / self.scope.scope_id
+        self._prepare_thread = threading.Thread(
+            target=self._prepare, args=(staging_root,), daemon=True
+        )
+        self._prepare_thread.start()
         try:
-            for component in self.components:
-                component.local_dir.mkdir(parents=True, exist_ok=True)
-            observer.schedule(_EventHandler(self), str(self.local_root), recursive=True)
-            observer.start()
+            result = self._prepared.get(timeout=max(0, deadline - time.monotonic()))
+        except queue.Empty:
+            self._stop.set()
+            threading.Thread(target=self._discard_prepared, daemon=True).start()
+            logging.warning("JIT_CACHE_FAIL_OPEN: setup timed out")
+            return False
+        self.store, prepared, restore_fd = result
+        try:
+            if not self.store:
+                self._stop.set()
+                return False
+            root = self.scope.root
+            restored = bool(prepared and store.commit_restore(prepared.staging, root))
+            if restored:
+                logging.info("JIT_CACHE_RESTORED: %s", prepared.snapshot.name)
+        finally:
+            if restore_fd is not None:
+                os.close(restore_fd)
+        if not restored:
+            with suppress(OSError):  # seed an empty remote once; restarts stay quiet
+                if not any(self.store.remote_root.glob(f"*{store.SNAPSHOT_SUFFIX}")):
+                    self._dirty.set()
+            # torch/aiter FileBatons deadlock if left; flock "*.lock" self-releases.
+            for item in self.scope.components:
+                if item.name in ("torch_extensions", "aiter"):
+                    store.reap_stale_batons(item.local_dir)
+        return self._start_watch()
+
+    def _start_watch(self) -> bool:
+        self._observer = Observer()
+        try:
+            for item in self.scope.components:
+                item.local_dir.mkdir(parents=True, exist_ok=True)
+                self._observer.schedule(self, str(item.local_dir), recursive=True)
+            self._observer.start()
         except Exception:
-            observer.stop()
-            raise
-        self._observer = observer
-        self._sync_thread = threading.Thread(target=self._sync_loop, daemon=True)
-        self._sync_thread.start()
+            logging.exception("JIT_CACHE_FAIL_OPEN: inotify watch setup failed")
+            return False
+        self._worker = threading.Thread(target=self._sync_loop, daemon=True)
+        self._worker.start()
+        return True
 
     def _snapshot_files(self) -> dict[str, Path]:
         files = {}
-        # All known components, not self.components: an archive is one complete
-        # generation of the shared tree, which co-located processes with a
-        # different managed set may also populate.
-        for component in COMPONENTS:
-            root = self.local_root / component.name
-            for path in root.rglob("*"):
-                with suppress(OSError):  # file may vanish between walk and stat
-                    if path.is_symlink() or not path.is_file():
-                        continue
-                    rel = path.relative_to(root).as_posix()
-                    if component.should_sync(rel) and path.stat().st_size:
-                        files[path.relative_to(self.local_root).as_posix()] = path
+        for item in self.scope.components:
+            for path in item.local_dir.rglob("*"):
+                with suppress(OSError):
+                    st, rel = path.lstat(), path.relative_to(item.local_dir).as_posix()
+                    if (
+                        st.st_size
+                        and stat.S_ISREG(st.st_mode)
+                        and item.should_sync(rel)
+                    ):
+                        files[f"{item.name}/{rel}"] = path
         return files
 
     def publish_pending_snapshot(self) -> None:
         if not self._dirty.is_set():
             return
-        self._dirty.clear()
+        publisher_fd = store.acquire_flock(self._lock_path("publish"), blocking=False)
+        if publisher_fd is None:
+            return
         try:
-            if not self.store.publish_snapshot(self._snapshot_files):
-                self._dirty.set()  # deferred: retry after the next quiet period
-        except Exception:
+            self._dirty.clear()
+            self.store.publish_snapshot(self._snapshot_files())
+        except Exception as error:
             self._dirty.set()
-            raise
+            if not isinstance(error, store.SnapshotRaced):
+                raise
+            logging.info("JIT snapshot deferred; builder active during pack: %s", error)
+        finally:
+            os.close(publisher_fd)
 
     def _sync_loop(self) -> None:
         while True:
             stopping = self._stop.wait(SYNC_POLL_S)
-            if not stopping and time.monotonic() - self._last_event_at < SYNC_POLL_S:
-                continue
             try:
                 self.publish_pending_snapshot()
             except Exception:
-                logging.exception("JIT cache sync failed")
+                logging.exception("JIT_CACHE_FAIL_OPEN: snapshot sync failed")
             if stopping:
                 return
 
+    def _cleanup(self) -> None:
+        try:
+            for worker in (self._observer, self._worker, self._prepare_thread):
+                if worker:
+                    with suppress(RuntimeError):
+                        worker.join()
+        finally:
+            self._discard_prepared()
+            if self.store:
+                self.store.close()
+            with self._lock:
+                self._cleanup_thread = None
+
     def stop(self) -> None:
-        deadline = time.monotonic() + SHUTDOWN_TIMEOUT_S
         self._stop.set()
         if self._observer:
             self._observer.stop()
-            self._observer.join(max(0, deadline - time.monotonic()))
-            self._observer = None
-        if self._sync_thread:
-            self._sync_thread.join(max(0, deadline - time.monotonic()))
-            self._sync_thread = None
+        with self._lock:
+            if self._cleanup_thread is None:
+                cleanup_thread = threading.Thread(target=self._cleanup, daemon=True)
+                self._cleanup_thread = cleanup_thread
+                cleanup_thread.start()
+            cleanup_thread = self._cleanup_thread
+        cleanup_thread.join(STOP_TIMEOUT_S)
+        if cleanup_thread.is_alive():
+            logging.warning("JIT cleanup continues in background")
+            if self.store:
+                threading.Thread(target=self.store.close, daemon=True).start()
+
+
+def start_from_config(config):
+    remote = str(config.remote_jit_dir or "").strip()
+    if (scope := setup_jit_cache_env()) is None or not remote:
+        return
+    manager = JitCacheManager(scope, remote)
+    try:
+        if manager.bootstrap(config.jit_cache_setup_timeout_s):
+            return manager
+    except Exception:
+        logging.exception("JIT_CACHE_FAIL_OPEN: bootstrap failed; cold start")
+    except BaseException:
+        manager.stop()
+        raise
+    manager.stop()

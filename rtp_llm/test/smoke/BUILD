@@ -70,7 +70,7 @@ test_suite(
         ":smoke_h20_kimi_linear",
         ":smoke_h20_grammar_heavy",
         ":smoke_cuda_remote_cache",
-        ":smoke_jit_remote_cache",
+        ":smoke_h20_jit_remote_cache",
         ":smoke_rocm_basic",
         ":smoke_rocm_dense",
         ":smoke_rocm_moe",

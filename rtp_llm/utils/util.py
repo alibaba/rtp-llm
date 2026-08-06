@@ -182,6 +182,16 @@ def copy_gemm_config():
     logging.info("not found gemm_config in HIPPO_APP_INST_ROOT, not copy")
 
 
+def torch_abi_fingerprint() -> Optional[tuple[str, int]]:
+    abi = getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", None)
+    return (torch.__version__, int(abi)) if isinstance(abi, bool) else None
+
+
+# Env vars that change compiled binaries without changing any package version;
+# consumed by jit_cache_manager.resolve_scope and tipc.ffi build signatures.
+COMPILE_FLAG_ENVS = ("TORCH_CUDA_ARCH_LIST", "NVCC_APPEND_FLAGS", "CXXFLAGS", "CFLAGS")
+
+
 def get_dtype_size(dtype: torch.dtype) -> int:
     torch = _torch_module()
     return {torch.int8: 1, torch.half: 2, torch.bfloat16: 2, torch.float: 4}[dtype]

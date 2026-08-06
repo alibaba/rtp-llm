@@ -13,6 +13,7 @@ from libth_transformer_config import (
 
 @cache
 def _get_fused_rope_kvcache():
+    # Lazy: keeps import free of JIT builds; warm-up still hits this pre-readiness.
     from rtp_kernel import fused_rope_kvcache
 
     return fused_rope_kvcache

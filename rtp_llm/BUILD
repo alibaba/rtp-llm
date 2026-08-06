@@ -76,7 +76,7 @@ arch_with_version_dep = select({
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
-requirement(names = [
+requirement([
     "sentencepiece",
     "transformers",
     "pynvml",
@@ -147,13 +147,16 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+_JIT_CACHE_SRCS = [
+    "utils/jit_cache_manager.py",
+    "utils/jit_cache_store.py",
+]
+
 py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
-    ], exclude = [
-        "utils/jit_cache_manager.py",
-        "utils/jit_cache_store.py",
+    ], exclude = _JIT_CACHE_SRCS + [
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
@@ -171,12 +174,8 @@ py_library(
 
 py_library(
     name = "jit_cache_manager_lib",
-    srcs = [
-        "utils/jit_cache_manager.py",
-        "utils/jit_cache_store.py",
-    ],
+    srcs = _JIT_CACHE_SRCS,
     deps = [
-        ":config_ops",
         ":utils",
         ":watchdog",
         ":zstandard",
@@ -476,6 +475,7 @@ py_library(
         ":blobfile",
         ":partial_json_parser",
         ":utils",
+        ":config_ops",
         ":jit_cache_manager_lib",
     ],
     data = jit_deps(),
@@ -654,7 +654,7 @@ whl_reqs = [
     "orjson",
     "aiohttp",
     "watchdog==6.0.0",
-    "zstandard==0.23.0",
+    "zstandard==0.25.0",
     "json5",
     "dashscope>=1.11.0",
     "jieba",
