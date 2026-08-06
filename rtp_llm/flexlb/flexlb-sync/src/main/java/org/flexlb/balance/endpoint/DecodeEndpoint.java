@@ -1,11 +1,14 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.autotpm.CancelReasonMapper;
 import org.flexlb.autotpm.PriorityRegistry;
 import org.flexlb.autotpm.VictimCandidate;
 import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.InflightItem;
 import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.TerminalReason;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -239,6 +242,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Completion step: a finished request leaves whichever layer tracks it.
      * Cross-round fast path: finished before ever being observed running —
      * removed straight from layer 1 (KV reservation released).
+     *
+     * <p>Auto-TPM close-out (blueprint §1.10): a finished task attributed by
+     * the engine as priority-preempted ({@link CancelReasonMapper}) settles
+     * its {@link InflightItem} as AUTO_TPM_PREEMPTED (4290) here — this is
+     * the authoritative path when the controller's bounded release wait
+     * timed out. Idempotent with the controller's own settle (CAS terminal).
      */
     private void processFinishedTasks(Map<String, TaskInfo> finishedTaskInfo) {
         if (finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
@@ -248,10 +257,28 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long requestId = task.getRequestId();
             boolean removedTask = engineTasks.remove(requestId) != null;
             boolean removedInflight = removeInflight(requestId);
+            if (CancelReasonMapper.isAutoTpmPreempted(task)) {
+                settlePreemptedItem(requestId);
+                continue;
+            }
             if (task.getErrorCode() != 0 && !removedTask && !removedInflight) {
                 logger.debug("Decode calibrate: finished failed request reqId={} not tracked, error={}",
                         requestId, task.getErrorMessage());
             }
+        }
+    }
+
+    /**
+     * Settle a preempted request's {@link InflightItem} with structured
+     * attribution {@link StrategyErrorType#AUTO_TPM_PREEMPTED}. No-op when
+     * the item is unknown or already terminal (controller settled it first).
+     */
+    private void settlePreemptedItem(long requestId) {
+        if (inflightStore == null) return;
+        InflightItem item = inflightStore.get(String.valueOf(requestId));
+        if (item != null && !item.isTerminated()) {
+            item.complete(Response.error(StrategyErrorType.AUTO_TPM_PREEMPTED));
+            logger.info("Decode calibrate: settled auto-tpm preempted reqId={} as AUTO_TPM_PREEMPTED", requestId);
         }
     }
 

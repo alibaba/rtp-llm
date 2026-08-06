@@ -5,6 +5,7 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.protobuf.MessageLite;
 import io.grpc.ManagedChannel;
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.netty.NettyChannelBuilder;
@@ -24,9 +25,11 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
 /**
@@ -39,6 +42,13 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     private final Executor executor;
     @Getter
     private final EventLoopGroup eventLoopGroup;
+
+    /**
+     * Per-endpoint Cancel capability flags ("ip:port" → supported, default
+     * true). Flipped to false on an UNIMPLEMENTED answer so degraded (old)
+     * engines are never sent another Cancel.
+     */
+    private final ConcurrentHashMap<String, AtomicBoolean> cancelSupportedByEndpoint = new ConcurrentHashMap<>();
 
     public EngineGrpcClient(CustomNameResolver nameResolver,
                             @Qualifier("managedChannelThreadPoolExecutor") ThreadPoolExecutor executor,
@@ -310,13 +320,58 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     /**
      * Cancel a single request on an engine worker (async).
      *
-     * <p>Instrumentation-only for now: no production caller — the preemption
-     * orchestration that drives engine-side cancel lands in a later stage.
-     * Returns the engine's {@code CancelResponsePB} (found / phase /
+     * <p>Returns the engine's {@code CancelResponsePB} (found / phase /
      * already_finished) so callers can distinguish a hit from a race.
+     *
+     * <p>UNIMPLEMENTED probe-degrade: an old engine without the Cancel RPC
+     * answers UNIMPLEMENTED — the endpoint is then marked unsupported and no
+     * further Cancel is sent to it (callers should consult
+     * {@link #isCancelSupported} and treat the endpoint as infeasible for
+     * running-preemption).
      */
     public CompletableFuture<EngineRpcService.CancelResponsePB> cancelAsync(String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
-        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request), requestTimeoutMs, ServiceType.CANCEL);
+        String endpointKey = ip + ":" + port;
+        AtomicBoolean supported = cancelSupportedByEndpoint.get(endpointKey);
+        if (supported != null && !supported.get()) {
+            CompletableFuture<EngineRpcService.CancelResponsePB> degraded = new CompletableFuture<>();
+            degraded.completeExceptionally(Status.UNIMPLEMENTED
+                    .withDescription("engine Cancel degraded for " + endpointKey)
+                    .asRuntimeException());
+            return degraded;
+        }
+        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request), requestTimeoutMs, ServiceType.CANCEL)
+                .whenComplete((response, t) -> {
+                    if (t != null && Status.fromThrowable(t).getCode() == Status.Code.UNIMPLEMENTED) {
+                        cancelSupportedByEndpoint
+                                .computeIfAbsent(endpointKey, key -> new AtomicBoolean(true))
+                                .set(false);
+                        Logger.warn("Engine {} answered UNIMPLEMENTED for Cancel, degrading endpoint (no further Cancel sent)", endpointKey);
+                    }
+                });
+    }
+
+    /**
+     * Convenience overload: cancel {@code requestId} with a structured
+     * {@link EngineRpcService.EngineCancelReasonPB} attribution.
+     */
+    public CompletableFuture<EngineRpcService.CancelResponsePB> cancelAsync(String ip, int port, long requestId,
+                                                                            EngineRpcService.EngineCancelReasonPB reason,
+                                                                            long requestTimeoutMs) {
+        EngineRpcService.CancelRequestPB request = EngineRpcService.CancelRequestPB.newBuilder()
+                .setRequestId(requestId)
+                .setReason(reason)
+                .build();
+        return cancelAsync(ip, port, request, requestTimeoutMs);
+    }
+
+    /**
+     * Whether the endpoint still accepts the Cancel RPC. Defaults to true;
+     * flips to false permanently (for this process) after an UNIMPLEMENTED
+     * probe answer.
+     */
+    public boolean isCancelSupported(String ip, int port) {
+        AtomicBoolean supported = cancelSupportedByEndpoint.get(ip + ":" + port);
+        return supported == null || supported.get();
     }
 
     @Override

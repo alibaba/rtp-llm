@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.autotpm.PreemptResult;
+import org.flexlb.autotpm.PriorityPressureController;
 import org.flexlb.autotpm.PriorityRegistry;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -14,6 +16,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.util.Logger;
 
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -55,6 +58,13 @@ public class BatchScheduler extends AbstractScheduler {
      * live from InflightStore registration to future settlement.
      */
     private final PriorityRegistry priorityRegistry = new PriorityRegistry();
+
+    /**
+     * Auto-TPM running-decode preemption orchestrator (D6). Optional wiring
+     * via {@link #setPressureController}: null (default) means the preempt
+     * branch is a no-op — behavior is identical to the pre-Stage-3 scheduler.
+     */
+    private volatile PriorityPressureController pressureController;
 
     public BatchScheduler(ConfigService configService,
                           Router router,
@@ -105,6 +115,13 @@ public class BatchScheduler extends AbstractScheduler {
             future.whenComplete((response, throwable) -> priorityRegistry.remove(requestId));
 
             Response routeResponse = router.route(ctx);
+            if (routeResponse == null || !routeResponse.isSuccess()) {
+                // Auto-TPM Phase 2 (D6): no capacity for this priority —
+                // try preempting one strictly lower-priority RUNNING decode
+                // request, then re-route once onto the confirmed-freed
+                // capacity (reusing the full reserve+BatchItem+offer path).
+                routeResponse = tryPreemptAndReroute(ctx, routeResponse);
+            }
             if (routeResponse == null || !routeResponse.isSuccess()) {
                 if (routeResponse != null) {
                     future.complete(routeResponse);
@@ -193,6 +210,46 @@ public class BatchScheduler extends AbstractScheduler {
     // ==================== Internal: resource rollback (pre-BatchItem paths) ====================
 
     /**
+     * Auto-TPM Phase 2 preempt branch (D6). Invoked only when routing failed;
+     * returns the original failed response unless a preemption is confirmed
+     * and a single re-route succeeds.
+     *
+     * <p>Preconditions for even attempting: a controller is wired, and the
+     * failure is a capacity-exhaustion outcome (null response,
+     * NO_AVAILABLE_WORKER or NO_DECODE_WORKER) — other route errors (invalid
+     * request, no prefill worker, ...) are not preemption-solvable.
+     *
+     * <p>On confirmed preemption the freed capacity is claimed by re-running
+     * the router once, reusing the full reserve+BatchItem+offer path. The
+     * controller only returns after the victim's release has been verified,
+     * so the freed slot is visible to the router (never optimistic; the
+     * re-route may still pick another endpoint that freed up meanwhile,
+     * which is equally correct).
+     */
+    private Response tryPreemptAndReroute(BalanceContext ctx, Response failed) {
+        PriorityPressureController controller = pressureController;
+        if (controller == null) {
+            return failed;
+        }
+        if (failed != null
+                && failed.getCode() != StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode()
+                && failed.getCode() != StrategyErrorType.NO_DECODE_WORKER.getErrorCode()) {
+            return failed;
+        }
+        Optional<PreemptResult> preempted = controller.tryPreempt(ctx);
+        if (preempted.isEmpty()) {
+            return failed;
+        }
+        PreemptResult result = preempted.get();
+        Logger.info("FlexLB auto-tpm preempt_reroute request_id={} priority={} "
+                        + "victim_request_id={} victim_priority={} freed_endpoint={}",
+                ctx.getRequestId(), ctx.getPriority(),
+                result.victimRequestId(), result.victimPriority(), result.endpoint());
+        Response rerouted = router.route(ctx);
+        return rerouted != null ? rerouted : failed;
+    }
+
+    /**
      * Rollback using route response — used only in submit() early-return paths
      * where BatchItem has not been created yet.
      */
@@ -248,6 +305,11 @@ public class BatchScheduler extends AbstractScheduler {
     /** Auto-TPM priority registry accessor (preemption orchestration wiring). */
     public PriorityRegistry priorityRegistry() {
         return priorityRegistry;
+    }
+
+    /** Wire the Auto-TPM preemption orchestrator; null keeps the branch a no-op. */
+    public void setPressureController(PriorityPressureController controller) {
+        this.pressureController = controller;
     }
 
     /**

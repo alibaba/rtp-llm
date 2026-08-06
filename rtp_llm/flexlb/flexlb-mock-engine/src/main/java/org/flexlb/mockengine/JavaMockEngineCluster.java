@@ -263,6 +263,8 @@ public final class JavaMockEngineCluster {
         private final ConcurrentLinkedQueue<CancelRecord> cancelRecords = new ConcurrentLinkedQueue<>();
         private final Map<Long, EngineRpcService.GenerateInputPB> capturedInputs = new ConcurrentHashMap<>();
         private volatile boolean captureInputs;
+        /** 0 = release on Cancel synchronously; >0 = delay to simulate a step boundary. */
+        private volatile long cancelReleaseDelayMs;
 
         FastRpcService(String roleName,
                        EngineRpcService.RoleTypePB roleType,
@@ -514,12 +516,54 @@ public final class JavaMockEngineCluster {
         public void cancel(EngineRpcService.CancelRequestPB request,
                            StreamObserver<EngineRpcService.CancelResponsePB> observer) {
             long requestId = request.getRequestId();
+            String reason = request.getReason().name();
+            long releaseDelayMs = cancelReleaseDelayMs;
+            if (releaseDelayMs > 0) {
+                // Delayed-release mode (test hook): report found immediately but
+                // keep the task claimed until the simulated step boundary —
+                // models an engine that aborts the stream asynchronously.
+                EngineRpcService.TaskInfoPB running = runningTasks.get(requestId);
+                cancelRecords.add(new CancelRecord(
+                        requestId, reason, System.currentTimeMillis(), running != null));
+                if (running != null) {
+                    scheduler.schedule(() -> settleCancelledTask(requestId, request), releaseDelayMs,
+                            TimeUnit.MILLISECONDS);
+                }
+                EngineRpcService.CancelResponsePB.Builder delayed =
+                        EngineRpcService.CancelResponsePB.newBuilder()
+                                .setFound(running != null)
+                                .setAlreadyFinished(running == null && isFinished(requestId));
+                if (running != null) {
+                    delayed.setPhase(running.getPhase());
+                }
+                observer.onNext(delayed.build());
+                observer.onCompleted();
+                return;
+            }
             // Settle exactly once: removing from runningTasks claims the task
             // against the scheduled completion callback.
-            EngineRpcService.TaskInfoPB task = runningTasks.remove(requestId);
+            EngineRpcService.TaskInfoPB task = settleCancelledTask(requestId, request);
             cancelRecords.add(new CancelRecord(
-                    requestId, CancelRecord.REASON_UNSPECIFIED,
-                    System.currentTimeMillis(), task != null));
+                    requestId, reason, System.currentTimeMillis(), task != null));
+            EngineRpcService.CancelResponsePB.Builder response =
+                    EngineRpcService.CancelResponsePB.newBuilder()
+                            .setFound(task != null)
+                            .setAlreadyFinished(task == null && isFinished(requestId));
+            if (task != null) {
+                response.setPhase(task.getPhase());
+            }
+            observer.onNext(response.build());
+            observer.onCompleted();
+        }
+
+        /**
+         * Claim and release a cancelled task: remove from runningTasks (loser
+         * against the batch completion callback is a no-op), release decode
+         * accounting, and publish the attributed finished record.
+         */
+        private EngineRpcService.TaskInfoPB settleCancelledTask(long requestId,
+                                                                EngineRpcService.CancelRequestPB request) {
+            EngineRpcService.TaskInfoPB task = runningTasks.remove(requestId);
             if (task != null) {
                 if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
                     // Release per-request decode accounting reserved in
@@ -529,23 +573,37 @@ public final class JavaMockEngineCluster {
                     activeKvTokens.addAndGet(-task.getInputLength());
                     pendingRequests.decrementAndGet();
                 }
-                recordCancelledFinish(task);
+                recordCancelledFinish(task, request.getReason());
             }
             statusVersion.incrementAndGet();
-            // Minimal response for the new Cancel contract; reason awareness
-            // and phase/already_finished reporting land in a later stage.
-            observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
-                    .setFound(task != null)
-                    .build());
-            observer.onCompleted();
+            return task;
+        }
+
+        /** Whether a finished record for {@code requestId} is still pending pickup. */
+        private boolean isFinished(long requestId) {
+            for (VersionedTask versioned : completions) {
+                if (versioned.task.getRequestId() == requestId) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         /** Publish a finished record for a cancelled task so WorkerStatus reflects the release. */
-        private void recordCancelledFinish(EngineRpcService.TaskInfoPB task) {
+        private void recordCancelledFinish(EngineRpcService.TaskInfoPB task,
+                                           EngineRpcService.EngineCancelReasonPB reason) {
             long version = completionVersion.incrementAndGet();
             EngineRpcService.TaskInfoPB finished = task.toBuilder()
                     .setEndTimeMs(System.currentTimeMillis())
                     .setExecutionTimeMs(0)
+                    // Structured attribution (D7): cancelled tasks finish with
+                    // engine error code CANCELLED (8100) and the wire-level
+                    // cancel reason — never a matchable error-message string.
+                    .setCancelReason(reason)
+                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                            .setErrorCode(8100)
+                            .setErrorMessage("cancelled")
+                            .build())
                     .build();
             completions.add(new VersionedTask(version, finished));
         }
@@ -555,6 +613,15 @@ public final class JavaMockEngineCluster {
         /** Enable capture of enqueued {@code GenerateInputPB}s. Off by default. */
         void enableInputCapture() {
             this.captureInputs = true;
+        }
+
+        /**
+         * Delay Cancel-triggered release by {@code delayMs} to simulate the
+         * engine aborting a stream only at the next step boundary. 0 (default)
+         * releases synchronously inside the Cancel RPC.
+         */
+        void setCancelReleaseDelayMs(long delayMs) {
+            this.cancelReleaseDelayMs = delayMs;
         }
 
         /** Captured input for the given request, or null if not captured. */
@@ -568,12 +635,12 @@ public final class JavaMockEngineCluster {
         }
 
         /**
-         * One received Cancel RPC. {@code reason} is a slot for the wire-level
-         * cancel reason — the engine proto does not carry one yet, so it is
-         * always {@link #REASON_UNSPECIFIED} until the protocol change lands.
+         * One received Cancel RPC. {@code reason} is the wire-level cancel
+         * reason enum name; requests carrying no explicit reason record
+         * {@link #REASON_UNSPECIFIED}.
          */
         record CancelRecord(long requestId, String reason, long receivedAtMs, boolean foundRunning) {
-            static final String REASON_UNSPECIFIED = "CANCEL_REASON_UNSPECIFIED";
+            static final String REASON_UNSPECIFIED = "ENGINE_CANCEL_REASON_UNSPECIFIED";
         }
 
         private record VersionedTask(long version, EngineRpcService.TaskInfoPB task) {

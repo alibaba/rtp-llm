@@ -114,6 +114,8 @@ public class EngineStatusConverter {
                 taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
                 taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());
             }
+            // Structured cancel attribution (D7): carry EngineCancelReasonPB numeric value.
+            taskInfo.setCancelReason(taskInfoPB.getCancelReasonValue());
 
             taskInfoMap.put(String.valueOf(taskInfoPB.getRequestId()), taskInfo);
         }

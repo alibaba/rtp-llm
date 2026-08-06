@@ -25,6 +25,10 @@ struct EngineScheduleInfo {
         std::string error_message;
         int64_t     batch_id          = -1;
         int64_t     execution_time_ms = -1;
+        // Structured cancel attribution (EngineCancelReasonPB numeric value);
+        // 0 = not cancelled / unspecified. Set via the Cancel RPC so the
+        // finished report carries the reason without string matching.
+        int64_t cancel_reason = 0;
     };
     std::vector<TaskInfo> running_task_info_list;
     std::vector<TaskInfo> finished_task_info_list;

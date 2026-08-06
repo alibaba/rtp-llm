@@ -60,6 +60,36 @@ public:
         running_streams_[request_id] = RunningEntry{new_task, stream};
     }
 
+    // Running stream lookup for the Cancel RPC; nullptr when not running.
+    GenerateStreamPtr findRunningStream(int64_t request_id) const {
+        std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+        auto                                iter = running_streams_.find(request_id);
+        return iter == running_streams_.end() ? nullptr : iter->second.stream;
+    }
+
+    // Record the cancel attribution on the running entry so that dequeue
+    // copies it into the finished report (structured attribution, no
+    // error-message matching). No-op when the request already left running.
+    void markCancelReason(int64_t request_id, int64_t cancel_reason) {
+        std::unique_lock<std::shared_mutex> lock(read_write_lock_);
+        auto                                iter = running_streams_.find(request_id);
+        if (iter != running_streams_.end()) {
+            iter->second.task_info.cancel_reason = cancel_reason;
+        }
+    }
+
+    // Whether a finished record for request_id is still buffered — lets the
+    // Cancel RPC report already_finished instead of a bare not-found.
+    bool hasFinished(int64_t request_id) const {
+        std::shared_lock<std::shared_mutex> lock(read_write_lock_);
+        for (const auto& iter : finished_streams_) {
+            if (iter.second.request_id == request_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void dequeue(int64_t request_id, const GenerateStreamPtr& stream) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                ptr = running_streams_.find(request_id);

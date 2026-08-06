@@ -278,6 +278,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         task_info->set_phase(static_cast<::TaskPhase>(task.phase));
         task_info->set_batch_id(task.batch_id);
         task_info->set_execution_time_ms(task.execution_time_ms);
+        task_info->set_cancel_reason(static_cast<::EngineCancelReasonPB>(task.cancel_reason));
         if (task.error_code != 0) {
             task_info->mutable_error_info()->set_error_code(task.error_code);
             task_info->mutable_error_info()->set_error_message(task.error_message);
@@ -479,6 +480,30 @@ grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
     response->set_health("OK");
+    return grpc::Status::OK;
+}
+
+grpc::Status
+LocalRpcServer::Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response) {
+    int64_t request_id = request->request_id();
+    RTP_LLM_LOG_INFO("receive cancel rpc request from client: %s, request_id: %ld, reason: %d, source: %s",
+                     context->peer().c_str(),
+                     request_id,
+                     static_cast<int>(request->reason()),
+                     request->source().c_str());
+    auto stream = meta_->findRunningStream(request_id);
+    if (!stream) {
+        response->set_found(false);
+        response->set_already_finished(meta_->hasFinished(request_id));
+        return grpc::Status::OK;
+    }
+    // Record the structured attribution on the running entry before aborting
+    // the stream, so dequeue publishes it with the finished report. Consumers
+    // must attribute via cancel_reason, never by matching the error message.
+    meta_->markCancelReason(request_id, static_cast<int64_t>(request->reason()));
+    response->set_found(true);
+    response->set_phase(static_cast<::TaskPhase>(RpcServerRuntimeMeta::derivePhase(stream)));
+    stream->reportError(ErrorCode::CANCELLED, "request cancelled by scheduler");
     return grpc::Status::OK;
 }
 

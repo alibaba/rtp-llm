@@ -56,6 +56,8 @@ public class FlexlbMetricHelper {
         monitor.register(MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.AUTO_TPM_NORMAL_PLACEMENT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(MetricConstant.AUTO_TPM_QUEUE_REJECT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.AUTO_TPM_RUNNING_CANCEL_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(MetricConstant.AUTO_TPM_PREEMPT_RATE_PER_MIN, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     // ==================== Individual report methods ====================
@@ -228,5 +230,33 @@ public class FlexlbMetricHelper {
                 MetricConstant.TAG_INCOMING_PRIORITY, String.valueOf(incomingPriority),
                 MetricConstant.TAG_PATH, path);
         monitor.report(MetricConstant.AUTO_TPM_QUEUE_REJECT_COUNT, tags, 1.0);
+    }
+
+    /**
+     * Report a running-decode cancel (preemption) attempt outcome (D10).
+     *
+     * @param result one of success/timeout/not_found/unsupported/rate_limited
+     */
+    public void reportAutoTpmRunningCancel(int victimPriority, int incomingPriority, String result) {
+        if (monitor == null) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(
+                MetricConstant.TAG_VICTIM_PRIORITY, String.valueOf(victimPriority),
+                MetricConstant.TAG_INCOMING_PRIORITY, String.valueOf(incomingPriority),
+                MetricConstant.TAG_RESULT, result,
+                MetricConstant.TAG_PATH, path);
+        monitor.report(MetricConstant.AUTO_TPM_RUNNING_CANCEL_COUNT, tags, 1.0);
+    }
+
+    /**
+     * Report the current global preemption rate in the sliding 1-minute window.
+     */
+    public void reportAutoTpmPreemptRate(int currentPerMin) {
+        if (monitor == null) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of(MetricConstant.TAG_PATH, path);
+        monitor.report(MetricConstant.AUTO_TPM_PREEMPT_RATE_PER_MIN, tags, currentPerMin);
     }
 }

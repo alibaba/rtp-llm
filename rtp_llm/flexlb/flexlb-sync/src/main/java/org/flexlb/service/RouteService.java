@@ -1,5 +1,6 @@
 package org.flexlb.service;
 
+import org.flexlb.autotpm.PriorityPressureController;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -70,6 +71,12 @@ public class RouteService {
 
         this.batchScheduler = new BatchScheduler(configService, router, endpointRegistry,
                 reporter, globalInflightStore, batchHelper);
+        // Auto-TPM Phase 2 (D6): preemption orchestrator, consulted only on
+        // capacity-exhausted routing failures. Dormant unless both
+        // AUTO_TPM_ENABLED and AUTO_TPM_DECODE_RUNNING_PREEMPT_ENABLED are on.
+        this.batchScheduler.setPressureController(new PriorityPressureController(
+                configService, endpointRegistry, endpointRegistry.getGrpcClient(),
+                globalInflightStore, batchScheduler.priorityRegistry(), batchHelper));
         this.queueScheduler = new QueueScheduler(router, configService, routingQueueReporter,
                 dynamicWorkerManager, globalInflightStore, queueHelper);
         this.directScheduler = new DirectScheduler(router, globalInflightStore, directHelper);

@@ -49,6 +49,11 @@ public class EndpointRegistry {
         this.batchIdGenerator = new BatchIdGenerator(detectLocalIp(), detectPort(environment));
     }
 
+    /** Shared engine gRPC client (Auto-TPM preemption orchestration wiring). */
+    public EngineGrpcClient getGrpcClient() {
+        return grpcClient;
+    }
+
     private static String detectLocalIp() {
         try {
             return InetAddress.getLocalHost().getHostAddress();

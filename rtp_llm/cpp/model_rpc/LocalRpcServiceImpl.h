@@ -105,6 +105,11 @@ public:
         return local_server_->CheckHealth(context, request, response);
     }
 
+    ::grpc::Status
+    Cancel(::grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response) override {
+        return local_server_->Cancel(context, request, response);
+    }
+
     ::grpc::Status UpdateEplbConfig(::grpc::ServerContext*           context,
                                     const UpdateEplbConfigRequestPB* request,
                                     EmptyPB*                         response) override {

@@ -688,6 +688,17 @@ public class MetricConstant {
     public static final String AUTO_TPM_QUEUE_REJECT_COUNT = "queue_reject.count";
 
     /**
+     * Running-decode cancel (preemption) count by victim/incoming priority and
+     * result (success/timeout/not_found/unsupported/rate_limited).
+     */
+    public static final String AUTO_TPM_RUNNING_CANCEL_COUNT = "running_cancel.count";
+
+    /**
+     * Current global preemption rate over the sliding 1-minute window (GAUGE).
+     */
+    public static final String AUTO_TPM_PREEMPT_RATE_PER_MIN = "preempt_rate_per_min";
+
+    /**
      * Tag key for priority dimension.
      */
     public static final String TAG_PRIORITY = "priority";
