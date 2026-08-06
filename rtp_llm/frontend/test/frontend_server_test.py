@@ -155,6 +155,198 @@ class FrontendServerTest(TestCase):
             [trace_attrs.EVENT_FIRST_RESPONSE_CHUNK],
         )
 
+    def test_streaming_latency_counts_only_visible_output_tokens(self):
+        from rtp_llm.telemetry import CURRENT_TRACE_STATE
+
+        class FakeTraceState:
+            def __init__(self):
+                self.events = []
+                self.token_counts = []
+
+            def add_event(self, name):
+                self.events.append(name)
+
+            def record_frontend_output_tokens(self, token_count):
+                self.token_counts.append(token_count)
+
+        responses = (
+            {"choices": [{"delta": {"role": "assistant"}}]},
+            {
+                "choices": [{"delta": {"content": ""}}],
+                "usage": {"completion_tokens": 1},
+            },
+            {
+                "choices": [{"delta": {"content": "hello"}}],
+                "usage": {"completion_tokens": 2},
+            },
+            {
+                "choices": [{"delta": {"reasoning_content": " world"}}],
+                "usage": {"completion_tokens": 4},
+            },
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 4},
+            },
+        )
+
+        async def _run_case(is_streaming: bool):
+            async def _generate():
+                for response in responses:
+                    yield response
+
+            def _generate_call():
+                return CompleteResponseAsyncGenerator(
+                    _generate(), CompleteResponseAsyncGenerator.get_last_value
+                )
+
+            trace_state = FakeTraceState()
+            token = CURRENT_TRACE_STATE.set(trace_state)
+            try:
+                wrapped = await self.frontend_server._call_generate_with_report(
+                    _generate_call, is_streaming
+                )
+                async for _ in wrapped:
+                    pass
+            finally:
+                CURRENT_TRACE_STATE.reset(token)
+            return trace_state
+
+        streaming = asyncio.run(_run_case(True))
+        non_streaming = asyncio.run(_run_case(False))
+
+        self.assertEqual(streaming.events, ["first_response_chunk"])
+        self.assertEqual(streaming.token_counts, [1, 2])
+        self.assertEqual(non_streaming.events, [])
+        self.assertEqual(non_streaming.token_counts, [])
+
+    def test_streaming_falls_back_to_visible_lanes_without_token_accounting(self):
+        """Tool/function frames count as delivered output even with no usage delta."""
+        from rtp_llm.telemetry import CURRENT_TRACE_STATE
+
+        class FakeTraceState:
+            def __init__(self):
+                self.token_counts = []
+
+            def add_event(self, name):
+                pass
+
+            def record_frontend_output_tokens(self, token_count):
+                self.token_counts.append(token_count)
+
+        responses = (
+            # No usage at all: one visible lane is the only available lower bound.
+            {
+                "choices": [
+                    {"delta": {"tool_calls": [{"function": {"name": "get_weather"}}]}}
+                ]
+            },
+            {"choices": [{"delta": {"function_call": {"arguments": '{"city":'}}}]},
+            # Usage present but not advancing: still one visible lane.
+            {
+                "choices": [{"delta": {"content": "!"}}],
+                "usage": {"completion_tokens": 0},
+            },
+            # Structural-only closing frame contributes nothing.
+            {
+                "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"completion_tokens": 0},
+            },
+        )
+
+        async def _run():
+            async def _generate():
+                for response in responses:
+                    yield response
+
+            def _generate_call():
+                return CompleteResponseAsyncGenerator(
+                    _generate(), CompleteResponseAsyncGenerator.get_last_value
+                )
+
+            trace_state = FakeTraceState()
+            token = CURRENT_TRACE_STATE.set(trace_state)
+            try:
+                wrapped = await self.frontend_server._call_generate_with_report(
+                    _generate_call, True
+                )
+                async for _ in wrapped:
+                    pass
+            finally:
+                CURRENT_TRACE_STATE.reset(token)
+            return trace_state
+
+        self.assertEqual(asyncio.run(_run()).token_counts, [1, 1, 1])
+
+    def test_streaming_token_observation_is_fail_open(self):
+        from rtp_llm.telemetry import CURRENT_TRACE_STATE
+
+        class FakeTraceState:
+            def add_event(self, name):
+                pass
+
+            def record_frontend_output_tokens(self, token_count):
+                pass
+
+        class ChoicesPropertyRaises:
+            def model_dump_json(self):
+                return "{}"
+
+            @property
+            def choices(self):
+                raise RuntimeError("choices unavailable")
+
+        class SerializableResponse:
+            def __init__(self, content):
+                self.choices = [{"delta": {"content": content}}]
+
+            def model_dump_json(self):
+                return "{}"
+
+        class BoolRaises:
+            def __bool__(self):
+                raise RuntimeError("truth value unavailable")
+
+        class ModelDumpPropertyRaises:
+            @property
+            def model_dump(self):
+                raise RuntimeError("model_dump unavailable")
+
+        class ModelDumpCallRaises:
+            def model_dump(self, **kwargs):
+                raise RuntimeError("model_dump failed")
+
+        responses = (
+            ChoicesPropertyRaises(),
+            SerializableResponse(BoolRaises()),
+            SerializableResponse(ModelDumpPropertyRaises()),
+            SerializableResponse(ModelDumpCallRaises()),
+        )
+
+        async def _run():
+            async def _generate():
+                for response in responses:
+                    yield response
+
+            def _generate_call():
+                return CompleteResponseAsyncGenerator(
+                    _generate(), CompleteResponseAsyncGenerator.get_last_value
+                )
+
+            token = CURRENT_TRACE_STATE.set(FakeTraceState())
+            try:
+                wrapped = await self.frontend_server._call_generate_with_report(
+                    _generate_call, True
+                )
+                return [response async for response in wrapped]
+            finally:
+                CURRENT_TRACE_STATE.reset(token)
+
+        observed = asyncio.run(_run())
+        self.assertEqual(len(observed), len(responses))
+        self.assertTrue(
+            all(actual is expected for actual, expected in zip(observed, responses))
+        )
+
     def test_encode(self):
         res = self.frontend_server.tokenizer_encode('{"prompt": "b c d e"}')
         self.assertEqual(

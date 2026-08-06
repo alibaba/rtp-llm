@@ -52,11 +52,13 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
     _engine_reported_finished,
+    _record_client_span_latency,
     _record_client_span_usage,
     _request_completed_normally,
     trans_input,
     trans_output,
 )
+from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateConfigPB,
     GenerateInputPB,
@@ -64,7 +66,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     RoleAddrPB,
     TensorPB,
 )
-from rtp_llm.telemetry import CURRENT_TRACE_STATE
+from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
@@ -688,16 +690,114 @@ class ModelRpcClientTest(TestCase):
         self.assertFalse(stub.fetch_iterator.cancelled)
 
 
+class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
+    def __init__(self):
+        self.metadata = None
+        self.metadata_ready = asyncio.Event()
+
+    async def GenerateStreamCall(self, request, context):
+        self.metadata = {item.key: item.value for item in context.invocation_metadata()}
+        self.metadata_ready.set()
+        outputs = GenerateOutputsPB()
+        output = outputs.flatten_output
+        output.output_ids.data_type = TensorPB.DataType.INT32
+        output.output_ids.shape.extend([1, 1])
+        output.output_ids.int32_data = struct.pack("<i", 7)
+        output.finished.extend([True])
+        aux_info = output.aux_info.add()
+        aux_info.input_len = 3
+        aux_info.output_len = 1
+        yield outputs
+
+
+class _RealChannelPool:
+    def __init__(self, channel):
+        self.channel = channel
+
+    async def get(self, _target_address):
+        return self.channel
+
+
+class ModelRpcClientGrpcMetadataTest(TestCase):
+    def test_traceparent_crosses_real_grpc_boundary(self):
+        self.addCleanup(tracing.reset_telemetry_for_test)
+
+        async def run():
+            server = grpc.aio.server()
+            servicer = _MetadataCaptureServicer()
+            model_rpc_service_pb2_grpc.add_RpcServiceServicer_to_server(
+                servicer, server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            channel = grpc.aio.insecure_channel(f"127.0.0.1:{port}")
+
+            from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+                InMemorySpanExporter,
+            )
+
+            exporter = InMemorySpanExporter()
+            self.assertTrue(tracing.reset_telemetry_for_test())
+            self.assertTrue(
+                tracing.init_telemetry_for_test(exporter, role="frontend", tp_rank=0)
+            )
+            root = tracing.start_server_span("root", {})
+            client = ModelRpcClient([f"127.0.0.1:{port}"], {}, max_rpc_timeout_ms=1000)
+            client._channel_pool = _RealChannelPool(channel)
+            input_py = GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(timeout_ms=1000),
+                request_id=901,
+                mm_inputs=[],
+            )
+            try:
+                responses = []
+                async for response in client.enqueue(input_py):
+                    responses.extend(response.generate_outputs)
+                await asyncio.wait_for(servicer.metadata_ready.wait(), timeout=5)
+                self.assertEqual(len(responses), 1)
+                self.assertIsNotNone(servicer.metadata)
+                self.assertIn("traceparent", servicer.metadata)
+                self.assertTrue(servicer.metadata["traceparent"].startswith("00-"))
+                root.finish()
+                self.assertTrue(tracing.shutdown_telemetry())
+                spans = {span.name: span for span in exporter.get_finished_spans()}
+                self.assertIn("rtp_llm.generate_stream_call", spans)
+                self.assertEqual(
+                    spans["rtp_llm.generate_stream_call"].parent.span_id,
+                    spans["root"].context.span_id,
+                )
+            finally:
+                await channel.close()
+                await server.stop(None)
+                self.assertTrue(tracing.reset_telemetry_for_test())
+
+        asyncio.run(run())
+
+
 class _FakeAux:
-    def __init__(self, input_len, output_len):
+    def __init__(
+        self, input_len, output_len, first_token_cost_time=8.5, cost_time=20.0
+    ):
         self.input_len = input_len
         self.output_len = output_len
+        self.first_token_cost_time = first_token_cost_time
+        self.cost_time = cost_time
 
 
 class _FakeOut:
-    def __init__(self, finished, input_len=8, output_len=3):
+    def __init__(
+        self,
+        finished,
+        input_len=8,
+        output_len=3,
+        first_token_cost_time=8.5,
+        cost_time=20.0,
+    ):
         self.finished = finished
-        self.aux_info = _FakeAux(input_len, output_len)
+        self.aux_info = _FakeAux(
+            input_len, output_len, first_token_cost_time, cost_time
+        )
 
 
 class _AsyncReturn:
@@ -716,6 +816,7 @@ class _FakeClientSpan:
         self.status = None
         self.error_type = None
         self.finished = False
+        self.finished_event = asyncio.Event()
 
     def set_attribute(self, key, value):
         if not self.finished:
@@ -730,6 +831,7 @@ class _FakeClientSpan:
             self.error_type = error_type or type(error).__name__
         else:
             self.status = "OK"
+        self.finished_event.set()
 
 
 class _FakeTraceState:
@@ -760,17 +862,28 @@ class _FakeRpcError(grpc.RpcError):
 class _SpanAwareStub:
     """Yields `total` responses; the last one carries the engine finished flag."""
 
-    def __init__(self, total, finish_last=True, terminal_error=None):
+    def __init__(
+        self,
+        total,
+        finish_last=True,
+        terminal_error=None,
+        terminal_delay=0.0,
+        terminal_never=False,
+    ):
         self._total = total
         self._finish_last = finish_last
         self._terminal_error = terminal_error
+        self._terminal_delay = terminal_delay
+        self._terminal_never = terminal_never
         self.iterator = None
 
     def GenerateStreamCall(self, input_pb, timeout=None, metadata=None):
-        total, finish_last, terminal_error = (
+        total, finish_last, terminal_error, terminal_delay, terminal_never = (
             self._total,
             self._finish_last,
             self._terminal_error,
+            self._terminal_delay,
+            self._terminal_never,
         )
 
         class _Iterator:
@@ -779,6 +892,8 @@ class _SpanAwareStub:
                 self.code_waited = False
                 self.code_resolved = False
                 self.events = []
+                self.cancelled_event = asyncio.Event()
+                self.code_started = asyncio.Event()
                 self._terminal_status = None
                 self._terminal_ready = asyncio.Event()
 
@@ -790,6 +905,7 @@ class _SpanAwareStub:
                 if self._terminal_ready.is_set():
                     return False
                 self.cancelled = True
+                self.cancelled_event.set()
                 self._terminal_status = StatusCode.CANCELLED
                 self._terminal_ready.set()
                 return True
@@ -797,6 +913,7 @@ class _SpanAwareStub:
             async def code(self):
                 self.code_waited = True
                 self.events.append("code")
+                self.code_started.set()
                 await self._terminal_ready.wait()
                 self.code_resolved = True
                 return self._terminal_status
@@ -814,19 +931,34 @@ class _SpanAwareStub:
                     aux_info.iter_count = i + 1
                     aux_info.input_len = 8
                     aux_info.output_len = i + 1
+                    aux_info.first_token_cost_time_us = 8500
+                    aux_info.cost_time_us = 20000
                     output_pb.finished.extend([finish_last and i == total - 1])
                     if finish_last and i == total - 1:
                         # The real server can settle independently while the
                         # Python message iterator remains suspended at yield.
-                        self._terminal_status = StatusCode.OK
-                        asyncio.get_running_loop().call_soon(self._terminal_ready.set)
+                        if not terminal_never:
+                            self._terminal_status = (
+                                terminal_error.code()
+                                if terminal_error is not None
+                                else StatusCode.OK
+                            )
+                            if terminal_delay:
+                                asyncio.get_running_loop().call_later(
+                                    terminal_delay, self._terminal_ready.set
+                                )
+                            else:
+                                asyncio.get_running_loop().call_soon(
+                                    self._terminal_ready.set
+                                )
                     yield outputs_pb
                 if terminal_error is not None:
                     self._terminal_status = terminal_error.code()
                     self._terminal_ready.set()
                     raise terminal_error
-                self._terminal_status = StatusCode.OK
-                self._terminal_ready.set()
+                if not terminal_never:
+                    self._terminal_status = StatusCode.OK
+                    self._terminal_ready.set()
 
         self.iterator = _Iterator()
         return self.iterator
@@ -841,10 +973,9 @@ class ClientSpanSettlementTest(TestCase):
     marked successful requests Cancelled, dropped the usage attributes and
     pushed the span end past the root span.
 
-    The renderer now closes its owned upstream explicitly. On engine completion,
-    enqueue waits for grpc.aio's terminal status before ending the CLIENT span.
-    A teardown after the root already settled is retained only as a fail-open
-    fallback for other consumers.
+    The application frame must be published before waiting for grpc.aio's
+    terminal status; settlement runs in a bounded independent task so a slow or
+    absent RPC deadline cannot delay the data plane.
     """
 
     USAGE_KEYS = (
@@ -856,10 +987,23 @@ class ClientSpanSettlementTest(TestCase):
     )
 
     def _build_client(
-        self, span, total, finish_last=True, trace_state=None, terminal_error=None
+        self,
+        span,
+        total,
+        finish_last=True,
+        trace_state=None,
+        terminal_error=None,
+        terminal_delay=0.0,
+        terminal_never=False,
     ):
         client = ModelRpcClient(["127.0.0.1:1234"], {}, 0, False)
-        stub = _SpanAwareStub(total, finish_last, terminal_error)
+        stub = _SpanAwareStub(
+            total,
+            finish_last,
+            terminal_error,
+            terminal_delay,
+            terminal_never,
+        )
         client._channel_pool = MagicMock()
         client._channel_pool.get = _AsyncReturn(MagicMock())
         token = CURRENT_TRACE_STATE.set(trace_state)
@@ -925,6 +1069,20 @@ class ClientSpanSettlementTest(TestCase):
         self.assertEqual(span.attributes["gen_ai.usage.completion_tokens"], 8)
         self.assertEqual(span.attributes["gen_ai.usage.total_tokens"], 16)
 
+    def test_beam_usage_attributes_count_primary_sequence_only(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, input_len=8, output_len=3),
+            _FakeOut(True, input_len=8, output_len=5),
+        ]
+
+        _record_client_span_usage(span, outputs, include_all_sequences=False)
+
+        self.assertEqual(span.attributes["gen_ai.usage.input_tokens"], 8)
+        self.assertEqual(span.attributes["gen_ai.usage.output_tokens"], 3)
+        self.assertEqual(span.attributes["gen_ai.usage.total_tokens"], 11)
+
     def test_usage_attributes_skip_inconsistent_choices(self):
         for choices in (
             [
@@ -943,29 +1101,106 @@ class ClientSpanSettlementTest(TestCase):
                 _record_client_span_usage(span, outputs)
                 self.assertEqual(span.attributes, {})
 
-    def test_consumer_break_after_finished_keeps_span_ok(self):
-        """The final frame is withheld until the physical RPC reaches OK.
-
-        Once that terminal status is known the span settles immediately --
-        before the finished frame is even published. Consumers habitually
-        abandon this generator right after the finished frame and the
-        surrounding wrappers do not aclose the inner generator, so deferring
-        settlement to aclose()/GC time would leak the span unexported.
-        """
+    def test_engine_latency_attributes_from_single_sequence_stream(self):
         span = _FakeClientSpan()
-        client = self._build_client(span, total=3)
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(
+                True,
+                output_len=5,
+                first_token_cost_time=8.5,
+                cost_time=20.0,
+            )
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertEqual(
+            span.attributes["rtp_llm.engine.time_per_output_token_ms"], 2.875
+        )
+
+    def test_engine_latency_attributes_require_coherent_aux_info(self):
+        cases = (
+            _FakeOut(True, output_len=0),
+            _FakeOut(True, output_len=1),
+            _FakeOut(True, output_len=5, first_token_cost_time=0),
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=8.0),
+        )
+        for output in cases:
+            with self.subTest(output=output):
+                span = _FakeClientSpan()
+                outputs = GenerateOutputs(generate_outputs=[output])
+                _record_client_span_latency(span, outputs)
+                if output.aux_info.output_len == 1:
+                    self.assertEqual(
+                        span.attributes["rtp_llm.engine.time_to_first_token_ms"],
+                        8.5,
+                    )
+                elif output.aux_info.cost_time < output.aux_info.first_token_cost_time:
+                    self.assertEqual(
+                        span.attributes["rtp_llm.engine.time_to_first_token_ms"],
+                        8.5,
+                    )
+                else:
+                    self.assertEqual(span.attributes, {})
+                self.assertNotIn(
+                    "rtp_llm.engine.time_per_output_token_ms", span.attributes
+                )
+
+    def test_multi_return_shares_ttft_but_omits_ambiguous_tpot(self):
+        """n>1 rides one physical stream: TPOT per sequence is not a span value."""
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=7, first_token_cost_time=8.5, cost_time=26.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
+
+    def test_multi_return_disagreeing_on_first_token_omits_latency(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=5, first_token_cost_time=9.5, cost_time=20.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes, {})
+
+    def test_multi_return_with_one_empty_sequence_omits_latency(self):
+        span = _FakeClientSpan()
+        outputs = GenerateOutputs()
+        outputs.generate_outputs = [
+            _FakeOut(True, output_len=5, first_token_cost_time=8.5, cost_time=20.0),
+            _FakeOut(True, output_len=0, first_token_cost_time=8.5, cost_time=20.0),
+        ]
+
+        _record_client_span_latency(span, outputs)
+
+        self.assertEqual(span.attributes, {})
+
+    def test_finished_frame_is_not_blocked_by_rpc_termination(self):
+        span = _FakeClientSpan()
+        client = self._build_client(span, total=3, terminal_delay=0.05)
 
         async def run():
             gen = client.enqueue(self._make_input())
-            async for outputs in gen:
+            while True:
+                outputs = await gen.__anext__()
                 if outputs.generate_outputs and outputs.generate_outputs[0].finished:
-                    self.assertTrue(client._test_stub.iterator.code_resolved)
-                    self.assertEqual(client._test_stub.iterator.events, ["code"])
-                    break  # mirrors render_response_stream's _check_all_finished
-            self.assertTrue(span.finished, "span settles with the finished frame")
-            await gen.aclose()  # injects GeneratorExit at the suspended yield
-            self.assertTrue(client._test_stub.iterator.code_waited)
-            self.assertEqual(client._test_stub.iterator.events[:2], ["code", "cancel"])
+                    self.assertFalse(client._test_stub.iterator.code_waited)
+                    break
+            await gen.aclose()
+            await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+            self.assertTrue(span.finished, "settlement runs after the finished frame")
+            self.assertEqual(client._test_stub.iterator.events, ["code"])
 
         asyncio.run(run())
         self.assertEqual(span.status, "OK")
@@ -973,6 +1208,90 @@ class ClientSpanSettlementTest(TestCase):
         self.assertEqual(span.attributes["rpc.response.status_code"], "OK")
         for key in self.USAGE_KEYS:
             self.assertIn(key, span.attributes)
+
+    def test_finished_frame_with_late_rpc_error_marks_span_error(self):
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span,
+            total=1,
+            terminal_error=_FakeRpcError(StatusCode.UNAVAILABLE),
+        )
+
+        async def run():
+            gen = client.enqueue(self._make_input())
+            outputs = await gen.__anext__()
+            self.assertTrue(outputs.generate_outputs[0].finished)
+            await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+            self.assertEqual(span.status, "ERROR")
+            with self.assertRaises(Exception):
+                await gen.__anext__()
+
+        asyncio.run(run())
+        self.assertEqual(span.attributes["rpc.response.status_code"], "UNAVAILABLE")
+        self.assertEqual(span.error_type, "RpcError")
+
+    def test_finished_frame_eventually_cancels_unsettled_rpc_with_or_without_trace(
+        self,
+    ):
+        async def run(client, span):
+            gen = client.enqueue(self._make_input())
+            outputs = await gen.__anext__()
+            self.assertTrue(outputs.generate_outputs[0].finished)
+            await gen.aclose()
+            iterator = client._test_stub.iterator
+            await asyncio.wait_for(iterator.cancelled_event.wait(), timeout=5)
+            self.assertTrue(iterator.cancelled)
+            if span is not None:
+                await asyncio.wait_for(span.finished_event.wait(), timeout=5)
+                self.assertEqual(span.status, "ERROR")
+                self.assertEqual(
+                    span.attributes["rpc.response.status_code"], "CANCELLED"
+                )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RPC_SETTLE_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            span = _FakeClientSpan()
+            client = self._build_client(span, total=1, terminal_never=True)
+            asyncio.run(run(client, span))
+            client = self._build_client(None, total=1, terminal_never=True)
+            asyncio.run(run(client, None))
+
+    def test_outer_cancellation_during_final_rpc_wait_propagates(self):
+        span = _FakeClientSpan()
+        client = self._build_client(
+            span, total=1, finish_last=False, terminal_never=True
+        )
+
+        async def run():
+            async def consume():
+                async for _ in client.enqueue(self._make_input()):
+                    pass
+
+            task = asyncio.create_task(consume())
+            while client._test_stub.iterator is None:
+                await asyncio.sleep(0)
+            iterator = client._test_stub.iterator
+            await asyncio.wait_for(iterator.code_started.wait(), timeout=5)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(iterator.cancelled)
+            self.assertEqual(span.status, "ERROR")
+            self.assertEqual(span.error_type, "Cancelled")
+
+        asyncio.run(run())
+
+    def test_trace_disabled_does_not_wait_for_rpc_termination(self):
+        client = self._build_client(None, total=1, terminal_delay=0.05)
+
+        async def run():
+            async for outputs in client.enqueue(self._make_input()):
+                self.assertTrue(outputs.generate_outputs[0].finished)
+            self.assertFalse(client._test_stub.iterator.code_waited)
+
+        asyncio.run(run())
 
     def test_stream_iterated_to_completion_keeps_span_ok(self):
         span = _FakeClientSpan()
@@ -1030,13 +1349,20 @@ class ClientSpanSettlementTest(TestCase):
 
         async def run():
             gen = client.enqueue(self._make_input())
+            seen = 0
             async for _ in gen:
-                break  # renderer hit a stop word
+                seen += 1
+                if seen == 3:
+                    break  # renderer hit a stop word
             await gen.aclose()
 
         asyncio.run(run())
         self.assertEqual(span.status, "OK")
         self.assertIsNone(span.error_type)
+        self.assertEqual(span.attributes["rtp_llm.engine.time_to_first_token_ms"], 8.5)
+        self.assertEqual(
+            span.attributes["rtp_llm.engine.time_per_output_token_ms"], 5.75
+        )
         for key in self.USAGE_KEYS:
             self.assertIn(key, span.attributes)
 
