@@ -83,24 +83,24 @@ public class LocalStandbyComparisonService {
         long localStandbyPredictedHitTokens = match == null
                 ? 0
                 : match.localMatchBlocks() * standbyPrediction.blockSize();
-        return result(feedback, localStandbyPredictedHitTokens, true);
+        return result(
+                feedback,
+                new CacheHitComparisonResult.HitComparison(
+                        localStandbyPredictedHitTokens,
+                        feedback.actualHitTokens() - localStandbyPredictedHitTokens));
     }
 
     private CacheHitComparisonResult withoutLocalStandbyPrediction(CacheHitFeedback feedback) {
-        return feedback == null ? null : result(feedback, 0, false);
+        return feedback == null ? null : result(feedback, null);
     }
 
-    private CacheHitComparisonResult result(CacheHitFeedback feedback, long localStandbyPredictedHitTokens,
-                                            boolean localStandbyPredictionAvailable) {
-        long localStandbyDeltaHitTokens = localStandbyPredictionAvailable
-                ? feedback.actualHitTokens() - localStandbyPredictedHitTokens
-                : 0;
-        long kvcmLocalDeltaHitTokens = feedback.kvcmMatchAvailable()
-                ? feedback.actualHitTokens() - feedback.kvcmLocalMatchTokens()
-                : 0;
-        long kvcmP2pTotalMatchDeltaHitTokens = feedback.kvcmMatchAvailable()
-                ? feedback.actualHitTokens() - feedback.kvcmP2pTotalMatchTokens()
-                : 0;
+    private CacheHitComparisonResult result(CacheHitFeedback feedback,
+                                            CacheHitComparisonResult.HitComparison localStandby) {
+        CacheHitComparisonResult.KvcmDetails kvcmDetails = feedback.kvcmMatchAvailable()
+                ? new CacheHitComparisonResult.KvcmDetails(
+                        feedback.actualHitTokens() - feedback.kvcmLocalMatchTokens(),
+                        feedback.actualHitTokens() - feedback.kvcmP2pTotalMatchTokens())
+                : null;
         return new CacheHitComparisonResult(
                 feedback.eventType(),
                 feedback.requestId(),
@@ -110,15 +110,11 @@ public class LocalStandbyComparisonService {
                 feedback.workerIp(),
                 feedback.taskState(),
                 feedback.inputTokens(),
-                feedback.predictedHitTokens(),
-                feedback.kvcmMatchAvailable(),
-                localStandbyPredictedHitTokens,
-                localStandbyPredictionAvailable,
-                feedback.actualHitTokens(),
-                feedback.deltaHitTokens(),
-                kvcmLocalDeltaHitTokens,
-                kvcmP2pTotalMatchDeltaHitTokens,
-                localStandbyDeltaHitTokens);
+                new CacheHitComparisonResult.Actual(feedback.actualHitTokens()),
+                new CacheHitComparisonResult.HitComparison(
+                        feedback.predictedHitTokens(), feedback.deltaHitTokens()),
+                localStandby,
+                kvcmDetails);
     }
 
     private RoleType resolveRoleType(String role) {

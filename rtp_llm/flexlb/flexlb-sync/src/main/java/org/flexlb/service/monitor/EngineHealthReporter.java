@@ -551,31 +551,35 @@ public class EngineHealthReporter {
         if (comparison == null) {
             return;
         }
+        CacheHitComparisonResult.HitComparison routing = comparison.routing();
+        CacheHitComparisonResult.Actual actual = comparison.actual();
+        CacheHitComparisonResult.KvcmDetails kvcmDetails = comparison.kvcmDetails();
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", comparison.workerIp(),
+                "engineIp", comparison.worker(),
                 "role", comparison.role(),
                 "group", comparison.group(),
-                "taskState", comparison.taskState(),
-                "cacheMatchSource", comparison.cacheMatchSource() == null ? "" : comparison.cacheMatchSource());
-        monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, metricTags, comparison.routingPredictedHitTokens());
-        monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, metricTags, comparison.actualHitTokens());
-        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, metricTags, comparison.routingDeltaHitTokens());
-        if (comparison.kvcmPredictionAvailable()) {
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, metricTags, comparison.kvcmLocalDeltaHitTokens());
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS, metricTags, comparison.kvcmP2pTotalMatchDeltaHitTokens());
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_EFFECTIVE_DELTA_TOKENS, metricTags, comparison.routingDeltaHitTokens());
+                "taskState", comparison.state(),
+                "cacheMatchSource", comparison.source() == null ? "" : comparison.source());
+        monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, metricTags, routing.hit());
+        monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, metricTags, actual.hit());
+        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, metricTags, routing.delta());
+        if (kvcmDetails != null) {
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, metricTags, kvcmDetails.localDelta());
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS, metricTags, kvcmDetails.p2pTotalMatchDelta());
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_EFFECTIVE_DELTA_TOKENS, metricTags, routing.delta());
         }
         long inputTokens = comparison.inputTokens();
         if (inputTokens > 0) {
-            monitor.report(CACHE_HIT_COMPARISON_PREDICTED_RATIO, metricTags, comparison.routingPredictedHitTokens() / (double) inputTokens);
-            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_RATIO, metricTags, comparison.actualHitTokens() / (double) inputTokens);
+            monitor.report(CACHE_HIT_COMPARISON_PREDICTED_RATIO, metricTags, routing.hit() / (double) inputTokens);
+            monitor.report(CACHE_HIT_COMPARISON_ACTUAL_RATIO, metricTags, actual.hit() / (double) inputTokens);
         }
-        if (comparison.localStandbyPredictionAvailable()) {
-            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS, metricTags, comparison.localStandbyPredictedHitTokens());
-            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, metricTags, comparison.localStandbyDeltaHitTokens());
+        CacheHitComparisonResult.HitComparison localStandby = comparison.localStandby();
+        if (localStandby != null) {
+            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS, metricTags, localStandby.hit());
+            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, metricTags, localStandby.delta());
             if (inputTokens > 0) {
-                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO, metricTags, comparison.localStandbyPredictedHitTokens() / (double) inputTokens);
+                monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO, metricTags, localStandby.hit() / (double) inputTokens);
             }
         }
     }

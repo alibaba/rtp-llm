@@ -20,7 +20,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -60,14 +60,14 @@ class LocalStandbyComparisonServiceTest {
         CacheHitComparisonResult result =
                 comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
 
-        assertEquals(4384, result.routingPredictedHitTokens());
-        assertEquals(4096, result.localStandbyPredictedHitTokens());
-        assertEquals(6000, result.actualHitTokens());
-        assertEquals(1616, result.routingDeltaHitTokens());
-        assertEquals(2000, result.kvcmLocalDeltaHitTokens());
-        assertEquals(-4000, result.kvcmP2pTotalMatchDeltaHitTokens());
-        assertEquals(1904, result.localStandbyDeltaHitTokens());
-        assertTrue(result.localStandbyPredictionAvailable());
+        assertEquals(4384, result.routing().hit());
+        assertEquals(6000, result.actual().hit());
+        assertEquals(1616, result.routing().delta());
+        assertEquals(2000, result.kvcmDetails().localDelta());
+        assertEquals(-4000, result.kvcmDetails().p2pTotalMatchDelta());
+        assertNotNull(result.localStandby());
+        assertEquals(4096, result.localStandby().hit());
+        assertEquals(1904, result.localStandby().delta());
     }
 
     private ModelMetaConfig modelMetaConfig() {

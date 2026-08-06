@@ -149,7 +149,10 @@ class CacheAwareServiceTest {
         CacheHitComparisonResult expected = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
                 "127.0.0.1", "running", 200,
-                100, 0, true, 120, 20, 120);
+                new CacheHitComparisonResult.Actual(120),
+                new CacheHitComparisonResult.HitComparison(100, 20),
+                new CacheHitComparisonResult.HitComparison(0, 120),
+                null);
         when(comparisonService.buildCacheHitComparison(feedback))
                 .thenReturn(CompletableFuture.completedFuture(expected));
 

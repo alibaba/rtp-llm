@@ -324,7 +324,11 @@ class EngineHealthReporterTest {
     void shouldReportCacheHitComparisonTokenMetricsWithStableDimensions() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
-                "running", 200, 100, 80, true, 120, 20, 40);
+                "running", 200,
+                new CacheHitComparisonResult.Actual(120),
+                new CacheHitComparisonResult.HitComparison(100, 20),
+                new CacheHitComparisonResult.HitComparison(80, 40),
+                null);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 
@@ -377,10 +381,24 @@ class EngineHealthReporterTest {
     void shouldNotReportLocalStandbyMetricsWhenPredictionIsUnavailable() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "test-group", "10.0.0.1",
-                "running", 200, 100, 0, false, 120, 20, 0);
+                "running", 200,
+                new CacheHitComparisonResult.Actual(120),
+                new CacheHitComparisonResult.HitComparison(100, 20),
+                null,
+                null);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "group", "test-group",
+                "taskState", "running",
+                "cacheMatchSource", "LOCAL_SYNC");
+        verify(monitor).report("app.cache.hit.comparison.predicted.tokens", expectedTags, 100.0);
+        verify(monitor).report("app.cache.hit.comparison.actual.tokens", expectedTags, 120.0);
+        verify(monitor).report("app.cache.hit.comparison.delta.tokens", expectedTags, 20.0);
         verify(monitor, never()).report(
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.predicted.tokens"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
@@ -393,15 +411,29 @@ class EngineHealthReporterTest {
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.predicted.ratio"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
                 org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.kvcm.local.delta.tokens"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.kvcm.p2p.total.match.delta.tokens"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.kvcm.effective.delta.tokens"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
     }
 
     @Test
     void shouldReportKvcmLocalP2pAndEffectiveDeltasWhenAvailable() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
-                "running", 200, 60,
-                true,
-                0, false, 120, 60, 80, 20, 0);
+                "running", 200,
+                new CacheHitComparisonResult.Actual(120),
+                new CacheHitComparisonResult.HitComparison(60, 60),
+                null,
+                new CacheHitComparisonResult.KvcmDetails(80, 20));
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 
@@ -421,7 +453,11 @@ class EngineHealthReporterTest {
     void shouldNotReportRatiosWithoutInputTokens() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
-                "running", 0, 100, 80, true, 120, 20, 40);
+                "running", 0,
+                new CacheHitComparisonResult.Actual(120),
+                new CacheHitComparisonResult.HitComparison(100, 20),
+                new CacheHitComparisonResult.HitComparison(80, 40),
+                null);
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 

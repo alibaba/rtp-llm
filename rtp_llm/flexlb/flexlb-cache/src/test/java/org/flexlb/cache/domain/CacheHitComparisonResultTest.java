@@ -4,6 +4,8 @@ import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CacheHitComparisonResultTest {
@@ -13,7 +15,10 @@ class CacheHitComparisonResultTest {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
                 "127.0.0.1", "running", 200,
-                100, true, 70, true, 120, 20, 40, 30, 50);
+                new CacheHitComparisonResult.Actual(120),
+                new CacheHitComparisonResult.HitComparison(100, 20),
+                new CacheHitComparisonResult.HitComparison(70, 50),
+                new CacheHitComparisonResult.KvcmDetails(40, 30));
 
         String json = JsonUtils.toStringOrEmpty(comparison);
 
@@ -24,8 +29,11 @@ class CacheHitComparisonResultTest {
         assertTrue(json.contains("\"actual\":{\"hit\":120}"));
         assertTrue(json.contains("\"kvcm\":{\"hit\":100,\"delta\":20}"));
         assertTrue(json.contains("\"localStandby\":{\"hit\":70,\"delta\":50}"));
-        assertFalse(json.contains("\"routingPredictedHitTokens\""));
-        assertFalse(json.contains("\"kvcmPredictionAvailable\""));
+        assertSame(comparison.routing(), comparison.kvcm());
+        assertFalse(json.contains("\"routing\""));
+        assertFalse(json.contains("\"kvcmDetails\""));
+        assertTrue(json.indexOf("\"actual\"") < json.indexOf("\"kvcm\""));
+        assertTrue(json.indexOf("\"kvcm\"") < json.indexOf("\"localStandby\""));
         assertFalse(json.contains("\"p2pFetch\""));
         assertFalse(json.contains("\"workerPort\""));
     }
@@ -35,7 +43,10 @@ class CacheHitComparisonResultTest {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
                 "127.0.0.1", "running", 200,
-                100, 0, false, 120, 20, 0);
+                new CacheHitComparisonResult.Actual(120),
+                new CacheHitComparisonResult.HitComparison(100, 20),
+                null,
+                null);
 
         String json = JsonUtils.toStringOrEmpty(comparison);
 
@@ -47,10 +58,14 @@ class CacheHitComparisonResultTest {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "LOCAL_SYNC", "PREFILL", "default",
                 "127.0.0.1", "running", 200,
-                100, 0, false, 120, 20, 0);
+                new CacheHitComparisonResult.Actual(120),
+                new CacheHitComparisonResult.HitComparison(100, 20),
+                null,
+                null);
 
         String json = JsonUtils.toStringOrEmpty(comparison);
 
         assertFalse(json.contains("\"kvcm\""));
+        assertNull(comparison.kvcm());
     }
 }
