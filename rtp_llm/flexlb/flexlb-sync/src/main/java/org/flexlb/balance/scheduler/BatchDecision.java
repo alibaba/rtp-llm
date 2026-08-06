@@ -5,9 +5,10 @@ import java.util.List;
 /**
  * Result of one {@link FixedWindowBatcherAlgorithm#decide} cycle.
  *
- * <p>The algorithm is a pure decision function: it never mutates the queue,
- * reports metrics, logs, or sleeps. The {@link WorkerBatcher} run loop
- * interprets the decision and executes the corresponding side effects.
+ * <p>The algorithm owns its queue and removes picked / dropped items inside
+ * {@code decide} before returning. The {@link WorkerBatcher} run loop
+ * interprets the decision and executes the remaining side effects (metric
+ * reporting, dispatch to the engine, settlement).
  *
  * <p>A {@code null} return from {@code decide} means no action this cycle
  * (park / engine backpressure); the batcher parks briefly and retries.

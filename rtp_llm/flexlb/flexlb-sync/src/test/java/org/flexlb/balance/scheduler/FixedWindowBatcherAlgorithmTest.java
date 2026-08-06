@@ -6,15 +6,10 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.PriorityBlockingQueue;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -26,45 +21,37 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Pure decision tests for {@link FixedWindowBatcherAlgorithm#decide}.
+ * Tests for {@link FixedWindowBatcherAlgorithm}.
  *
- * <p>The algorithm has no side effects, so every test asserts the returned
- * {@link BatchDecision} (and that the queue is left untouched) instead of
- * verifying endpoint or reporter interactions.
+ * <p>The algorithm owns its queue, so every test enqueues items via
+ * {@link FixedWindowBatcherAlgorithm#offer} and asserts the returned
+ * {@link BatchDecision} (and resulting queue state) from
+ * {@link FixedWindowBatcherAlgorithm#decide}. No external context or
+ * queue mock is needed.
  */
 class FixedWindowBatcherAlgorithmTest {
 
     @Test
-    void contextQueueDepthTracksMutationsWithoutQueueSizeReads() {
-        BatchItem first = enqueuedItem(1L, 1L);
-        BatchItem second = enqueuedItem(2L, 2L);
-        PriorityBlockingQueue<BatchItem> queue = queueWith(first, second);
-        BatcherContext ctx = context(
-                "test", null, new FlexlbConfig(), queue,
-                mock(BatchSchedulerReporter.class));
+    void offerAndSizeTrackQueueState() {
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(sloCaseConfig(), null);
 
-        assertEquals(2, ctx.size());
-        assertTrue(ctx.remove(first));
-        assertEquals(1, ctx.size());
-        assertTrue(ctx.remove(second));
-        assertEquals(0, ctx.size());
-        assertTrue(ctx.isEmpty());
+        assertEquals(0, algorithm.size());
+        algorithm.offer(enqueuedItem(1, 100L));
+        assertEquals(1, algorithm.size());
+        algorithm.offer(enqueuedItem(2, 200L));
+        assertEquals(2, algorithm.size());
 
-        queue.add(first);
-        BatcherContext drainCtx = context(
-                "test", null, new FlexlbConfig(), queue,
-                mock(BatchSchedulerReporter.class));
-        drainCtx.drainTo(new ArrayList<>());
-        assertEquals(0, drainCtx.size());
+        algorithm.shutdown();
+        assertEquals(0, algorithm.size());
     }
 
     @Test
     void emptyQueueYieldsNullDecision() {
-        BatcherContext context = context(
-                "test", null, sloCaseConfig(), queueWith(),
-                mock(BatchSchedulerReporter.class));
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(sloCaseConfig(), null);
 
-        assertNull(new FixedWindowBatcherAlgorithm().decide(context));
+        assertNull(algorithm.decide());
     }
 
     @Test
@@ -75,58 +62,54 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getPredictor()).thenReturn(predictor);
         when(predictor.predictBatchMs(anyList())).thenReturn(500.0);
 
-        BatcherContext context = context(
-                "test", endpoint, config,
-                queueWith(enqueuedItem(1, System.currentTimeMillis()),
-                        enqueuedItem(2, System.currentTimeMillis())),
-                mock(BatchSchedulerReporter.class));
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, endpoint);
+        algorithm.offer(enqueuedItem(1, System.currentTimeMillis()));
+        algorithm.offer(enqueuedItem(2, System.currentTimeMillis()));
 
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
         assertEquals(2, dispatch.items().size());
         assertEquals("predict_threshold", dispatch.reason());
         assertEquals(2, dispatch.queueSizeBefore());
-        // Pure decision: the queue is untouched
-        assertEquals(2, context.size());
+        // Algorithm removed the picked items from its queue
+        assertEquals(0, algorithm.size());
     }
 
     @Test
     void sloCaseDispatchesAtFixedWindowWhenPredictionIsBelowThreshold() {
         FlexlbConfig config = sloCaseConfig();
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        BatcherContext context = context(
-                "test", endpoint, config,
-                queueWith(enqueuedItem(1, System.currentTimeMillis() - 170)),
-                mock(BatchSchedulerReporter.class));
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, null);
+        algorithm.offer(enqueuedItem(1, System.currentTimeMillis() - 170));
 
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
         assertEquals("fixed_window_timeout", dispatch.reason());
         assertEquals(1, dispatch.items().size());
         assertTrue(dispatch.headWaitMs() >= 170);
+        assertEquals(0, algorithm.size());
     }
 
     @Test
     void sloCaseDispatchesWhenBatchReachesMaxSize() {
         FlexlbConfig config = sloCaseConfig();
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        BatchItem[] items = new BatchItem[32];
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, null);
         long now = System.currentTimeMillis() - 1_000;
-        for (int index = 0; index < items.length; index++) {
-            items[index] = enqueuedItem(index + 1, now);
+        for (int index = 0; index < 32; index++) {
+            algorithm.offer(enqueuedItem(index + 1, now));
         }
-        BatcherContext context = context(
-                "test", endpoint, config, queueWith(items),
-                mock(BatchSchedulerReporter.class));
 
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
         assertEquals(32, dispatch.items().size());
         assertEquals("batch_full", dispatch.reason());
         assertEquals(32, dispatch.queueSizeBefore());
+        assertEquals(0, algorithm.size());
     }
 
     @Test
@@ -136,34 +119,34 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.prefillInflightCount()).thenReturn(1);
 
-        BatcherContext context = context(
-                "test", endpoint, config,
-                queueWith(enqueuedItem(1, System.currentTimeMillis() - 1_000)),
-                mock(BatchSchedulerReporter.class));
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, endpoint);
+        algorithm.offer(enqueuedItem(1, System.currentTimeMillis() - 1_000));
 
-        assertNull(new FixedWindowBatcherAlgorithm().decide(context));
-        assertEquals(1, context.size());
+        assertNull(algorithm.decide());
+        // Park decision: item remains in queue
+        assertEquals(1, algorithm.size());
     }
 
     @Test
     void deadlineExceededHeadYieldsDropDecision() {
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchEnqueueDeadlineMs(100);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
 
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, null);
         BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 1_000, 10);
-        BatcherContext context = context(
-                "test", endpoint, config, queueWith(head),
-                mock(BatchSchedulerReporter.class));
+        algorithm.offer(head);
 
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Drop drop = assertInstanceOf(BatchDecision.Drop.class, decision);
         assertEquals(BatchDecision.DropCause.QUEUE_DEADLINE_EXCEEDED, drop.cause());
         assertEquals(head, drop.item());
         assertTrue(drop.detail().contains("deadline_ms=100"));
-        // Pure decision: the item is neither removed nor settled
-        assertEquals(1, context.size());
+        // Algorithm removed the dropped item from its queue
+        assertEquals(0, algorithm.size());
+        // Settlement happens in the batcher, not the algorithm
         assertFalse(head.future().isDone());
     }
 
@@ -179,21 +162,20 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
 
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, endpoint);
         long now = System.currentTimeMillis() - 1_000;
-        BatcherContext context = context(
-                "test", endpoint, config,
-                queueWith(enqueuedItem(1, now, 60),
-                        enqueuedItem(2, now + 1, 50),
-                        enqueuedItem(3, now + 2, 30)),
-                mock(BatchSchedulerReporter.class));
+        algorithm.offer(enqueuedItem(1, now, 60));
+        algorithm.offer(enqueuedItem(2, now + 1, 50));
+        algorithm.offer(enqueuedItem(3, now + 2, 30));
 
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
         assertEquals(List.of(1L), dispatch.items().stream().map(BatchItem::requestId).toList());
         assertEquals(60L, dispatch.items().stream().mapToLong(BatchItem::seqLen).sum());
-        // Pure decision: all three items remain queued
-        assertEquals(3, context.size());
+        // Only the picked item was removed; others remain queued
+        assertEquals(2, algorithm.size());
     }
 
     @Test
@@ -211,22 +193,19 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
 
-        BatchItem[] items = new BatchItem[13];
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, endpoint);
         long now = System.currentTimeMillis() - 1_000;
-        items[0] = enqueuedItem(1L, now, 929_760L);
-        for (int index = 1; index < items.length; index++) {
-            items[index] = enqueuedItem(index + 1L, now + index, 9_192L);
+        algorithm.offer(enqueuedItem(1L, now, 929_760L));
+        for (int index = 1; index < 13; index++) {
+            algorithm.offer(enqueuedItem(index + 1L, now + index, 9_192L));
         }
 
-        BatcherContext context = context(
-                "test", endpoint, config, queueWith(items),
-                mock(BatchSchedulerReporter.class));
-
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
         assertEquals(List.of(1L), dispatch.items().stream().map(BatchItem::requestId).toList());
-        assertEquals(13, context.size());
+        assertEquals(12, algorithm.size());
     }
 
     @Test
@@ -241,15 +220,14 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
 
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, endpoint);
         long now = System.currentTimeMillis() - 1_000;
-        BatcherContext context = context(
-                "test", endpoint, config,
-                queueWith(enqueuedItem(1, now, 60),
-                        enqueuedItem(2, now + 1, 20),
-                        enqueuedItem(3, now + 2, 5)),
-                mock(BatchSchedulerReporter.class));
+        algorithm.offer(enqueuedItem(1, now, 60));
+        algorithm.offer(enqueuedItem(2, now + 1, 20));
+        algorithm.offer(enqueuedItem(3, now + 2, 5));
 
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
         assertEquals(List.of(1L), dispatch.items().stream().map(BatchItem::requestId).toList());
@@ -272,26 +250,20 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
 
-        BatchItem[] items = new BatchItem[requestCount];
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, endpoint);
         long now = System.currentTimeMillis() - 1_000;
         for (int index = 0; index < requestCount; index++) {
-            items[index] = enqueuedItem(index + 1L, now + index, seqLen);
+            algorithm.offer(enqueuedItem(index + 1L, now + index, seqLen));
         }
-        BatcherContext context = context(
-                "test", endpoint, config, queueWith(items),
-                mock(BatchSchedulerReporter.class));
 
-        FixedWindowBatcherAlgorithm algorithm = new FixedWindowBatcherAlgorithm();
-
-        // Decision cycle 1 — batcher would remove the picked items, so
-        // simulate the execution step between the two pure decisions.
+        // Decision cycle 1 — algorithm removes the picked items automatically
         BatchDecision.Dispatch first = assertInstanceOf(
-                BatchDecision.Dispatch.class, algorithm.decide(context));
-        first.items().forEach(context::remove);
+                BatchDecision.Dispatch.class, algorithm.decide());
 
+        // Decision cycle 2 — queue now has only the remaining items
         BatchDecision.Dispatch second = assertInstanceOf(
-                BatchDecision.Dispatch.class, algorithm.decide(context));
-        second.items().forEach(context::remove);
+                BatchDecision.Dispatch.class, algorithm.decide());
 
         List<List<BatchItem>> batches = List.of(first.items(), second.items());
         assertEquals(List.of(31, 1), batches.stream().map(List::size).toList());
@@ -301,7 +273,7 @@ class FixedWindowBatcherAlgorithmTest {
             assertTrue(totalTokens < engineBatchTokenLimit,
                     "Engine would reject batch with total_tokens=" + totalTokens);
         }
-        assertEquals(0, context.size());
+        assertEquals(0, algorithm.size());
     }
 
     @Test
@@ -315,13 +287,13 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
 
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, endpoint);
         long now = System.currentTimeMillis();
-        BatcherContext context = context(
-                "test", endpoint, config,
-                queueWith(enqueuedItem(1, now, 60), enqueuedItem(2, now + 1, 40)),
-                mock(BatchSchedulerReporter.class));
+        algorithm.offer(enqueuedItem(1, now, 60));
+        algorithm.offer(enqueuedItem(2, now + 1, 40));
 
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Dispatch dispatch = assertInstanceOf(BatchDecision.Dispatch.class, decision);
         assertEquals(List.of(1L), dispatch.items().stream().map(BatchItem::requestId).toList());
@@ -338,21 +310,22 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
 
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, endpoint);
         BatchItem item = enqueuedItem(1, 1, 100);
-        BatcherContext context = context(
-                "test", endpoint, config, queueWith(item),
-                mock(BatchSchedulerReporter.class));
+        algorithm.offer(item);
 
-        BatchDecision decision = new FixedWindowBatcherAlgorithm().decide(context);
+        BatchDecision decision = algorithm.decide();
 
         BatchDecision.Drop drop = assertInstanceOf(BatchDecision.Drop.class, decision);
         assertEquals(BatchDecision.DropCause.EXCEEDS_BATCH_TOKEN_CAPACITY, drop.cause());
         assertEquals(item, drop.item());
         assertTrue(drop.detail().contains("seq_len=100"));
         assertTrue(drop.detail().contains("capacity=100"));
-        // Pure decision: settlement happens in the batcher, not the algorithm
+        // Algorithm removed the dropped item from its queue
+        assertEquals(0, algorithm.size());
+        // Settlement happens in the batcher, not the algorithm
         assertFalse(item.future().isDone());
-        assertEquals(1, context.size());
     }
 
     // ---- helpers ----
@@ -368,10 +341,8 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs) {
-        BatchItem item = new BatchItem(null, new CompletableFuture<>(),
+        return new BatchItem(null, new CompletableFuture<>(),
                 null, null, null, null, null, enqueuedAtMs);
-        item.setSortKey(enqueuedAtMs);  // FixedWindow: sortKey = enqueuedAtMs
-        return item;
     }
 
     private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs, long seqLen) {
@@ -380,26 +351,8 @@ class FixedWindowBatcherAlgorithmTest {
         request.setSeqLen(seqLen);
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(request);
-        BatchItem item = new BatchItem(
+        return new BatchItem(
                 balanceContext, new CompletableFuture<>(),
                 null, null, null, null, null, enqueuedAtMs);
-        item.setSortKey(enqueuedAtMs);
-        return item;
-    }
-
-    private static PriorityBlockingQueue<BatchItem> queueWith(BatchItem... items) {
-        PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
-        for (BatchItem item : items) {
-            queue.add(item);
-        }
-        return queue;
-    }
-
-    private static BatcherContext context(String key, PrefillEndpoint endpoint,
-                                          FlexlbConfig config,
-                                          PriorityBlockingQueue<BatchItem> queue,
-                                          BatchSchedulerReporter reporter) {
-        return new BatcherContext(key, endpoint, config,
-                queue, new AtomicInteger(queue.size()), reporter);
     }
 }

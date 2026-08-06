@@ -32,9 +32,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * scheduler. All paths are idempotent: the future completes at most once,
  * the decode reservation is rolled back at most once ({@link #rolledBack}
  * CAS), and prefill batch repack uses {@code computeIfPresent}.
- *
- * <p>{@link #sortKey} is mutable — {@link FixedWindowBatcherAlgorithm} computes it
- * inside {@link WorkerBatcher#offer(BatchItem)} via {@link FixedWindowBatcherAlgorithm#computeSortKey}.
  */
 public final class BatchItem {
 
@@ -46,9 +43,6 @@ public final class BatchItem {
     private final PrefillEndpoint prefillEp;
     private final DecodeEndpoint decodeEp;
     private final long enqueuedAtMs;
-
-    /** Mutable sort key set by the batcher algorithm at offer time. */
-    private volatile long sortKey;
 
     /**
      * Batch ID assigned in {@link PrefillEndpoint#submitBatch} just before
@@ -97,12 +91,6 @@ public final class BatchItem {
     public PrefillEndpoint prefillEp() { return prefillEp; }
     public DecodeEndpoint decodeEp() { return decodeEp; }
     public long enqueuedAtMs() { return enqueuedAtMs; }
-
-    /** Priority queue sort key. */
-    public long sortKey() { return sortKey; }
-
-    /** Set by {@link WorkerBatcher#offer} after {@link FixedWindowBatcherAlgorithm#computeSortKey}. */
-    public void setSortKey(long sortKey) { this.sortKey = sortKey; }
 
     /** Batch ID assigned at dispatch time; 0 = not yet dispatched. */
     public long assignedBatchId() { return assignedBatchId; }

@@ -7,34 +7,30 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Per-worker request batcher that owns the queue, lifecycle, and all side
- * effects (dispatch execution, metric reporting, logging, parking),
- * delegating the pure dispatch decision to {@link FixedWindowBatcherAlgorithm}.
+ * Per-worker request batcher: a thin shell that handles thread coordination
+ * and side-effect execution (metric reporting, dispatch to the engine,
+ * settlement), delegating all queue management and dispatch decisions to
+ * {@link FixedWindowBatcherAlgorithm}.
  *
  * <p>One instance per Prefill worker. Requests are submitted via
  * {@link #offer(BatchItem)} and batched by the algorithm. The run loop
  * interprets each {@link BatchDecision}: ready batches go to
- * {@link PrefillEndpoint#submitBatch} via the {@link BatcherContext};
- * rejected or expired items settle themselves through {@link BatchItem}
- * terminal transitions.
+ * {@link PrefillEndpoint#submitBatch}; rejected or expired items settle
+ * themselves through {@link BatchItem} terminal transitions. The algorithm
+ * removes items from its internal queue inside {@link FixedWindowBatcherAlgorithm#decide};
+ * this class never touches the queue directly.
  */
 public class WorkerBatcher {
 
     private final String key;
     private final FlexlbConfig cfg;
-    private final PriorityBlockingQueue<BatchItem> queue =
-            new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
-    private final AtomicInteger queueDepth = new AtomicInteger();
     private final Thread workerThread;
     private volatile boolean stopped;
     private final FixedWindowBatcherAlgorithm algorithm;
@@ -48,8 +44,8 @@ public class WorkerBatcher {
                          BatchSchedulerReporter reporter) {
         this.key = key;
         this.cfg = cfg;
-        this.algorithm = new FixedWindowBatcherAlgorithm();
-        this.ctx = new BatcherContext(key, prefillEp, cfg, queue, queueDepth, reporter);
+        this.algorithm = new FixedWindowBatcherAlgorithm(cfg, prefillEp);
+        this.ctx = new BatcherContext(key, prefillEp, cfg, reporter);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
@@ -66,24 +62,17 @@ public class WorkerBatcher {
             return;
         }
         int maxSize = cfg.getFlexlbBatchQueueMaxSize();
-        if (!reserveQueueSlot(maxSize)) {
+        if (maxSize > 0 && algorithm.size() >= maxSize) {
             item.failOffer(
                     new IllegalStateException("FlexLB batcher queue full, maxSize=" + maxSize));
             return;
         }
-        try {
-            long sortKey = algorithm.computeSortKey(ctx, item);
-            item.setSortKey(sortKey);
-            queue.add(item);
-            signalNotEmpty();
-        } catch (RuntimeException | Error e) {
-            queueDepth.decrementAndGet();
-            throw e;
-        }
+        algorithm.offer(item);
+        signalNotEmpty();
     }
 
     public int queueSize() {
-        return queueDepth.get();
+        return algorithm.size();
     }
 
     /**
@@ -91,14 +80,14 @@ public class WorkerBatcher {
      * Delegates to {@link FixedWindowBatcherAlgorithm#queueWaitMs}.
      */
     public long queueWaitMs() {
-        return algorithm.queueWaitMs(ctx);
+        return algorithm.queueWaitMs();
     }
 
     public void shutdown() {
         stopped = true;
         workerThread.interrupt();
         List<BatchItem> remaining = new ArrayList<>();
-        ctx.drainTo(remaining);
+        algorithm.drainTo(remaining);
         for (BatchItem item : remaining) {
             item.failOffer(
                     new CancellationException("FlexLB batcher stopped: " + key));
@@ -111,7 +100,7 @@ public class WorkerBatcher {
         while (!stopped && !Thread.currentThread().isInterrupted()) {
             try {
                 waitForNonEmpty();
-                BatchDecision decision = algorithm.decide(ctx);
+                BatchDecision decision = algorithm.decide();
                 if (decision == null) {
                     // No action this cycle (park / engine backpressure)
                     TimeUnit.MILLISECONDS.sleep(1);
@@ -132,8 +121,8 @@ public class WorkerBatcher {
 
     /**
      * Execute a {@link BatchDecision.Dispatch}: report metrics, log the
-     * decision, then remove the items from the queue and hand the batch to
-     * the endpoint.
+     * decision, then hand the batch to the endpoint. The algorithm has
+     * already removed the picked items from the queue.
      */
     private void executeDispatch(BatchDecision.Dispatch d) {
         String role = RoleType.PREFILL.name();
@@ -156,44 +145,43 @@ public class WorkerBatcher {
                 d.reason(), d.items().size(), d.headWaitMs(),
                 d.queueSizeBefore(), ctx.key(), d.items().get(0).requestId());
 
-        ctx.dispatch(d.items(),
+        ctx.prefillEp().submitBatch(d.items(),
                 new DispatchMeta(d.reason()));
     }
 
     /**
      * Execute a {@link BatchDecision.Drop}: log (deadline expiry only), then
-     * remove the head item from the queue and settle it through the matching
-     * {@link BatchItem} terminal transition.
+     * settle the item through the matching {@link BatchItem} terminal
+     * transition. The algorithm has already removed the item from the queue.
      */
     private void executeDrop(BatchDecision.Drop d) {
         switch (d.cause()) {
             case QUEUE_DEADLINE_EXCEEDED -> {
                 Logger.warn("flexlb_batch_drop request_id={} reason=queue_deadline_exceeded {}",
                         d.item().requestId(), d.detail());
-                ctx.dropHead(d.item());
+                d.item().failExpired();
             }
             case EXCEEDS_BATCH_TOKEN_CAPACITY ->
-                    ctx.rejectForBatchTokenCapacity(d.item(), ctx.batchTokenCapacity());
+                    d.item().failOffer(new IllegalArgumentException(
+                            "request cannot fit strict padded batch token capacity: " + d.detail()));
         }
     }
 
     /**
-     * Block until the queue is non-empty, using {@link Condition#await()}
-     * instead of the previous {@code take()+put()} round-trip which caused
-     * invalid re-sorting of the priority queue and wasted operations.
+     * Block until the queue is non-empty, using {@link Condition#await()}.
      *
-     * <p>The fast path checks {@link PriorityBlockingQueue#peek()} without
-     * holding the lock. Only when the queue is empty does the thread
+     * <p>The fast path checks {@link FixedWindowBatcherAlgorithm#size()}
+     * without holding the lock. Only when the queue is empty does the thread
      * acquire {@link #waitLock} and await on {@link #notEmpty}, which is
-     * signalled by {@link #offer(BatchItem)} after each successful add.
+     * signalled by {@link #offer(BatchItem)} after each successful enqueue.
      */
     private void waitForNonEmpty() throws InterruptedException {
-        if (queue.peek() != null) {
+        if (algorithm.size() > 0) {
             return;
         }
         waitLock.lock();
         try {
-            while (queue.peek() == null) {
+            while (algorithm.size() == 0) {
                 notEmpty.await();
             }
         } finally {
@@ -208,22 +196,6 @@ public class WorkerBatcher {
             notEmpty.signal();
         } finally {
             waitLock.unlock();
-        }
-    }
-
-    private boolean reserveQueueSlot(int maxSize) {
-        if (maxSize <= 0) {
-            queueDepth.incrementAndGet();
-            return true;
-        }
-        while (true) {
-            int current = queueDepth.get();
-            if (current >= maxSize) {
-                return false;
-            }
-            if (queueDepth.compareAndSet(current, current + 1)) {
-                return true;
-            }
         }
     }
 }
