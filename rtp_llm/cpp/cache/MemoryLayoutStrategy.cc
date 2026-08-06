@@ -34,6 +34,9 @@ void MemoryLayoutStrategy::clearKVTensor(torch::Tensor& kv_cache_tensor) {
 void MemoryLayoutStrategy::clearScaleTensor(torch::Tensor& kv_scale_tensor) {
     if (config_.hasScale()) {
         if (config_.dtype == rtp_llm::TYPE_FP8_E4M3) {
+            // PyFlashinfer writes FP8 KV entries with an implicit scale of 1
+            // and relies on this allocator invariant without synchronizing the
+            // device from each layer's cache-write hot path.
             kv_scale_tensor.fill_(1.0);
         } else {
             kv_scale_tensor.fill_(0);

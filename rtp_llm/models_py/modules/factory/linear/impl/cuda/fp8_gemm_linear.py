@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
     CudaFp8FlashinferLinear,
 )
+from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -18,6 +19,20 @@ class CudaFp8GEMMLinear(LinearBase):
     """CUDA FP8 GEMM wrapper."""
 
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
+
+    @classmethod
+    def _is_fp8_per_block_candidate(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+    ) -> bool:
+        return (
+            weight_scales is not None
+            and quant_config is not None
+            and weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+            and quant_config.get_method() == "FP8_PER_BLOCK"
+        )
 
     @classmethod
     def can_handle(
@@ -29,11 +44,43 @@ class CudaFp8GEMMLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        if weight_scales is None or quant_config is None:
+        if not cls._is_fp8_per_block_candidate(quant_config, weight, weight_scales):
             return False
-        if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
-            return False
-        return quant_config.get_method() == "FP8_PER_BLOCK"
+        # Preserve the sm90/sm100 behavior where construction reports the
+        # actionable DeepGEMM installation error. Only sm12x is excluded from
+        # this strategy because it uses the SM120 CUTLASS backend instead.
+        if not is_sm12x(weight.device):
+            return True
+
+        return False
+
+    @classmethod
+    def rejection_reason(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> Optional[str]:
+        if not is_sm12x(weight.device) or not cls._is_fp8_per_block_candidate(
+            quant_config, weight, weight_scales
+        ):
+            return None
+        # The SM120 strategy can be absent from the registry when its binding
+        # was not compiled. Preserve its public diagnostic in that case.
+        try:
+            from .fp8_vllm_blockwise_sm120_linear import CudaFp8VllmBlockwiseLinear
+        except ImportError as error:
+            return (
+                "SM120 FP8_PER_BLOCK backend is unavailable; rebuild on x86 "
+                f"with --config=cuda12_9 (ENABLE_FP8_SM120): {error}"
+            )
+
+        return CudaFp8VllmBlockwiseLinear.rejection_reason(
+            quant_config, weight, weight_scales
+        )
 
     @torch.inference_mode()
     def __init__(

@@ -53,6 +53,31 @@ py_test(
     },
 )
 
+# Intentionally run the complete decode suite on real SM120 hardware: this
+# covers the SM120-only CUDA-core replay cases without an architecture mock and
+# also guards common FlashInfer decode behavior on the newly supported device.
+py_test(
+    name = "test_py_flashinfer_mha_decode_sm120",
+    main = "test_py_flashinfer_mha_decode.py",
+    srcs = [
+        "test_py_flashinfer_mha_decode.py",
+        "attention_ref.py",
+        "base_attention_test.py"
+    ],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["RTX_5000_PRO", "cuda12_9"],
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {
+        'gpu': 'RTX_5000_PRO',
+    },
+)
+
 py_test(
     name = "test_xqa",
     srcs = [
@@ -256,5 +281,38 @@ py_test(
     tags = ["H20"],
     exec_properties = {
         'gpu': 'H20',
+    },
+)
+
+py_test(
+    name = "test_kv_cache_write_op",
+    srcs = ["test_kv_cache_write_op.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
+# Exercise FlashInfer's FP8 append kernel on the architecture this PR enables.
+py_test(
+    name = "test_kv_cache_write_op_sm120",
+    main = "test_kv_cache_write_op.py",
+    srcs = ["test_kv_cache_write_op.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "//conditions:default": [],
+    }),
+    tags = ["RTX_5000_PRO", "cuda12_9"],
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {
+        'gpu': 'RTX_5000_PRO',
     },
 )
