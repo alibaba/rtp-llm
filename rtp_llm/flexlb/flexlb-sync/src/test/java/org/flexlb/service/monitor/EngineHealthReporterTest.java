@@ -69,8 +69,6 @@ class EngineHealthReporterTest {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.kvcm.p2p.total.match.delta.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        verify(monitor).register("app.cache.hit.comparison.kvcm.effective.delta.tokens",
-                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.delta.tokens",
@@ -358,20 +356,19 @@ class EngineHealthReporterTest {
 
     @Test
     void shouldReportSelectedKvcmP2pMatchDetails() {
-        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1", 40, 80, 100, 60, true);
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1", 40, 80, 100, true);
 
         verify(cacheMetricsReporter).reportKvcmSelectedMatch(
-                RoleType.PREFILL, "10.0.0.1", 40, 80, 100, 60);
+                RoleType.PREFILL, "10.0.0.1", 40, 80, 100);
     }
 
     @Test
     void shouldSkipSelectedKvcmP2pMetricsWhenDetailsAreUnavailable() {
-        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1", 0, 0, 0, 0, false);
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, "10.0.0.1", 0, 0, 0, false);
 
         verify(cacheMetricsReporter, never()).reportKvcmSelectedMatch(
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyLong(),
                 org.mockito.ArgumentMatchers.anyLong());
@@ -419,14 +416,10 @@ class EngineHealthReporterTest {
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.kvcm.p2p.total.match.delta.tokens"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
                 org.mockito.ArgumentMatchers.anyDouble());
-        verify(monitor, never()).report(
-                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.kvcm.effective.delta.tokens"),
-                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
-                org.mockito.ArgumentMatchers.anyDouble());
     }
 
     @Test
-    void shouldReportKvcmLocalP2pAndEffectiveDeltasWhenAvailable() {
+    void shouldReportKvcmLocalAndP2pDeltasWhenAvailable() {
         CacheHitComparisonResult comparison = new CacheHitComparisonResult(
                 "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1",
                 "running", 200,
@@ -446,7 +439,6 @@ class EngineHealthReporterTest {
                 "cacheMatchSource", "KVCM");
         verify(monitor).report("app.cache.hit.comparison.kvcm.local.delta.tokens", expectedTags, 80.0);
         verify(monitor).report("app.cache.hit.comparison.kvcm.p2p.total.match.delta.tokens", expectedTags, 20.0);
-        verify(monitor).report("app.cache.hit.comparison.kvcm.effective.delta.tokens", expectedTags, 60.0);
     }
 
     @Test

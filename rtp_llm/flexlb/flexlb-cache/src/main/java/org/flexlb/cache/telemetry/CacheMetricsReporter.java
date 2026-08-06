@@ -22,7 +22,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
-import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_EFFECTIVE_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_P2P_FETCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_P2P_TOTAL_MATCH_TOKENS;
@@ -91,7 +90,6 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.GAUGE);
         monitor.register(CACHE_KVCM_SELECTED_P2P_FETCH_TOKENS, FlexMetricType.GAUGE);
         monitor.register(CACHE_KVCM_SELECTED_P2P_TOTAL_MATCH_TOKENS, FlexMetricType.GAUGE);
-        monitor.register(CACHE_KVCM_SELECTED_EFFECTIVE_MATCH_TOKENS, FlexMetricType.GAUGE);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
@@ -169,13 +167,11 @@ public class CacheMetricsReporter {
                                         String engineIp,
                                         long localMatchTokens,
                                         long p2pFetchTokens,
-                                        long p2pTotalMatchTokens,
-                                        long effectiveMatchTokens) {
+                                        long p2pTotalMatchTokens) {
         FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", engineIp);
         monitor.report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, tags, localMatchTokens);
         monitor.report(CACHE_KVCM_SELECTED_P2P_FETCH_TOKENS, tags, p2pFetchTokens);
         monitor.report(CACHE_KVCM_SELECTED_P2P_TOTAL_MATCH_TOKENS, tags, p2pTotalMatchTokens);
-        monitor.report(CACHE_KVCM_SELECTED_EFFECTIVE_MATCH_TOKENS, tags, effectiveMatchTokens);
     }
 
     public void reportLocalStandbyCapacityRejected() {

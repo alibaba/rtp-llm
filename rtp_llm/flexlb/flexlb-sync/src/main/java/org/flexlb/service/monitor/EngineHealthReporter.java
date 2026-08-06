@@ -43,7 +43,6 @@ import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
-import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_EFFECTIVE_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
@@ -180,7 +179,6 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        this.monitor.register(CACHE_HIT_COMPARISON_KVCM_EFFECTIVE_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -533,7 +531,7 @@ public class EngineHealthReporter {
     }
 
     public void reportKvcmSelectedMatch(RoleType roleType, String engineIp, long localMatchTokens,
-                                        long p2pFetchTokens, long p2pTotalMatchTokens, long effectiveMatchTokens,
+                                        long p2pFetchTokens, long p2pTotalMatchTokens,
                                         boolean available) {
         if (!available) {
             return;
@@ -543,8 +541,7 @@ public class EngineHealthReporter {
                 engineIp,
                 localMatchTokens,
                 p2pFetchTokens,
-                p2pTotalMatchTokens,
-                effectiveMatchTokens);
+                p2pTotalMatchTokens);
     }
 
     public void reportCacheHitComparisonMetrics(String modelName, CacheHitComparisonResult comparison) {
@@ -567,7 +564,6 @@ public class EngineHealthReporter {
         if (kvcmDetails != null) {
             monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, metricTags, kvcmDetails.localDelta());
             monitor.report(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS, metricTags, kvcmDetails.p2pTotalMatchDelta());
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_EFFECTIVE_DELTA_TOKENS, metricTags, routing.delta());
         }
         long inputTokens = comparison.inputTokens();
         if (inputTokens > 0) {

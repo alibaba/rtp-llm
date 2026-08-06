@@ -227,10 +227,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return workers.stream()
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
-                    long hitCacheTokens = calculatePrefixMatchLength(
-                            workerStatus, cacheMatchResult, p2pHitDiscount);
-                    long prefillTime = TaskInfo.estimatePrefillTimeMs(
-                            seqLen, hitCacheTokens, cacheHitDiscount);
+                    long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResult, p2pHitDiscount);
+                    long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens, cacheHitDiscount);
                     long queueTime = workerStatus.getRunningQueueTime().get();
                     long newTTFT = prefillTime + queueTime;
                     long lastSelectedTime = workerStatus.getLastSelectedTime().get();
@@ -285,7 +283,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 task.getKvcmLocalMatchTokens(),
                 task.getKvcmP2pFetchTokens(),
                 task.getKvcmP2pTotalMatchTokens(),
-                selectedWorker.hitCacheTokens(),
                 task.isKvcmMatchAvailable());
         workerStatus.putLocalTask(requestId, task);
 
@@ -719,9 +716,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param cacheMatchResult Cache match result
      * @return Number of tokens hit
      */
-    private long calculatePrefixMatchLength(WorkerStatus workerStatus,
-                                            CacheMatchResult cacheMatchResult,
-                                            double p2pHitDiscount) {
+    private long calculatePrefixMatchLength(WorkerStatus workerStatus, CacheMatchResult cacheMatchResult, double p2pHitDiscount) {
         HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getIpPort());
         if (match == null) {
             return 0L;
