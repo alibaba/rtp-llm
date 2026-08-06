@@ -22,6 +22,7 @@ class MTPBlock(RtpModule):
         reverse_concat: bool = False,
         bias: bool = False,
         params_dtype: torch.dtype = torch.bfloat16,
+        prefix: str = "mtp_block",
     ):
         super().__init__()
         self.reverse_concat = reverse_concat
@@ -33,7 +34,7 @@ class MTPBlock(RtpModule):
             tp_size=1,
             tp_rank=0,
             quant_config=None,
-            prefix="fc",
+            prefix=f"{prefix}.fc",
             bias=bias,
             params_dtype=params_dtype,
         )

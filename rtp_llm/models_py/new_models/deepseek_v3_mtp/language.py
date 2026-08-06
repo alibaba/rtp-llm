@@ -31,7 +31,6 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     build_rope_cache,
     checkpoint_path,
     extract_config_values,
-    keep_mla_checkpoint_weights,
     nonnegative_int,
     positive_int,
     read_config_json,
@@ -161,7 +160,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             fmha_config=fmha_config,
             device_resource_config=device_resource_config,
         )
-        self._keep_mla_checkpoint_weights = keep_mla_checkpoint_weights()
+        self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
         self._mla_kernel_layout = None
 
         ckpt_path = checkpoint_path(model_config)
@@ -221,6 +220,7 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             reverse_concat=True,
             bias=False,
             params_dtype=cfg["params_dtype"],
+            prefix="mtp_block",
         )
 
         # --- Single MoE decoder layer ---

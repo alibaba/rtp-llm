@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from safetensors.torch import save_file
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_hip
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
@@ -22,6 +22,7 @@ from rtp_llm.models_py.new_models.deepseek_v3.attention import (
 )
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
     DeepSeekV32ForCausalLM,
+    MlaRuntimeLayoutMixin,
     build_rope_cache,
     extract_config_values,
 )
@@ -128,6 +129,8 @@ def _router_model_config(
     has_moe_norm=False,
     moe_n_group=1,
     moe_topk_group=1,
+    scoring_func=1,
+    routed_scaling_factor=1.0,
 ):
     config = ModelConfig()
     config.attn_config.head_num = 1
@@ -141,6 +144,8 @@ def _router_model_config(
     config.has_moe_norm = has_moe_norm
     config.moe_n_group = moe_n_group
     config.moe_topk_group = moe_topk_group
+    config.scoring_func = scoring_func
+    config.routed_scaling_factor = routed_scaling_factor
     config.quant_config = None
     return config
 
@@ -188,33 +193,44 @@ def _manual_noaux_reference(
     renormalize,
     routed_scaling_factor,
 ):
-    """Independent HF-style reference for forward/router integration tests."""
-    scores = logits.float().sigmoid()
-    scores_for_choice = scores + correction_bias
-    group_size = scores.shape[-1] // n_group
-    grouped_scores = scores_for_choice.view(-1, n_group, group_size)
-    group_scores = grouped_scores.topk(
-        min(2, group_size), dim=-1, sorted=False
-    ).values.sum(dim=-1)
-    selected_groups = group_scores.topk(topk_group, dim=-1, sorted=False).indices
-    group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
-    group_mask.scatter_(1, selected_groups, True)
-    expert_mask = (
-        group_mask.unsqueeze(-1)
-        .expand(-1, -1, group_size)
-        .reshape_as(scores_for_choice)
-    )
-    topk_ids = (
-        scores_for_choice.masked_fill(~expert_mask, float("-inf"))
-        .topk(top_k, dim=-1, sorted=False)
-        .indices
-    )
-    topk_weights = scores.gather(1, topk_ids)
-    if renormalize and top_k > 1:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
-            1e-20
+    """Scalar reference intentionally independent of the vectorized router."""
+    scores = logits.float().sigmoid().tolist()
+    biases = correction_bias.float().tolist()
+    group_size = len(biases) // n_group
+    all_weights = []
+    all_ids = []
+    for token_scores in scores:
+        choice_scores = [score + bias for score, bias in zip(token_scores, biases)]
+        group_scores = []
+        for group_id in range(n_group):
+            begin = group_id * group_size
+            group_values = choice_scores[begin : begin + group_size]
+            group_scores.append(sum(sorted(group_values, reverse=True)[:2]))
+        selected_groups = set(
+            sorted(range(n_group), key=group_scores.__getitem__, reverse=True)[
+                :topk_group
+            ]
         )
-    return topk_weights * routed_scaling_factor, topk_ids
+        candidates = [
+            expert_id
+            for expert_id in range(len(token_scores))
+            if expert_id // group_size in selected_groups
+        ]
+        selected_experts = sorted(
+            candidates,
+            key=choice_scores.__getitem__,
+            reverse=True,
+        )[:top_k]
+        token_weights = [token_scores[expert_id] for expert_id in selected_experts]
+        if renormalize and top_k > 1:
+            denominator = max(sum(token_weights), 1e-20)
+            token_weights = [weight / denominator for weight in token_weights]
+        all_ids.append(selected_experts)
+        all_weights.append([weight * routed_scaling_factor for weight in token_weights])
+    return (
+        torch.tensor(all_weights, dtype=torch.float32, device=logits.device),
+        torch.tensor(all_ids, dtype=torch.int64, device=logits.device),
+    )
 
 
 def _dense_checkpoint_weights():
@@ -522,6 +538,42 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             DeepSeekV32MTPForCausalLM,
         )
 
+    def test_registry_aliases_complete_a_real_checkpoint_load(self):
+        weights = _dense_checkpoint_weights()
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            with open(
+                f"{checkpoint_path}/config.json",
+                "w",
+                encoding="utf-8",
+            ) as config_file:
+                json.dump(_dense_loader_config_json(), config_file)
+            save_file(weights, f"{checkpoint_path}/model.safetensors")
+
+            for model_type in (
+                "deepseek2",
+                "deepseek3",
+                "deepseek_v31",
+                "deepseek_v32",
+                "glm_5",
+                "kimi_k2",
+            ):
+                with self.subTest(model_type=model_type):
+                    model_config = _dense_loader_model_config(checkpoint_path)
+                    model_config.model_type = model_type
+                    model = NewModelLoader(
+                        model_config=model_config,
+                        load_config=NewLoaderConfig(
+                            compute_dtype=torch.float32,
+                            device="cpu",
+                        ),
+                        model_path=checkpoint_path,
+                    ).load()
+                    self.assertIsInstance(model, DeepSeekV32ForCausalLM)
+                    torch.testing.assert_close(
+                        model.embed_tokens.weight,
+                        weights["model.embed_tokens.weight"],
+                    )
+
     def test_new_model_loader_safetensors_forward_matches_reference(self):
         weights = _dense_checkpoint_weights()
         with tempfile.TemporaryDirectory() as checkpoint_path:
@@ -626,7 +678,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         )
         torch.testing.assert_close(outputs.hidden_states, expected)
 
-    def test_weight_validation_wraps_non_runtime_errors_with_module_name(self):
+    def test_weight_validation_preserves_error_type_and_adds_module_context(self):
         class ValueErrorLoader(RtpModule):
             def load_weights(self, weights):
                 del weights
@@ -638,8 +690,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         root = RtpModule()
         root.child = ValueErrorLoader()
         with self.assertRaisesRegex(
-            RuntimeError,
-            r"Weight validation failed for child .*invalid child state",
+            ValueError,
+            "Weight validation failed for child.*invalid child state",
         ):
             NewModelLoader._validate_loaded_weights(root)
 
@@ -1112,7 +1164,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         "IndexerOp is not implemented on ROCm",
     )
     def test_sparse_indexer_rope_cache_is_a_device_tracked_buffer(self):
-        cache = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        cache = torch.linspace(-0.97, 0.91, 32, dtype=torch.float32).reshape(8, 4)
         with torch.device("cpu"):
             indexer = DeepSeekV32Indexer(
                 index_n_heads=1,
@@ -1132,10 +1184,62 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             dict(indexer.indexer_op.named_buffers())["cos_sin_cache"],
             indexer.indexer_op.cos_sin_cache,
         )
-        indexer.indexer_op.to(dtype=torch.float64)
-        self.assertEqual(indexer.indexer_op.cos_sin_cache.dtype, torch.float64)
-        with self.assertRaisesRegex(RuntimeError, "expected torch.float32"):
-            indexer.indexer_op._validated_cos_sin_cache()
+        indexer.indexer_op.to(dtype=torch.bfloat16)
+        self.assertEqual(indexer.indexer_op.cos_sin_cache.dtype, torch.float32)
+        torch.testing.assert_close(
+            indexer.indexer_op.cos_sin_cache,
+            cache,
+            rtol=0,
+            atol=0,
+        )
+
+    def test_model_dtype_migration_preserves_shared_fp32_rope_cache(self):
+        cache = torch.linspace(-0.97, 0.91, 16, dtype=torch.float32).reshape(4, 4)
+        # A plain consumer isolates the top-level alias-restoration contract;
+        # the real CUDA IndexerOp's standalone _apply behavior is covered by
+        # test_sparse_indexer_rope_cache_is_a_device_tracked_buffer above.
+        indexer_op = torch.nn.Module()
+        indexer_op.register_buffer("cos_sin_cache", cache, persistent=False)
+        indexer = torch.nn.Module()
+        indexer.indexer_op = indexer_op
+        attention = torch.nn.Module()
+        attention.indexer = indexer
+        layer = torch.nn.Module()
+        layer.self_attn = attention
+
+        class CacheOwner(MlaRuntimeLayoutMixin, RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("cos_sin_cache", cache, persistent=False)
+                self.layers = torch.nn.ModuleList([layer])
+                self._mla_kernel_layout = None
+
+        owner = CacheOwner().to(dtype=torch.bfloat16)
+        self.assertEqual(owner.cos_sin_cache.dtype, torch.float32)
+        self.assertIs(
+            owner.layers[0].self_attn.indexer.indexer_op.cos_sin_cache,
+            owner.cos_sin_cache,
+        )
+        torch.testing.assert_close(owner.cos_sin_cache, cache, rtol=0, atol=0)
+
+    def test_rotary_cache_is_fp32_even_when_default_dtype_is_bfloat16(self):
+        original_dtype = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(torch.bfloat16)
+            cache = build_rope_cache(
+                {"qk_rope_head_dim": 4, "rope_theta": 10000.0},
+                max_seq_len=16,
+                device=torch.device("cpu"),
+            )
+        finally:
+            torch.set_default_dtype(original_dtype)
+        reference = build_rope_cache(
+            {"qk_rope_head_dim": 4, "rope_theta": 10000.0},
+            max_seq_len=16,
+            device=torch.device("cpu"),
+        )
+        self.assertEqual(cache.dtype, torch.float32)
+        torch.testing.assert_close(cache, reference, rtol=0, atol=0)
 
     def test_linear_prefixes_preserve_layer_qualified_quantization_rules(self):
         quant_config = QuantizationConfig(
@@ -1310,13 +1414,17 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(attention.o_proj.reduce_output)
 
     def test_mla_fp8_derived_weights_support_tensor_and_channel_scales(self):
+        class Fp8LinearStub(torch.nn.Module):
+            def fp8_scale_block_size(self) -> tuple[int, int]:
+                return (128, 128)
+
         weight = torch.tensor([[1.0, -2.0], [3.0, -4.0]], dtype=torch.float8_e4m3fn)
         for scale in (
             torch.tensor([0.5], dtype=torch.float32),
             torch.tensor([[0.5], [2.0]], dtype=torch.float32),
         ):
             with self.subTest(scale_shape=tuple(scale.shape)):
-                linear = torch.nn.Module()
+                linear = Fp8LinearStub()
                 linear.weight = torch.nn.Parameter(weight.clone(), requires_grad=False)
                 linear.weight_scale = torch.nn.Parameter(
                     scale.clone(), requires_grad=False
@@ -1544,29 +1652,29 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             routed_scaling_factor=2.5,
         )
 
+        expected_weights, expected_ids = _manual_noaux_reference(
+            logits,
+            correction_bias,
+            top_k=2,
+            n_group=4,
+            topk_group=2,
+            renormalize=True,
+            routed_scaling_factor=2.5,
+        )
+        actual_order = ids.argsort(dim=-1)
+        expected_order = expected_ids.argsort(dim=-1)
+        self.assertTrue(
+            torch.equal(
+                ids.gather(1, actual_order),
+                expected_ids.gather(1, expected_order),
+            )
+        )
+        torch.testing.assert_close(
+            weights.gather(1, actual_order),
+            expected_weights.gather(1, expected_order),
+        )
         scores = logits.sigmoid()
         choice_scores = scores + correction_bias
-        grouped = choice_scores.view(2, 4, 2)
-        group_scores = grouped.topk(2, dim=-1, sorted=False).values.sum(dim=-1)
-        selected_groups = group_scores.topk(2, dim=-1, sorted=False).indices
-        group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
-        group_mask.scatter_(1, selected_groups, True)
-        expert_mask = (
-            group_mask.unsqueeze(-1).expand(-1, -1, 2).reshape_as(choice_scores)
-        )
-        expected_ids = (
-            choice_scores.masked_fill(~expert_mask, float("-inf"))
-            .topk(2, dim=-1, sorted=False)
-            .indices
-        )
-        expected_weights = scores.gather(1, expected_ids)
-        expected_weights = (
-            expected_weights
-            / expected_weights.sum(dim=-1, keepdim=True).clamp_min(1e-20)
-            * 2.5
-        )
-        self.assertTrue(torch.equal(ids, expected_ids))
-        self.assertTrue(torch.equal(weights, expected_weights))
         self.assertFalse(
             torch.equal(
                 weights,
@@ -1574,6 +1682,25 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 / choice_scores.gather(1, ids).sum(dim=-1, keepdim=True)
                 * 2.5,
             )
+        )
+
+    def test_noaux_router_matches_hand_computed_golden(self):
+        probabilities = torch.tensor([[0.5, 0.75, 0.25, 0.6]], dtype=torch.float32)
+        logits = torch.logit(probabilities)
+        weights, ids = _select_deepseek_noaux_topk(
+            logits,
+            torch.tensor([0.0, 0.0, 1.0, 1.0]),
+            top_k=2,
+            n_group=2,
+            topk_group=1,
+            renormalize=False,
+            routed_scaling_factor=2.0,
+        )
+        order = ids.argsort(dim=-1)
+        self.assertTrue(torch.equal(ids.gather(1, order), torch.tensor([[2, 3]])))
+        torch.testing.assert_close(
+            weights.gather(1, order),
+            torch.tensor([[0.5, 1.2]]),
         )
 
     def test_noaux_router_device_selection_is_explicit(self):
@@ -1618,9 +1745,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     topk_method="noaux_tc",
                     correction_bias=True,
                 )
-            self.assertEqual(block._use_fast_group_topk, expect_fast)
-            self.assertEqual(block.group_topk is not None, expect_fast)
-            self.assertEqual(group_topk.call_count, int(expect_fast))
+                self.assertEqual(block._use_fast_group_topk, expect_fast)
+                self.assertEqual(block.group_topk is not None, expect_fast)
+                self.assertEqual(group_topk.call_count, int(expect_fast))
 
     def test_noaux_top1_normalization_uses_reference_path_on_cuda(self):
         with (
@@ -1687,7 +1814,11 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 tp_rank=0,
                 ep_size=1,
                 ep_rank=0,
-                model_config=_router_model_config(moe_k=1, has_moe_norm=True),
+                model_config=_router_model_config(
+                    moe_k=1,
+                    has_moe_norm=True,
+                    scoring_func=0,
+                ),
                 parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
@@ -1708,7 +1839,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
     def test_non_noaux_router_avoids_cuda_select_topk_on_other_devices(self):
         parallelism_config = _single_rank_parallelism_config()
         moe_config = types.SimpleNamespace(fake_balance_expert=False)
-        model_config = _router_model_config()
+        model_config = _router_model_config(scoring_func=0)
         with (
             mock.patch(
                 "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
@@ -1748,12 +1879,23 @@ class DeepSeekNewloaderTest(unittest.TestCase):
 
     def test_moe_rejects_model_config_routing_mismatch(self):
         mismatch_configs = {
-            "hidden_size": _router_model_config(hidden_size=16),
-            "expert_num": _router_model_config(expert_num=8),
-            "moe_k": _router_model_config(moe_k=1),
-            "has_moe_norm": _router_model_config(has_moe_norm=True),
-            "moe_n_group": _router_model_config(moe_n_group=2),
-            "moe_topk_group": _router_model_config(moe_topk_group=2),
+            "hidden_size": _router_model_config(hidden_size=16, scoring_func=0),
+            "expert_num": _router_model_config(expert_num=8, scoring_func=0),
+            "moe_k": _router_model_config(moe_k=1, scoring_func=0),
+            "has_moe_norm": _router_model_config(
+                has_moe_norm=True,
+                scoring_func=0,
+            ),
+            "moe_n_group": _router_model_config(moe_n_group=2, scoring_func=0),
+            "moe_topk_group": _router_model_config(
+                moe_topk_group=2,
+                scoring_func=0,
+            ),
+            "scoring_func": _router_model_config(scoring_func=1),
+            "routed_scaling_factor": _router_model_config(
+                scoring_func=0,
+                routed_scaling_factor=2.0,
+            ),
         }
         with (
             mock.patch(
@@ -1823,6 +1965,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     has_moe_norm=True,
                     moe_n_group=2,
                     moe_topk_group=1,
+                    routed_scaling_factor=2.0,
                 ),
                 parallelism_config=parallelism_config,
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
@@ -1842,6 +1985,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int64)
+                self.topk_ids_dtype = torch.int64
                 self.weights = None
                 self.ids = None
 
@@ -1899,7 +2043,11 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             tp_rank=0,
             ep_size=1,
             ep_rank=0,
-            model_config=_router_model_config(hidden_size=4),
+            model_config=_router_model_config(
+                hidden_size=4,
+                scoring_func=0,
+                routed_scaling_factor=2.0,
+            ),
             parallelism_config=_single_rank_parallelism_config(),
             quant_config=None,
             params_dtype=torch.float32,
@@ -1957,11 +2105,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "two-dimensional"):
             block(torch.zeros(1, 2, 4))
 
-    @unittest.skipUnless(
-        get_device_type() == DeviceType.Cuda,
-        "CUDA GroupTopK is required",
-    )
-    def test_moe_cuda_noaux_router_matches_reference(self):
+    @unittest.skipUnless(is_cuda(), "CUDA GroupTopK is required")
+    def _gpu_moe_cuda_noaux_router_matches_reference(self):
         with torch.device("cuda"):
             block = DeepSeekV32MoEBlock(
                 hidden_size=4,
@@ -1979,6 +2124,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     has_moe_norm=True,
                     moe_n_group=4,
                     moe_topk_group=2,
+                    routed_scaling_factor=2.5,
                 ),
                 parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
@@ -1999,6 +2145,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int32)
+                self.topk_ids_dtype = torch.int32
                 self.weights = None
                 self.ids = None
 
@@ -2062,11 +2209,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(torch.allclose(actual_weights, expected_weights, atol=1e-6))
         self.assertTrue(torch.equal(output, hidden_states))
 
-    @unittest.skipUnless(
-        get_device_type() == DeviceType.Cuda,
-        "CUDA SelectTopk is required",
-    )
-    def test_moe_cuda_fast_select_topk_matches_reference(self):
+    @unittest.skipUnless(is_cuda(), "CUDA SelectTopk is required")
+    def _gpu_moe_cuda_fast_select_topk_matches_reference(self):
         model_config = ModelConfig()
         model_config.attn_config.head_num = 1
         model_config.attn_config.size_per_head = 128
@@ -2077,6 +2221,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         model_config.expert_num = 8
         model_config.moe_k = 2
         model_config.has_moe_norm = True
+        model_config.scoring_func = 0
+        model_config.routed_scaling_factor = 1.0
+        model_config.moe_n_group = 1
+        model_config.moe_topk_group = 1
         with torch.device("cuda"):
             block = DeepSeekV32MoEBlock(
                 hidden_size=4,
@@ -2108,6 +2256,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int32)
+                self.topk_ids_dtype = torch.int32
                 self.weights = None
                 self.ids = None
 
@@ -2151,11 +2300,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(torch.equal(actual_ids, expected_ids))
         torch.testing.assert_close(actual_weights, expected_weights)
 
-    @unittest.skipUnless(
-        get_device_type() == DeviceType.ROCm,
-        "ROCm is required",
-    )
-    def test_moe_rocm_noaux_reference_router_matches_expected(self):
+    @unittest.skipUnless(is_hip(), "ROCm is required")
+    def _gpu_moe_rocm_noaux_reference_router_matches_expected(self):
         with torch.device("cuda"):
             block = DeepSeekV32MoEBlock(
                 hidden_size=4,
@@ -2173,6 +2319,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     has_moe_norm=True,
                     moe_n_group=4,
                     moe_topk_group=2,
+                    routed_scaling_factor=2.5,
                 ),
                 parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
@@ -2194,6 +2341,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int32)
+                self.topk_ids_dtype = torch.int32
                 self.weights = None
                 self.ids = None
 
@@ -2294,12 +2442,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             (128 + 128 + 2, 128),
         )
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
-    @unittest.skipIf(
-        torch.version.hip is not None,
-        "online fused FP8 A projection is CUDA-only",
-    )
-    def test_mla_online_fp8_uses_models_py_quantizer(self):
+    @unittest.skipUnless(is_cuda(), "requires a CUDA GPU")
+    def _gpu_mla_online_fp8_uses_models_py_quantizer(self):
         with torch.device("cuda"):
             attention = DeepSeekV32MlaAttention(
                 hidden_size=128,
@@ -2323,12 +2467,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             (128 + 128 + 2, 128),
         )
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires a ROCm GPU")
-    @unittest.skipUnless(
-        torch.version.hip is not None,
-        "ROCm online-FP8 fallback is required",
-    )
-    def test_mla_online_fp8_rocm_keeps_exact_bf16_kv_b_views(self):
+    @unittest.skipUnless(is_hip(), "requires a ROCm GPU")
+    def _gpu_mla_online_fp8_rocm_keeps_exact_bf16_kv_b_views(self):
         device = torch.device("cuda")
         with torch.device(device):
             attention = DeepSeekV32MlaAttention(
@@ -2371,12 +2511,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(torch.equal(kernel_weights[W.mla_kv_b_w], expected_kv_b))
         self.assertNotIn(W.mla_kv_b_s, kernel_weights)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
-    @unittest.skipIf(
-        torch.version.hip is not None,
-        "DeepGEMM fused FP8 projection is CUDA-only",
-    )
-    def test_mla_online_fused_fp8_projection_matches_bf16_reference(self):
+    @unittest.skipUnless(is_cuda(), "requires a CUDA GPU")
+    def _gpu_mla_online_fused_fp8_projection_matches_bf16_reference(self):
         device = torch.device("cuda")
         with torch.device(device):
             attention = DeepSeekV32MlaAttention(
@@ -2430,12 +2566,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertLess(float(relative_rmse), 0.05)
         self.assertGreater(float(cosine), 0.998)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
-    @unittest.skipIf(
-        torch.version.hip is not None,
-        "CUDA online-FP8 kv_b runtime is required",
-    )
-    def test_mla_online_fp8_kc_vc_use_bf16_checkpoint_source(self):
+    @unittest.skipUnless(is_cuda(), "requires a CUDA GPU")
+    def _gpu_mla_online_fp8_kc_vc_use_bf16_checkpoint_source(self):
         from rtp_llm.models_py.modules.factory import LinearFactory
 
         device = torch.device("cuda")
@@ -2508,12 +2640,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertLess(float(relative_rmse), 0.05)
         self.assertGreater(float(cosine), 0.998)
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
-    @unittest.skipIf(
-        torch.version.hip is not None,
-        "CUDA DeepGEMM pre-quantized FP8 projection is required",
-    )
-    def test_mla_prequantized_fp8_kernel_views_execute_numerically(self):
+    @unittest.skipUnless(is_cuda(), "requires a CUDA GPU")
+    def _gpu_mla_prequantized_fp8_kernel_views_execute_numerically(self):
         from rtp_llm.models_py.kernels.cuda.fp8_quant import per_block_cast_to_fp8
         from rtp_llm.models_py.modules.factory import LinearFactory
 
@@ -2726,8 +2854,29 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             self.assertFalse(model.initialize(None))
         ensure_layout.assert_not_called()
 
+    def test_keep_mla_checkpoint_weights_is_typed_and_prevents_release(self):
+        with self.assertRaisesRegex(TypeError, "keep_mla_checkpoint_weights"):
+            NewLoaderConfig(keep_mla_checkpoint_weights=1)
+
+        model = _uninitialized_model(DeepSeekV32ForCausalLM)
+        model._mla_kernel_layout = None
+        model._keep_mla_checkpoint_weights = True
+        attention = mock.Mock()
+        model.layers = [types.SimpleNamespace(self_attn=attention)]
+        with (
+            mock.patch(
+                "rtp_llm.models_py.model_desc.module_base.GptModelBase.initialize",
+                return_value=True,
+            ),
+            mock.patch.object(model, "_ensure_mla_kernel_layout") as ensure_layout,
+        ):
+            self.assertTrue(model.initialize(None))
+        ensure_layout.assert_called_once_with()
+        attention.release_checkpoint_only_weights.assert_not_called()
+
     def test_mtp_block_rejects_inconsistent_inputs(self):
         block = MTPBlock(hidden_size=4, params_dtype=torch.float32)
+        self.assertEqual(block.fc.prefix, "mtp_block.fc")
         with self.assertRaisesRegex(ValueError, "shape mismatch"):
             block(torch.zeros(2, 4), torch.zeros(1, 4))
         with self.assertRaisesRegex(TypeError, "share a dtype"):

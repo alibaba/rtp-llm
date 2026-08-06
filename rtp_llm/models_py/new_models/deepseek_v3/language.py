@@ -71,18 +71,41 @@ def build_mla_runtime_layout(
     )
 
 
-def keep_mla_checkpoint_weights() -> bool:
-    """Return whether debugging requested retention of superseded weights."""
-    value = os.environ.get("RTP_LLM_KEEP_MLA_CHECKPOINT_WEIGHTS", "0")
-    if value not in {"0", "1"}:
-        raise ValueError(
-            "RTP_LLM_KEEP_MLA_CHECKPOINT_WEIGHTS must be either '0' or '1'"
-        )
-    return value == "1"
-
-
 class MlaRuntimeLayoutMixin:
     """Shared MLA runtime-layout lifecycle for score and MTP models."""
+
+    def _apply(self, fn, recurse: bool = True):
+        source_cos_sin_cache = self.cos_sin_cache
+        result = super()._apply(fn, recurse)
+        # The score/MTP model and every sparse IndexerOp intentionally share
+        # one RoPE cache. RtpModule restores aliases after recursively applying
+        # ``fn``; because the top-level registration is the alias master, a
+        # model-wide ``to(dtype=...)`` can otherwise overwrite the IndexerOp's
+        # local FP32 correction with a lower-precision cache. Re-establish the
+        # kernel contract once, after alias restoration, and bind every
+        # consumer to that canonical tensor.
+        cos_sin_cache = self.cos_sin_cache
+        if cos_sin_cache.dtype != torch.float32:
+            # Use the pre-conversion FP32 values and only adopt the target
+            # device. Casting the already-lowered tensor back to FP32 would
+            # preserve its dtype but irreversibly keep BF16/FP16 rounding.
+            cos_sin_cache = source_cos_sin_cache.to(
+                device=cos_sin_cache.device,
+                dtype=torch.float32,
+            )
+        self.cos_sin_cache = cos_sin_cache
+        for layer in self.layers:
+            indexer = layer.self_attn.indexer
+            if indexer is not None:
+                indexer.indexer_op.cos_sin_cache = cos_sin_cache
+        if self._mla_kernel_layout is not None:
+            # The runtime layout is a lightweight non-Module view, so refresh
+            # all of its tensor references after a post-initialize migration.
+            self._mla_kernel_layout = build_mla_runtime_layout(
+                self.layers,
+                cos_sin_cache,
+            )
+        return result
 
     def runtime_weight_view(self) -> Dict[str, torch.Tensor]:
         return {
@@ -817,7 +840,7 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             fmha_config=fmha_config,
             device_resource_config=device_resource_config,
         )
-        self._keep_mla_checkpoint_weights = keep_mla_checkpoint_weights()
+        self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
         self._mla_kernel_layout: Optional[MlaKernelWeightLayout] = None
 
         ckpt_path = checkpoint_path(model_config)

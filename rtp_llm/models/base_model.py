@@ -240,6 +240,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
+        keep_mla_checkpoint_weights: bool = False,
         skip_python_model: bool = False,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
@@ -254,6 +255,7 @@ class BaseModel(object):
             max_generate_batch_size: Maximum batch size for generation
             merge_lora: Whether to merge LoRA weights
             device_resource_config: DeviceResourceConfig for device resource configuration
+            keep_mla_checkpoint_weights: Keep superseded MLA checkpoint tensors for debugging
         """
         # All metadata is in model_config
         model = cls(
@@ -270,6 +272,9 @@ class BaseModel(object):
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
         )
+        if not isinstance(keep_mla_checkpoint_weights, bool):
+            raise TypeError("keep_mla_checkpoint_weights must be a bool")
+        model.keep_mla_checkpoint_weights = keep_mla_checkpoint_weights
 
         import os
 
@@ -429,6 +434,7 @@ class BaseModel(object):
             moe_config=getattr(self, "moe_config", None),
             fmha_config=self.fmha_config,
             device_resource_config=self.device_resource_config,
+            keep_mla_checkpoint_weights=self.keep_mla_checkpoint_weights,
         )
         loader = NewModelLoader(
             model_config=self.model_config,

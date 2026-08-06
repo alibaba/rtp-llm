@@ -126,6 +126,44 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
     return config;
 }
 
+inline CacheConfig makeSimpleMlaCacheConfig(int               layer_num,
+                                            int               block_num,
+                                            size_t            tokens_per_block,
+                                            rtp_llm::DataType dtype,
+                                            bool              sparse                  = false,
+                                            size_t            kv_scale_stride_bytes   = 0,
+                                            size_t            kernel_tokens_per_block = 0,
+                                            uint32_t          kv_lora_rank            = 4,
+                                            uint32_t          rope_head_dim           = 4) {
+    CacheConfig config;
+    config.dtype                     = dtype;
+    config.layer_num                 = static_cast<uint32_t>(layer_num);
+    config.layer_all_num             = static_cast<uint32_t>(layer_num);
+    config.block_num                 = static_cast<uint32_t>(block_num);
+    config.seq_size_per_block        = tokens_per_block;
+    config.kernel_seq_size_per_block = kernel_tokens_per_block == 0 ? tokens_per_block : kernel_tokens_per_block;
+    config.use_mla                   = true;
+    config.is_sparse                 = sparse;
+
+    auto             spec = makeMlaSpec("default", tokens_per_block, dtype, kv_lora_rank, rope_head_dim);
+    std::vector<int> layer_ids(layer_num);
+    for (int i = 0; i < layer_num; ++i) {
+        layer_ids[i] = i;
+    }
+    config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+
+    config.kv_block_stride_bytes = spec->block_size_bytes();
+    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
+    config.kv_scale_stride_bytes = kv_scale_stride_bytes == 0 ? spec->scale_block_size_bytes() : kv_scale_stride_bytes;
+    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
+    return config;
+}
+
 inline CacheConfig makeSimpleLinearCacheConfig(int               layer_num,
                                                int               block_num,
                                                size_t            tokens_per_block,

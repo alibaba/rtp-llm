@@ -21,7 +21,7 @@ _FP8_BLOCK_QUANT_TYPES = {
 
 
 def _uses_fp8_block_quant(quant_config: Optional[QuantizationConfig]) -> bool:
-    quant_type = str(getattr(quant_config, "quant_type", "none")).lower()
+    quant_type = "none" if quant_config is None else quant_config.quant_type.lower()
     return quant_type in _FP8_BLOCK_QUANT_TYPES
 
 
@@ -74,8 +74,8 @@ class DeepSeekV32MLP(RtpModule):
         self.intermediate_size = intermediate_size
         self.padded_intermediate_size = intermediate_size
         self.fp8_block_size = None
-        if _uses_fp8_block_quant(quant_config):
-            block_n, block_k = getattr(quant_config, "weight_block_size", [128, 128])
+        if quant_config is not None and _uses_fp8_block_quant(quant_config):
+            block_n, block_k = quant_config.fp8_block_size
             alignment = math.lcm(tp_size * block_n, tp_size * block_k)
             self.padded_intermediate_size = (
                 (intermediate_size + alignment - 1) // alignment * alignment
@@ -127,8 +127,9 @@ class DeepSeekV32MLP(RtpModule):
                 label=name,
             )
         if self.fp8_block_size is None:
-            return tensor
-
+            raise RuntimeError(
+                "padded DeepSeek MLP weights require an FP8 block layout"
+            )
         block_n, block_k = self.fp8_block_size
         if name in (
             "gate_proj.weight_scale_inv",

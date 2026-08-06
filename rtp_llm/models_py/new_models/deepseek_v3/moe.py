@@ -9,6 +9,8 @@ Key design:
 """
 
 import logging
+import math
+from enum import Enum, IntEnum
 from typing import Any, Optional
 
 import torch
@@ -23,17 +25,30 @@ from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
 from .mlp import DeepSeekV32MLP
 
-_VALID_TOPK_METHODS = {"greedy", "group_limited_greedy", "noaux_tc"}
 logger = logging.getLogger(__name__)
 
 
-def normalize_topk_method(topk_method: str) -> str:
+class ScoringFunc(IntEnum):
+    SOFTMAX = 0
+    SIGMOID = 1
+
+
+class TopKMethod(str, Enum):
+    GREEDY = "greedy"
+    GROUP_LIMITED_GREEDY = "group_limited_greedy"
+    NOAUX_TC = "noaux_tc"
+
+
+def normalize_topk_method(topk_method: str | TopKMethod) -> TopKMethod:
+    if isinstance(topk_method, TopKMethod):
+        return topk_method
     if not isinstance(topk_method, str):
         raise TypeError(f"topk_method must be a string, got {topk_method!r}")
     normalized = "greedy" if topk_method == "gready" else topk_method
-    if normalized not in _VALID_TOPK_METHODS:
-        raise ValueError(f"unsupported DeepSeek topk_method={topk_method!r}")
-    return normalized
+    try:
+        return TopKMethod(normalized)
+    except ValueError as exc:
+        raise ValueError(f"unsupported DeepSeek topk_method={topk_method!r}") from exc
 
 
 def _mask_scores_by_group(
@@ -52,12 +67,11 @@ def _mask_scores_by_group(
     ).indices
     group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
     group_mask.scatter_(1, selected_groups, True)
-    expert_mask = (
-        group_mask.unsqueeze(-1)
-        .expand(-1, -1, group_size)
-        .reshape_as(scores_for_choice)
-    )
-    return scores_for_choice.masked_fill(~expert_mask, float("-inf"))
+    grouped_scores = scores_for_choice.view(-1, n_group, group_size)
+    return grouped_scores.masked_fill(
+        ~group_mask.unsqueeze(-1),
+        float("-inf"),
+    ).view_as(scores_for_choice)
 
 
 def _validate_routing_args(
@@ -89,12 +103,13 @@ def _select_deepseek_topk(
     router_logits_fp32: torch.Tensor,
     *,
     top_k: int,
-    scoring_func: int,
+    scoring_func: int | ScoringFunc,
     n_group: int,
     topk_group: int,
     group_limited: bool,
     renormalize: bool,
     routed_scaling_factor: float,
+    validate: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference-correct DeepSeek-V2 routing for the non-noaux path.
 
@@ -109,19 +124,19 @@ def _select_deepseek_topk(
             f"{tuple(router_logits_fp32.shape)}"
         )
     num_experts = router_logits_fp32.shape[-1]
-    _validate_routing_args(
-        num_experts=num_experts,
-        top_k=top_k,
-        n_group=n_group,
-        topk_group=topk_group,
-        grouped=group_limited,
-    )
-    if scoring_func == 0:
+    if validate:
+        _validate_routing_args(
+            num_experts=num_experts,
+            top_k=top_k,
+            n_group=n_group,
+            topk_group=topk_group,
+            grouped=group_limited,
+        )
+    scoring_func = ScoringFunc(scoring_func)
+    if scoring_func == ScoringFunc.SOFTMAX:
         scores = torch.softmax(router_logits_fp32, dim=-1)
-    elif scoring_func == 1:
+    elif scoring_func == ScoringFunc.SIGMOID:
         scores = torch.sigmoid(router_logits_fp32)
-    else:
-        raise ValueError(f"unsupported DeepSeek scoring_func={scoring_func}")
 
     candidate_scores = scores
     if group_limited:
@@ -158,6 +173,7 @@ def _select_deepseek_noaux_topk(
     topk_group: int,
     renormalize: bool,
     routed_scaling_factor: float,
+    validate: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference DeepSeek-V3 noaux_tc routing used when GroupTopK is unavailable."""
     if router_logits_fp32.dim() != 2:
@@ -166,18 +182,19 @@ def _select_deepseek_noaux_topk(
             f"{tuple(router_logits_fp32.shape)}"
         )
     num_experts = router_logits_fp32.shape[-1]
-    if correction_bias.shape != (num_experts,):
+    if validate and correction_bias.shape != (num_experts,):
         raise ValueError(
             "correction_bias must have shape [experts], got "
             f"{tuple(correction_bias.shape)} for {num_experts} experts"
         )
-    _validate_routing_args(
-        num_experts=num_experts,
-        top_k=top_k,
-        n_group=n_group,
-        topk_group=topk_group,
-        grouped=True,
-    )
+    if validate:
+        _validate_routing_args(
+            num_experts=num_experts,
+            top_k=top_k,
+            n_group=n_group,
+            topk_group=topk_group,
+            grouped=True,
+        )
     group_size = num_experts // n_group
 
     scores = torch.sigmoid(router_logits_fp32)
@@ -271,11 +288,11 @@ class DeepSeekV32MoEBlock(RtpModule):
         # Config fields for GroupTopK (DeepSeek V3 style)
         has_shared_expert: bool = True,
         shared_expert_intermediate_size: int = 0,
-        scoring_func: int = 1,  # 0=softmax, 1=sigmoid
+        scoring_func: int | ScoringFunc = ScoringFunc.SIGMOID,
         routed_scaling_factor: float = 1.0,
         n_group: int = 1,
         topk_group: int = 1,
-        topk_method: str = "greedy",
+        topk_method: str | TopKMethod = TopKMethod.GREEDY,
         has_moe_norm: bool = False,
         correction_bias: bool = False,
         prefix: str = "mlp",
@@ -283,22 +300,27 @@ class DeepSeekV32MoEBlock(RtpModule):
         super().__init__()
         if moe_config is None:
             fake_balance_expert = False
-        elif isinstance(moe_config, dict):
-            fake_balance_expert = moe_config.get("fake_balance_expert", False)
         else:
-            fake_balance_expert = getattr(moe_config, "fake_balance_expert", False)
+            fake_balance_expert = moe_config.fake_balance_expert
         if not isinstance(fake_balance_expert, bool):
             raise TypeError("moe_config.fake_balance_expert must be a bool")
-        if scoring_func not in (0, 1):
-            raise ValueError(f"unsupported DeepSeek scoring_func={scoring_func}")
+        try:
+            scoring_func = ScoringFunc(scoring_func)
+        except ValueError as exc:
+            raise ValueError(
+                f"unsupported DeepSeek scoring_func={scoring_func}"
+            ) from exc
         topk_method = normalize_topk_method(topk_method)
-        if correction_bias != (topk_method == "noaux_tc"):
+        if correction_bias != (topk_method == TopKMethod.NOAUX_TC):
             raise ValueError(
                 "correction_bias must be enabled exactly for noaux_tc routing"
             )
-        if correction_bias and scoring_func != 1:
+        if correction_bias and scoring_func != ScoringFunc.SIGMOID:
             raise ValueError("noaux_tc routing requires sigmoid scoring")
-        grouped = topk_method in {"group_limited_greedy", "noaux_tc"}
+        grouped = topk_method in {
+            TopKMethod.GROUP_LIMITED_GREEDY,
+            TopKMethod.NOAUX_TC,
+        }
         _validate_routing_args(
             num_experts=num_experts,
             top_k=top_k,
@@ -313,7 +335,7 @@ class DeepSeekV32MoEBlock(RtpModule):
         self.topk_group = topk_group
         self.has_moe_norm = has_moe_norm
         self.correction_bias = correction_bias
-        self.group_limited = topk_method == "group_limited_greedy"
+        self.group_limited = topk_method == TopKMethod.GROUP_LIMITED_GREEDY
 
         routing_config = {
             "hidden_size": (model_config.hidden_size, hidden_size),
@@ -328,11 +350,23 @@ class DeepSeekV32MoEBlock(RtpModule):
                 model_config.moe_topk_group,
                 topk_group,
             ),
+            "scoring_func": (
+                ScoringFunc(model_config.scoring_func),
+                scoring_func,
+            ),
+            "routed_scaling_factor": (
+                float(model_config.routed_scaling_factor),
+                float(routed_scaling_factor),
+            ),
         }
         mismatches = [
             f"{name}=ModelConfig({actual!r})/constructor({expected!r})"
             for name, (actual, expected) in routing_config.items()
-            if actual != expected
+            if not (
+                math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-12)
+                if name == "routed_scaling_factor"
+                else actual == expected
+            )
         ]
         if mismatches:
             raise ValueError(
@@ -343,7 +377,7 @@ class DeepSeekV32MoEBlock(RtpModule):
         fast_select_topk_candidate = (
             device_type == DeviceType.Cuda
             and not correction_bias
-            and scoring_func == 0
+            and scoring_func == ScoringFunc.SOFTMAX
             and not self.group_limited
             and routed_scaling_factor == 1.0
             and not (top_k == 1 and has_moe_norm)
@@ -379,7 +413,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             and not self._use_fast_group_topk
             and layer_idx == 0
         ):
-            logger.info(
+            logger.warning(
                 "DeepSeek layer %d uses reference PyTorch MoE routing "
                 "(device=%s method=%s scoring_func=%d groups=%d/%d scaling=%s "
                 "renormalize=%s)",
@@ -452,28 +486,14 @@ class DeepSeekV32MoEBlock(RtpModule):
             self.shared_experts = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.experts.fused_moe is None:
-            raise RuntimeError("DeepSeek fused MoE runtime is not initialized")
         if hidden_states.dim() != 2:
             raise ValueError(
                 "DeepSeek MoE expects a two-dimensional token matrix, got "
                 f"{tuple(hidden_states.shape)}"
             )
-        num_tokens = hidden_states.shape[0]
         router_logits = self.gate(hidden_states)
         router_logits_fp32 = router_logits.float()
-
-        topk_weights = torch.empty(
-            (num_tokens, self.top_k),
-            dtype=torch.float32,
-            device=hidden_states.device,
-        )
-        topk_ids_dtype = self.experts.fused_moe.topk_ids_dtype
-        topk_ids = torch.empty(
-            (num_tokens, self.top_k),
-            dtype=topk_ids_dtype,
-            device=hidden_states.device,
-        )
+        topk_ids_dtype = self.experts.topk_ids_dtype
 
         if self.correction_bias:
             if self._use_fast_group_topk:
@@ -481,12 +501,17 @@ class DeepSeekV32MoEBlock(RtpModule):
                     raise RuntimeError(
                         "DeepSeek CUDA grouped top-k router received a CPU tensor"
                     )
-                group_topk = self.group_topk
-                if group_topk is None:
-                    raise RuntimeError(
-                        "DeepSeek CUDA grouped top-k router is not initialized"
-                    )
-                group_topk(
+                topk_weights = torch.empty(
+                    (hidden_states.shape[0], self.top_k),
+                    dtype=torch.float32,
+                    device=hidden_states.device,
+                )
+                topk_ids = torch.empty(
+                    (hidden_states.shape[0], self.top_k),
+                    dtype=topk_ids_dtype,
+                    device=hidden_states.device,
+                )
+                self.group_topk(
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                     scores=router_logits_fp32,
@@ -506,19 +531,27 @@ class DeepSeekV32MoEBlock(RtpModule):
                     topk_group=self.topk_group,
                     renormalize=self.has_moe_norm,
                     routed_scaling_factor=self.routed_scaling_factor,
+                    validate=False,
                 )
-                topk_weights.copy_(selected_weights)
-                topk_ids.copy_(selected_ids)
+                topk_weights = selected_weights
+                topk_ids = selected_ids.to(dtype=topk_ids_dtype)
         else:
             if self._use_fast_select_topk:
                 if not router_logits_fp32.is_cuda:
                     raise RuntimeError(
                         "DeepSeek CUDA top-k router received a CPU tensor"
                     )
-                select_topk = self.select_topk
-                if select_topk is None:
-                    raise RuntimeError("DeepSeek CUDA top-k router is not initialized")
-                select_topk(router_logits_fp32, topk_ids, topk_weights)
+                topk_weights = torch.empty(
+                    (hidden_states.shape[0], self.top_k),
+                    dtype=torch.float32,
+                    device=hidden_states.device,
+                )
+                topk_ids = torch.empty(
+                    (hidden_states.shape[0], self.top_k),
+                    dtype=topk_ids_dtype,
+                    device=hidden_states.device,
+                )
+                self.select_topk(router_logits_fp32, topk_ids, topk_weights)
             else:
                 selected_weights, selected_ids = _select_deepseek_topk(
                     router_logits_fp32,
@@ -529,9 +562,10 @@ class DeepSeekV32MoEBlock(RtpModule):
                     group_limited=self.group_limited,
                     renormalize=self.has_moe_norm,
                     routed_scaling_factor=self.routed_scaling_factor,
+                    validate=False,
                 )
-                topk_weights.copy_(selected_weights)
-                topk_ids.copy_(selected_ids)
+                topk_weights = selected_weights
+                topk_ids = selected_ids.to(dtype=topk_ids_dtype)
 
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)

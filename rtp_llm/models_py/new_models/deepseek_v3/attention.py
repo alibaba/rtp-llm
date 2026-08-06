@@ -19,7 +19,11 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.layers.linear import ColumnParallelLinear, RowParallelLinear
+from rtp_llm.models_py.layers.linear import (
+    ColumnParallelLinear,
+    LinearBase,
+    RowParallelLinear,
+)
 from rtp_llm.models_py.layers.norm import RMSNorm
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
@@ -115,24 +119,10 @@ def _dequant_fp8_to_bf16(
     return (w * s).to(torch.bfloat16)
 
 
-def _fp8_block_size(linear: nn.Module) -> tuple[int, int]:
-    quant_config = getattr(linear, "quant_config", None)
-    value = getattr(quant_config, "weight_block_size", (128, 128))
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        raise ValueError(f"Invalid FP8 weight_block_size {value!r}")
-    block_n, block_k = value
-    if any(
-        isinstance(item, bool) or not isinstance(item, int) or item <= 0
-        for item in (block_n, block_k)
-    ):
-        raise ValueError(f"Invalid FP8 weight_block_size {value!r}")
-    return block_n, block_k
-
-
-def _is_fp8_block_scale(linear: nn.Module, scale: torch.Tensor) -> bool:
+def _is_fp8_block_scale(linear: LinearBase, scale: torch.Tensor) -> bool:
     if scale.dim() != 2:
         return False
-    block_n, block_k = _fp8_block_size(linear)
+    block_n, block_k = linear.fp8_scale_block_size()
     expected = (
         math.ceil(linear.weight.shape[0] / block_n),
         math.ceil(linear.weight.shape[1] / block_k),
@@ -140,7 +130,7 @@ def _is_fp8_block_scale(linear: nn.Module, scale: torch.Tensor) -> bool:
     return tuple(scale.shape) == expected
 
 
-def _linear_weight_bf16(linear: nn.Module) -> torch.Tensor:
+def _linear_weight_bf16(linear: LinearBase) -> torch.Tensor:
     """Return a linear's weight as bf16, dequantizing it when it is FP8.
 
     Used by the MLA post-load derivations (fused qkv-a, kc/vc) which run
@@ -159,10 +149,10 @@ def _linear_weight_bf16(linear: nn.Module) -> torch.Tensor:
     scale = _fp8_scale_parameter(linear)
     if scale is None:
         raise RuntimeError(f"fp8 linear {type(linear).__name__} is missing block scale")
-    return _dequant_fp8_to_bf16(w, scale.data, _fp8_block_size(linear))
+    return _dequant_fp8_to_bf16(w, scale.data, linear.fp8_scale_block_size())
 
 
-def _fp8_scale_parameter(linear: nn.Module) -> Optional[nn.Parameter]:
+def _fp8_scale_parameter(linear: LinearBase) -> Optional[nn.Parameter]:
     """Return the registered pre- or post-hook FP8 block scale.
 
     Fp8BlockLinearMethod deliberately renames the registered parameter from
@@ -434,7 +424,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         q_a_scale = _fp8_scale_parameter(self.q_a_proj)
         kv_a_scale = _fp8_scale_parameter(self.kv_a_proj_with_mqa)
         is_hip = torch.version.hip is not None
-        block_n, _ = _fp8_block_size(self.q_a_proj)
+        block_n, _ = self.q_a_proj.fp8_scale_block_size()
         fused_a_block_aligned = self.q_a_proj.weight.shape[0] % block_n == 0
         if (
             self.q_lora_rank > 0

@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -139,16 +140,12 @@ class LinearBase(RtpModule):
         if name == "weight":
             self._main_weight_loaded = True
 
-    def _fp8_scale_block_size(self):
-        value = getattr(
-            self.quant_config, "weight_block_size", [self._FP8_BLOCK, self._FP8_BLOCK]
-        )
-        if not isinstance(value, (list, tuple)) or len(value) != 2:
-            raise ValueError(f"Invalid FP8 weight_block_size {value!r}")
-        block_n, block_k = value
-        _require_positive_int(block_n, "FP8 output block size")
-        _require_positive_int(block_k, "FP8 input block size")
-        return block_n, block_k
+    def _fp8_scale_block_size(self) -> tuple[int, int]:
+        return self.quant_config.fp8_block_size
+
+    def fp8_scale_block_size(self) -> tuple[int, int]:
+        """Public validated FP8 block layout for derived runtime weights."""
+        return self._fp8_scale_block_size()
 
     @staticmethod
     def _ceil_div(x: int, y: int) -> int:

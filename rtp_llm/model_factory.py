@@ -92,6 +92,9 @@ class ModelFactory:
             merge_lora=merge_lora,
             device_resource_config=engine_config.device_resource_config,
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
+            keep_mla_checkpoint_weights=(
+                engine_config.load_config.keep_mla_checkpoint_weights
+            ),
         )
         return model
 
@@ -160,6 +163,9 @@ class ModelFactory:
                 device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
+                keep_mla_checkpoint_weights=(
+                    engine_config.load_config.keep_mla_checkpoint_weights
+                ),
             )
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)

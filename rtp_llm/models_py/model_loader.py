@@ -137,6 +137,7 @@ class NewLoaderConfig:
     ffn_tp_rank: Optional[int] = None
     lm_head_tp_size: Optional[int] = None
     lm_head_tp_rank: Optional[int] = None
+    keep_mla_checkpoint_weights: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.load_method, str):
@@ -206,6 +207,8 @@ class NewLoaderConfig:
             )
         if not isinstance(self.compute_dtype, torch.dtype):
             raise TypeError("compute_dtype must be a torch.dtype")
+        if not isinstance(self.keep_mla_checkpoint_weights, bool):
+            raise TypeError("keep_mla_checkpoint_weights must be a bool")
         _validate_runtime_device(self.device, "device")
         if self.parallelism_config is not None:
             for prefix in ("tp", "ep"):
@@ -503,11 +506,15 @@ class NewModelLoader:
                 try:
                     validator(loaded_tensor_ids)
                 except Exception as exc:
-                    qualified_name = module_name or "<root>"
-                    raise RuntimeError(
-                        f"Weight validation failed for {qualified_name} "
-                        f"({type(module).__name__}): {exc}"
-                    ) from exc
+                    context = (
+                        f"Weight validation failed for {module_name} "
+                        f"({type(module).__name__})"
+                    )
+                    if exc.args:
+                        exc.args = (f"{context}: {exc.args[0]}", *exc.args[1:])
+                    else:
+                        exc.args = (context,)
+                    raise
 
     @staticmethod
     def _run_post_load_hooks(model: nn.Module) -> None:
