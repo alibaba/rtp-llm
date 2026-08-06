@@ -616,7 +616,7 @@ class ModelDeployWeightInfo:
         phy2log: Optional[List[List[int]]] = None,
         exported_device: Optional[Any] = None,
         force_cpu_load_weights: bool = False,
-        moe_pure_tp_preshard: bool = False,
+        moe_pure_tp_preshard: bool = True,
     ):
         merge_lora = False
 

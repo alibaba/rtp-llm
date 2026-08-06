@@ -28,7 +28,7 @@ def init_load_group_args(parser, load_config, model_args):
         bind_to=(load_config, "loader_recycle_handles"),
         type=str2bool,
         default=True,
-        help="仅 ROCm + safetensors 主模型加载生效：关闭已读 shard 句柄以释放 mmap，置假回滚句柄回收",
+        help="ROCm + safetensors 主模型加载时回收已读 shard handle；置假关闭",
     )
     load_group.add_argument(
         "--moe_pure_tp_preshard",
@@ -36,6 +36,5 @@ def init_load_group_args(parser, load_config, model_args):
         bind_to=(load_config, "moe_pure_tp_preshard"),
         type=str2bool,
         default=True,
-        help="pure TP(tp>1,dp=1,ep=1) 下按 rank 切片读取 MoE 专家权重的总闸，"
-        "仅对显式声明支持的权重生效；置假回滚为整张量读取 + 切分",
+        help="pure TP 下预切分已支持的 MoE 权重；置假回滚为全量读取",
     )

@@ -21,12 +21,8 @@ class TestCompressedW4A8Loader(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            # quantize_weight_to_int4b imports rtp_kernel lazily inside its body,
-            # so importing it here would not surface a missing wheel.
             import rtp_kernel.w4a8_group_gemm  # noqa: F401
         except ImportError as e:
-            # Only a missing third-party wheel may skip. The in-repo imports below
-            # stay outside the guard so renames/syntax errors keep failing red.
             raise unittest.SkipTest(
                 f"rtp_kernel.w4a8_group_gemm not available: {e}"
             ) from e

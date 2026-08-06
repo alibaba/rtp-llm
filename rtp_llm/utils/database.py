@@ -113,6 +113,8 @@ class CkptDatabase(BaseDatabase):
             f"CkptDatabase recycle_handles={self._recycle_handles} (asked={recycle_handles},"
             f" copy_out={ckpt_file_info.ROCM_COPY_OUT}, shards={len(self._file_max_layer)})"
         )
+        if self._recycle_handles and not self._file_max_layer:
+            logging.warning("recycle_handles on but no layer-numbered tensors; no-op")
 
     def _recycle_consumed_shards(self, name: str) -> None:
         """Close shards fully below the previous layer (one-layer in-flight slack)."""

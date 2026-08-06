@@ -36,7 +36,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
         os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
         os.environ["LOADER_RECYCLE_HANDLES"] = "false"
-        os.environ["MOE_PURE_TP_PRESHARD"] = "0"
+        os.environ["MOE_PURE_TP_PRESHARD"] = "false"
 
         sys.argv = ["prog"]
 
@@ -78,7 +78,7 @@ class ServerArgsSetTest(TestCase):
 
         # Verify load_config: the flag came from LOADER_RECYCLE_HANDLES=false.
         self.assertFalse(py_env_configs.load_config.loader_recycle_handles)
-        # MOE_PURE_TP_PRESHARD=0 must still parse as a disable.
+        # MOE_PURE_TP_PRESHARD=false must override the True default.
         self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
@@ -151,7 +151,7 @@ class ServerArgsSetTest(TestCase):
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
 
-        # Pins the shipped default: neither env nor argv sets the flag here.
+        # Pins the shipped defaults: neither env nor argv sets the flags here.
         self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
         self.assertTrue(py_env_configs.load_config.moe_pure_tp_preshard)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig

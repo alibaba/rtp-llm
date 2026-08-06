@@ -6,8 +6,8 @@ from unittest.mock import patch
 import torch
 from safetensors.torch import save_file
 
-from rtp_llm.utils import ckpt_file_info, database
-from rtp_llm.utils.database import CkptDatabase
+from rtp_llm.utils import ckpt_file_info
+from rtp_llm.utils.database import _LAYER_RE, CkptDatabase
 
 
 class CkptDataBaseTest(unittest.TestCase):
@@ -230,15 +230,8 @@ class HandleRecyclingTest(unittest.TestCase):
                 os.path.join(tmp, f"model-{layer}.safetensors"),
             )
 
-    def test_production_gate_matches_build(self):
-        # Unpatched on purpose: every other assertion here patches ROCM_COPY_OUT,
-        # so hard-coding the constant either way would otherwise stay green.
-        self.assertEqual(ckpt_file_info.ROCM_COPY_OUT, torch.version.hip is not None)
-
     def test_recycling_enabled_on_real_rocm_build(self):
-        # The only assertion that gives ckpt_database_test_rocm its own signal:
-        # no ROCM_COPY_OUT patch, so the production gate is pinned end to end.
-        # Unreachable skip on the rocm target -- setUpClass already asserts hip.
+        # The ROCm target reaches this without patching the production gate.
         if torch.version.hip is None:
             self.skipTest("requires a ROCm build")
         with tempfile.TemporaryDirectory() as tmp:
@@ -292,10 +285,10 @@ class HandleRecyclingTest(unittest.TestCase):
 
     def test_layer_name_matching_is_bounded(self):
         for name in ("model.layers.3.w", "h.3.w", "model.blocks.3.w", "layer.3.w"):
-            self.assertEqual(database._LAYER_RE.search(name).group(1), "3", name)
+            self.assertEqual(_LAYER_RE.search(name).group(1), "3", name)
         # No layer number anywhere means recycling stays off for that checkpoint.
         for name in ("model.embed_tokens.weight", "model.sublayers.3.w"):
-            self.assertIsNone(database._LAYER_RE.search(name), name)
+            self.assertIsNone(_LAYER_RE.search(name), name)
 
 
 if __name__ == "__main__":

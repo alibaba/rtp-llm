@@ -31,6 +31,7 @@ py_test(
     main = "ckpt_database_test.py",
     args = ["HandleRecyclingTest"],
     deps = ["//rtp_llm:utils", "//rtp_llm:config", "//rtp_llm:_ft_pickler", "//rtp_llm:lora"],
+    data = ["//rtp_llm/utils/test:testdata"],
     env = {"RTP_LLM_REQUIRE_ACCELERATOR": "1"},
     tags = ["rocm"],
     exec_properties = {'gpu': 'MI308X-ROCM7'},

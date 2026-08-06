@@ -19,8 +19,9 @@ from rtp_llm.model_loader.weight_module import (
     QuantWeight,
     WeightModule,
 )
+from rtp_llm.utils import model_weight as mw
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.model_weight import MOE_PURE_TP_LAYOUTS, CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
 class FfnConfig(BaseModel):
@@ -300,6 +301,16 @@ class PreShardedTensor(NamedTuple):
     tensor: torch.Tensor
 
 
+# Keyed by (weight name, process function, checkpoint tensor count).
+_PURE_TP_LAYOUTS = {
+    (W.moe_w2, mw.stack_, 1): (1, (0,), False, mw.sp_moe_neg1),
+    (W.moe_s2, mw.stack_, 1): (1, (0,), False, mw.sp_moe_neg1),
+    (W.moe_w1, mw.stack_moe_w1, 2): (0, (0,), False, mw.sp_moe_w1),
+    (W.moe_s1, mw.stack_moe_w1, 2): (0, (0,), False, mw.sp_moe_w1),
+    (W.moe_w1, mw.transpose_stack_moe_w1, 1): (0, (1, 0), True, mw.sp_moe_w1),
+}
+
+
 class MoeAtomicWeight(AtomicWeight):
     # A pre-sharded tensor reaching an online-quant clone crashes the load;
     # capable clones opt back in (see per_block_fp8_quant_weight).
@@ -379,10 +390,8 @@ class MoeAtomicWeight(AtomicWeight):
         load_config: LoadConfig,
     ):
         raw_tensor = tensor.get(self.name) if isinstance(tensor, dict) else tensor
-        # NOTE: scale (moe_s1/moe_s2) must also go through shuffle_moe_weight to
-        # perform the up/gate cat swap that keeps scale aligned with the kernel
-        # ordering. shuffle_moe_weight internally skips the layout shuffle for
-        # scale (do_shuffle=False) and only performs the swap.
+        # Scale (moe_s1/moe_s2) must also pass shuffle_moe_weight: it applies the
+        # up/gate swap (do_shuffle=False skips the layout shuffle for scale).
         if self.name in [W.moe_w1, W.moe_w2, W.moe_s1, W.moe_s2]:
             raw_tensor = load_config.exported_device.shuffle_moe_weight(
                 raw_tensor, load_config.compute_dtype, self.name
@@ -477,37 +486,45 @@ class MoeAtomicWeight(AtomicWeight):
         device: str,
         load_config: LoadConfig,
     ) -> Optional[torch.Tensor]:
-        supported = (
-            load_config.moe_pure_tp_preshard
-            and self.enable_pure_tp_preshard
-            and load_config.moe_pure_tp_mode
-            and not load_config.merge_lora
-            and layer_id is not None
-            and isinstance(tensor_source, DatabaseTensorSource)
-            and isinstance(tensor_source.get_database(), CkptDatabase)
-            and tensor_source.get_database().is_safetensor
-            and all(weight.merge_fun is identity for weight in self.weights)
-        )
-        layout = MOE_PURE_TP_LAYOUTS.get(
-            (self.name, self.process_fun, len(self.weights))
-        )
-        if not supported or layout is None:
+        if not (load_config.moe_pure_tp_preshard and self.enable_pure_tp_preshard):
             return None
+
+        layout = _PURE_TP_LAYOUTS.get((self.name, self.process_fun, len(self.weights)))
+        database = (
+            tensor_source.get_database()
+            if isinstance(tensor_source, DatabaseTensorSource)
+            else None
+        )
+        log_context = f"{self.name} layer {layer_id}: pre-shard"
+        if (
+            layout is None
+            or not load_config.moe_pure_tp_mode
+            or load_config.merge_lora
+            or layer_id is None
+            or not isinstance(database, CkptDatabase)
+            or not database.is_safetensor
+            or not all(weight.merge_fun is identity for weight in self.weights)
+        ):
+            logging.warning(f"{log_context} unavailable; using legacy read")
+            return None
+
         split_dim, segments, requires_stacked, split_func = layout
         is_stacked = self.stacked_ckpt_keys and tensor_source.has_tensor(
             self.weights[0].tensor_name(layer_id)
         )
-        if requires_stacked and not is_stacked:
+        if (requires_stacked and not is_stacked) or (
+            self._get_split_func() is not split_func
+        ):
+            logging.warning(f"{log_context} fallback: incompatible weight layout")
             return None
-        if self._get_split_func() is not split_func:
-            return None
+
         experts = list(
             load_config.get_selected_experts(layer_id, self.config.expert_num)
         )
         if not experts:
+            logging.warning(f"{log_context} fallback: no experts selected")
             return None
 
-        database = tensor_source.get_database()
         expert_dims = slice(1, None) if is_stacked else slice(None)
 
         def shape_of(weight: CkptWeightInfo, expert: int) -> List[int]:
@@ -517,14 +534,15 @@ class MoeAtomicWeight(AtomicWeight):
         # Metadata-only reads: keep legacy's every-expert shape fail-fast.
         shapes = [shape_of(w, e) for w in self.weights for e in experts]
         expert_shape = shapes[0]
-        if any(shape != expert_shape for shape in shapes) or len(expert_shape) != 2:
+        if len(expert_shape) != 2 or any(shape != expert_shape for shape in shapes):
+            logging.warning(f"{log_context} fallback: incompatible expert shapes")
             return None
+
         divisor = len(segments) * load_config.tp_size
         if expert_shape[split_dim] % divisor:
             logging.warning(
-                f"{self.name} layer {layer_id}: {expert_shape}[{split_dim}] is not"
-                f" divisible by {divisor} (tp_size x segments), falling back to legacy"
-                f" split (which floor-splits and drops the remainder)"
+                f"{log_context} fallback: dimension {expert_shape[split_dim]} is not "
+                f"divisible by tp_size x segments ({divisor})"
             )
             return None
         if layer_id == 0:
@@ -536,13 +554,8 @@ class MoeAtomicWeight(AtomicWeight):
         output_shape[split_dim] = shard_size * len(segments) * len(self.weights)
         dtype = self.data_type or load_config.compute_dtype
         output = torch.empty((len(experts), *output_shape), dtype=dtype, device=device)
-        # Slicing the last dim is a strided safetensors read: stage via scratch.
+        # Strided last-dim safetensors read: read full expert, slice host-side.
         read_full_expert = split_dim == 1
-        scratch = (
-            torch.empty(expert_shape, dtype=dtype, device=device)
-            if read_full_expert
-            else None
-        )
         dst = 0
         full = (slice(None), slice(None))
         for weight in self.weights:
@@ -556,8 +569,7 @@ class MoeAtomicWeight(AtomicWeight):
                     where = (*((expert,) if is_stacked else ()), *read_slice)
                     loaded = database.load_tensor_slice(name, where, dtype)
                     if read_full_expert:
-                        scratch.copy_(loaded)
-                        loaded = scratch[shard_slice]
+                        loaded = loaded[shard_slice].contiguous()
                     output[slot].narrow(split_dim, dst, shard_size).copy_(loaded)
                 dst += shard_size
         return output

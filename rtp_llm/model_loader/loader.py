@@ -46,7 +46,7 @@ class ModelLoader:
         database: BaseDatabase,
         load_method: LoadMethod = LoadMethod.AUTO,
         force_cpu_load_weights: bool = False,
-        moe_pure_tp_preshard: bool = False,
+        moe_pure_tp_preshard: bool = True,
     ):
         self.model_config = model_config
         self._task_type = model_config.task_type
@@ -828,7 +828,7 @@ def get_model_loader(
     database: BaseDatabase,
     load_method: LoadMethod = LoadMethod.AUTO,
     force_cpu_load_weights: bool = False,
-    moe_pure_tp_preshard: bool = False,
+    moe_pure_tp_preshard: bool = True,
 ) -> ModelLoader:
     if weights_info._head_num % weights_info.tp_size != 0:
         raise Exception(

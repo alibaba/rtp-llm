@@ -17,10 +17,7 @@ py_test(
     srcs = ["test_pure_tp_preshard.py"],
     # auto_model: this test imports rtp_llm.models weight infos.
     deps = ["//rtp_llm/models_py/standalone:auto_model"],
-    # CPU-pinned: covers slicing-layout parity against the legacy split only.
-    # NOT covered here (needs an accelerator target): the real exported_device
-    # hooks (shuffle_moe_weight is identity-stubbed), the fp8 empty/copy_ path,
-    # and recycle_handles=True (ROCM_COPY_OUT is False off ROCm).
+    # Accelerator hooks, FP8 device copies, and handle recycling need a GPU target.
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
 
