@@ -84,8 +84,16 @@
           "10000"
         ],
         [
+          "FLEXLB_BATCH_ENQUEUE_DEADLINE_MS",
+          "800"
+        ],
+        [
           "FLEXLB_BATCH_FIXED_WAIT_MS",
           "160"
+        ],
+        [
+          "FLEXLB_BATCH_QUEUE_MAX_SIZE",
+          "128"
         ],
         [
           "FLEXLB_BATCH_PREDICT_THRESHOLD_MS",
@@ -121,7 +129,7 @@
         ],
         [
           "FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES",
-          "-1"
+          "1"
         ],
         [
           "FLEXLB_BATCH_MAX_INFLIGHT",

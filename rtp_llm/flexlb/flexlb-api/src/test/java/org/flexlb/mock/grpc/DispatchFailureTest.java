@@ -35,6 +35,9 @@ class DispatchFailureTest extends FlexLBMockTestBase {
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
+        // Mock workers never release inflight batches — disable backpressure
+        // to keep the original always-dispatch test semantics.
+        cfg.setFlexlbBatchFixedMaxInflightBatches(0);
         return cfg;
     }
 
