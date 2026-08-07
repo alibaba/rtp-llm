@@ -26,6 +26,7 @@
 | `p2pHitDiscount` | 0.2 | KVCM 单远端 P2P 拉取后新增命中 block 的路由折扣；本地命中始终按 1.0 计入 |
 | `shortestTtftSimilarityThresholdRatio` | 0.2 | ttft 相似阈值比例 |
 | `cacheAffinityFirstQueueToleranceFactor` | 2.0 | cache leader 可额外承受的 TTFT：缓存 token 领先量 × cache 折扣 × 该系数 |
+| `cacheAffinityFirstAbsoluteToleranceTokens` | 0 | cache leader 可额外承受 TTFT 的绝对 cache token 容忍值；与 factor 计算值取较大者后再应用 cache 折扣 |
 | `decodeAvailableMemoryThreshold` | 90 | Decode 可用性滞回阈值（%） |
 | `hysteresisBiasPercent` | 15 | Decode 可用性滞回带宽（%） |
 | `scheduleWorkerSize` | CPU 核数 | 调度线程数 = 最大许可数 |

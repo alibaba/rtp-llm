@@ -171,10 +171,13 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
     }
 
     private double calculateToleratedExtraTtft(long cacheLeadTokens, FlexlbConfig config) {
-        // Cache tokens are converted to tolerated time by the cache discount and policy multiplier.
-        return cacheLeadTokens
-                * Math.max(0.0, config.getPrefillCacheHitDiscount())
-                * Math.max(0.0, config.getCacheAffinityFirstQueueToleranceFactor());
+        // Keep both inputs in cache-token units before applying the shared cache-hit discount.
+        double cacheTokenTolerance = Math.max(
+                cacheLeadTokens * Math.max(0.0, config.getCacheAffinityFirstQueueToleranceFactor()),
+                config.getCacheAffinityFirstAbsoluteToleranceTokens());
+
+        // Cache tokens are converted to token-equivalent TTFT tolerance by the configured discount.
+        return cacheTokenTolerance * Math.max(0.0, config.getPrefillCacheHitDiscount());
     }
 
     private record CacheLeaderDecision(ScoredWorker preferredWorker, long cacheLeadTokens,

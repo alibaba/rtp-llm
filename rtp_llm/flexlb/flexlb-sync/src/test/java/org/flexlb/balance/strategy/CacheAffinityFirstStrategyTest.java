@@ -103,6 +103,45 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
+    void usesCacheLeaderWhenAbsoluteTokenToleranceExceedsCacheLeadTolerance() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 13000);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker, thirdWorker),
+                Map.of(
+                        cacheLeader.getIpPort(), 16,
+                        shortestTtftWorker.getIpPort(), 15,
+                        thirdWorker.getIpPort(), 15));
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstAbsoluteToleranceTokens(250000);
+
+        ServerStatus selected = select(strategy, config, "absolute-token-tolerance");
+
+        Assertions.assertEquals(cacheLeader.getIp(), selected.getServerIp());
+    }
+
+    @Test
+    void appliesCacheHitDiscountToAbsoluteTokenTolerance() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 126001);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker, thirdWorker),
+                Map.of(
+                        cacheLeader.getIpPort(), 16,
+                        shortestTtftWorker.getIpPort(), 15,
+                        thirdWorker.getIpPort(), 15));
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setPrefillCacheHitDiscount(0.5);
+        config.setCacheAffinityFirstAbsoluteToleranceTokens(250000);
+
+        ServerStatus selected = select(strategy, config, "absolute-token-discount");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+    }
+
+    @Test
     void usesShortestQueueWhenAllWorkersHaveSameCommonPrefix() {
         WorkerStatus workerA = createWorker("127.0.0.1", 5000);
         WorkerStatus shortestQueueWorker = createWorker("127.0.0.2", 0);

@@ -117,6 +117,13 @@ public class FlexlbConfig {
     private double cacheAffinityFirstQueueToleranceFactor = 2.0;
 
     /**
+     * Absolute cache-token tolerance for additional TTFT in CACHE_AFFINITY_FIRST.
+     * It is compared with the cache lead before both values are discounted to TTFT work.
+     * Zero keeps the tolerance entirely determined by the cache lead and factor.
+     */
+    private long cacheAffinityFirstAbsoluteToleranceTokens = 0;
+
+    /**
      * KV cache available threshold for DECODE role (percentage)
      * When Worker's KV cache usage is below this threshold, the Worker is considered available
      * Range: 1-100, default 90 means Worker is unavailable when usage exceeds 90%

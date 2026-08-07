@@ -97,7 +97,8 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 
 - **终态 TTFT 成本守卫**：每个 worker 的 `ttft` 已包含当前请求的预估 Prefill 时间和已有队列时间。
   计算 cache leader 相对最短 ttft worker 的 `extraTtft`；只有该差异不大于
-  `cacheLeadTokens × prefillCacheHitDiscount × cacheAffinityFirstQueueToleranceFactor(2.0)`
+  `prefillCacheHitDiscount × max(cacheLeadTokens × cacheAffinityFirstQueueToleranceFactor(2.0),
+  cacheAffinityFirstAbsoluteToleranceTokens)`
   且缓存命中更多时，才选 leader
   （`CACHE_LEADER`），否则选最短 ttft（`SHORTEST_TTFT`）。
 - CAS 抢占失败落到其他 worker 时记 `CONCURRENT_FALLBACK`。决策快照（debug 级）写入
