@@ -19,6 +19,7 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
@@ -39,6 +40,7 @@ import java.util.Map;
 import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
@@ -154,6 +156,7 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SCHEDULE_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_AFFINITY_DECISION_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_LOCAL_TASK_MAP_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -470,6 +473,7 @@ public class EngineHealthReporter {
                     // Report specific server selection QPS
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
+                            "strategy", strategyName(ctx, serverStatus.getRole()),
                             "engineIp", serverStatus.getServerIp(),
                             "success", String.valueOf(isSuccess),
                             "code", String.valueOf(code)
@@ -478,6 +482,21 @@ public class EngineHealthReporter {
                 }
             }
         }
+    }
+
+    public void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
+        monitor.report(CACHE_AFFINITY_DECISION_QPS, FlexMetricTags.of(
+                "role", roleType.name(),
+                "engineIp", engineIp,
+                "decision", decision), 1.0);
+    }
+
+    private String strategyName(BalanceContext context, RoleType roleType) {
+        if (context.getConfig() == null) {
+            return "UNKNOWN";
+        }
+        LoadBalanceStrategyEnum strategy = context.getConfig().getStrategyForRoleType(roleType);
+        return strategy == null ? "UNKNOWN" : strategy.getName();
     }
 
     /**

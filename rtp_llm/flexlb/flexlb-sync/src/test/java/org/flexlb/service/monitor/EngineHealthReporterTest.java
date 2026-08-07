@@ -4,8 +4,11 @@ import io.netty.channel.EventLoopGroup;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -15,6 +18,7 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
@@ -24,6 +28,7 @@ import org.junit.jupiter.api.Test;
 import reactor.netty.resources.LoopResources;
 
 import java.util.Map;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -141,6 +146,41 @@ class EngineHealthReporterTest {
         FlexMetricTags expectedTags = FlexMetricTags.of("success", "false");
         verify(monitor).report("app.request.input.ids.count", expectedTags, 512.0);
         verify(monitor).report("app.request.body.bytes", expectedTags, 5_242_881.0);
+    }
+
+    @Test
+    void shouldReportSelectedEngineWithConfiguredStrategy() {
+        ServerStatus serverStatus = new ServerStatus();
+        serverStatus.setRole(RoleType.PREFILL);
+        serverStatus.setServerIp("10.0.0.1");
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(serverStatus));
+        FlexlbConfig config = new FlexlbConfig();
+        config.setLoadBalanceStrategy(LoadBalanceStrategyEnum.CACHE_AFFINITY_FIRST);
+        BalanceContext context = new BalanceContext();
+        context.setConfig(config);
+        context.setResponse(response);
+
+        reporter.reportBalancingService(context);
+
+        verify(monitor).report("app.engine.balancing.master.select.detail", FlexMetricTags.of(
+                "role", "PREFILL",
+                "strategy", "CacheAffinityFirst",
+                "engineIp", "10.0.0.1",
+                "success", "true",
+                "code", "200"), 1.0);
+    }
+
+    @Test
+    void shouldReportCacheAffinityDecisionBySelectedEngine() {
+        reporter.reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");
+
+        verify(monitor).report("app.cache.affinity.decision.qps", FlexMetricTags.of(
+                "role", "PREFILL",
+                "engineIp", "10.0.0.1",
+                "decision", "CACHE_LEADER"), 1.0);
     }
 
     @Test

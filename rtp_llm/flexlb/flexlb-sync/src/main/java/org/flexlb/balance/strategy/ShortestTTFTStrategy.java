@@ -458,6 +458,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 cacheAffinityDecision));
     }
 
+    protected void reportCacheAffinityDecision(RoleType roleType, String engineIp, String decision) {
+        engineHealthReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
+    }
+
     private ShortestTtftDecision buildDecisionSnapshot(
             ScoredWorker selectedWorker,
             List<ScoredWorker> sortedWorkers,

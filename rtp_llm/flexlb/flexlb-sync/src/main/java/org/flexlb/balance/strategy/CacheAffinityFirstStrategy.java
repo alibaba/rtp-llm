@@ -70,6 +70,8 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
                         ? "CACHE_AFFINITY_FALLBACK"
                         : "SHORTEST_TTFT_FALLBACK";
 
+        reportCacheAffinityDecision(roleType, selectedWorker.worker().getIp(), selectionReason);
+
         // Preserve the decision path in the debug snapshot, including a concurrent fallback.
         recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, workersByTtft, List.of(),
                 shortestTtftWorker.ttft(), 0, roleType, group, seqLen, config.getPrefillCacheHitDiscount(),
