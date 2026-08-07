@@ -181,6 +181,8 @@ entirely through environment variables (`Config.fromEnv`):
 | ENABLE_FALLBACK | false | Enable fallback prefill via ENDPOINTS_FILE |
 | ENDPOINTS_FILE | "" | endpoints.json written by JavaMockEngineCluster |
 | DRY_RUN | false | Parse and validate only, no traffic |
+| SEND_MODE | replay | Arrival process: replay (trace ts pacing) / uniform (fixed interval) |
+| SEND_MODE_QPS | 0 | uniform mode total target QPS (per shard = QPS / NUM_SHARDS) |
 
 ## Architecture
 
