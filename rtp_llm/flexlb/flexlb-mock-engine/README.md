@@ -10,7 +10,7 @@ A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU i
 - **HTTP control**: 11 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /metrics)
 - **Inflight leak detection**: 30s periodic check with 60s grace period
 - **KV cache modeling**: LRU cache with prefix matching, pressure simulation
-- **Concurrency modeling**: Prefill serial (1 per DP rank), decode parallel (up to 132 concurrent)
+- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
 
 ## Quick Start
 
@@ -30,9 +30,11 @@ bash run_online_eval.sh
 |-----|---------|-------------|
 | sleep_scale | 1.0 | Global timing multiplier (0.1=fast, 1.0=realistic) |
 | prefill.fixed_ms | null | Fixed prefill latency (bypasses formula) |
+| prefill.min_ms | null | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast |
 | prefill.scale | 1.0 | Prefill-specific multiplier |
 | decode.scale | 1.0 | Decode-specific multiplier |
 | decode.step_ms_by_batch | [[1,1.0],...] | Per-step latency by batch size |
+| decode.per_token_ms | null | Fixed per-token decode latency (ms); when set, overrides step_ms_by_batch curve (e.g. 45.0 ≈ DeepSeek V3 ~22 tok/s) |
 | jitter_pct | 0.0 | Random jitter (±%) |
 
 ### Runtime HTTP API
@@ -51,6 +53,12 @@ bash run_online_eval.sh
 | /requests | GET | List recent request/task records |
 
 The control server listens on `baseGrpcPort - 1` of the mock cluster.
+
+**Decode pending-queue capacity**: when `queue_depth_limit` is not explicitly set (via
+`/set_queue_depth` or fault injection), the effective decode pending cap defaults to
+`max(256, decode_max_concurrency × 2)`. This bounds the decode wait queue so that
+under overload the engine rejects excess requests with backpressure rather than
+queuing unbounded. Use `/set_queue_depth` to override at runtime.
 
 **Monitoring / Prometheus target contract**: since the Java rewrite the whole
 cluster is a single process and `/metrics` is served **only** on the control
