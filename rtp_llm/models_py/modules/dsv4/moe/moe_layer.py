@@ -226,9 +226,10 @@ class MoE(nn.Module):
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
         # Strategies that fold the shared expert into their routed kernel
-        # (MegaMoEFusedStrategy) own the shared-expert weights themselves and
-        # produce ``routed + shared`` directly; the MoE layer then skips its
-        # standalone shared-expert executor and the combine add.
+        # (MegaMoEFusedStrategy / MegaMoEStrategySE) own the shared-expert
+        # weights themselves and produce ``routed + shared`` directly; the
+        # MoE layer then skips its standalone shared-expert executor and the
+        # combine add.
         self._routed_includes_shared = bool(
             getattr(strategy_cls, "routed_includes_shared", False)
         )
@@ -263,10 +264,9 @@ class MoE(nn.Module):
         # (e.g. LocalLoopStrategy.experts ModuleList) propagate through
         # ``MoE.to(device)``.
         self._strategy = strategy_cls(cfg)
-        self._gate_pack_static = (
-            os.environ.get("MOEDBG", "0") == "0"
-            and self._strategy.can_use_gate_pack_static(self.gate)
-        )
+        self._gate_pack_static = os.environ.get(
+            "MOEDBG", "0"
+        ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(layer_weights)
