@@ -1,5 +1,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <memory>
+#include <optional>
+
+#include <c10/core/InferenceMode.h>
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
@@ -9,19 +13,22 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 // Single wrapper for both prefill and decode tests; init_prefill / init_decode
-// build GraphParams and call CudaGraphRunner factory methods.
+// build GraphParams and call the test-only factories on CudaGraphRunner.
 // Plain pybind11 class (no torch::jit::CustomClassHolder) so the module loads without
 // depending on torch's registered CustomClassHolder type.
 class CudaGraphTestRunner {
 public:
-    void init_prefill(py::object               py_instance,
-                      int64_t                  max_context_batch_size,
-                      int64_t                  max_seq_len,
-                      int64_t                  tokens_per_block,
-                      int64_t                  kernel_tokens_per_block,
-                      std::vector<int>         prefill_capture_seq_lens,
-                      int64_t                  hidden_size,
-                      std::vector<std::string> group_tags) {
+    void init_prefill(py::object                   py_instance,
+                      int64_t                      max_context_batch_size,
+                      int64_t                      max_seq_len,
+                      int64_t                      tokens_per_block,
+                      int64_t                      kernel_tokens_per_block,
+                      std::vector<int>             prefill_capture_seq_lens,
+                      int64_t                      hidden_size,
+                      std::vector<std::string>     group_tags,
+                      std::optional<torch::Tensor> position_encoding,
+                      std::optional<torch::Tensor> token_type_embedding,
+                      float                        input_embedding_scalar) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = true;
@@ -35,8 +42,11 @@ public:
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
         params.kv_cache_group_tags          = std::move(group_tags);
-
-        runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
+        runner_.reset(CudaGraphRunner::createForPrefill(std::move(py_instance),
+                                                        std::move(params),
+                                                        std::move(position_encoding),
+                                                        std::move(token_type_embedding),
+                                                        input_embedding_scalar));
     }
 
     void init_decode(py::object               py_instance,
@@ -62,42 +72,48 @@ public:
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags          = std::move(group_tags);
         params.is_target_verify             = is_target_verify;
-
-        runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
+        runner_.reset(CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params)));
     }
 
     bool canRun(torch_ext::PyModelInputs& inputs) {
-        return runner_ != nullptr && runner_->canRun(inputs, state_);
+        TORCH_CHECK(runner_ != nullptr, "runner is not initialized");
+        return runner_->canRun(inputs, state_);
+    }
+
+    void prepareAttentionInputs(torch_ext::PyModelInputs& inputs) {
+        TORCH_CHECK(runner_ != nullptr, "runner is not initialized");
+        c10::InferenceMode inference_guard(true);
+        buildDeviceMirrors(inputs);
+        runner_->prepareAttentionInputs(inputs, state_, false);
     }
 
     torch_ext::PyModelOutputs forward(torch_ext::PyModelInputs& inputs) {
+        TORCH_CHECK(runner_ != nullptr, "runner is not initialized");
+        buildDeviceMirrors(inputs);
+        return runner_->forward(inputs, state_);
+    }
+
+    int getCurrentRealGraphSize() {
+        TORCH_CHECK(runner_ != nullptr, "runner is not initialized");
+        return runner_->getCurrentRealGraphBs(state_);
+    }
+
+private:
+    void buildDeviceMirrors(torch_ext::PyModelInputs& inputs) {
         // Production PyWrappedModel creates these device mirrors. Python tests
         // cannot assign them because the bindings intentionally expose them as
         // read-only, so reproduce that input-building step in the test wrapper.
         inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
         inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
         refreshTaggedAttentionInputs(inputs);
-        return runner_->forward(inputs, state_);
     }
 
-    int getCurrentRealGraphSize() {
-        return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
-    }
-
-    ~CudaGraphTestRunner() {
-        reset_runner();
-    }
-
-private:
     void reset_runner() {
-        if (runner_ != nullptr) {
-            delete runner_;
-            runner_ = nullptr;
-        }
+        runner_.reset();
     }
 
-    CudaGraphRunner* runner_ = nullptr;
-    CudaGraphState   state_{};
+    std::unique_ptr<CudaGraphRunner> runner_;
+    CudaGraphState                   state_{};
 };
 
 }  // namespace rtp_llm
@@ -115,7 +131,10 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags") = std::vector<std::string>{})
+             py::arg("group_tags")             = std::vector<std::string>{},
+             py::arg("position_encoding")      = std::nullopt,
+             py::arg("token_type_embedding")   = std::nullopt,
+             py::arg("input_embedding_scalar") = 1.0f)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -128,6 +147,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("is_target_verify")  = false,
              py::arg("num_tokens_per_bs") = 1)
         .def("canRun", &CudaGraphTestRunner::canRun)
+        .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
 }

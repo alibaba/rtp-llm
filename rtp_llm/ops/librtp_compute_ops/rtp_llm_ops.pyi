@@ -257,11 +257,11 @@ def dispose_communicator(comm_ptr: int) -> None:
     """
 def embedding(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, position_ids: torch.Tensor | None = None, token_type_ids: torch.Tensor | None = None, text_tokens_mask: torch.Tensor | None = None) -> None:
     """
-    Embedding lookup kernel
+    Embedding lookup kernel. position_ids and token_type_ids are retained for compatibility and ignored.
     """
-def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, combo_position_ids: torch.Tensor, position_encoding: torch.Tensor, combo_tokens_type_ids: torch.Tensor, token_type_embedding: torch.Tensor, input_embedding_scalar: float = 1.0) -> None:
+def embedding_bert(output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, combo_position_ids: torch.Tensor, position_encoding: torch.Tensor, combo_tokens_type_ids: torch.Tensor, token_type_embedding: torch.Tensor, input_embedding_scalar: float = 1.0, text_tokens_mask: torch.Tensor | None = None) -> None:
     """
-    EmbeddingBert lookup kernel
+    EmbeddingBert lookup kernel; text_tokens_mask=0 skips word-embedding lookup for that token
     """
 def fast_topk_transform_fused(score: torch.Tensor, lengths: torch.Tensor, dst_page_table: torch.Tensor, src_page_table: torch.Tensor | None = None, cu_seqlens_q: torch.Tensor, row_starts: torch.Tensor | None = None) -> None:
     """

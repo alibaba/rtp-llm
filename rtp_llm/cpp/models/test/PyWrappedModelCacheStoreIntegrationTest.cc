@@ -389,6 +389,27 @@ Scenario makeMicroBatchScenario() {
     return scenario;
 }
 
+Scenario makeMicroBatchFallbackScenario(const std::string& signal) {
+    auto       scenario    = makeMicroBatchScenario();
+    const auto token_count = scenario.inputs.combo_tokens.numel();
+    if (signal == "bert_ids") {
+        scenario.inputs.combo_tokens_type_ids = pinnedTensor(std::vector<int32_t>(token_count, 0), {token_count});
+    } else if (signal == "text_mask") {
+        scenario.inputs.text_tokens_mask = pinnedTensor(std::vector<int32_t>(token_count, 1), {token_count});
+    } else if (signal == "features") {
+        scenario.inputs.multimodal_features =
+            std::vector<torch::Tensor>{torch::zeros({1, 1}, torch::TensorOptions().dtype(torch::kFloat16))};
+    } else if (signal == "locs") {
+        scenario.inputs.mm_features_locs = pinnedTensor({0}, {1});
+    } else if (signal == "extra") {
+        scenario.inputs.mm_extra_input =
+            std::vector<torch::Tensor>{torch::zeros({1, 1}, torch::TensorOptions().dtype(torch::kFloat16))};
+    } else {
+        throw std::invalid_argument("unknown micro-batch fallback signal: " + signal);
+    }
+    return scenario;
+}
+
 Scenario makeContextParallelScenario() {
     auto     config = makeCacheConfig({{"default", 2, 16}});
     auto     layout = makeLayout(config);
@@ -437,6 +458,10 @@ Scenario makeScenario(const std::string& name) {
     }
     if (name == "micro_batch") {
         return makeMicroBatchScenario();
+    }
+    const std::string micro_batch_fallback_prefix = "micro_batch_fallback_";
+    if (name.rfind(micro_batch_fallback_prefix, 0) == 0) {
+        return makeMicroBatchFallbackScenario(name.substr(micro_batch_fallback_prefix.size()));
     }
     if (name == "cp_actual_lengths") {
         return makeContextParallelScenario();

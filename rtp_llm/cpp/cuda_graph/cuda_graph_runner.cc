@@ -1,9 +1,10 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
-#include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_replay_contracts.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -61,6 +62,18 @@ bool streamAsyncReplayPrepEnabled() {
         return is_on("RTP_LLM_STREAM_ASYNC") || is_on("RTP_LLM_MTP_ASYNC_PREPARE");
     }();
     return enabled;
+}
+
+// Fallback counters are logged on the first hit and then at powers of two: the
+// count stays monotonic and observable without flooding the request hot path.
+struct FallbackTick {
+    uint64_t count;
+    bool     should_log;
+};
+
+FallbackTick tickFallback(std::atomic<uint64_t>& counter) {
+    const uint64_t count = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+    return {count, (count & (count - 1)) == 0};
 }
 
 void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
@@ -192,8 +205,8 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputData");
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto& py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    const int token_num   = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
+    auto&     py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    const int token_num       = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
     optimizedCopyAsync(inputs.input_ids, py_model_inputs.input_ids, token_num * sizeof(int));
     if (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0) {
@@ -277,7 +290,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // async strided D2H copy that the pre-callPrepareCudaGraph synchronize below
     // waits for; host sources keep main's synchronous row-by-row memcpy.
     bool pending_host_mirror_d2h = false;
-    auto stridedCopyHost = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst) {
+    auto stridedCopyHost         = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() <= 0 || !dst.defined() || dst.is_cuda())
             return;
         if (src.is_cuda()) {
@@ -326,16 +339,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
     }
     if (is_prefill_cuda_graph_mode_) {
-        addCudaGraphPrepareFillRegion(fill_params,
-                                      py_model_inputs_.attention_inputs.prefix_lengths_device,
-                                      state.current_batch_size,
-                                      max_bs_,
-                                      0);
-        addCudaGraphPrepareFillRegion(fill_params,
-                                      py_model_inputs_.attention_inputs.input_lengths_device,
-                                      state.current_batch_size,
-                                      max_bs_,
-                                      0);
+        addCudaGraphPrepareFillRegion(
+            fill_params, py_model_inputs_.attention_inputs.prefix_lengths_device, state.current_batch_size, max_bs_, 0);
+        addCudaGraphPrepareFillRegion(
+            fill_params, py_model_inputs_.attention_inputs.input_lengths_device, state.current_batch_size, max_bs_, 0);
         addCudaGraphPrepareFillRegion(fill_params,
                                       py_model_inputs_.attention_inputs.cu_seqlens_device,
                                       state.current_batch_size + 1,
@@ -406,16 +413,40 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         tryAddD2DCopy(inputs.attention_inputs.decode_cu_seqlens_device,
                       py_model_inputs_.attention_inputs.decode_cu_seqlens_device,
                       (state.current_batch_size + 1) * sizeof(int));
-    } else {
-        // D2D copy
-        if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
-            tryAddD2DCopy(inputs.bert_embedding_inputs.combo_position_ids,
-                          py_model_inputs_.bert_embedding_inputs.combo_position_ids,
-                          state.current_seq_len * sizeof(int));
-            tryAddD2DCopy(inputs.bert_embedding_inputs.combo_tokens_type_ids,
-                          py_model_inputs_.bert_embedding_inputs.combo_tokens_type_ids,
-                          state.current_seq_len * sizeof(int));
-        }
+    } else if (hasBothBertEmbeddingTables(py_model_inputs_.bert_embedding_inputs.position_encoding,
+                                          py_model_inputs_.bert_embedding_inputs.token_type_embedding)) {
+        // Bert embedding tables and scalar are capture-time constants, while
+        // position/type IDs are dynamic request inputs. Gate the copy on the
+        // captured model capability rather than request table presence.
+        const auto& source_bert      = inputs.bert_embedding_inputs;
+        auto&       destination_bert = py_model_inputs_.bert_embedding_inputs;
+        // canReplaySelectedGraph has already rejected incompatible request IDs.
+        // Keep these checks as defensive assertions for direct forward callers.
+        RTP_LLM_CHECK_WITH_INFO(
+            validateBertReplayIdBuffersForCopy(source_bert.combo_position_ids,
+                                               destination_bert.combo_position_ids,
+                                               source_bert.combo_tokens_type_ids,
+                                               destination_bert.combo_tokens_type_ids,
+                                               static_cast<size_t>(state.current_seq_len)),
+            "Bert position/type IDs are incompatible with CUDA graph replay: required=%d, "
+            "src_position_numel=%lld, dst_position_numel=%lld, src_type_numel=%lld, dst_type_numel=%lld",
+            state.current_seq_len,
+            source_bert.combo_position_ids.defined() ? static_cast<long long>(source_bert.combo_position_ids.numel()) :
+                                                       -1LL,
+            destination_bert.combo_position_ids.defined() ?
+                static_cast<long long>(destination_bert.combo_position_ids.numel()) :
+                -1LL,
+            source_bert.combo_tokens_type_ids.defined() ?
+                static_cast<long long>(source_bert.combo_tokens_type_ids.numel()) :
+                -1LL,
+            destination_bert.combo_tokens_type_ids.defined() ?
+                static_cast<long long>(destination_bert.combo_tokens_type_ids.numel()) :
+                -1LL);
+        tryAddD2DCopy(
+            source_bert.combo_position_ids, destination_bert.combo_position_ids, state.current_seq_len * sizeof(int));
+        tryAddD2DCopy(source_bert.combo_tokens_type_ids,
+                      destination_bert.combo_tokens_type_ids,
+                      state.current_seq_len * sizeof(int));
     }
 
     // Multi-group cache: collect group-local block tables by stable topology tag.
@@ -429,8 +460,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined()
-                && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
+            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
                 dst_inputs.kv_cache_kernel_block_id.zero_();
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
@@ -604,8 +634,7 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             RTP_LLM_CHECK_WITH_INFO(dst_it != py_model_inputs.attention_inputs_by_tag.end(),
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
-            add_block_table(src_inputs.kv_cache_kernel_block_id_device,
-                            dst_it->second.kv_cache_kernel_block_id_device);
+            add_block_table(src_inputs.kv_cache_kernel_block_id_device, dst_it->second.kv_cache_kernel_block_id_device);
         }
     }
     fusedCopy(d2d_copies);
@@ -729,10 +758,8 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
     size_t      copy_numel            = 0;
     const auto& captured_position_ids = graph_it->second.mem_hold_.py_model_inputs_.combo_position_ids;
     if (!validateComboPositionIds(inputs, state, captured_position_ids, copy_numel)) {
-        const uint64_t fallback_count = combo_position_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-        // Log the first fallback and then at powers of two. This keeps the
-        // decode hot path quiet while retaining a monotonic, observable count.
-        if ((fallback_count & (fallback_count - 1)) == 0) {
+        const FallbackTick tick = tickFallback(combo_position_fallback_log_count_);
+        if (tick.should_log) {
             RTP_LLM_LOG_WARNING(
                 "combo_position_ids are incompatible with CUDA graph key %d: factor=%d, src_numel=%lld, "
                 "dst_numel=%lld; fallback to normal run (fallback_count=%llu)",
@@ -740,15 +767,57 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
                 position_id_len_factor_,
                 inputs.combo_position_ids.defined() ? static_cast<long long>(inputs.combo_position_ids.numel()) : -1LL,
                 captured_position_ids.defined() ? static_cast<long long>(captured_position_ids.numel()) : -1LL,
-                static_cast<unsigned long long>(fallback_count));
+                static_cast<unsigned long long>(tick.count));
         }
         return false;
+    }
+    const auto& captured_inputs = graph_it->second.mem_hold_.py_model_inputs_;
+    if (is_prefill_cuda_graph_mode_
+        && hasBothBertEmbeddingTables(captured_inputs.bert_embedding_inputs.position_encoding,
+                                      captured_inputs.bert_embedding_inputs.token_type_embedding)) {
+        const auto& source_bert      = inputs.bert_embedding_inputs;
+        const auto& destination_bert = captured_inputs.bert_embedding_inputs;
+        if (!validateBertReplayIdBuffersForCopy(source_bert.combo_position_ids,
+                                                destination_bert.combo_position_ids,
+                                                source_bert.combo_tokens_type_ids,
+                                                destination_bert.combo_tokens_type_ids,
+                                                static_cast<size_t>(state.current_seq_len))) {
+            const FallbackTick tick = tickFallback(bert_replay_id_fallback_log_count_);
+            if (tick.should_log) {
+                RTP_LLM_LOG_WARNING("Bert position/type IDs are incompatible with CUDA graph replay: "
+                                    "required=%d, position_numel=%lld, token_type_numel=%lld; fallback to normal run "
+                                    "(fallback_count=%llu)",
+                                    state.current_seq_len,
+                                    source_bert.combo_position_ids.defined() ?
+                                        static_cast<long long>(source_bert.combo_position_ids.numel()) :
+                                        -1LL,
+                                    source_bert.combo_tokens_type_ids.defined() ?
+                                        static_cast<long long>(source_bert.combo_tokens_type_ids.numel()) :
+                                        -1LL,
+                                    static_cast<unsigned long long>(tick.count));
+            }
+            return false;
+        }
     }
     return true;
 }
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
+    struct PreparedStateGuard {
+        std::atomic<bool>& prepared;
+        bool               replayable{false};
+        ~PreparedStateGuard() {
+            if (!replayable) {
+                prepared.store(false, std::memory_order_release);
+            }
+        }
+    } prepared_state_guard{prepared_attention_inputs_};
+
+    if (!enable_cuda_graph_) {
+        return false;
+    }
+
     if (kv_cache_group_tags_.size() > 1) {
         if (inputs.attention_inputs_by_tag.size() != kv_cache_group_tags_.size()) {
             RTP_LLM_LOG_WARNING("Tagged kv cache size mismatch: inputs=%zu, captured=%zu, fallback to normal run.",
@@ -767,10 +836,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         return false;
     }
 
-    // Check if this is speculative sampling:
-    // 1. prefix_lengths is not empty
-    // 2. all values in input_lengths are the same
-    // this is for 2.2.1
+    bool graph_selected = false;
     if (is_target_verify_) {
         if (!inputs.attention_inputs.is_target_verify) {
             return false;
@@ -779,27 +845,55 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             RTP_LLM_LOG_WARNING("Target-verify CUDA graph requires prefill attention inputs, fallback to normal run.");
             return false;
         }
-        // Target-verify must also respect captured decode range. Otherwise we
-        // may replay an uncaptured graph key.
-        return tryGetRealGraphDecodeBatchSize(inputs, state) && canReplaySelectedGraph(inputs, state);
+        graph_selected = tryGetRealGraphDecodeBatchSize(inputs, state);
+    } else {
+        if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_) {
+            return false;
+        }
+        graph_selected = is_prefill_cuda_graph_mode_ ? tryGetRealGraphPrefillSeqLen(inputs, state) :
+                                                       tryGetRealGraphDecodeBatchSize(inputs, state);
+        if (graph_selected && is_prefill_cuda_graph_mode_) {
+            RTP_LLM_LOG_DEBUG("prefill cuda graph replay seq_len key %d", state.current_real_graph_seq_len);
+        }
     }
-
-    if (!enable_cuda_graph_ || (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_)) {
+    if (!graph_selected) {
         return false;
     }
 
-    if (is_prefill_cuda_graph_mode_) {
-        if (!tryGetRealGraphPrefillSeqLen(inputs, state)) {
-            return false;
+    // Multimodal injection depends on request-owned tensors that are not copied
+    // into captured graph inputs. This is unsafe for every model using the
+    // shared injector, so gate on the data contract rather than model identity.
+    const bool has_multimodal_features = !inputs.multimodal_inputs.multimodal_features.empty();
+    const bool has_multimodal_locs =
+        inputs.multimodal_inputs.mm_features_locs.defined() && inputs.multimodal_inputs.mm_features_locs.numel() > 0;
+    const bool has_multimodal_extra = !inputs.multimodal_inputs.mm_extra_input.empty();
+    const bool has_text_tokens_mask =
+        inputs.embedding_inputs.text_tokens_mask.defined() && inputs.embedding_inputs.text_tokens_mask.numel() > 0;
+    const bool has_request_owned_multimodal_input =
+        has_multimodal_features || has_multimodal_locs || has_multimodal_extra || has_text_tokens_mask;
+    if (has_request_owned_multimodal_input) {
+        // These tensors are not copied into captured inputs. Even an all-one
+        // mask is conservatively treated as request-owned because inspecting
+        // its values here would synchronize the CUDA request hot path.
+        // combo_tokens_type_ids is intentionally excluded: EmbeddingExecutor
+        // always supplies it, Bert consumes the separately copied
+        // bert_embedding_inputs IDs, and treating it as a multimodal signal
+        // would disable CUDA graph for every embedding request.
+        const FallbackTick tick = tickFallback(multimodal_input_fallback_log_count_);
+        if (tick.should_log) {
+            RTP_LLM_LOG_WARNING("request-owned multimodal inputs are incompatible with CUDA graph replay: "
+                                "features=%d, locs=%d, extra=%d, text_tokens_mask=%d; fallback to normal run "
+                                "(fallback_count=%llu)",
+                                has_multimodal_features,
+                                has_multimodal_locs,
+                                has_multimodal_extra,
+                                has_text_tokens_mask,
+                                static_cast<unsigned long long>(tick.count));
         }
-        // current_real_graph_seq_len is always *it from lower_bound within capture_range_
-        RTP_LLM_LOG_DEBUG("prefill cuda graph replay seq_len key %d", state.current_real_graph_seq_len);
-    } else {
-        if (!tryGetRealGraphDecodeBatchSize(inputs, state)) {
-            return false;
-        }
+        return false;
     }
-    return canReplaySelectedGraph(inputs, state);
+    prepared_state_guard.replayable = canReplaySelectedGraph(inputs, state);
+    return prepared_state_guard.replayable;
 }
 
 void CudaGraphRunner::initKernelInternalMemory() {
@@ -944,7 +1038,12 @@ void CudaGraphRunner::setInputEmbeddingScalar(float input_embedding_scalar) {
     input_embedding_scalar_ = input_embedding_scalar;
 }
 
-void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token) {
+void CudaGraphRunner::initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs) {
+    // A position or token-type table can exist independently on non-Bert
+    // models. Only the complete pair identifies the Bert embedding contract.
+    if (!hasBothBertEmbeddingTables(position_encoding_, token_type_embedding_)) {
+        return;
+    }
     auto options_cuda_int32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
     // Initialize BertEmbeddingInputs for capture
     // combo_position_ids: empty tensor for capture (will be filled during actual forward)
@@ -1007,7 +1106,7 @@ void CudaGraphRunner::initCapture() {
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
         // Setup BertEmbedding inputs using the extracted function
-        initCaptureBertEmbeddingInputs(inputs, max_bs_, max_num_token_);
+        initCaptureBertEmbeddingInputs(inputs, max_bs_);
 
         torch::Tensor output;
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
@@ -1226,14 +1325,25 @@ CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs
                              is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
 }
 
-CudaGraphRunner* CudaGraphRunner::createForPrefill(py::object py_instance, GraphParams params) {
+CudaGraphRunner* CudaGraphRunner::createForPrefill(py::object                   py_instance,
+                                                   GraphParams                  params,
+                                                   std::optional<torch::Tensor> position_encoding,
+                                                   std::optional<torch::Tensor> token_type_embedding,
+                                                   float                        input_embedding_scalar) {
     params.enable_cuda_graph = true;
     if (params.num_tokens_per_bs == 0) {
         params.num_tokens_per_bs = params.max_seq_len;
     }
-    CudaGraphRunner* runner = new CudaGraphRunner(params, std::move(py_instance));
+    auto runner = std::make_unique<CudaGraphRunner>(params, std::move(py_instance));
+    if (position_encoding.has_value()) {
+        runner->setPositionEncoding(std::move(position_encoding.value()));
+    }
+    if (token_type_embedding.has_value()) {
+        runner->setTokenTypeEmbedding(std::move(token_type_embedding.value()));
+    }
+    runner->setInputEmbeddingScalar(input_embedding_scalar);
     runner->initCapture();
-    return runner;
+    return runner.release();
 }
 
 CudaGraphRunner* CudaGraphRunner::createForDecode(py::object py_instance, GraphParams params) {
@@ -1241,9 +1351,9 @@ CudaGraphRunner* CudaGraphRunner::createForDecode(py::object py_instance, GraphP
     if (params.num_tokens_per_bs == 0) {
         params.num_tokens_per_bs = 1;
     }
-    CudaGraphRunner* runner = new CudaGraphRunner(params, std::move(py_instance));
+    auto runner = std::make_unique<CudaGraphRunner>(params, std::move(py_instance));
     runner->initCapture();
-    return runner;
+    return runner.release();
 }
 
 }  // namespace rtp_llm
