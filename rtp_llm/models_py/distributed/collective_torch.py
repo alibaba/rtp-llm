@@ -645,6 +645,12 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     return _group_map[group_key]
 
 
+def get_process_group(group: Group) -> torch.distributed.ProcessGroup:
+    """Return RTP's initialized process group for fused collective operators."""
+
+    return _get_group(group)
+
+
 # 需要注意：调用 send/recv 时如果某些 rank 没有操作，就没有对应的 ncclgroupstart/ncclgroupend
 # 这样直接使用 torch 的 send/recv 是错误的。
 def send(tensor: torch.Tensor, dst: int, group: Group) -> None:

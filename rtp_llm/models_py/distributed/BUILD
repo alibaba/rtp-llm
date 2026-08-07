@@ -16,6 +16,13 @@ py_library(
 )
 
 py_library(
+    name = "fused_all_gather_matmul",
+    srcs = ["fused_all_gather_matmul.py"],
+    deps = ["//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "deepep_wrapper",
     srcs = ["deepep_wrapper.py"],
     deps = [

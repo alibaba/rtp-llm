@@ -97,6 +97,8 @@ Optional environment variables:
                                          flashmla; Decode defaults to kernel
   KIMI_K3_PERF_FUSIONS                  optimized TP8/EP8 defaults to 1;
                                          all other modes/topologies default to 0
+  KIMI_K3_FUSED_AG_GEMM                 auto|off|force; defaults to auto;
+                                         Prefill global M<64K always uses NCCL
   KIMI_K3_BATCHED_KDA_DECODE            optimized TP8/EP8 Decode defaults to 1;
                                          all other modes/topologies default to 0
   KIMI_K3_PERF_MODE                     strict performance-path validation only
@@ -391,6 +393,7 @@ kda_backend="${KIMI_K3_KDA_BACKEND:-${default_kda_backend}}"
 moe_backend="${KIMI_K3_MOE_BACKEND:-${default_moe_backend}}"
 mla_backend="${KIMI_K3_MLA_BACKEND:-${default_mla_backend}}"
 perf_fusions="${KIMI_K3_PERF_FUSIONS:-${default_perf_fusions}}"
+fused_ag_gemm="${KIMI_K3_FUSED_AG_GEMM:-auto}"
 batched_kda_decode="${KIMI_K3_BATCHED_KDA_DECODE:-${default_batched_kda_decode}}"
 perf_mode="${KIMI_K3_PERF_MODE:-0}"
 accuracy_mode="${KIMI_K3_ACCURACY_MODE:-${default_accuracy_mode}}"
@@ -596,8 +599,11 @@ export KIMI_K3_MLA_BACKEND="${mla_backend}"
 export KIMI_K3_USE_HOST_METADATA="${use_host_metadata}"
 export KIMI_K3_SP_MOE="${sp_moe}"
 export KIMI_K3_PERF_FUSIONS="${perf_fusions}"
+export KIMI_K3_FUSED_AG_GEMM="${fused_ag_gemm}"
 export KIMI_K3_BATCHED_KDA_DECODE="${batched_kda_decode}"
 export KIMI_K3_PERF_MODE="${perf_mode}"
+[[ "${KIMI_K3_FUSED_AG_GEMM}" =~ ^(auto|off|force)$ ]] \
+    || die "KIMI_K3_FUSED_AG_GEMM must be auto, off, or force"
 export KIMI_K3_FASTSAFETENSORS_STREAMING="${KIMI_K3_FASTSAFETENSORS_STREAMING:-1}"
 export KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH="${KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH:-1}"
 [[ "${KIMI_K3_FASTSAFETENSORS_STREAMING}" == "0" \
@@ -757,6 +763,7 @@ echo "  MoE backend:     ${moe_backend}"
 echo "  MLA backend:     ${mla_backend}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
 echo "  perf fusions:    ${perf_fusions}"
+echo "  fused AG/GEMM:   ${fused_ag_gemm}"
 echo "  batched KDA:     ${batched_kda_decode}"
 echo "  perf validation: ${perf_mode}"
 echo "  concurrency:     generate=${concurrency_limit}, context=${max_context_batch_size}"

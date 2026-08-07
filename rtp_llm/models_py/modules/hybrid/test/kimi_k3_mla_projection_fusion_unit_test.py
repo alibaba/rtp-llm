@@ -11,6 +11,7 @@ from rtp_llm.models.kimi_k3.kimi_k3 import KimiK3ModelConfig
 from rtp_llm.models.kimi_k3.kimi_k3_weight import _merge_mla_input_projections
 from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3MLA
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
+from rtp_llm.utils.model_weight import W
 
 
 class _CountingProjection(nn.Module):
@@ -39,9 +40,11 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         module.use_output_gate = True
         module._mla_backend = "kernel"
         module._accuracy_full_weight_cache = {}
+        module._sp_prefill_input_is_sharded = False
         projection = _CountingProjection(torch.randn(5, 14))
         module.fused_qkv_a_proj = projection
         module._packed_qkv_gate_w = projection.weight
+        module.weights = {W.mla_fusedqkrope_w: projection.weight}
         return module, projection
 
     def test_loader_packs_replicated_latents_and_local_gate(self) -> None:
@@ -131,6 +134,44 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
             clear=False,
         ):
             self.assertTrue(module._use_source_projection_boundaries())
+
+    def test_sharded_accuracy_gathers_before_source_projections(self) -> None:
+        module, projection = self._projection_module()
+        module.attn_tp_size = 2
+        module._sp_prefill_input_is_sharded = True
+        local_hidden = torch.randn(3, 5)
+        gathered_hidden = torch.randn(6, 5)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "KIMI_K3_PERF_FUSIONS": "0",
+                    "KIMI_K3_ACCURACY_CANONICAL_TP": "0",
+                    "KIMI_K3_ACCURACY_CANONICAL_MLA": "0",
+                    "KIMI_K3_ACCURACY_LOCAL_EAGER_MLA": "0",
+                    "KIMI_K3_ACCURACY_TRACE_DIR": "",
+                },
+                clear=False,
+            ),
+            patch.object(
+                kimi_k3,
+                "_prefill_all_gather_input",
+                return_value=gathered_hidden,
+            ) as gather,
+            patch.object(kimi_k3, "_linear", wraps=kimi_k3._linear) as linear,
+        ):
+            qkv_a, output_gate = module._project_qkv_a_input(local_hidden)
+
+        gather.assert_called_once_with(local_hidden, 2)
+        self.assertEqual(linear.call_count, 3)
+        expected_q = torch.mm(gathered_hidden, projection.weight[:, :3])
+        expected_kv = torch.mm(gathered_hidden, projection.weight[:, 3:6])
+        expected_gate = torch.mm(gathered_hidden, projection.weight[:, 6:])
+        torch.testing.assert_close(
+            qkv_a, torch.cat((expected_q, expected_kv), dim=-1), rtol=0, atol=0
+        )
+        torch.testing.assert_close(output_gate, expected_gate, rtol=0, atol=0)
 
     def test_canonical_tp_reconstructs_full_width_gate_projection(self) -> None:
         module, projection = self._projection_module()

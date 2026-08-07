@@ -146,6 +146,7 @@ py_library(
         ":kernels",
         ":configs",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py/distributed:fused_all_gather_matmul",
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda",

@@ -38,8 +38,13 @@ from rtp_llm.models_py.distributed.collective_torch import (
     all_reduce,
     all_to_all_single,
     barrier,
+    get_process_group,
     reduce_scatter,
     reduce_scatter_padded,
+)
+from rtp_llm.models_py.distributed.fused_all_gather_matmul import (
+    fused_all_gather_matmul,
+    reserve_fused_all_gather_matmul_workspace,
 )
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.kimi_k3_cuda_graph_cache import (
@@ -87,6 +92,7 @@ from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     PyAttentionInputs,
+    PyModelInitResources,
     PyModelInputs,
     PyModelOutputs,
 )
@@ -98,6 +104,7 @@ if TYPE_CHECKING:
 
 
 KIMI_K3_MLA_LATENT_NORM_EPS = 1e-6
+_FUSED_AG_GEMM_MIN_GLOBAL_TOKENS = 64 * 1024
 _FLASH_KDA_WORKSPACES: dict[tuple[int, int], torch.Tensor] = {}
 _FLASH_KDA_LOGGED_DEVICES: set[int] = set()
 _CULA_LOGGED_DEVICES: set[int] = set()
@@ -118,6 +125,15 @@ def _perf_fusions_enabled() -> bool:
     """Select the explicitly staged performance-fusion implementations."""
 
     return _env_flag("KIMI_K3_PERF_FUSIONS")
+
+
+def _fused_ag_gemm_mode() -> str:
+    mode = os.environ.get("KIMI_K3_FUSED_AG_GEMM", "auto").strip().lower()
+    if mode not in ("auto", "off", "force"):
+        raise ValueError(
+            f"KIMI_K3_FUSED_AG_GEMM must be auto, off, or force; got {mode!r}"
+        )
+    return mode
 
 
 def _batched_kda_decode_enabled() -> bool:
@@ -507,6 +523,55 @@ def _sequence_parallel_row_weight(
     local_height = full_weight.shape[0] // tp_size
     begin = tp_rank * local_height
     return full_weight[begin : begin + local_height]
+
+
+def _use_fused_prefill_ag_gemm(global_token_count: int) -> bool:
+    """Whether K3 should fuse this Prefill AllGather and projection."""
+
+    mode = _fused_ag_gemm_mode()
+    if mode == "off" or global_token_count < _FUSED_AG_GEMM_MIN_GLOBAL_TOKENS:
+        return False
+    if mode == "force":
+        return True
+    return (
+        _perf_fusions_enabled()
+        and not _accuracy_canonical_tp_enabled()
+        and not _accuracy_canonical_mla_enabled()
+        and not _accuracy_local_eager_mla_enabled()
+        and not _accuracy_trace_requested()
+    )
+
+
+def _prefill_all_gather_input(local_input: torch.Tensor, tp_size: int) -> torch.Tensor:
+    return all_gather_into(
+        local_input,
+        local_input.new_empty((local_input.shape[0] * tp_size, *local_input.shape[1:])),
+        Group.TP,
+    )
+
+
+def _prefill_all_gather_matmul(
+    local_input: torch.Tensor,
+    weight: torch.Tensor,
+    *,
+    tp_size: int,
+) -> torch.Tensor:
+    """Run the configured Prefill token AllGather/packed-projection path."""
+
+    if _use_fused_prefill_ag_gemm(local_input.shape[0] * tp_size):
+        process_group = get_process_group(Group.TP)
+        _, outputs = fused_all_gather_matmul(
+            local_input,
+            [weight],
+            process_group,
+            return_gathered=False,
+        )
+        return outputs[0]
+
+    with _perf_profile("k3_separate_all_gather_then_gemm", local_input):
+        gathered = _prefill_all_gather_input(local_input, tp_size)
+        output = _linear(gathered, weight)
+    return output
 
 
 class _KimiK3MLALatentRMSNorm(nn.Module):
@@ -1675,6 +1740,73 @@ class KimiK3KDA(nn.Module):
             tuple(self._a2a_o_weight.shape),
         )
 
+    def _project_fused_kda_inputs(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        prefill_input_is_sharded: bool,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
+
+        if prefill_input_is_sharded:
+            projected_fused = _prefill_all_gather_matmul(
+                hidden_states,
+                self.kda_fused_w,
+                tp_size=self.attn_tp_size,
+            )
+        else:
+            with _perf_profile(
+                f"{self.trace_prefix}.qkvg_fa_beta_fused_projection",
+                hidden_states,
+            ):
+                projected_fused = _linear(hidden_states, self.kda_fused_w)
+        (
+            q_projected,
+            k_projected,
+            v_projected,
+            output_gate_projected,
+            forget_latent,
+            full_raw_beta,
+        ) = split_kda_qkvg_fa_beta_sections(
+            projected_fused,
+            self.projection_size,
+            self.projection_size,
+            self.projection_size,
+            self.projection_size,
+            self.forget_latent_size,
+            self.total_heads,
+            dim=1,
+        )
+        with _perf_profile(
+            f"{self.trace_prefix}.forget_gate_up_projection",
+            forget_latent,
+        ):
+            raw_gate = _column_parallel_linear(
+                forget_latent,
+                self.weights[W.linear_attn_f_b_w],
+                self.attn_tp_size,
+                self.attn_tp_rank,
+                self._full_column_weights,
+                "forget_gate_up",
+            )
+        beta_begin = self.attn_tp_rank * self.local_heads
+        raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
+        return (
+            q_projected,
+            k_projected,
+            v_projected,
+            raw_gate,
+            raw_beta,
+            output_gate_projected,
+        )
+
     def _prepared_trace_values(
         self,
         q: torch.Tensor,
@@ -2592,6 +2724,7 @@ class KimiK3KDA(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         sequence_parallel: bool = False,
+        prefill_input_is_sharded: bool = False,
     ) -> tuple[torch.Tensor, Optional[KimiKDAState]]:
         trace_enabled = _accuracy_trace_enabled()
         if state is not None and kv_cache is not None:
@@ -2634,7 +2767,20 @@ class KimiK3KDA(nn.Module):
         # selector until the remaining experimental post-processing code is
         # removed in a follow-up cleanup.
         a2a_prefill = False
+        if prefill_input_is_sharded and (
+            mode != "prefill"
+            or not sequence_parallel
+            or self.attn_tp_size <= 1
+            or not hidden_states.is_cuda
+        ):
+            raise ValueError(
+                "prefill_input_is_sharded requires CUDA Prefill Sequence "
+                "Parallel with TP>1"
+            )
         local_token_count = hidden_states.shape[0]
+        if prefill_input_is_sharded and _accuracy_canonical_tp_enabled():
+            hidden_states = all_gather(hidden_states, group=Group.TP)
+            prefill_input_is_sharded = False
         token_count = hidden_states.shape[0]
         if _accuracy_canonical_tp_enabled():
             with _perf_profile(
@@ -2687,43 +2833,21 @@ class KimiK3KDA(nn.Module):
                     "forget_gate_up",
                 )
                 full_raw_beta = _linear(hidden_states, self.kda_beta_w)
+            beta_begin = self.attn_tp_rank * self.local_heads
+            raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
         else:
-            with _perf_profile(
-                f"{self.trace_prefix}.qkvg_fa_beta_fused_projection",
-                hidden_states,
-            ):
-                projected_fused = _linear(hidden_states, self.kda_fused_w)
             (
                 q_projected,
                 k_projected,
                 v_projected,
+                raw_gate,
+                raw_beta,
                 output_gate_projected,
-                forget_latent,
-                full_raw_beta,
-            ) = split_kda_qkvg_fa_beta_sections(
-                projected_fused,
-                self.projection_size,
-                self.projection_size,
-                self.projection_size,
-                self.projection_size,
-                self.forget_latent_size,
-                self.total_heads,
-                dim=1,
+            ) = self._project_fused_kda_inputs(
+                hidden_states,
+                prefill_input_is_sharded=prefill_input_is_sharded,
             )
-            with _perf_profile(
-                f"{self.trace_prefix}.forget_gate_up_projection",
-                forget_latent,
-            ):
-                raw_gate = _column_parallel_linear(
-                    forget_latent,
-                    self.weights[W.linear_attn_f_b_w],
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "forget_gate_up",
-                )
-        beta_begin = self.attn_tp_rank * self.local_heads
-        raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
+            token_count = q_projected.shape[0]
         head_shape = (1, token_count, self.local_heads, self.head_dim)
         output_gate = output_gate_projected.reshape(head_shape)
         if trace_enabled:
@@ -3114,6 +3238,7 @@ class KimiK3MLA(MlaAttention):
         self.kv_a_layernorm = _KimiK3MLALatentRMSNorm(self._kv_a_norm)
         self._sp_active_for_forward = False
         self._sp_padded_for_forward = False
+        self._sp_prefill_input_is_sharded = False
 
     def _use_source_projection_boundaries(self) -> bool:
         return (
@@ -3147,7 +3272,27 @@ class KimiK3MLA(MlaAttention):
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if self._use_source_projection_boundaries():
+        source_boundaries = self._use_source_projection_boundaries()
+        if self._sp_prefill_input_is_sharded:
+            if source_boundaries:
+                hidden_states = _prefill_all_gather_input(
+                    hidden_states, self.attn_tp_size
+                )
+            else:
+                packed = _prefill_all_gather_matmul(
+                    hidden_states,
+                    self._packed_qkv_gate_w,
+                    tp_size=self.attn_tp_size,
+                )
+                return torch.split(
+                    packed,
+                    [
+                        self.q_lora_rank + self.kv_lora_rank + self.suffix_dim,
+                        self.local_heads * self.value_dim,
+                    ],
+                    dim=-1,
+                )
+        if source_boundaries:
             return self._project_source_qkv_a_input(hidden_states)
         packed = self.fused_qkv_a_proj(hidden_states)
         return torch.split(
@@ -3196,6 +3341,7 @@ class KimiK3MLA(MlaAttention):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         sequence_parallel: bool = False,
+        prefill_input_is_sharded: bool = False,
     ) -> torch.Tensor:
         attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
         self._sp_active_for_forward = bool(
@@ -3204,6 +3350,16 @@ class KimiK3MLA(MlaAttention):
             and hidden_states.is_cuda
             and attn_inputs is not None
         )
+        self._sp_prefill_input_is_sharded = bool(prefill_input_is_sharded)
+        if self._sp_prefill_input_is_sharded and (
+            not self._sp_active_for_forward
+            or attn_inputs is None
+            or not attn_inputs.is_prefill
+        ):
+            raise ValueError(
+                "prefill_input_is_sharded requires production CUDA MLA "
+                "Prefill Sequence Parallel with TP>1"
+            )
         self._sp_padded_for_forward = bool(
             self._sp_active_for_forward
             and attn_inputs is not None
@@ -3226,6 +3382,7 @@ class KimiK3MLA(MlaAttention):
         finally:
             self._sp_active_for_forward = False
             self._sp_padded_for_forward = False
+            self._sp_prefill_input_is_sharded = False
 
     def _forward_impl(
         self,
@@ -5197,19 +5354,9 @@ class KimiK3DecoderLayer(nn.Module):
             record_accuracy_tensor(
                 f"{trace_prefix}.attention_input", attention_input, token_dim=0
             )
-        kda_a2a_prefill = (
-            sequence_parallel
-            and mode == "prefill"
-            and self.is_kda
-            and isinstance(self.self_attn, KimiK3KDA)
-            and self.self_attn.uses_a2a_comm
+        prefill_input_is_sharded = bool(
+            sequence_parallel and mode == "prefill" and tp_size > 1
         )
-        if sequence_parallel and mode == "prefill" and not kda_a2a_prefill:
-            with _perf_profile(
-                f"{trace_prefix}.attention_input_token_allgather_TP8",
-                attention_input,
-            ):
-                attention_input = all_gather(attention_input, group=Group.TP)
         if self.is_kda:
             with _perf_profile(
                 f"{trace_prefix}.KDA_attention_complete", attention_input
@@ -5221,6 +5368,7 @@ class KimiK3DecoderLayer(nn.Module):
                     kv_cache=kv_cache,
                     attention_inputs=attention_inputs,
                     sequence_parallel=sequence_parallel,
+                    prefill_input_is_sharded=prefill_input_is_sharded,
                 )
         else:
             # MLA layers use the shared ``MlaAttention`` signature and consume
@@ -5234,6 +5382,7 @@ class KimiK3DecoderLayer(nn.Module):
                     kv_cache,
                     attention_inputs=attention_inputs,
                     sequence_parallel=sequence_parallel,
+                    prefill_input_is_sharded=prefill_input_is_sharded,
                 )
         if decode_sp_debug:
             logging.info(
@@ -5383,7 +5532,45 @@ class KimiK3Model(GptModelBase):
         self.output_attn_res_proj = weights.get_global_weight(K3W.OUTPUT_ATTN_RES_PROJ)
         self._layer_group_ids: Optional[tuple[int, ...]] = None
         self._kda_a2a_weights_materialized = False
+        self._fused_ag_gemm_workspace_ready = False
         _validate_perf_environment()
+
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        """Bind runtime resources and reserve the largest Prefill AG workspace."""
+
+        super().initialize(init_resource)
+        if self._fused_ag_gemm_workspace_ready:
+            return True
+
+        tp_size = int(self.parallelism_config.get_attn_tp_size())
+        max_global_tokens = int(self.config.max_seq_len) * int(
+            init_resource.max_context_batch_size
+        )
+        if (
+            init_resource.is_decode_role
+            or tp_size <= 1
+            or not _use_fused_prefill_ag_gemm(max_global_tokens)
+        ):
+            return True
+        max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
+        workspace_bytes = (
+            max_local_tokens
+            * int(self.config.hidden_size)
+            * self.embedding_weight.element_size()
+        )
+        reserve_fused_all_gather_matmul_workspace(
+            get_process_group(Group.TP),
+            workspace_bytes,
+        )
+        self._fused_ag_gemm_workspace_ready = True
+        logging.info(
+            "[K3_FUSED_AG_GEMM] reserved %.3f GiB symmetric workspace "
+            "for %d global Prefill tokens (TP%d)",
+            workspace_bytes / (1 << 30),
+            max_global_tokens,
+            tp_size,
+        )
+        return True
 
     # ``prepare_fmha_impl`` is inherited from ``GptModelBase``: it builds the
     # framework MLA impl via ``AttnImplFactory.get_fmha_impl`` (identical to the
