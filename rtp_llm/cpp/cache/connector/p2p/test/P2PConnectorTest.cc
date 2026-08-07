@@ -333,15 +333,15 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     EXPECT_NE(response.p2p_response().error_message().find("cache_keys size 2 != block_ids size 1"), std::string::npos);
 }
 
-TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasNoLayerBlocks) {
+TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpRankHasNoLocalLayerBlocks) {
     FunctionRequestPB request;
     auto* p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("empty-read");
 
     FunctionResponsePB response;
-    EXPECT_FALSE(connector_->executeFunction(request, response));
-    EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_TRUE(connector_->executeFunction(request, response));
+    EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidBlockId) {

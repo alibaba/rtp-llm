@@ -1,37 +1,10 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include <algorithm>
-#include <optional>
 
 namespace rtp_llm {
-
-namespace {
-
-std::optional<size_t> physicalBlockPosition(const CacheGroupPolicy& policy,
-                                            size_t                  logical_position,
-                                            size_t                  logical_count,
-                                            int                     cp_rank,
-                                            int                     cp_size) {
-    const size_t cp_scale = static_cast<size_t>(std::max(1, cp_size));
-    if (policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN && cp_scale > 1) {
-        if (logical_position % cp_scale != static_cast<size_t>(cp_rank)) {
-            return std::nullopt;
-        }
-        return logical_position / cp_scale;
-    }
-    if (policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && cp_scale > 1) {
-        const bool is_segment_tail = logical_position % cp_scale == cp_scale - 1;
-        const bool is_final_key    = logical_position + 1 == logical_count;
-        if (!is_segment_tail && !is_final_key) {
-            return std::nullopt;
-        }
-        return logical_position / cp_scale;
-    }
-    return std::make_optional(logical_position);
-}
-
-}  // namespace
 
 std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(KVCacheResource&     resource,
                                                                              const CacheTopology& topology,
@@ -87,7 +60,8 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayerTag(KVCacheR
     const auto& block_ids = resource.blocksForLayer(layer_id, group.tag);
     auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
     for (size_t logical_pos = logical_begin; logical_pos < logical_end; ++logical_pos) {
-        const auto physical_pos = physicalBlockPosition(group.policy, logical_pos, cache_keys.size(), cp_rank, cp_size);
+        const auto physical_pos =
+            CPSlotMapper::physicalBlockPosition(group.policy, logical_pos, cache_keys.size(), cp_rank, cp_size);
         if (!physical_pos || *physical_pos >= block_ids.size() || isNullBlockIdx(block_ids[*physical_pos])) {
             continue;
         }

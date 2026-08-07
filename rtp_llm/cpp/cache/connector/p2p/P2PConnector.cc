@@ -454,10 +454,12 @@ bool P2PConnector::executeRead(int64_t                                 request_i
         setP2PResponse(response, error_info);
         return false;
     };
-    if (unique_key.empty() || p2p_request.layer_blocks_size() == 0) {
-        return reject_read("READ request has empty unique_key or layer_blocks");
+    if (unique_key.empty()) {
+        return reject_read("READ request has empty unique_key");
     }
 
+    // An empty local projection is valid when the requested logical range has
+    // no block owned by this CP rank. worker_->read treats it as completed.
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     std::set<std::string>                          layer_tag_keys;
     for (const auto& layer_block_pb : p2p_request.layer_blocks()) {
