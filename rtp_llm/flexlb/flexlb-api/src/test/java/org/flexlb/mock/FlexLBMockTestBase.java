@@ -304,6 +304,10 @@ public abstract class FlexLBMockTestBase {
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         cfg.setFlexlbInflightTtlMs(300_000L);
+        // Mock workers never report batch completion, so inflight batches are
+        // never released via calibrate(). Disable fixed_window backpressure
+        // explicitly to keep the original always-dispatch test semantics.
+        cfg.setFlexlbBatchFixedMaxInflightBatches(0);
         return cfg;
     }
 

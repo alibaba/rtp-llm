@@ -63,6 +63,9 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         cfg.setFlexlbInflightTtlMs(300_000L);
+        // Mock workers never release inflight batches — disable backpressure
+        // to keep the original always-dispatch test semantics.
+        cfg.setFlexlbBatchFixedMaxInflightBatches(0);
         return cfg;
     }
 
