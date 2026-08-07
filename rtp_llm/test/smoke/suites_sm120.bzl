@@ -266,9 +266,8 @@ def sm120_suites():
 
 
     # SM120 MoE (h20_moe + sm100_moe 同位 — Qwen3-30B MoE)
-    # 对应 PR-6 (FP8) + PR-9 (NVFP4 可选)
-    # 注意：RTX 5000 Pro 无 NVLink → DeepEP 路径全部不在此 suite 内
-    #       仅跑 sm120_fp8_grouped (Triton batched grouped GEMM, 替代原 fp8_per_block_no_dp 循环)
+    # 覆盖 FP8 grouped GEMM 和单卡 NVFP4 B12x；RTX 5000 Pro 无 NVLink，
+    # 因此 DeepEP 路径不在此 suite 内。
     native.test_suite(
         name="smoke_sm120_moe",
         tests=[
@@ -279,7 +278,18 @@ def sm120_suites():
                 smoke_args="--moe_strategy sm120_fp8_grouped --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
                 gpu_type=["RTX_5000_PRO"],
             ),
-            # TODO(PR-9): moe_nvfp4_no_deepep_sm120
+            # Golden tokens are checkpoint-specific; a different NVFP4 weight
+            # revision or conversion may legitimately fail response comparison.
+            # Keep the response probe to one token because low-precision greedy
+            # suffixes can bifurcate; executor tests own numerical/Graph checks.
+            # Keep generic warmup disabled; the first smoke request exercises JIT.
+            smoke_test(
+                name="moe_nvfp4_no_deepep_sm120",
+                task_info="data/model/qwen3_moe/q_r_coder_30b_nvfp4_sm120.json",
+                envs=["LOAD_PYTHON_MODEL=1", "STABILITY_REPEAT=5"],
+                smoke_args="--moe_strategy fp4_b12x --fp4_moe_op b12x --use_deepep_moe 0 --use_all_gather 1 --warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64",
+                gpu_type=["RTX_5000_PRO"],
+            ),
         ],
     )
 

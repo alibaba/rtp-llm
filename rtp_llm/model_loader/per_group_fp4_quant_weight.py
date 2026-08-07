@@ -524,6 +524,16 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
                     self.scale.name,
                     kernel_weight,
                     scale_weight,
+                    scale_2=(
+                        processed_res.get(self.scale_2.name)
+                        if self.scale_2 is not None
+                        else None
+                    ),
+                    input_scale=(
+                        processed_res.get(self.input_scale.name)
+                        if self.input_scale is not None
+                        else None
+                    ),
                 )
             )
             processed_res[self.kernel.name] = kernel_weight

@@ -1,4 +1,21 @@
+import argparse
+
+from rtp_llm.config.moe_config import (
+    B12X_DISABLE_CUDA12_9_COMPAT_ENV,
+    B12X_ZEROED_ENERGY_LIMIT_DEFAULT,
+    B12X_ZEROED_ENERGY_LIMIT_ENV,
+    Fp4MoeOp,
+    MoeStrategyName,
+    validate_b12x_zeroed_energy_limit,
+)
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _parse_b12x_zeroed_energy_limit(value: str) -> float:
+    try:
+        return validate_b12x_zeroed_energy_limit(float(value))
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
@@ -161,36 +178,43 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         env_name="MOE_STRATEGY",
         bind_to=(moe_config, "moe_strategy"),
         type=str,
-        choices=[
-            "auto",
-            "no_auant_ep_low_latency",
-            "no_auant_cpp",
-            "no_auant_dp_normal",
-            "fp8_per_block_no_dp_masked",
-            "fp8_per_block_no_dp",
-            "fp8_per_block_ep_low_latency",
-            "fp8_per_block_ep_normal",
-            "fp8_per_block_pure_cp",
-            "fp8_per_block_pure_dp",
-            "fp8_per_tensor_no_dp",
-            "fp8_per_tensor_ep_low_latency",
-            "fp8_per_tensor_ep_normal",
-            "w4a8_int4_per_channel_no_dp",
-            "w4a8_int4_per_channel_ep_low_latency",
-            "w4a8_int4_per_channel_ep_normal",
-            "fp4_ep_low_latency",
-            "fp4_ep_normal",
-            "fp4_no_dp",
-        ],
-        default="auto",
-        help="指定moe strategy, 默认为auto",
+        choices=[strategy.value for strategy in MoeStrategyName],
+        default=MoeStrategyName.AUTO.value,
+        help=(
+            "指定moe strategy, 默认为auto。sm120_fp8_grouped 和 fp4_b12x "
+            "仅适用于 sm_120/121；fp4_b12x 还要求单卡 (ep_size=1)。"
+        ),
     )
     moe_group.add_argument(
         "--fp4_moe_op",
         env_name="FP4_MOE_OP",
         bind_to=(moe_config, "fp4_moe_op"),
         type=str,
-        choices=["auto", "trtllm", "cutedsl"],
-        default="auto",
-        help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
+        choices=[op.value for op in Fp4MoeOp],
+        default=Fp4MoeOp.AUTO.value,
+        help=(
+            "指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 "
+            "TensorRT-LLM), cutedsl (使用 CuTe DSL), b12x (仅支持 "
+            "sm_120/121 且 ep_size=1 的 flashinfer b12x；该架构没有其他"
+            "单卡 FP4 fallback)。B12X 紧急运维开关见 fused_moe README。"
+        ),
+    )
+    moe_group.add_argument(
+        "--b12x_zeroed_energy_limit",
+        env_name=B12X_ZEROED_ENERGY_LIMIT_ENV,
+        bind_to=(moe_config, "b12x_zeroed_energy_limit"),
+        type=_parse_b12x_zeroed_energy_limit,
+        default=B12X_ZEROED_ENERGY_LIMIT_DEFAULT,
+        help=(
+            "B12X 折叠 weight_scale_2 时允许因 e4m3 下溢丢失的最大 scale "
+            "energy 比例，取值范围 [0, 1]。"
+        ),
+    )
+    moe_group.add_argument(
+        "--b12x_disable_cuda12_9_compat",
+        env_name=B12X_DISABLE_CUDA12_9_COMPAT_ENV,
+        bind_to=(moe_config, "b12x_disable_cuda12_9_compat"),
+        type=str2bool,
+        default=False,
+        help="关闭 B12X wrapper 构造期的 CUDA 12.9 兼容处理。",
     )

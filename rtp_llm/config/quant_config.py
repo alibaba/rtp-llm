@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
+NVFP4_BLOCK_SIZE = 16
+
 
 class QuantizationType(str, Enum):
     """

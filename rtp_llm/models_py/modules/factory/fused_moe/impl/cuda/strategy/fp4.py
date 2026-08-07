@@ -4,11 +4,15 @@ from typing import Any, Dict
 
 import torch
 
-from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
+from rtp_llm.config.moe_config import Fp4MoeOp, MoeStrategyName, resolve_fp4_moe_op
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.priority_attributes import (
     StrategyAttributes,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    NVFP4_BLOCK_SIZE,
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.strategy_base import MoeStrategy
@@ -17,12 +21,58 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 )
 
 
+class CudaFp4B12xNoDPStrategy(MoeStrategy):
+    """SM120/121 NVFP4 single-GPU / PureTP strategy using flashinfer b12x."""
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        checker.check(
+            resolve_fp4_moe_op(config.moe_config, is_sm12x=is_sm12x())
+            == Fp4MoeOp.B12X.value
+        )
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP4_B12X.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_fp4_executor import (
+            B12xFp4Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterFp4PerGroup,
+        )
+
+        quant_config = FusedMoEQuantConfig(
+            quant_dtype=torch.uint8,
+            block_shape=[NVFP4_BLOCK_SIZE, NVFP4_BLOCK_SIZE],
+        )
+        return StrategyAttributes(
+            router_class=PureTpRouterFp4PerGroup,
+            executor_class=B12xFp4Executor,
+            quant_config=quant_config,
+        )
+
+
 class CudaFp4NoDPStrategy(MoeStrategy):
     """CUDA FP4 PerGroup single GPU strategy"""
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp4_no_dp" or config.moe_strategy == "auto")
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        # TRT-LLM's bundled FP4 MoE cubins do not include sm_120/sm_121.
+        checker.check(not is_sm12x())
+        checker.check(
+            resolve_fp4_moe_op(config.moe_config, is_sm12x=is_sm12x())
+            == Fp4MoeOp.TRTLLM.value
+        )
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP4_NO_DP.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
@@ -34,7 +84,7 @@ class CudaFp4NoDPStrategy(MoeStrategy):
 
         quant_config = FusedMoEQuantConfig(
             quant_dtype=torch.uint8,
-            block_shape=[16, 16],
+            block_shape=[NVFP4_BLOCK_SIZE, NVFP4_BLOCK_SIZE],
         )
         return StrategyAttributes(
             router_class=PureTpRouterFp4PerGroup,
@@ -51,7 +101,16 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "modelopt_fp4")
-        checker.check(config.moe_strategy == "fp4_ep_low_latency" or config.moe_strategy == "auto")
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        checker.check(
+            resolve_fp4_moe_op(config.moe_config, is_sm12x=is_sm12x())
+            == Fp4MoeOp.CUTEDSL.value
+        )
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP4_EP_LOW_LATENCY.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
@@ -63,7 +122,7 @@ class CudaFp4EpLowLatencyStrategy(MoeStrategy):
 
         quant_config = FusedMoEQuantConfig(
             quant_dtype=torch.uint8,
-            block_shape=[16, 16],
+            block_shape=[NVFP4_BLOCK_SIZE, NVFP4_BLOCK_SIZE],
         )
         return StrategyAttributes(
             router_class=DeepEpLowLatencyRouter,
@@ -77,7 +136,16 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        checker.check(config.moe_strategy == "fp4_ep_normal" or config.moe_strategy == "auto")
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        checker.check(
+            resolve_fp4_moe_op(config.moe_config, is_sm12x=is_sm12x())
+            == Fp4MoeOp.TRTLLM.value
+        )
+        checker.check(
+            config.moe_strategy == MoeStrategyName.FP4_EP_NORMAL.value
+            or config.moe_strategy == MoeStrategyName.AUTO.value
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor import (
@@ -89,7 +157,7 @@ class CudaFp4EpNormalStrategy(MoeStrategy):
 
         quant_config = FusedMoEQuantConfig(
             quant_dtype=torch.uint8,
-            block_shape=[16, 16],
+            block_shape=[NVFP4_BLOCK_SIZE, NVFP4_BLOCK_SIZE],
         )
         return StrategyAttributes(
             router_class=DeepepNormalRouterFp4PerGroup,

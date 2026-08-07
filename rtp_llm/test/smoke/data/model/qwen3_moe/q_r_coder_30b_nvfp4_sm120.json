@@ -1,0 +1,54 @@
+{
+    "model_type": "qwen_3_moe",
+    "model_path": "/mnt/nas1/smoke/Qwen3-Coder-30B-A3B-Instruct_nvfp4_hf",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": " Explain",
+                "response_alternatives": [
+                    " -"
+                ],
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s1",
+                    "$prompt:s1"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 1,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": " Explain",
+                        "response_alternatives": [
+                            " -"
+                        ]
+                    },
+                    {
+                        "response": " Explain",
+                        "response_alternatives": [
+                            " -"
+                        ]
+                    }
+                ]
+            }
+        }
+    ]
+}
