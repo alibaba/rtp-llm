@@ -501,14 +501,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (is_dspark_) {
         RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark fixed proposal width must be positive");
-        RTP_LLM_CHECK_WITH_INFO(
-            propose_step_ == static_cast<size_t>(params.sp_config.gen_num_per_cycle)
-                && propose_step_
-                       == static_cast<size_t>(propose_params->getEngineInitParams().model_config_.gen_num_per_cycle),
-            "dspark gamma must match engine and draft model width: propose=%zu engine=%ld draft=%ld",
-            propose_step_,
-            params.sp_config.gen_num_per_cycle,
-            propose_params->getEngineInitParams().model_config_.gen_num_per_cycle);
         // DSpARK commit handles both replicated and byte-sharded prefill-CP
         // cache layouts after gathering the rank-local target features.
         RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,

@@ -458,36 +458,6 @@ def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
     )
 
 
-def normalize_dspark_gamma_from_checkpoint(py_env_configs: PyEnvConfigs) -> None:
-    """Make model-defined DSpARK gamma visible before frontend/backend split."""
-    sp_config = py_env_configs.sp_config
-    if sp_config.type != SpeculativeType.DSPARK:
-        return
-    if not sp_config.checkpoint_path:
-        raise ValueError("sp_type dspark requires sp_checkpoint_path")
-
-    config_path = os.path.join(sp_config.checkpoint_path, "config.json")
-    if not os.path.isfile(config_path):
-        raise ValueError(f"DSpARK checkpoint config does not exist: {config_path}")
-    with open(config_path, "r", encoding="utf-8") as reader:
-        checkpoint_config = json.load(reader)
-    if "dspark_block_size" not in checkpoint_config:
-        raise ValueError("DSpARK checkpoint config requires dspark_block_size")
-
-    gamma = int(checkpoint_config["dspark_block_size"])
-    if gamma <= 0:
-        raise ValueError(f"dspark requires a positive dspark_block_size, got {gamma}")
-    configured_gamma = int(sp_config.gen_num_per_cycle)
-    if configured_gamma != gamma:
-        logging.info(
-            "DSpARK ignores configured gen_num_per_cycle=%d and uses "
-            "checkpoint dspark_block_size=%d",
-            configured_gamma,
-            gamma,
-        )
-    sp_config.gen_num_per_cycle = gamma
-
-
 def setup_cuda_device_and_accl_env(local_rank: int) -> None:
     """Apply CUDA device and ACCL env side effects (same as ParallelInfo.from_params)."""
     if torch.cuda.is_available():
@@ -531,9 +501,6 @@ def setup_and_configure_server(py_env_configs: PyEnvConfigs):
     """
     setup_default_args(py_env_configs)
     fetch_model_files_to_local(py_env_configs)
-    # This runs in the parent process before backend workers are spawned, so
-    # frontend warmup reservation and every child receive the same model gamma.
-    normalize_dspark_gamma_from_checkpoint(py_env_configs)
     ll_num_max_token = py_env_configs.concurrency_config.concurrency_limit
     sp_type = py_env_configs.sp_config.type  # Get SpeculativeType enum value
     if py_env_configs.sp_config.type != SpeculativeType.NONE:

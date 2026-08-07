@@ -67,7 +67,6 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
-        "dspark_block_size",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
@@ -500,9 +499,8 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
-        # DSpARK draft checkpoint metadata. The checkpoint block size is the
-        # proposal width used by every runtime component.
-        self.dspark_block_size: Optional[int] = None
+        # DSpARK draft checkpoint metadata. Runtime proposal width comes only
+        # from sp_config.gen_num_per_cycle.
         self.dspark_noise_token_id: Optional[int] = None
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None

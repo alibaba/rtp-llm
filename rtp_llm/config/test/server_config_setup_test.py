@@ -1,12 +1,9 @@
-import json
-import tempfile
 import unittest
 from unittest import TestCase
 from unittest.mock import patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import (
-    normalize_dspark_gamma_from_checkpoint,
     set_parallelism_config,
     setup_and_configure_server,
 )
@@ -24,28 +21,6 @@ class GenerateConfigTest(TestCase):
         )
         cuda_available.start()
         self.addCleanup(cuda_available.stop)
-
-    @patch.dict(
-        "os.environ",
-        {
-            "MODEL_TYPE": "fake_model",
-            "SP_TYPE": "dspark",
-            "GEN_NUM_PER_CIRCLE": "3",
-        },
-        clear=True,
-    )
-    def test_dspark_gamma_comes_from_checkpoint_before_process_split(self):
-        py_env_configs: PyEnvConfigs = setup_args()
-        with tempfile.TemporaryDirectory() as checkpoint_path:
-            with open(
-                f"{checkpoint_path}/config.json", "w", encoding="utf-8"
-            ) as writer:
-                json.dump({"dspark_block_size": 5}, writer)
-            py_env_configs.sp_config.checkpoint_path = checkpoint_path
-
-            normalize_dspark_gamma_from_checkpoint(py_env_configs)
-
-        self.assertEqual(py_env_configs.sp_config.gen_num_per_cycle, 5)
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).
