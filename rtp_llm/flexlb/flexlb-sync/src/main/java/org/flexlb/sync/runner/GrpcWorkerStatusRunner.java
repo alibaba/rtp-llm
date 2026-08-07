@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.CacheHitFeedback;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.TaskStateUpdateResult;
 import org.flexlb.dao.master.WorkerHost;

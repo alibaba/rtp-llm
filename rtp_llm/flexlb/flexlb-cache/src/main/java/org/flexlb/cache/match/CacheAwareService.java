@@ -10,8 +10,8 @@ import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.CacheHitFeedback;
+import org.flexlb.dao.master.WorkerStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.List;

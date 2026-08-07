@@ -2,8 +2,8 @@ package org.flexlb.httpserver;
 
 import org.flexlb.cache.domain.CacheMatchFailoverAction;
 import org.flexlb.cache.domain.CacheMatchFailoverRequest;
-import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.config.CacheMatchMode;
 import org.flexlb.consistency.LBStatusConsistencyService;

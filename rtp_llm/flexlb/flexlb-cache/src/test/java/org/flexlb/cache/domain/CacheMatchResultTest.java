@@ -1,10 +1,11 @@
 package org.flexlb.cache.domain;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
-import java.util.Map;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class CacheMatchResultTest {
 

@@ -5,9 +5,9 @@ import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.match.CacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 

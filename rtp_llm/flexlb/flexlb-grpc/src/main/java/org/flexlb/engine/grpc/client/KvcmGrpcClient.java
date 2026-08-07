@@ -19,7 +19,6 @@ import org.flexlb.kvcm.grpc.GetHostCacheStateResponse;
 import org.flexlb.kvcm.grpc.HostCacheMatch;
 import org.flexlb.kvcm.grpc.QueryType;
 import org.flexlb.listener.ApplicationWarmupState;
-import org.flexlb.util.IdUtils;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;

@@ -9,6 +9,7 @@ import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -26,7 +27,6 @@ import org.mockito.Mockito;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import org.flexlb.dao.cache.HostCacheMatch;
 import java.util.Set;
 
 class CacheAffinityFirstStrategyTest {

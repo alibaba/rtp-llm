@@ -1,7 +1,7 @@
 package org.flexlb.cache.match.kvcm;
 
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.cache.HostCacheMatch;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.KvcmGrpcClient;
 import org.flexlb.exception.KvcmQueryException;
 import org.junit.jupiter.api.Test;

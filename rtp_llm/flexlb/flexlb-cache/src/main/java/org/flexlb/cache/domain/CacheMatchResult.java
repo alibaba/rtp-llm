@@ -1,9 +1,9 @@
 package org.flexlb.cache.domain;
 
+import org.flexlb.dao.cache.HostCacheMatch;
+
 import java.util.Collections;
 import java.util.Map;
-
-import org.flexlb.dao.cache.HostCacheMatch;
 
 /**
  * Cache matches and the block size used to produce them.

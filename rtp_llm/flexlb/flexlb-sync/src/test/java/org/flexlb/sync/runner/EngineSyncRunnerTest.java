@@ -1,8 +1,8 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -20,8 +20,8 @@ import java.util.concurrent.atomic.LongAdder;
 
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)

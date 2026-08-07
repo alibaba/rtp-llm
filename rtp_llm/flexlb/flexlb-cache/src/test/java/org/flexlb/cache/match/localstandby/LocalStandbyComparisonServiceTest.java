@@ -6,12 +6,12 @@ import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.cache.HostCacheMatch;
+import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
-import org.flexlb.dao.master.CacheHitFeedback;
-import org.flexlb.dao.cache.HostCacheMatch;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

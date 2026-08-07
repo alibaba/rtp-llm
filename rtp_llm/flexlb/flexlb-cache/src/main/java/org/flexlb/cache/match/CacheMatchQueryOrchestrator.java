@@ -15,8 +15,8 @@ import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
 import org.flexlb.dao.cache.HostCacheMatch;
+import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;

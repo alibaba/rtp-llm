@@ -1,8 +1,5 @@
 package org.flexlb.service;
 
-import java.util.concurrent.CancellationException;
-import java.util.concurrent.CompletableFuture;
-
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.Router;
@@ -12,6 +9,9 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
+
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 
 @Component
 public class RouteService {

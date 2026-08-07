@@ -9,8 +9,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import static org.flexlb.constant.MetricConstant.ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_RETRY_QPS;
+import static org.flexlb.constant.MetricConstant.ROUTING_ROUTE_ATTEMPT_EXECUTION_TIME_MS;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.verify;
 
