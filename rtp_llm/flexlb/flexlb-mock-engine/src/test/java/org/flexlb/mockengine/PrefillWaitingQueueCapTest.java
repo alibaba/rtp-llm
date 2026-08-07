@@ -33,6 +33,11 @@ import static org.junit.jupiter.api.Assertions.fail;
  * with cap 4 the 5th enqueued batch is the last accepted (1 running + 4
  * waiting) and the 6th is rejected with an explicit backpressure error.
  *
+ * <p>Cap semantics: {@code cap >= 0} is enforced — {@code cap == 0} is
+ * zero-waiting fail-fast (accept only when the engine is idle, reject any batch
+ * arriving while one is running); absent in JSON or negative = unbounded
+ * (legacy behavior).
+ *
  * <p>Also verifies that a rejection leaves no counter residue
  * (pendingRequests / waitingPrefillRequests / runningTasks) and that the queue
  * keeps draining normally after a rejection.
@@ -140,11 +145,11 @@ class PrefillWaitingQueueCapTest {
         assertFalse(prefill.isLeakDetected());
     }
 
-    // ──────────── Test 3: cap <= 0 disables the gate (unbounded, legacy) ────────────
+    // ──────────── Test 3: negative cap disables the gate (unbounded, legacy) ────────────
 
     @Test
-    void nonPositiveCapDisablesBackpressure() throws Exception {
-        JavaMockEngineCluster.FastRpcService prefill = startPrefill(model("50", 0));
+    void negativeCapDisablesBackpressure() throws Exception {
+        JavaMockEngineCluster.FastRpcService prefill = startPrefill(model("50", -1));
 
         for (int i = 1; i <= 10; i++) {
             EngineRpcService.EnqueueBatchResponsePB response =
@@ -155,6 +160,65 @@ class PrefillWaitingQueueCapTest {
 
         awaitInflightZero(prefill, 5_000);
         assertEquals(10, prefill.getCompletedCount());
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    // ──────────── Test 4: absent field = unbounded (backward compat) ────────────
+
+    @Test
+    void absentCapMeansUnbounded() throws Exception {
+        JavaMockEngineCluster.FastRpcService prefill = startPrefill(modelWithoutCap("50"));
+
+        for (int i = 1; i <= 10; i++) {
+            EngineRpcService.EnqueueBatchResponsePB response =
+                    enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
+            assertEquals(1, response.getSuccessesCount(), "batch " + i + " should be accepted");
+            assertEquals(0, response.getErrorsCount());
+        }
+
+        awaitInflightZero(prefill, 5_000);
+        assertEquals(10, prefill.getCompletedCount());
+        assertFalse(prefill.isLeakDetected());
+    }
+
+    // ──────────── Test 5: cap = 0 — zero-waiting fail-fast ────────────
+
+    @Test
+    void zeroCapRejectsWhileRunningAcceptsWhenIdle() throws Exception {
+        // 300 ms per batch: batch 1 occupies the single concurrency slot; with
+        // cap 0 no batch may wait, so batch 2 arriving mid-run is rejected
+        // immediately (fail-fast) instead of queuing.
+        JavaMockEngineCluster.FastRpcService prefill = startPrefill(model("300", 0));
+
+        EngineRpcService.EnqueueBatchResponsePB first =
+                enqueue(prefill, batch(5001, slot(0, input(1, 10))));
+        assertEquals(1, first.getSuccessesCount(), "idle engine must accept the batch");
+        assertEquals(1, prefill.getActivePrefillRequestCount(),
+                "accepted request should be counted as running (prefill_running_reqs)");
+
+        EngineRpcService.EnqueueBatchResponsePB rejected =
+                enqueue(prefill, batch(5002, slot(0, input(2, 10))));
+        assertEquals(0, rejected.getSuccessesCount(), "busy engine must reject with cap=0");
+        assertEquals(1, rejected.getErrorsCount());
+        String message = rejected.getErrors(0).getErrorInfo().getErrorMessage();
+        assertTrue(message.contains("prefill waiting queue full (backpressure)"),
+                "rejection must carry an explicit backpressure error, got: " + message);
+        assertTrue(message.contains("waiting=0 cap=0"),
+                "rejection should report waiting/cap, got: " + message);
+        assertEquals("rejected", prefill.getRequestStates().get(2L));
+        assertEquals(0, prefill.getWaitingCount(), "cap=0 must never queue a batch");
+
+        // Once the running batch drains, the engine is idle again and accepts.
+        awaitInflightZero(prefill, 5_000);
+        assertEquals(0, prefill.getActivePrefillRequestCount(),
+                "running-request gauge must return to zero after drain");
+        EngineRpcService.EnqueueBatchResponsePB retry =
+                enqueue(prefill, batch(5003, slot(0, input(3, 10))));
+        assertEquals(1, retry.getSuccessesCount(), "idle engine must accept after drain");
+
+        awaitInflightZero(prefill, 5_000);
+        assertEquals(2, prefill.getCompletedCount(), "batch 1 + retry should complete");
+        assertEquals(0, prefill.getWaitingCount());
         assertFalse(prefill.isLeakDetected());
     }
 
@@ -171,13 +235,24 @@ class PrefillWaitingQueueCapTest {
 
     private MockPerformanceModel model(String prefillFormula, int maxWaitingBatches)
             throws Exception {
+        return buildModel(prefillFormula, Map.of(
+                "scale", 1.0, "max_waiting_batches", maxWaitingBatches));
+    }
+
+    /** Performance JSON without the max_waiting_batches field (absent = unbounded). */
+    private MockPerformanceModel modelWithoutCap(String prefillFormula) throws Exception {
+        return buildModel(prefillFormula, Map.of("scale", 1.0));
+    }
+
+    private MockPerformanceModel buildModel(String prefillFormula, Map<String, Object> prefill)
+            throws Exception {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         MAPPER.writeValue(performance.toFile(), Map.of(
                 "block_size", 1024,
                 "sleep_scale", 1.0,
                 "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0, "max_waiting_batches", maxWaitingBatches),
+                "prefill", prefill,
                 "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MAPPER.writeValue(master.toFile(), Map.of(
                 "zone_process_setting", Map.of(
