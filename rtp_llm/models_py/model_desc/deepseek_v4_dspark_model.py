@@ -9,7 +9,7 @@ in parallel::
 
 Every query attends to the latest committed sliding-window context *and* the
 whole query block (including future noise positions).  The backbone therefore
-produces ``dspark_block_size`` base-logit rows in one pass.  A cheap Markov bias is then applied
+produces ``GEN_NUM_PER_CIRCLE`` base-logit rows in one pass.  A cheap Markov bias is then applied
 left-to-right, beginning with the anchor, to recover intra-block dependency.
 
 The target model supplies mean-pooled hidden states from its configured layers
@@ -18,9 +18,8 @@ each step.  This model projects those rows once and inserts a layer-specific KV
 projection into each draft layer's paged SWA cache before evaluating the next
 query block.
 
-The width is fixed for the lifetime of a service and comes from the checkpoint's
-``dspark_block_size``. ModelFactory copies it into the engine's common
-``gen_num_per_cycle`` field. The executor evaluates proposal blocks eagerly and
+The width is fixed for the lifetime of a service and comes only from
+``GEN_NUM_PER_CIRCLE``. The executor evaluates proposal blocks eagerly and
 routes feature-KV commit calls through the ordinary prefill CUDA graph.
 """
 

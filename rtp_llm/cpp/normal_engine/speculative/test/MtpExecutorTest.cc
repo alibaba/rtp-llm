@@ -440,10 +440,9 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.max_seq_len       = test_config.max_seq_len;
-        model_config.vocab_size        = test_config.vocab_size;
-        model_config.num_layers        = test_config.num_layers;
-        model_config.gen_num_per_cycle = test_config.gen_num_per_cycle;
+        model_config.max_seq_len = test_config.max_seq_len;
+        model_config.vocab_size  = test_config.vocab_size;
+        model_config.num_layers  = test_config.num_layers;
 
         sp_config.type                    = test_config.sp_type;
         sp_config.gen_num_per_cycle       = test_config.gen_num_per_cycle;
