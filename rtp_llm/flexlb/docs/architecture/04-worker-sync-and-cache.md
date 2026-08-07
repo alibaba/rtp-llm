@@ -86,7 +86,8 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 - `KvcmGrpcClient`（flexlb-grpc）：向 KVCM **leader** 发 `GetHostCacheState`
   （namespace = `deploymentName_blockSize`，QueryType 按 worker `kvCacheGroupMode` 映射
   QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port,
-  prefix_match_blocks}`；查询失败重试至 `maxQueryRetryCount`。
+  prefix_match_blocks}`；`p2p_host_count` 默认 5，只对 local 命中最长的前 N 个 host 计算
+  P2P，配置为 0 时跳过 P2P；查询失败重试至 `maxQueryRetryCount`。
 - 健康管理：daemon 线程每 `leaderRefreshIntervalMs(10s)` 刷 leader（`GetClusterInfo`）与
   worker 元数据；心跳/查询失败计数对 `heartbeatFailureThreshold(3)` /
   `queryFailureThreshold(10)` 判不健康，连续 `recoverySuccessThreshold(3)` 次心跳成功恢复；

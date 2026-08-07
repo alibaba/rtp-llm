@@ -20,6 +20,7 @@ public class KvcmConfig {
     public static final int DEFAULT_QUERY_FAILURE_THRESHOLD = 10;
     public static final int DEFAULT_MAX_QUERY_RETRY_COUNT = 1;
     public static final int DEFAULT_RECOVERY_SUCCESS_THRESHOLD = 3;
+    public static final int DEFAULT_P2P_HOST_COUNT = 0;
 
     @JsonProperty("enabled")
     private boolean enabled;
@@ -56,6 +57,13 @@ public class KvcmConfig {
 
     @JsonProperty("recovery_success_threshold")
     private int recoverySuccessThreshold = DEFAULT_RECOVERY_SUCCESS_THRESHOLD;
+
+    /**
+     * Number of local-match-leading hosts for which KVCM should continue P2P matching.
+     * Zero disables P2P matching in the request.
+     */
+    @JsonProperty("p2p_host_count")
+    private int p2pHostCount = DEFAULT_P2P_HOST_COUNT;
 
     @JsonProperty("local_standby")
     private LocalStandbyConfig localStandby = new LocalStandbyConfig();

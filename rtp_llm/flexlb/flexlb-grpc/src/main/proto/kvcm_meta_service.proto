@@ -71,6 +71,9 @@ message GetHostCacheStateRequest {
   QueryType query_type = 3;
   repeated int64 block_cache_keys = 4;  // Ordered prompt block cache keys.
   repeated string medium = 5;           // Empty means all storage media.
+  // Number of hosts with the longest local match to continue evaluating P2P for.
+  // Zero skips P2P evaluation.
+  int32 p2p_host_count = 6;
 }
 
 message HostCacheMatch {

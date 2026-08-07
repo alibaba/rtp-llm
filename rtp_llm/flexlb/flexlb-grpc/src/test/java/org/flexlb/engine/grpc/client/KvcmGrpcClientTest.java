@@ -110,10 +110,23 @@ class KvcmGrpcClientTest {
         assertEquals(QueryType.QT_PREFIX_MATCH, request.getQueryType());
         assertEquals(List.of(11L, 22L, 33L), request.getBlockCacheKeysList());
         assertEquals(0, request.getMediumCount());
+        assertEquals(KvcmConfig.DEFAULT_P2P_HOST_COUNT, request.getP2PHostCount());
         assertTrue(client.findMatchingEngines(
                 "request-null-group", List.of(11L, 22L, 33L), 2192L, RoleType.PDFUSION, null).isEmpty());
         assertTrue(client.findMatchingEngines(
                 "request-empty-group", List.of(11L, 22L, 33L), 2192L, RoleType.PDFUSION, "").isEmpty());
+    }
+
+    @Test
+    void skipsP2pMatchingWhenP2pHostCountIsZero() throws Exception {
+        ModelMetaConfig modelMetaConfig = modelMetaConfig(seedServer.getPort());
+        KvcmConfig kvcmConfig = modelMetaConfig.getServiceRoutes().iterator().next().getKvcm();
+        kvcmConfig.setP2pHostCount(0);
+        client = newClient(modelMetaConfig, serviceDiscovery(), KvCacheGroupMode.FULL_ATTENTION_ONLY);
+
+        waitForMatches(RoleType.PDFUSION);
+
+        assertEquals(0, lastCacheRequest.get().getP2PHostCount());
     }
 
     @Test

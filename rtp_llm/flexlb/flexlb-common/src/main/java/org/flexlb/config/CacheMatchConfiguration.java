@@ -69,7 +69,7 @@ public class CacheMatchConfiguration {
             log.info("KVCM cache matching configuration: serviceId={}, address={}, namespace={}, "
                             + "requestTimeoutMs={}, leaderRefreshIntervalMs={}, "
                             + "heartbeatFailureThreshold={}, queryFailureThreshold={}, maxQueryRetryCount={}, "
-                            + "recoverySuccessThreshold={}",
+                            + "recoverySuccessThreshold={}, p2pHostCount={}",
                     kvcmServiceRoute.getServiceId(),
                     kvcmConfig.getAddress(),
                     kvcmConfig.getNamespace(),
@@ -78,7 +78,8 @@ public class CacheMatchConfiguration {
                     kvcmConfig.getHeartbeatFailureThreshold(),
                     kvcmConfig.getQueryFailureThreshold(),
                     kvcmConfig.getMaxQueryRetryCount(),
-                    kvcmConfig.getRecoverySuccessThreshold());
+                    kvcmConfig.getRecoverySuccessThreshold(),
+                    kvcmConfig.getP2pHostCount());
         }
         if (localStandbyEnabled) {
             log.info("Local standby cache configuration: autoSwitch={}, blockSize={}, "

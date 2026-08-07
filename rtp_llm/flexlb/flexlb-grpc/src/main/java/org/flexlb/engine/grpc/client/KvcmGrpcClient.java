@@ -194,14 +194,16 @@ public class KvcmGrpcClient {
                 .setInstanceId(namespace)
                 .setQueryType(queryType)
                 .addAllBlockCacheKeys(blockCacheKeys)
+                .setP2PHostCount(Math.max(0, config.getP2pHostCount()))
                 .build();
 
         try {
             if (log.isDebugEnabled()) {
                 log.debug("KVCM GetHostCacheState request: requestId={}, namespace={}, "
-                                + "leader={}, role={}, group={}, queryType={}, blockCount={}, blockCacheKeys={}",
+                                + "leader={}, role={}, group={}, queryType={}, p2pHostCount={}, "
+                                + "blockCount={}, blockCacheKeys={}",
                         requestId, namespace, currentLeader, roleType, group, queryType,
-                        blockCacheKeys.size(), blockCacheKeys);
+                        request.getP2PHostCount(), blockCacheKeys.size(), blockCacheKeys);
             }
             long startTime = System.nanoTime() / 1000;
             GetHostCacheStateResponse response = metaServiceClient.getHostCacheState(
