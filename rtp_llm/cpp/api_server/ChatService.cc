@@ -12,13 +12,50 @@ namespace rtp_llm {
 
 // ChatService::ChatService() {}
 
+std::shared_ptr<ChatRender> ChatService::requireChatRender(const std::string& endpoint_name) {
+    auto chat_render = openai_endpoint_->getChatRender();
+    if (chat_render == nullptr) {
+        throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
+                                     "chat_render is null: " + endpoint_name
+                                         + " endpoint requires a chat template / render config");
+    }
+    return chat_render;
+}
+
+std::string ChatService::extractDebugInfo(const ChatCompletionRequest& chat_request,
+                                          const RenderedInputs&        rendered_input) {
+    try {
+        return openai_endpoint_->getDebugInfo(chat_request, rendered_input);
+    } catch (const HttpApiServerException&) {
+        throw;  // already typed
+    } catch (const py::error_already_set&) {
+        // Let pybind11 exceptions propagate so the router layer's dedicated
+        // python-exception handler (with its distinct logging) still applies.
+        throw;
+    } catch (const std::exception& e) {
+        throw HttpApiServerException(HttpApiServerException::ERROR_GENERATE_CONFIG_FORMAT,
+                                     "extract debug info failed: " + std::string(e.what()));
+    }
+}
+
 std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t                      request_id,
                                                               const ChatCompletionRequest& chat_request,
                                                               const RenderedInputs&        rendered_input) {
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->request_id                    = request_id;
     input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
-    input->generate_config               = openai_endpoint_->extract_generation_config(chat_request);
+    try {
+        input->generate_config = openai_endpoint_->extract_generation_config(chat_request);
+    } catch (const HttpApiServerException&) {
+        throw;  // already typed
+    } catch (const py::error_already_set&) {
+        // Let pybind11 exceptions propagate so the router layer's dedicated
+        // python-exception handler (with its distinct logging) still applies.
+        throw;
+    } catch (const std::exception& e) {
+        throw HttpApiServerException(HttpApiServerException::ERROR_GENERATE_CONFIG_FORMAT,
+                                     std::string("openai endpoint config error: ") + e.what());
+    }
     metric_reporter_->reportFTInputTokenLengthMetric(input->generate_config->select_tokens_id.size());
     metric_reporter_->reportFTNumBeansMetric(input->generate_config->maxNumBeams());
 
@@ -160,7 +197,7 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
         metric_reporter_->reportResponseIterateLatencyMs(iterate_stage_timer.last_ms());
 
         if (index == 0) {
-            std::string debug_info    = openai_endpoint_->getDebugInfo(chat_request, rendered_input);
+            std::string debug_info    = extractDebugInfo(chat_request, rendered_input);
             std::string json_response = ctx->render_stream_response_first(num_return_sequences, debug_info);
             write_sse_response(json_response);
         }
@@ -196,7 +233,7 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
 
     AccessLogWrapper::logQueryAccess(body, request_id, chat_request.private_request);
 
-    auto       chat_render    = openai_endpoint_->getChatRender();
+    auto       chat_render    = requireChatRender("chat completions");
     const auto rendered_input = chat_render->render_chat_request(body);
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
@@ -231,9 +268,9 @@ void ChatService::chatRender(const std::unique_ptr<http_server::HttpResponseWrit
     ChatCompletionRequest chat_request;
     FromJsonString(chat_request, body);
 
-    auto        chat_render    = openai_endpoint_->getChatRender();
+    auto        chat_render    = requireChatRender("chat render");
     const auto  rendered_input = chat_render->render_chat_request(body);
-    std::string debug_info     = openai_endpoint_->getDebugInfo(chat_request, rendered_input);
+    std::string debug_info     = extractDebugInfo(chat_request, rendered_input);
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
     writer->Write(debug_info);

@@ -51,7 +51,7 @@ private:
 
     ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
 
-    virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
+    virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
                                                               std::string ip_port = "") = 0;
 
     ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,

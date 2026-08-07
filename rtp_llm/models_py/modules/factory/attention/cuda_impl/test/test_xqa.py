@@ -57,10 +57,12 @@ class TestXQAAttnOp(BaseAttentionTest):
         logging.info(f"XQAAttnOp support check: {is_supported}")
 
         if not is_supported:
-            logging.warning(
-                f"XQAAttnOp does not support this configuration, skipping correctness test"
+            self.skipTest(
+                f"XQAAttnOp does not support this configuration "
+                f"(head_num={config.head_num}, head_num_kv={config.head_num_kv}, "
+                f"size_per_head={config.size_per_head}, "
+                f"seq_size_per_block={config.seq_size_per_block})"
             )
-            return
 
         # Prepare parameters
         params_base = attn_op.prepare(attn_inputs)
@@ -195,6 +197,12 @@ class TestXQAAttnOp(BaseAttentionTest):
                 logging.warning(f"    ⚠️  Expected SUPPORTED but got NOT SUPPORTED")
 
         logging.info(f"\nSupported cases: {supported_count}/{len(supported_cases)}")
+        self.assertEqual(
+            supported_count,
+            len(supported_cases),
+            f"Expected all {len(supported_cases)} configs to be supported, "
+            f"but only {supported_count} were",
+        )
 
         # Test UNSUPPORTED configurations
         logging.info("\n--- Testing UNSUPPORTED configurations ---")
@@ -259,34 +267,28 @@ class TestXQAAttnOp(BaseAttentionTest):
         logging.info(
             f"\nUnsupported cases correctly rejected: {unsupported_count}/{len(unsupported_cases)}"
         )
+        self.assertEqual(
+            unsupported_count,
+            len(unsupported_cases),
+            f"Expected all {len(unsupported_cases)} configs to be rejected, "
+            f"but only {unsupported_count} were",
+        )
 
         # Test boundary cases
         logging.info("\n--- Testing BOUNDARY cases ---")
 
+        # (head_num, head_num_kv, size_per_head, seq_size_per_block, data_type,
+        #  expected_supported, description)
         boundary_cases = [
             # Edge cases for group_size
-            (
-                32,
-                2,
-                128,
-                64,
-                "fp16",
-                "group_size=16 (max allowed): SHOULD BE SUPPORTED",
-            ),
-            (
-                34,
-                2,
-                128,
-                64,
-                "fp16",
-                "group_size=17 (just over limit): SHOULD BE UNSUPPORTED",
-            ),
+            (32, 2, 128, 64, "fp16", True, "group_size=16 (max allowed)"),
+            (34, 2, 128, 64, "fp16", False, "group_size=17 (just over limit)"),
             # Edge cases for head_dim
-            (32, 8, 64, 64, "fp16", "head_dim=64 (min): SHOULD BE SUPPORTED"),
-            (32, 8, 256, 64, "fp16", "head_dim=256 (max): SHOULD BE SUPPORTED"),
+            (32, 8, 64, 64, "fp16", True, "head_dim=64 (min)"),
+            (32, 8, 256, 64, "fp16", True, "head_dim=256 (max)"),
             # Edge cases for page_size
-            (32, 8, 128, 16, "fp16", "page_size=16 (min): SHOULD BE SUPPORTED"),
-            (32, 8, 128, 128, "fp16", "page_size=128 (max): SHOULD BE SUPPORTED"),
+            (32, 8, 128, 16, "fp16", True, "page_size=16 (min)"),
+            (32, 8, 128, 128, "fp16", True, "page_size=128 (max)"),
         ]
 
         for (
@@ -295,6 +297,7 @@ class TestXQAAttnOp(BaseAttentionTest):
             size_per_head,
             seq_size_per_block,
             data_type,
+            expected_supported,
             desc,
         ) in boundary_cases:
             config = self._create_config(
@@ -319,6 +322,13 @@ class TestXQAAttnOp(BaseAttentionTest):
                 f"    head_num={head_num}, head_num_kv={head_num_kv}, group_size={group_size}\n"
                 f"    head_dim={size_per_head}, page_size={seq_size_per_block}\n"
                 f"    → Support: {is_supported}"
+            )
+
+            self.assertEqual(
+                is_supported,
+                expected_supported,
+                f"Boundary case '{desc}': expected support={expected_supported}, "
+                f"got {is_supported}",
             )
 
         logging.info("\n=== XQAAttnOp support() testing completed ===")

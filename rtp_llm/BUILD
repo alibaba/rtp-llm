@@ -21,11 +21,6 @@ load(
 if_rocm = _if_rocm
 
 
-flashinfer = [
-    "apache-tvm-ffi",
-    "flashinfer-python",
-]
-
 flashinfer_with_cache = [
     "apache-tvm-ffi",
     "flashinfer-python",
@@ -55,7 +50,6 @@ flashattn = [
 ]
 
 xft_dep = select({
-    "@//:using_arm": [],
     "//:xft_use_icx": [
         # "xfastertransformer_devel_icx",
     ],
@@ -65,15 +59,13 @@ xft_dep = select({
 })
 
 arch_dep = select({
-    "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": [":decord", ":av"],
+    "//conditions:default": [":decord"],
 })
 
 arch_with_version_dep = select({
-    "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
-    "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
+    "//conditions:default": ["decord==0.6.0"],
 })
 
 requirement([
@@ -111,7 +103,6 @@ requirement([
     "xfastertransformer_devel",
     "xfastertransformer_devel_icx",
     "decord",
-    "av",
     # add qwen agent package
     "pydantic",
     "json5",
@@ -161,6 +152,7 @@ py_library(
         ":cpm_kernels",
         ":prettytable",
         ":psutil",
+        ":aiohttp",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
 )
@@ -238,9 +230,7 @@ py_library(
         ":protobuf",
         ":pyOpenSSL",
     ] + select({
-        "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
-        "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
         "//conditions:default": ["flash_attn"]
     }) + arch_dep,
@@ -277,20 +267,16 @@ py_library(
     }) + select({
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
-        "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": rtp_kernel,
         "@//:using_cuda12_arm": rtp_kernel,
-        "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
-        "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
-        "@//:using_arm": [],
         "@//:using_cuda12_arm": [],
         # "//:xft_use_icx": [
         #     "xfastertransformer_devel_icx",
@@ -299,9 +285,7 @@ py_library(
             "xfastertransformer_devel",
         ],
     }) + select({
-        "@//:using_arm": [],
-	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
-        "@//:using_cpu": [],
+        "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cuda12_arm": [],
         "//conditions:default": []
     }) + internal_deps(),
@@ -587,6 +571,7 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
+    # Kept in sync with requirements_base.txt and the regenerated lockfiles.
     "transformers==5.2.0",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
@@ -602,7 +587,7 @@ whl_reqs = [
     "lru-dict",
     "py-spy",
     "pyarrow==14.0.0",
-    "safetensors",
+    "safetensors==0.8.0",
     "cpm_kernels",
     "Pillow",
     "pillow-heif",
@@ -610,7 +595,8 @@ whl_reqs = [
     "protobuf==4.25",
     "einops",
     "prettytable",
-    "pydantic",
+    "pydantic==2.13.4",
+    "regex==2026.6.28",
     "timm==0.9.12",
     "onnx",
     "sentence-transformers==5.2.0",
@@ -727,7 +713,7 @@ rename_wheel(
 
 rename_wheel(
     name = "rtp_llm_cuda12",
-    package_name = "rtp_llm-%s+cuda121" % RELEASE_VERSION,
+    package_name = "rtp_llm-%s+cuda129" % RELEASE_VERSION,
     src = ":rtp_llm_whl",
 )
 

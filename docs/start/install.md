@@ -28,14 +28,21 @@ git clone git@github.com:alibaba/rtp-llm.git
 cd RTP-LLM
 
 # build RTP-LLM whl target
-# --config=cuda12_6 build target for NVIDIA GPU with cuda12_6
+# --config=cuda12_9 build target for NVIDIA GPU with cuda12_9
 # --config=rocm build target for AMD
-bazelisk build //rtp_llm:rtp_llm --verbose_failures --config=cuda12_6 --test_output=errors --test_env="LOG_LEVEL=INFO"  --jobs=64
+bazelisk build //rtp_llm:rtp_llm --verbose_failures --config=cuda12_9 --jobs=64
 
 ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2_grpc.py  `pwd`/rtp_llm/cpp/model_rpc/proto/
 ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py  `pwd`/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py
 
 ```
+
+> **Breaking change (build configs):** the `--config=cpu`, `--config=arm` and
+> `--config=cuda12_6` build configurations have been removed. The supported build
+> configs are now `--config=cuda12_9` (x86 NVIDIA GPU, the default), `--config=cuda12_9_arm`
+> (aarch64 NVIDIA GPU) and `--config=rocm` (AMD). Building without an explicit
+> `--config` no longer falls back to a CPU build — it resolves the cuda12_9 (cu129)
+> wheels. Update any CI/scripts that referenced the removed configs accordingly.
 
 
 ## Method 3: Using docker

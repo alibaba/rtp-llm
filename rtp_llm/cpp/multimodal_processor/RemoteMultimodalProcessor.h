@@ -70,8 +70,8 @@ private:
         }
     }
 
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                      std::string                                 ip_port = "") {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
+                                                      std::string                                  ip_port = "") {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "ip:port is empty in remote multimodal processing");
         }

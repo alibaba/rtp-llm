@@ -19,7 +19,7 @@ public:
     }
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
                                                       std::string ip_port = "") override {
         MultimodalOutput output;
         for (const auto& input : mm_inputs) {

@@ -34,7 +34,7 @@ _DEFAULT_VIDEO_PLACEHOLDER = "<|kimi_k25_video_placeholder|>"
 def _read_top_config(ckpt_path: str) -> Dict[str, Any]:
     config_path = os.path.join(ckpt_path, "config.json")
     if not os.path.exists(config_path):
-        return {}
+        raise FileNotFoundError(f"config.json not found in {ckpt_path}")
     with open(config_path, "r") as f:
         return json.load(f)
 
@@ -52,7 +52,7 @@ class KimiK25(DeepSeekV2):
         # Promote `text_config.quantization_config` to the top level so the
         # standard loader path discovers compressed-tensors INT4. Done in
         # the on-disk JSON-equivalent dict before any further processing.
-        text_config = top_config.get("text_config", {}) if top_config else {}
+        text_config = top_config.get("text_config", {})
         if isinstance(text_config, dict) and "quantization_config" in text_config:
             top_config.setdefault(
                 "quantization_config", text_config["quantization_config"]
@@ -189,7 +189,7 @@ class KimiK25(DeepSeekV2):
     def _populate_vision_config(
         cls, config: ModelConfig, top_config: Dict[str, Any]
     ) -> None:
-        vision_config = top_config.get("vision_config", {}) if top_config else {}
+        vision_config = top_config.get("vision_config", {})
         # Drop unsupported HF keys (e.g. `_attn_implementation`) before
         # passing to KimiK25VisionConfig so PretrainedConfig.__init__ does
         # not raise on unknown kwargs.

@@ -160,6 +160,7 @@ class VisionAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int = 16) -> None:
         super().__init__()
         self.num_heads = num_heads
+        self.head_dim = dim // num_heads
         self.qkv = nn.Linear(dim, dim * 3, bias=True)
         self.proj = nn.Linear(dim, dim)
 
@@ -193,7 +194,7 @@ class VisionAttention(nn.Module):
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
         attn_weights = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(self.head_dim)
-        attn_weights = attn_weights + attention_mask
+        attn_weights = attn_weights.masked_fill(~attention_mask, float("-inf"))
         attn_weights = nn.functional.softmax(
             attn_weights, dim=-1, dtype=torch.float32
         ).to(q.dtype)

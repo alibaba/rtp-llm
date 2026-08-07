@@ -10,7 +10,7 @@ The test verifies:
   3. Runs in a tight loop (stress) to increase race-window hit probability
 
 Run with bazel:
-    bazel test //rtp_llm/models_py/triton_kernels/moe/test:test_ep_scatter --config=cuda12
+    bazel test //rtp_llm/models_py/triton_kernels/moe/test:test_ep_scatter --config=cuda12_9
 """
 
 import math

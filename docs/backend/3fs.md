@@ -15,7 +15,7 @@ Currently, 3FS is disabled by default in production. You can enable 3FS by follo
 1. 3FS is currently only used in CUDA environments. During compilation, 3FS needs to be actively compiled, and 3FS needs to be actively enabled at runtime.
 
 ```shell
-bazelisk build --config=cuda12_6 --config=3fs xxx
+bazelisk build --config=cuda12_9 --config=3fs xxx
 ```
 
 

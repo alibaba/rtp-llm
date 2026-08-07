@@ -38,6 +38,8 @@ public:
                     const http_server::HttpRequest&                         request);
 
 private:
+    std::shared_ptr<ChatRender> requireChatRender(const std::string& endpoint_name);
+    std::string extractDebugInfo(const ChatCompletionRequest& chat_request, const RenderedInputs& rendered_input);
     std::shared_ptr<GenerateInput>
          fillGenerateInput(int64_t request_id, const ChatCompletionRequest& chat_request, const RenderedInputs& body);
     void generateResponse(const std::shared_ptr<GenerateConfig>&                  config,

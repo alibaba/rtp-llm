@@ -12,7 +12,6 @@ py_library(
     srcs = ["cp_test_utils.py"],
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
 )
@@ -22,7 +21,6 @@ py_test(
     srcs = ["test_cp_utils.py"],
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["A10"],
@@ -34,7 +32,6 @@ py_test(
     srcs = ["test_allgather_cp_impl.py"],
     deps = py_test_deps + [":cp_test_utils"] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20"],
@@ -46,7 +43,6 @@ py_test(
     srcs = ["test_alltoall_cp_impl.py"],
     deps = py_test_deps + [":cp_test_utils"] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20"],
@@ -58,7 +54,6 @@ py_test(
     srcs = ["test_allgather_overlap_impl.py"],
     deps = py_test_deps + [":cp_test_utils"] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20"],
@@ -70,7 +65,6 @@ py_test(
     srcs = ["test_cp_linear_attn.py"],
     deps = py_test_deps + [":cp_test_utils"] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["manual"],

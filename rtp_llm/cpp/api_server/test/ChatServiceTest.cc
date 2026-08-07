@@ -65,6 +65,10 @@ protected:
         auto openai_endpoint            = std::dynamic_pointer_cast<OpenaiEndpoint>(mock_openai_endpoint_);
         chat_service_->openai_endpoint_ = openai_endpoint;
 
+        // 默认返回 mock_render_, 保持既有用例行为不变
+        ON_CALL(*mock_openai_endpoint_, getChatRender).WillByDefault(Return(render));
+        EXPECT_CALL(*mock_openai_endpoint_, getChatRender).Times(AnyNumber());
+
         mock_writer_ = std::make_unique<http_server::MockHttpResponseWriter>();
         auto writer  = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer_.get());
         ASSERT_TRUE(writer != nullptr);
@@ -436,6 +440,44 @@ TEST_F(ChatServiceTest, StreamingStreamErrorsUseSseErrorPath) {
 
     EXPECT_EQ(writer_->_type, http_server::HttpResponseWriter::WriteType::Stream);
     EXPECT_EQ(writer_->_headers.at("Content-Type"), "text/event-stream");
+}
+
+TEST_F(ChatServiceTest, ChatCompletions_NullChatRender_Throws515) {
+    http_server::HttpRequest request;
+    const std::string        body = R"del({
+    "messages": [{"role": "user", "content": "who are you?"}],
+    "stream": false,
+    "source": "test_source"
+})del";
+    request._request              = CreateHttpPacket(body);
+
+    EXPECT_CALL(*mock_openai_endpoint_, getChatRender).WillOnce(Return(nullptr));
+
+    try {
+        chat_service_->chatCompletions(writer_, request, 10086);
+        FAIL() << "expected null chat_render error";
+    } catch (const HttpApiServerException& error) {
+        EXPECT_EQ(error.getType(), HttpApiServerException::UNSUPPORTED_OPERATION);
+    }
+}
+
+TEST_F(ChatServiceTest, ChatRender_NullChatRender_Throws515) {
+    http_server::HttpRequest request;
+    const std::string        body = R"del({
+    "messages": [{"role": "user", "content": "who are you?"}],
+    "stream": false,
+    "source": "test_source"
+})del";
+    request._request              = CreateHttpPacket(body);
+
+    EXPECT_CALL(*mock_openai_endpoint_, getChatRender).WillOnce(Return(nullptr));
+
+    try {
+        chat_service_->chatRender(writer_, request);
+        FAIL() << "expected null chat_render error";
+    } catch (const HttpApiServerException& error) {
+        EXPECT_EQ(error.getType(), HttpApiServerException::UNSUPPORTED_OPERATION);
+    }
 }
 
 }  // namespace rtp_llm

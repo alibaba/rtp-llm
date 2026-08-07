@@ -20,7 +20,8 @@ public:
 public:
     // `virtual` for test
     virtual std::shared_ptr<GenerateConfig> extract_generation_config(const ChatCompletionRequest& req);
-    std::shared_ptr<ChatRender>             getChatRender() {
+    // `virtual` for test
+    virtual std::shared_ptr<ChatRender> getChatRender() {
         return chat_render_;
     }
     std::string getDebugInfo(const ChatCompletionRequest& chat_request, const RenderedInputs& rendered_input);

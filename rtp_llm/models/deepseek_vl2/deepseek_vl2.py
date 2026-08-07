@@ -21,7 +21,7 @@ class DeepSeekVLV2(BaseModel):
         config.activation_type = "gated-silu"
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
-            return
+            raise FileNotFoundError(f"config.json not found in {ckpt_path}")
         with open(config_path) as reader:
             content = reader.read()
             top_config_json = json.loads(content)
