@@ -1,7 +1,7 @@
 import fnmatch
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterable, List, Optional, Type
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Type
 
 import torch
 
@@ -174,6 +174,11 @@ class QuantizationConfig:
         )
         self.activation_dynamic = self._activation_dynamic(source_config)
         self.weight_block_size = self._weight_block_size(self.quant_type, source_config)
+
+    @property
+    def fp8_block_size(self) -> Tuple[int, int]:
+        """Return the validated output/input FP8 block dimensions."""
+        return self.weight_block_size[0], self.weight_block_size[1]
 
     @staticmethod
     def _normalize_ignored(values: Iterable[str]) -> List[str]:
