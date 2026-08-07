@@ -154,7 +154,9 @@ struct alignas(8) TieValue {
   float value;
   uint32_t idx;
   inline static constexpr TieValue invalid() {
-    return TieValue{-FLT_MAX, 0xFFFFFFFFu};
+    // A padding element must sort below every legal FP32 value.  -FLT_MAX is
+    // greater than -inf and therefore corrupts ranks when -inf is selected.
+    return TieValue{-std::numeric_limits<float>::infinity(), 0xFFFFFFFFu};
   }
 };
 

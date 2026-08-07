@@ -471,7 +471,29 @@ def test_special_float_values_exact():
     expected = logits.topk(k, dim=1, sorted=False).indices.to(torch.int32)
     assert torch.equal(out.sort(dim=1).values, expected.sort(dim=1).values)
 
-    print("  [special float values] direct exact index set OK")
+    print("  [special float values] exact index sets OK")
+
+
+def test_negative_infinity_tie_padding_is_minimal():
+    """Padding candidates must rank below legal -inf values."""
+    k = 512
+    for tie_count in (48, 96):
+        above_count = 500
+        seq_len = above_count + tie_count
+        logits = torch.full(
+            (1, seq_len), -torch.inf, dtype=torch.float32, device="cuda"
+        )
+        logits[0, :above_count] = 1.0
+        lengths = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
+
+        out = _run(logits, lengths, k=k, max_seq_len=seq_len)
+        _assert_value_equiv(
+            out,
+            logits,
+            lengths,
+            k=k,
+            tag=f"-inf tie padding candidates={tie_count}",
+        )
 
 
 def test_mtp_batched_decode_flattened_bs_rows():
@@ -944,6 +966,7 @@ if __name__ == "__main__":
     test_fp32_subnormal_ordering_exact()
     test_dispatch_boundaries_all_k_exact()
     test_special_float_values_exact()
+    test_negative_infinity_tie_padding_is_minimal()
     test_mtp_batched_decode_flattened_bs_rows()
     test_batched_streaming_path_b64()
     test_long_seq_radix_path()
