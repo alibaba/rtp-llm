@@ -91,7 +91,11 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long predictThresholdMs = cfg.getFlexlbBatchPredictThresholdMs();
         long batchMaxTokens = batchTokenCapacity();
 
-        // 0. Oversized head: can never be picked by any batch
+        // 0. Oversized head: can never be picked by any batch. The offer-time
+        // check() already rejects oversized requests, but batchTokenCapacity is
+        // partly worker-reported and may have shrunk between offer and dispatch,
+        // so keep this head rejection as a fallback: an impossible head must not
+        // block the FIFO queue.
         if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
             queue.remove(head);
             return new BatchDecision.Drop(head,
@@ -189,7 +193,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
      * that have not populated the newer field yet. The FlexLB setting
      * remains an operator-controlled upper bound.
      */
-    private long batchTokenCapacity() {
+    @Override
+    public long batchTokenCapacity() {
         long capacity = positiveOrUnlimited(cfg.getFlexlbBatchMaxCapacity());
         WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
         if (status == null) {

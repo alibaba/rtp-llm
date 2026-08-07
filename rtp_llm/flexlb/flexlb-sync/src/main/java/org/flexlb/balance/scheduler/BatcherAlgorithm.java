@@ -21,6 +21,39 @@ public interface BatcherAlgorithm {
     void offer(BatchItem item);
 
     /**
+     * Effective strict padded-token limit for one batch, used by the default
+     * {@link #check}. Implementations derive it from the static FlexLB config
+     * and the latest worker-reported status (so the value may shrink between
+     * offer and dispatch).
+     */
+    long batchTokenCapacity();
+
+    /**
+     * Pre-enqueue admission check (command-style query). Called by
+     * {@link WorkerBatcher#offer} after the stopped / queue-full guards and
+     * before {@link #offer} actually enqueues the item. Returns {@code null}
+     * to admit the item; a non-null reject reason fails the offer via
+     * {@link BatchItem#failOffer} without enqueueing.
+     *
+     * <p>The default implementation rejects a request whose own padded shape
+     * can never fit the strict batch token capacity — such a request could
+     * never be picked by any batch and would only occupy queue capacity until
+     * it expires.
+     *
+     * <p>{@link #batchTokenCapacity()} is partly derived from worker-reported
+     * status and may change between offer and dispatch, so {@link #decide}
+     * implementations keep an equivalent head rejection as a fallback.
+     */
+    default String check(BatchItem item) {
+        long capacity = batchTokenCapacity();
+        if (!BatchShape.empty().add(item).fitsCompute(capacity)) {
+            return "request seq_len=" + item.seqLen()
+                    + " cannot fit strict padded batch token capacity=" + capacity;
+        }
+        return null;
+    }
+
+    /**
      * Produce the next dispatch / drop decision, removing the affected
      * items from the internal container.
      *

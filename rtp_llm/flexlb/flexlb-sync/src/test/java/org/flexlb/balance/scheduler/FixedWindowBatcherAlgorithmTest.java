@@ -5,7 +5,9 @@ import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -301,6 +303,9 @@ class FixedWindowBatcherAlgorithmTest {
 
     @Test
     void requestAtEngineTokenLimitIsRejectedBeforeDispatch() {
+        // Covers the decide() fallback path: batchTokenCapacity is partly
+        // worker-reported and may shrink after the offer-time check() admitted
+        // the item, so an oversized head must still be rejected here.
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchFixedWaitMs(0);
         config.setFlexlbBatchMaxCapacity(1_000);
@@ -326,6 +331,77 @@ class FixedWindowBatcherAlgorithmTest {
         assertEquals(0, algorithm.size());
         // Settlement happens in the batcher, not the algorithm
         assertFalse(item.future().isDone());
+    }
+
+    @Test
+    void offerRejectsOversizedRequestViaCheckWithoutEnqueue() {
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchMaxCapacity(100);
+
+        WorkerBatcher batcher = new WorkerBatcher(
+                "test", null, config, mock(BatchSchedulerReporter.class));
+
+        // seqLen == capacity → padded shape does not fit the strict limit
+        BatchItem oversized = enqueuedItem(1, System.currentTimeMillis(), 100);
+        batcher.offer(oversized);
+
+        assertTrue(oversized.future().isDone());
+        Response response = oversized.future().join();
+        assertFalse(response.isSuccess());
+        assertTrue(response.getErrorMessage()
+                .contains("cannot fit strict padded batch token capacity"));
+        assertEquals(0, batcher.queueSize());
+    }
+
+    @Test
+    void offerCheckRejectionDoesNotLeakQueueDepth() {
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchMaxCapacity(100);
+        config.setFlexlbBatchQueueMaxSize(1);
+
+        WorkerBatcher batcher = new WorkerBatcher(
+                "test", null, config, mock(BatchSchedulerReporter.class));
+
+        for (long id = 1; id <= 3; id++) {
+            BatchItem oversized = enqueuedItem(id, System.currentTimeMillis(), 200);
+            batcher.offer(oversized);
+            assertTrue(oversized.future().isDone());
+        }
+        assertEquals(0, batcher.queueSize());
+
+        // Rejected offers must not consume the single queue slot
+        BatchItem admitted = enqueuedItem(9, System.currentTimeMillis(), 60);
+        batcher.offer(admitted);
+        assertFalse(admitted.future().isDone());
+        assertEquals(1, batcher.queueSize());
+    }
+
+    @Test
+    void offerAdmitsRequestWithinCapacityAndEnqueues() {
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchMaxCapacity(100);
+
+        WorkerBatcher batcher = new WorkerBatcher(
+                "test", null, config, mock(BatchSchedulerReporter.class));
+
+        BatchItem item = enqueuedItem(1, System.currentTimeMillis(), 60);
+        batcher.offer(item);
+
+        assertFalse(item.future().isDone());
+        assertEquals(1, batcher.queueSize());
+    }
+
+    @Test
+    void defaultCheckAdmitsWithinCapacityAndRejectsOversized() {
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchMaxCapacity(100);
+        FixedWindowBatcherAlgorithm algorithm =
+                new FixedWindowBatcherAlgorithm(config, null);
+
+        assertNull(algorithm.check(enqueuedItem(1, 1, 60)));
+
+        String reason = algorithm.check(enqueuedItem(2, 2, 100));
+        assertEquals("request seq_len=100 cannot fit strict padded batch token capacity=100", reason);
     }
 
     // ---- helpers ----

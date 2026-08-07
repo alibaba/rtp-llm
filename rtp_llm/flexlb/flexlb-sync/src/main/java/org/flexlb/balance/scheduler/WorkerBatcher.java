@@ -67,6 +67,13 @@ public class WorkerBatcher {
                     new IllegalStateException("FlexLB batcher queue full, maxSize=" + maxSize));
             return;
         }
+        // Pre-enqueue admission check: reject items that could never be picked
+        // by any batch instead of letting them occupy queue capacity.
+        String rejectReason = algorithm.check(item);
+        if (rejectReason != null) {
+            item.failOffer(new IllegalStateException(rejectReason));
+            return;
+        }
         algorithm.offer(item);
         signalNotEmpty();
     }
