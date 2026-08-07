@@ -587,8 +587,8 @@ public class EngineHealthReporter {
         monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, metricTags, actual.hit());
         monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, metricTags, routing.delta());
         if (kvcmDetails != null) {
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, metricTags, kvcmDetails.localDelta());
-            monitor.report(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS, metricTags, kvcmDetails.p2pTotalMatchDelta());
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, metricTags, kvcmDetails.local().delta());
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_P2P_TOTAL_MATCH_DELTA_TOKENS, metricTags, kvcmDetails.p2pTotal().delta());
         }
         long inputTokens = comparison.inputTokens();
         if (inputTokens > 0) {

@@ -63,8 +63,10 @@ class LocalStandbyComparisonServiceTest {
         assertEquals(4384, result.routing().hit());
         assertEquals(6000, result.actual().hit());
         assertEquals(1616, result.routing().delta());
-        assertEquals(2000, result.kvcmDetails().localDelta());
-        assertEquals(-4000, result.kvcmDetails().p2pTotalMatchDelta());
+        assertEquals(4000, result.kvcmDetails().local().hit());
+        assertEquals(2000, result.kvcmDetails().local().delta());
+        assertEquals(10000, result.kvcmDetails().p2pTotal().hit());
+        assertEquals(-4000, result.kvcmDetails().p2pTotal().delta());
         assertNotNull(result.localStandby());
         assertEquals(4096, result.localStandby().hit());
         assertEquals(1904, result.localStandby().delta());

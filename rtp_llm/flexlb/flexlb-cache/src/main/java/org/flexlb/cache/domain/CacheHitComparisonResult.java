@@ -26,8 +26,15 @@ public record CacheHitComparisonResult(
         @JsonIgnore KvcmDetails kvcmDetails) {
 
     @JsonProperty("kvcm")
-    public HitComparison kvcm() {
-        return CacheMatchSource.KVCM.name().equals(source) ? routing : null;
+    public KvcmComparison kvcm() {
+        if (!CacheMatchSource.KVCM.name().equals(source) || routing == null) {
+            return null;
+        }
+        return new KvcmComparison(
+                routing.hit(),
+                routing.delta(),
+                kvcmDetails == null ? null : kvcmDetails.local(),
+                kvcmDetails == null ? null : kvcmDetails.p2pTotal());
     }
 
     public record Actual(long hit) {
@@ -36,6 +43,14 @@ public record CacheHitComparisonResult(
     public record HitComparison(long hit, long delta) {
     }
 
-    public record KvcmDetails(long localDelta, long p2pTotalMatchDelta) {
+    /**
+     * KVCM prediction drill-down. {@code hit}/{@code delta} are the blended prediction used for
+     * routing; {@code local} and {@code p2pTotal} compare the actual hit against the local-only
+     * match and the full local+P2P match respectively. {@code p2pTotal.hit} includes {@code local.hit}.
+     */
+    public record KvcmComparison(long hit, long delta, HitComparison local, HitComparison p2pTotal) {
+    }
+
+    public record KvcmDetails(HitComparison local, HitComparison p2pTotal) {
     }
 }

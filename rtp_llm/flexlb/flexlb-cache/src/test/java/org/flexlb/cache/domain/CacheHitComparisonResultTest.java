@@ -3,6 +3,7 @@ package org.flexlb.cache.domain;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -18,7 +19,9 @@ class CacheHitComparisonResultTest {
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(100, 20),
                 new CacheHitComparisonResult.HitComparison(70, 50),
-                new CacheHitComparisonResult.KvcmDetails(40, 30));
+                new CacheHitComparisonResult.KvcmDetails(
+                        new CacheHitComparisonResult.HitComparison(60, 60),
+                        new CacheHitComparisonResult.HitComparison(110, 10)));
 
         String json = JsonUtils.toStringOrEmpty(comparison);
 
@@ -27,9 +30,15 @@ class CacheHitComparisonResultTest {
         assertTrue(json.contains("\"worker\":\"127.0.0.1\""));
         assertTrue(json.contains("\"state\":\"running\""));
         assertTrue(json.contains("\"actual\":{\"hit\":120}"));
-        assertTrue(json.contains("\"kvcm\":{\"hit\":100,\"delta\":20}"));
+        assertTrue(json.contains(
+                "\"kvcm\":{\"hit\":100,\"delta\":20,"
+                        + "\"local\":{\"hit\":60,\"delta\":60},"
+                        + "\"p2pTotal\":{\"hit\":110,\"delta\":10}}"));
         assertTrue(json.contains("\"localStandby\":{\"hit\":70,\"delta\":50}"));
-        assertSame(comparison.routing(), comparison.kvcm());
+        assertEquals(100, comparison.kvcm().hit());
+        assertEquals(20, comparison.kvcm().delta());
+        assertSame(comparison.kvcmDetails().local(), comparison.kvcm().local());
+        assertSame(comparison.kvcmDetails().p2pTotal(), comparison.kvcm().p2pTotal());
         assertFalse(json.contains("\"routing\""));
         assertFalse(json.contains("\"kvcmDetails\""));
         assertTrue(json.indexOf("\"actual\"") < json.indexOf("\"kvcm\""));

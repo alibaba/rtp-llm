@@ -455,7 +455,9 @@ class EngineHealthReporterTest {
                 new CacheHitComparisonResult.Actual(120),
                 new CacheHitComparisonResult.HitComparison(60, 60),
                 null,
-                new CacheHitComparisonResult.KvcmDetails(80, 20));
+                new CacheHitComparisonResult.KvcmDetails(
+                        new CacheHitComparisonResult.HitComparison(40, 80),
+                        new CacheHitComparisonResult.HitComparison(100, 20)));
 
         reporter.reportCacheHitComparisonMetrics("test-model", comparison);
 

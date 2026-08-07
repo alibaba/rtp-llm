@@ -98,8 +98,12 @@ public class LocalStandbyComparisonService {
                                             CacheHitComparisonResult.HitComparison localStandby) {
         CacheHitComparisonResult.KvcmDetails kvcmDetails = feedback.kvcmMatchAvailable()
                 ? new CacheHitComparisonResult.KvcmDetails(
-                        feedback.actualHitTokens() - feedback.kvcmLocalMatchTokens(),
-                        feedback.actualHitTokens() - feedback.kvcmP2pTotalMatchTokens())
+                        new CacheHitComparisonResult.HitComparison(
+                                feedback.kvcmLocalMatchTokens(),
+                                feedback.actualHitTokens() - feedback.kvcmLocalMatchTokens()),
+                        new CacheHitComparisonResult.HitComparison(
+                                feedback.kvcmP2pTotalMatchTokens(),
+                                feedback.actualHitTokens() - feedback.kvcmP2pTotalMatchTokens()))
                 : null;
         return new CacheHitComparisonResult(
                 feedback.eventType(),
