@@ -926,33 +926,52 @@ void CudaGraphRunner::initCapture() {
 
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host[1] = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens[1]      = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths[0]   = max_num_token_;
-
             PyModelInputs inputs = capture_mem_hold_.py_model_inputs_;
-            inputs.attention_inputs.cu_seqlens_host =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host.slice(0, 0, 2);
-            inputs.attention_inputs.cu_seqlens =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, 2);
-            inputs.attention_inputs.cu_kv_seqlens =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, 2);
-            inputs.attention_inputs.input_lengths =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, 1);
-            // ``prefix_lengths`` must mirror the per-request batch size of
-            // the sliced post-check forward; downstream (e.g. DSv4 indexer)
-            // asserts ``prefix_lengths.numel() == batch_size`` and aborts on
-            // the unsliced ``[max_bs_]`` view.
-            if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.defined()
-                && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.numel() > 0) {
-                inputs.attention_inputs.prefix_lengths =
-                    capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, 1);
+            const bool fixed_width_dspark_prefill = dspark_call_phase_ != DSparkCallPhase::NONE;
+            if (fixed_width_dspark_prefill) {
+                // A fixed-width draft graph owns B independent requests of
+                // exactly num_tokens_per_bs_ rows.  Flattening the same
+                // max_bs_*width storage into one long request is not an
+                // equivalent warmup shape: DSpARK proposal, for example,
+                // requires input_ids.numel() == input_lengths.numel()*gamma.
+                // Keep the full batch metadata built by
+                // initKernelInternalMemory() for this post-check.
+                RTP_LLM_LOG_INFO("initCapture fixed-width draft post check keeps batch=%d width=%d",
+                                 max_bs_,
+                                 num_tokens_per_bs_);
+                RTP_LLM_CHECK_WITH_INFO(
+                    inputs.input_ids.numel()
+                        == inputs.attention_inputs.input_lengths.numel() * num_tokens_per_bs_,
+                    "DSpARK prefill graph post-check must preserve B*width: tokens=%ld batch=%ld width=%d",
+                    inputs.input_ids.numel(),
+                    inputs.attention_inputs.input_lengths.numel(),
+                    num_tokens_per_bs_);
+            } else {
+                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host[1] = max_num_token_;
+                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens[1]      = max_num_token_;
+                capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = max_num_token_;
+                capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths[0]   = max_num_token_;
+
+                inputs.attention_inputs.cu_seqlens_host =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host.slice(0, 0, 2);
+                inputs.attention_inputs.cu_seqlens =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens.slice(0, 0, 2);
+                inputs.attention_inputs.cu_kv_seqlens =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens.slice(0, 0, 2);
+                inputs.attention_inputs.input_lengths =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, 1);
+                // ``prefix_lengths`` must mirror the per-request batch size
+                // of the sliced embedding post-check forward.
+                if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.defined()
+                    && capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.numel() > 0) {
+                    inputs.attention_inputs.prefix_lengths =
+                        capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.slice(0, 0, 1);
+                }
+                inputs.attention_inputs.kv_cache_kernel_block_id_device =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, 1);
+                inputs.attention_inputs.kv_cache_kernel_block_id_host =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host.slice(0, 0, 1);
             }
-            inputs.attention_inputs.kv_cache_kernel_block_id_device =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.slice(0, 0, 1);
-            inputs.attention_inputs.kv_cache_kernel_block_id_host =
-                capture_mem_hold_.py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host.slice(0, 0, 1);
             try {
                 ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
                 py_forward_method_(inputs);
