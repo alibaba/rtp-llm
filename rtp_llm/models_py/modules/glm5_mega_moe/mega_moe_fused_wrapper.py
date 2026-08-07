@@ -15,9 +15,8 @@ class MegaMoeFusedWrapper(MegaMoeWrapper):
 
     The routed expert weights use the same load-time FP4 layout as
     :class:`MegaMoeWrapper`. The shared expert weights are pre-quantized **FP8
-    e4m3 per-block** tensors loaded from
-    ``shared_experts.*.{weight,weight_scale_inv}`` (``mega_moe_fused`` no longer
-    supports FP4 shared-expert weights).
+    e4m3 per-block** tensors (``.scale`` / legacy ``.weight_scale_inv``).
+    Native UE8M0 scales skip requant at setup time.
     """
 
     def _get_mega_moe_cls(self):

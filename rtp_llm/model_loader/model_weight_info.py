@@ -46,17 +46,19 @@ def create_scalar_ones(ts: List[torch.Tensor]):
 def _apply_mega_moe_fp4_wrappers(
     weight_info: "ModelWeightInfo",
     database: Optional[BaseDatabase] = None,
+    quant_config: Optional[QuantizationConfig] = None,
 ) -> "ModelWeightInfo":
     """Walk ``weight_info`` and replace MoE w1/w2 weights with mega-MoE FP4
     load-time quantizers when a MegaMoE strategy is selected.
 
     Three cases are handled:
-      - **Offline FP4 ckpt** (auto-detected via ``database``: experts have
-        ``.weight_scale`` entries): replace with
-        :class:`OfflineMegaMoeFp4MoeWeight` (no quantization, direct load).
-        ``MOE_STRATEGY=mega_moe_fused`` additionally loads shared-expert FP4
-        weights; ``MOE_STRATEGY=mega_moe`` leaves shared experts on their
-        normal FFN path.
+      - **Offline FP4 ckpt** (``quantization_config.expert_dtype == "fp4"``,
+        fallback: legacy ``experts.*.weight_scale`` keys): replace with
+        :class:`OfflineMegaMoeFp4MoeWeight` (direct load; scale key is
+        ``.scale`` for UE8M0 or ``.weight_scale`` for float32).
+        ``MOE_STRATEGY=mega_moe_fused`` additionally wraps shared experts as
+        FP8 per-block (:class:`OfflineMegaMoeFp8SharedExpertWeight`);
+        ``MOE_STRATEGY=mega_moe`` leaves shared experts on the normal FFN path.
       - ``MoeAtomicWeight`` (BF16 ckpt): wrap with
         :class:`OnlineMegaMoeFp4Weight` (BF16 → FP4).
       - ``PerBlockFp8Weight`` for moe_w1/moe_w2 (FP8 ckpt under
@@ -72,12 +74,18 @@ def _apply_mega_moe_fp4_wrappers(
         is_mega_moe_strategy,
         wrap_moe_for_mega_moe,
     )
+    from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 
     if not is_mega_moe_strategy():
         return weight_info
 
-    include_shared_expert = is_mega_moe_fused_strategy()
     is_offline = is_offline_mega_moe_fp4_ckpt(database)
+    include_shared_expert = is_mega_moe_fused_strategy()
+    scale_dtype = (
+        PerBlockFp8Weight._get_scale_dtype(getattr(quant_config, "scale_fmt", None))
+        if is_offline
+        else torch.float32
+    )
     if is_offline:
         logging.info(
             "[mega_moe] offline FP4 MoE detected in ckpt; using "
@@ -90,7 +98,9 @@ def _apply_mega_moe_fp4_wrappers(
     def _walk(weight: WeightModule) -> WeightModule:
         if is_offline:
             wrapped = wrap_for_offline_fp4(
-                weight, include_shared_expert=include_shared_expert
+                weight,
+                include_shared_expert=include_shared_expert,
+                scale_dtype=scale_dtype,
             )
         else:
             wrapped = wrap_moe_for_mega_moe(weight)
@@ -430,9 +440,12 @@ class ModelDeployWeightInfo:
         # MegaMoE strategies force load-time FP4 quantization for MoE weights
         # regardless of whether a quant_config is set. This must run
         # AFTER `to_quant_weight_info` so we can replace any PerBlockFp8Weight
-        # MoE wrapper with the FP8→FP4 variant. `database` lets us auto-detect
-        # offline FP4 MoE ckpt (experts with `.weight_scale` keys).
-        weight_info = _apply_mega_moe_fp4_wrappers(weight_info, database=database)
+        # MoE wrapper with the FP8→FP4 variant. `database` / `quant_config`
+        # auto-detect offline FP4 MoE (`expert_dtype=fp4` or legacy
+        # `experts.*.weight_scale`) and pick UE8M0 vs float32 scale dtype.
+        weight_info = _apply_mega_moe_fp4_wrappers(
+            weight_info, database=database, quant_config=self._quant_config
+        )
 
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")

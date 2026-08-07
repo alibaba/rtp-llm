@@ -58,6 +58,9 @@ def _transform_scale_ue8m0(sf, mn):
 
     if not sf.is_cuda:
         sf = sf.cuda()
+    # Native UE8M0 is lossless in float32 (exponent-only).
+    if sf.dtype == torch.float8_e8m0fnu:
+        sf = sf.float()
     sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
     sf = deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
     return sf

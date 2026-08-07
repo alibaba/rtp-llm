@@ -255,20 +255,19 @@ class QuantizationConfig(ABC):
                         "group_size": group_size,
                         "is_quanted": True,
                         "mixed_attention": mixed_attention,
+                        "scale_fmt": quant_config.get("scale_fmt", None),
                     }
                 )
 
-        normalized_config = {
-            "bits": bits,
-            "method": quant_method,
-            "group_size": group_size,
-            "is_quanted": True,
-        }
-        if quant_config and "weight_scale_format" in quant_config:
-            normalized_config["weight_scale_format"] = quant_config[
-                "weight_scale_format"
-            ]
-        result = cls.from_config(normalized_config)
+        result = cls.from_config(
+            {
+                "bits": bits,
+                "method": quant_method,
+                "group_size": group_size,
+                "is_quanted": True,
+                "scale_fmt": quant_config.get("scale_fmt", None),
+            }
+        )
         if quant_config and "exclude" in quant_config:
             result.exclude_modules = set(quant_config["exclude"])
         return result
@@ -390,11 +389,7 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         # used by the mega_moe path which performs its own internal BF16->FP4
         # conversion in MegaMoeWrapper.
         self.skip_moe = kwargs.get("skip_moe", False)
-        # Offline-converted FP8 checkpoints may store 128x128 block scales as
-        # native UE8M0 values.  Keeping this in the quant config lets the
-        # loader preserve that one-byte dtype and skip the expensive
-        # FP8 -> FP32 -> FP8 requantization performed for legacy checkpoints.
-        self.weight_scale_format = kwargs.get("weight_scale_format", "float32")
+        self.scale_fmt = kwargs.get("scale_fmt", None)
 
     @classmethod
     def get_method(cls) -> str:
@@ -675,6 +670,7 @@ class ModelOptFp4Config(QuantizationConfig):
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.mixed_attention = kwargs.get("mixed_attention", False)
+        self.scale_fmt = kwargs.get("scale_fmt", None)
         hybrid_attn_quant_method = kwargs.get("hybrid_attn_quant_method", None)
         if hybrid_attn_quant_method is not None:
             method_norm = str(hybrid_attn_quant_method).upper()

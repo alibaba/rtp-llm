@@ -13,14 +13,10 @@ which is distinct from the routed ``get_symm_buffer_for_mega_moe`` buffer.
 The routed experts stay FP4 (per-group, gran_k=32). The **shared expert** is
 consumed as **FP8 e4m3 weights with 128×128 per-block UE8M0 scale factors**
 (``mega_moe_fused`` no longer supports FP4 shared-expert weights). This module
-also owns the FP8 shared-expert weight transform + scratch workspace, mirroring
-DeepGEMM's reference flow in ``opt_fused/test_mega_moe_fused.py`` /
-``opt_fused/fused_op.py``:
+owns the FP8 shared-expert weight transform + scratch workspace:
 
-    sf_int = transform_sf_into_required_layout(sf_fp32, N, K, (128, 128))
-    (l1_w, l1_sf), (l2_w, l2_sf) = \
-        transform_shared_expert_weights_for_mega_moe_fused(
-            (w1_fp8, l1_sf_int), (w2_fp8, l2_sf_int))
+* legacy float32 scales → ``requant_weight_ue8m0`` then fused layout transform
+* native UE8M0 / packed int32 → keep weight bits, pack SF only, then fused layout
 
 The transformed SF tensors are pre-arranged for direct SM100 UTCCP 4x32
 consumption by the fused SE L1/L2 paths; the FP8 weight tensors keep the SE
@@ -208,31 +204,30 @@ def mega_moe_fused_enabled() -> bool:
 
 def transform_shared_expert_fp8_for_fused(
     w1_w: torch.Tensor,  # [2*inter, dim]  float8_e4m3fn  (gate||up stacked on N)
-    w1_s: torch.Tensor,  # [2*inter//128, dim//128]  float32  per-block SF
+    w1_s: torch.Tensor,  # float32 block SF, e8m0 block SF, or packed int32
     w2_w: torch.Tensor,  # [dim, inter]    float8_e4m3fn
-    w2_s: torch.Tensor,  # [dim//128, inter//128]  float32  per-block SF
+    w2_s: torch.Tensor,  # float32 block SF, e8m0 block SF, or packed int32
     dim: int,
     inter: int,
 ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
     """Transform FP8 per-block shared-expert weights for ``fp8_fp4_mega_moe_fused``.
 
-    The checkpoint stores standard DeepSeek-style FP8 per-block weights whose
-    ``weight_scale_inv`` is an arbitrary fp32 per-block scale (NOT UE8M0).
-    DeepGEMM's fused SE path needs **UE8M0** scales, so — exactly like the
-    routed ``fp8_fp8_mega_moe`` path (``mega_moe_fp8.py`` →
-    ``requant_weight_ue8m0``) — we dequantize the FP8 blocks and requantize them
-    against UE8M0 power-of-two scales. ``requant_weight_ue8m0`` returns the
-    requantized FP8 weight plus the SF already in the INT32-packed MN-major
-    TMA-aligned layout (equivalent to
-    ``transform_sf_into_required_layout(sf, N, K, (128, 128))``), which is what
-    ``transform_shared_expert_weights_for_mega_moe_fused`` consumes.
+    Scale handling mirrors ``mega_moe_fp8_se``:
 
-    Returns ``((l1_w, l1_sf), (l2_w, l2_sf))`` ready to pass to
+    * **float32** (legacy DeepSeek ``weight_scale_inv``): dequant → requant to
+      UE8M0 via ``requant_weight_ue8m0`` (may rewrite FP8 weight bits).
+    * **native UE8M0** (``float8_e8m0fnu`` or loader-packed ``int32``): keep
+      FP8 weight bits byte-exact; only ensure the DeepGEMM TMA-packed int32
+      scale layout (no requant).
+
+    Returns ``((l1_w, l1_sf), (l2_w, l2_sf))`` ready for
     ``deep_gemm.fp8_fp4_mega_moe_fused``.
     """
     import deep_gemm
 
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+
+    from .quant_layouts import prepare_fp8_weight_scale_for_deepgemm
 
     n1, k1 = 2 * inter, dim
     n2, k2 = dim, inter
@@ -252,24 +247,34 @@ def transform_shared_expert_fp8_for_fused(
             f"shared expert w2 FP8 weight shape mismatch: expected {(n2, k2)}, "
             f"got {tuple(w2_w.shape)}"
         )
-    exp_s1 = (n1 // FP8_BLOCK, k1 // FP8_BLOCK)
-    exp_s2 = (n2 // FP8_BLOCK, k2 // FP8_BLOCK)
-    if tuple(w1_s.shape) != exp_s1:
-        raise ValueError(
-            f"shared expert w13 FP8 scale shape mismatch: expected {exp_s1}, "
-            f"got {tuple(w1_s.shape)}"
-        )
-    if tuple(w2_s.shape) != exp_s2:
-        raise ValueError(
-            f"shared expert w2 FP8 scale shape mismatch: expected {exp_s2}, "
-            f"got {tuple(w2_s.shape)}"
-        )
 
-    # Dequantize the serialized (non-UE8M0) FP8 blocks and requantize to UE8M0.
-    # The returned SF is already in the INT32-packed layout the fused SE
-    # transform expects.
-    w1_w_req, w1_sf_int = requant_weight_ue8m0(w1_w.contiguous(), w1_s.float())
-    w2_w_req, w2_sf_int = requant_weight_ue8m0(w2_w.contiguous(), w2_s.float())
+    if w1_s.dtype == torch.float32 or w2_s.dtype == torch.float32:
+        if w1_s.dtype != torch.float32 or w2_s.dtype != torch.float32:
+            raise TypeError(
+                "fused shared expert requires both scales to be raw float32 "
+                f"or both native UE8M0/packed int32, got {w1_s.dtype} and "
+                f"{w2_s.dtype}"
+            )
+        exp_s1 = (n1 // FP8_BLOCK, k1 // FP8_BLOCK)
+        exp_s2 = (n2 // FP8_BLOCK, k2 // FP8_BLOCK)
+        if tuple(w1_s.shape) != exp_s1:
+            raise ValueError(
+                f"shared expert w13 FP8 scale shape mismatch: expected {exp_s1}, "
+                f"got {tuple(w1_s.shape)}"
+            )
+        if tuple(w2_s.shape) != exp_s2:
+            raise ValueError(
+                f"shared expert w2 FP8 scale shape mismatch: expected {exp_s2}, "
+                f"got {tuple(w2_s.shape)}"
+            )
+        w1_w_req, w1_sf_int = requant_weight_ue8m0(w1_w.contiguous(), w1_s)
+        w2_w_req, w2_sf_int = requant_weight_ue8m0(w2_w.contiguous(), w2_s)
+    else:
+        # Already UE8M0 (raw e8m0 or loader-packed int32): no weight requant.
+        w1_w_req = w1_w.contiguous()
+        w2_w_req = w2_w.contiguous()
+        w1_sf_int = prepare_fp8_weight_scale_for_deepgemm(w1_s, n1, k1)
+        w2_sf_int = prepare_fp8_weight_scale_for_deepgemm(w2_s, n2, k2)
 
     (l1_w, l1_sf), (l2_w, l2_sf) = (
         deep_gemm.transform_shared_expert_weights_for_mega_moe_fused(

@@ -148,9 +148,9 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
     def setup_shared_expert_from_fp8(
         self,
         w1_w: torch.Tensor,  # [2*inter, dim] float8_e4m3fn (gate||up stacked on N)
-        w1_s: torch.Tensor,  # [2*inter//128, dim//128] float32 per-block SF
+        w1_s: torch.Tensor,  # float32 / e8m0 block SF, or packed int32
         w2_w: torch.Tensor,  # [dim, inter] float8_e4m3fn
-        w2_s: torch.Tensor,  # [dim//128, inter//128] float32 per-block SF
+        w2_s: torch.Tensor,  # float32 / e8m0 block SF, or packed int32
     ) -> None:
         """Setup pre-quantized FP8 per-block shared-expert weights for fused MegaMoE."""
         cfg = self.cfg

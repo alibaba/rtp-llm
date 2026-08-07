@@ -1,16 +1,18 @@
 """Offline FP4 mega-MoE weight loader.
 
 Reads pre-quantized FP4+UE8M0 MoE weights directly from checkpoint, produced
-by ``tools/convert/glm5_fp4_moe_fp8_quant.py``:
+by ``glm5_fp4_moe_fp8_quant.py``:
 
-  - ``{expert_prefix}.weight``        int8 (FP4 packed)
-  - ``{expert_prefix}.weight_scale``  fp32 (UE8M0 per-block scale)
+  - ``{expert_prefix}.weight``  int8 (FP4 packed)
+  - ``{expert_prefix}.scale``   UE8M0 (``float8_e8m0fnu``); legacy
+    float32 ckpts use ``.weight_scale``
 
-Output format matches ``OnlineMegaMoeFp4Weight`` so downstream
-``MegaMoeWrapper`` and ``MegaMoeFusedWrapper`` accept it identically.
+Shared-expert / dense FP8 scales use ``.scale`` (UE8M0) or legacy
+``.weight_scale_inv``.
 
-Auto-detected by ``is_offline_mega_moe_fp4_ckpt(database)`` — looks for
-the FP4 scale suffix on any expert weight in the ckpt index.
+Auto-detected by ``is_offline_mega_moe_fp4_ckpt`` via
+``quantization_config.expert_dtype == "fp4"`` (preferred) or legacy
+``.weight_scale`` tensor names.
 """
 
 from typing import Any, Dict, Optional
@@ -27,17 +29,33 @@ from rtp_llm.model_loader.weight_module import (
     WeightModule,
 )
 from rtp_llm.utils.database import BaseDatabase
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    concat_0,
+    identity,
+)
 
 _MEGA_MOE_KERNEL_NAMES = (W.moe_w1, W.moe_w2)
 _SHARED_EXPERT_KERNEL_NAMES = (W.ffn_w13, W.ffn_w2)
 
 _FP4_W_SUFFIX = ".weight"
-_FP4_S_SUFFIX = ".weight_scale"
-# Shared experts in the GLM-5.2 FP4-MoE/FP8 checkpoint are FP8 per-block:
-# ``.weight`` is float8_e4m3fn and the per-block (128x128) UE8M0 scale is stored
-# under ``.weight_scale_inv`` (DeepSeek FP8 convention), not ``.weight_scale``.
-_FP8_S_SUFFIX = ".weight_scale_inv"
+_FP4_S_SUFFIX_LEGACY = ".weight_scale"
+_FP4_S_SUFFIX_UE8M0 = ".scale"
+_FP8_S_SUFFIX_LEGACY = ".weight_scale_inv"
+_FP8_S_SUFFIX_UE8M0 = ".scale"
+
+
+def _fp4_scale_suffix(scale_dtype: torch.dtype) -> str:
+    if scale_dtype == torch.float8_e8m0fnu:
+        return _FP4_S_SUFFIX_UE8M0
+    return _FP4_S_SUFFIX_LEGACY
+
+
+def _fp8_scale_suffix(scale_dtype: torch.dtype) -> str:
+    if scale_dtype == torch.float8_e8m0fnu:
+        return _FP8_S_SUFFIX_UE8M0
+    return _FP8_S_SUFFIX_LEGACY
 
 
 def _mega_moe_scale_name(name: str) -> str:
@@ -54,12 +72,6 @@ def _shared_expert_scale_name(name: str) -> str:
     if name == W.ffn_w2:
         return W.ffn_s2
     raise ValueError(f"unsupported shared expert kernel name: {name}")
-
-
-def _concat_shared_w13(ts: list[torch.Tensor]) -> torch.Tensor:
-    if len(ts) != 2:
-        raise ValueError(f"shared expert w13 expects gate/up tensors, got {len(ts)}")
-    return torch.cat(ts, dim=0).contiguous()
 
 
 def _is_shared_expert_weight(src_weight_info: WeightModule) -> bool:
@@ -86,6 +98,7 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
     def __init__(
         self,
         src_weight_info: MoeAtomicWeight,
+        scale_dtype: torch.dtype = torch.float32,
         **kwargs: Any,
     ):
         if src_weight_info.name not in _MEGA_MOE_KERNEL_NAMES:
@@ -102,9 +115,10 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
             config=src_weight_info.config,
             stacked_ckpt_keys=getattr(src_weight_info, "stacked_ckpt_keys", False),
         )
+        s_suffix = _fp4_scale_suffix(scale_dtype)
         scale_weights = [
             CkptWeightInfo(
-                w.name[: -len(_FP4_W_SUFFIX)] + _FP4_S_SUFFIX,
+                w.name[: -len(_FP4_W_SUFFIX)] + s_suffix,
                 w.merge_fun,
             )
             for w in src_weight_info.weights
@@ -113,7 +127,7 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
             name=_mega_moe_scale_name(src_weight_info.name),
             weights=scale_weights,
             process_fun=src_weight_info.process_fun,
-            data_type=torch.float32,
+            data_type=scale_dtype,
             config=src_weight_info.config,
         )
 
@@ -174,11 +188,8 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
 class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
     """Load pre-quantized FP8 per-block shared-expert weights for fused MegaMoE.
 
-    The shared expert in the GLM-5.2 FP4-MoE checkpoint is FP8 e4m3 with 128x128
-    per-block UE8M0 scale (``.weight`` + ``.weight_scale_inv``). gate/up are
-    stacked along the output dim (``W.ffn_w13``); down is loaded as-is
-    (``W.ffn_w2``). No transpose: the kernel consumes the native ``[N, K]``
-    orientation. ``mega_moe_fused`` only supports FP8 shared-expert weights.
+    Shared expert is FP8 e4m3 + 128x128 UE8M0 scale (``.scale`` / legacy
+    ``.weight_scale_inv``). gate/up stacked with ``concat_0`` (TP=1 only).
     """
 
     shared_weight_list = list(_SHARED_EXPERT_KERNEL_NAMES)
@@ -192,6 +203,7 @@ class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
     def __init__(
         self,
         src_weight_info: FfnAtomicWeight,
+        scale_dtype: torch.dtype = torch.float32,
         **kwargs: Any,
     ):
         if not _is_shared_expert_weight(src_weight_info):
@@ -200,9 +212,7 @@ class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
                 f"{_SHARED_EXPERT_KERNEL_NAMES}, got {src_weight_info}"
             )
 
-        process_fun = (
-            _concat_shared_w13 if src_weight_info.name == W.ffn_w13 else identity
-        )
+        process_fun = concat_0 if src_weight_info.name == W.ffn_w13 else identity
         kernel = FfnAtomicWeight(
             name=src_weight_info.name,
             weights=src_weight_info.weights,
@@ -210,9 +220,10 @@ class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
         )
+        s_suffix = _fp8_scale_suffix(scale_dtype)
         scale_weights = [
             CkptWeightInfo(
-                w.name[: -len(_FP4_W_SUFFIX)] + _FP8_S_SUFFIX,
+                w.name[: -len(_FP4_W_SUFFIX)] + s_suffix,
                 w.merge_fun,
             )
             for w in src_weight_info.weights
@@ -221,7 +232,7 @@ class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
             name=_shared_expert_scale_name(src_weight_info.name),
             weights=scale_weights,
             process_fun=process_fun,
-            data_type=torch.float32,
+            data_type=scale_dtype,
             config=src_weight_info.config,
         )
 
@@ -261,6 +272,12 @@ class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
         }
 
     def _split(self, tensor, load_config: LoadConfig):
+        if load_config.tp_size != 1 or load_config.ffn_tp_size != 1:
+            raise ValueError(
+                "OfflineMegaMoeFp8SharedExpertWeight assumes tp_size="
+                f"ffn_tp_size=1, got tp_size={load_config.tp_size}, "
+                f"ffn_tp_size={load_config.ffn_tp_size}"
+            )
         split_kernel = self.kernel._split(
             {self.kernel.name: tensor[self.kernel.name]}, load_config
         )
@@ -287,8 +304,11 @@ import json as _json
 import os as _os
 import re as _re
 
+# Legacy float32 FP4 MoE scale name. New UE8M0 ckpts use ``.scale`` for both
+# FP4 MoE and FP8 linears — those must not be used for FP4 detection (all-FP8
+# ckpts share the same ``.scale`` suffix); rely on ``expert_dtype`` instead.
 _OFFLINE_FP4_SCALE_RE = _re.compile(
-    r"model\.layers\.\d+\.mlp\.(experts\.\d+|shared_experts)\."
+    r"model\.layers\.\d+\.mlp\.experts\.\d+\."
     r"(gate|up|down)_proj\.weight_scale$"
 )
 
@@ -298,12 +318,9 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
 
     Detection order:
 
-    1. **Primary (cheap)**: read ``<ckpt>/config.json`` and check
-       ``quantization_config.expert_dtype == "fp4"`` — self-describing flag
-       emitted by ``tools/convert/glm5_fp4_moe_fp8_quant.py``.
-    2. **Fallback (scan)**: any tensor name matches
-       ``model.layers.{i}.mlp.experts.{j}.{gate|up|down}_proj.weight_scale``
-       (handles older ckpts that pre-date the ``expert_dtype`` flag).
+    1. **Primary**: ``quantization_config.expert_dtype == "fp4"``
+       (emitted by ``glm5_fp4_moe_fp8_quant.py`` when not ``all_fp8``).
+    2. **Fallback**: legacy ``experts.*.weight_scale`` tensor names.
     """
     if database is None:
         return False
@@ -322,7 +339,7 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
             except Exception:
                 pass  # fall through to tensor scan
 
-    # (2) fallback: scan tensor names
+    # (2) fallback: legacy ``.weight_scale`` only (not ``.scale``)
     try:
         names = database.get_pretrain_tensor_names()
     except Exception:
@@ -333,7 +350,9 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
     return False
 
 
-def wrap_moe_for_offline_fp4(weight: WeightModule) -> WeightModule:
+def wrap_moe_for_offline_fp4(
+    weight: WeightModule, scale_dtype: torch.dtype = torch.float32
+) -> WeightModule:
     """Replace a MoE w1/w2 wrapper with offline FP4 loader.
 
     Handles both raw ``MoeAtomicWeight`` and ``PerBlockFp8Weight``-wrapped
@@ -346,13 +365,15 @@ def wrap_moe_for_offline_fp4(weight: WeightModule) -> WeightModule:
         kernel = weight.kernel
         if kernel is None or not isinstance(kernel, MoeAtomicWeight):
             return weight
-        return OfflineMegaMoeFp4MoeWeight(kernel)
+        return OfflineMegaMoeFp4MoeWeight(kernel, scale_dtype=scale_dtype)
     if isinstance(weight, MoeAtomicWeight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
-        return OfflineMegaMoeFp4MoeWeight(weight)
+        return OfflineMegaMoeFp4MoeWeight(weight, scale_dtype=scale_dtype)
     return weight
 
 
-def wrap_shared_expert_for_offline_fp4(weight: WeightModule) -> WeightModule:
+def wrap_shared_expert_for_offline_fp4(
+    weight: WeightModule, scale_dtype: torch.dtype = torch.float32
+) -> WeightModule:
     """Replace shared-expert FFN weights with the offline FP8 per-block loader.
 
     ``mega_moe_fused`` consumes the shared expert as FP8 e4m3 per-block weights
@@ -369,21 +390,23 @@ def wrap_shared_expert_for_offline_fp4(weight: WeightModule) -> WeightModule:
         if kernel is None or not isinstance(kernel, FfnAtomicWeight):
             return weight
         if _is_shared_expert_weight(kernel):
-            return OfflineMegaMoeFp8SharedExpertWeight(kernel)
+            return OfflineMegaMoeFp8SharedExpertWeight(kernel, scale_dtype=scale_dtype)
     if _is_shared_expert_weight(weight):
-        return OfflineMegaMoeFp8SharedExpertWeight(weight)
+        return OfflineMegaMoeFp8SharedExpertWeight(weight, scale_dtype=scale_dtype)
     return weight
 
 
 def wrap_for_offline_fp4(
-    weight: WeightModule, include_shared_expert: bool = False
+    weight: WeightModule,
+    include_shared_expert: bool = False,
+    scale_dtype: torch.dtype = torch.float32,
 ) -> WeightModule:
     """Replace offline FP4 MoE weights, optionally including shared experts.
 
     ``mega_moe`` only consumes routed expert weights. ``mega_moe_fused``
-    consumes routed expert and shared-expert FP4 weights.
+    also wraps shared-expert FP8 per-block weights.
     """
-    wrapped = wrap_moe_for_offline_fp4(weight)
+    wrapped = wrap_moe_for_offline_fp4(weight, scale_dtype=scale_dtype)
     if wrapped is not weight or not include_shared_expert:
         return wrapped
-    return wrap_shared_expert_for_offline_fp4(weight)
+    return wrap_shared_expert_for_offline_fp4(weight, scale_dtype=scale_dtype)
