@@ -201,3 +201,13 @@ register_lazy_model(
     "rtp_llm.models_py.new_models.deepseek_v3_mtp",
     "DeepSeekV32MTPForCausalLM",
 )
+register_lazy_model(
+    "deepseek_vl_v2",
+    "rtp_llm.models_py.new_models.deepseek_vl2",
+    "DeepSeekVLV2ForCausalLM",
+)
+register_lazy_model(
+    "deepseek_vl2_vision",
+    "rtp_llm.models_py.new_models.deepseek_vl2.vision",
+    "DeepSeekVLV2ForVisionEmbedding",
+)

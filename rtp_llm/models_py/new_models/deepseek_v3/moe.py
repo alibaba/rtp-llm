@@ -409,6 +409,8 @@ class DeepSeekV32MoEBlock(RtpModule):
         self._use_fast_group_topk = (
             correction_bias
             and device_type == DeviceType.Cuda
+            and num_experts // n_group >= 2
+            # no_aux_tc_kernels uses a single WARP_SIZE=32 selection warp.
             and n_group <= 32
             and top_k <= 32
             and not (top_k == 1 and has_moe_norm)

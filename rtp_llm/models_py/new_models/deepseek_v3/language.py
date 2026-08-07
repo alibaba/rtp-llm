@@ -576,6 +576,7 @@ def extract_config_values(
         routed_scaling_factor = config_json.get(
             "routed_scaling_factor", routed_scaling_factor
         )
+    topk_method_is_explicit = bool(config_json) and "topk_method" in config_json
     topk_method = config_json.get("topk_method", "greedy") if config_json else "greedy"
     topk_method = normalize_topk_method(topk_method)
     # has_e_score_correction is not a ModelConfig field — the legacy loader
@@ -680,6 +681,12 @@ def extract_config_values(
     scoring_func = nonnegative_int(scoring_func, "scoring_func")
     if scoring_func not in (0, 1):
         raise ValueError(f"unsupported scoring_func={scoring_func}")
+    if moe_layer_index and scoring_func == 1 and not topk_method_is_explicit:
+        raise ValueError(
+            "DeepSeek sigmoid routing requires an explicit config.json "
+            "topk_method; the newloader cannot safely infer whether the "
+            "checkpoint owns e_score_correction_bias"
+        )
     routed_scaling_factor = _positive_float(
         routed_scaling_factor, "routed_scaling_factor"
     )

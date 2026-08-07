@@ -973,6 +973,12 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertEqual(cfg["moe_layer_index"], [3])
         self.assertEqual(cfg["topk_method"], "greedy")
 
+    def test_sigmoid_router_requires_explicit_topk_method(self):
+        raw = _raw_config()
+        del raw["topk_method"]
+        with self.assertRaisesRegex(ValueError, "explicit config.json topk_method"):
+            extract_config_values(_model_config(), _load_config(), raw)
+
     def test_config_rejects_eplb_before_module_construction(self):
         config = _model_config()
         config.eplb_config.eplb_mode = EplbMode.EPLB
@@ -1871,6 +1877,48 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 scoring_func=1,
                 routed_scaling_factor=1.0,
                 n_group=64,
+                topk_group=2,
+                topk_method="noaux_tc",
+                correction_bias=True,
+            )
+        self.assertFalse(block._use_fast_group_topk)
+        self.assertIsNone(block.group_topk)
+        group_topk.assert_not_called()
+
+    def test_noaux_router_single_expert_groups_use_reference_path(self):
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.Cuda,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.GroupTopK"
+            ) as group_topk,
+            torch.device("cpu"),
+        ):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=8,
+                moe_intermediate_size=4,
+                num_experts=4,
+                top_k=2,
+                layer_idx=3,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=_router_model_config(
+                    expert_num=4,
+                    moe_n_group=4,
+                    moe_topk_group=2,
+                ),
+                parallelism_config=_single_rank_parallelism_config(),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=1,
+                routed_scaling_factor=1.0,
+                n_group=4,
                 topk_group=2,
                 topk_method="noaux_tc",
                 correction_bias=True,
