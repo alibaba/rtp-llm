@@ -16,7 +16,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv4.moe import MoE
 
-
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
 
 
@@ -170,6 +169,7 @@ class Block(nn.Module):
         if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
             "mega",
             "mega_fused",
+            "mega_se",
         ):
             return
         if getattr(self.attn, "_cp_ctx", None) is None:
