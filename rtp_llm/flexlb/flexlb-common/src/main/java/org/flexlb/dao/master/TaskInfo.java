@@ -65,8 +65,7 @@ public class TaskInfo {
         return estimatePrefillTimeMs(tokens, hitCacheTokens, DEFAULT_CACHE_HIT_DISCOUNT);
     }
 
-    public static long estimatePrefillTimeMs(
-            long tokens, long hitCacheTokens, double cacheHitDiscount) {
+    public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens, double cacheHitDiscount) {
         return (long) (tokens - hitCacheTokens * cacheHitDiscount);
     }
 

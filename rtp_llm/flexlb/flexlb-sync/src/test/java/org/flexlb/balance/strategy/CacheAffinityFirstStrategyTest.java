@@ -15,6 +15,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -62,14 +63,16 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void prefersCacheLeaderWhileSavedWorkCoversExtraQueue() {
-        WorkerStatus cacheLeader = createWorker("127.0.0.1", 5000);
+    void usesCacheLeaderWhenExtraTtftIsWithinTolerance() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 6000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
+        cacheLeader.getLastSelectedTime().set(2);
+        shortestTtftWorker.getLastSelectedTime().set(1);
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker, thirdWorker),
                 Map.of(
-                        cacheLeader.getIpPort(), 17,
+                        cacheLeader.getIpPort(), 16,
                         shortestTtftWorker.getIpPort(), 15,
                         thirdWorker.getIpPort(), 15));
 
@@ -83,8 +86,8 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void spillsToShortestTtftWorkerWhenCacheLeaderQueueIsTooLong() {
-        WorkerStatus overloadedCacheLeader = createWorker("127.0.0.1", 9000);
+    void usesShortestTtftWorkerWhenExtraTtftExceedsTolerance() {
+        WorkerStatus overloadedCacheLeader = createWorker("127.0.0.1", 13000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
         CacheAffinityFirstStrategy strategy = createStrategy(
@@ -117,54 +120,53 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void sendsOneWarmupRequestToAnIdleColdWorker() {
-        WorkerStatus cacheLeader = createWorker("127.0.0.1", 5000);
-        WorkerStatus warmWorker = createWorker("127.0.0.2", 0);
-        WorkerStatus coldWorker = createWorker("127.0.0.3", 0);
-        coldWorker.getLastSelectedTime().set(-1);
-        CacheAffinityFirstStrategy strategy = createStrategy(
-                List.of(cacheLeader, warmWorker, coldWorker),
-                Map.of(
-                        cacheLeader.getIpPort(), 17,
-                        warmWorker.getIpPort(), 16,
-                        coldWorker.getIpPort(), 0));
-
-        SelectionResult first = selectWithContext(
-                strategy, cacheAffinityConfig(), "cold-warmup");
-        ServerStatus second = select(strategy, cacheAffinityConfig(), "after-warmup");
-
-        Assertions.assertEquals(coldWorker.getIp(), first.serverStatus().getServerIp());
-        Assertions.assertNotEquals(coldWorker.getIp(), second.getServerIp());
-        Assertions.assertTrue(coldWorker.getRunningQueueTime().get() > 0);
-        var decision = first.balanceContext()
-                .getShortestTtftDecisionByRole()
-                .get(RoleType.PREFILL);
-        Assertions.assertNotNull(decision);
-        Assertions.assertEquals("CacheAffinityFirst", decision.strategy());
-        Assertions.assertEquals("COLD_WORKER_PROBE", decision.selectionReason());
-        Assertions.assertEquals(3, decision.workers().size());
-        Assertions.assertEquals(coldWorker.getIp(), decision.workers().stream()
-                .filter(worker -> worker.selected())
-                .findFirst()
-                .orElseThrow()
-                .ip());
-    }
-
-    @Test
-    void doesNotExploreARecentlySelectedColdWorker() {
-        WorkerStatus cacheLeader = createWorker("127.0.0.1", 5000);
+    void doesNotProactivelySelectNeverSelectedIdleColdWorker() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 4000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         WorkerStatus coldWorker = createWorker("127.0.0.3", 0);
+        cacheLeader.getLastSelectedTime().set(2);
+        shortestTtftWorker.getLastSelectedTime().set(1);
+        coldWorker.getLastSelectedTime().set(-1);
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, shortestTtftWorker, coldWorker),
                 Map.of(
                         cacheLeader.getIpPort(), 17,
-                        shortestTtftWorker.getIpPort(), 16,
+                        shortestTtftWorker.getIpPort(), 15,
                         coldWorker.getIpPort(), 0));
 
-        ServerStatus selected = select(strategy, cacheAffinityConfig(), "recent-cold-worker");
+        ServerStatus selected = select(strategy, cacheAffinityConfig(), "no-cold-warmup");
 
-        Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+        Assertions.assertEquals(cacheLeader.getIp(), selected.getServerIp());
+        Assertions.assertNotEquals(coldWorker.getIp(), selected.getServerIp());
+        Assertions.assertEquals(-1, coldWorker.getLastSelectedTime().get());
+        Assertions.assertEquals(0, coldWorker.getRunningQueueTime().get());
+        Assertions.assertTrue(coldWorker.getLocalTaskMap().isEmpty());
+    }
+
+    @Test
+    void keepsCacheAffinityOrderWhenCacheLeaderWasClaimedConcurrently() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus cacheFallback = createWorker("127.0.0.2", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.3", 0);
+        cacheLeader.getLastSelectedTime().set(101);
+        cacheFallback.getLastSelectedTime().set(200);
+        shortestTtftWorker.getLastSelectedTime().set(300);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, cacheFallback, shortestTtftWorker), Map.of());
+        BalanceContext balanceContext = new BalanceContext();
+
+        ScoredWorker selectedWorker = strategy.selectBestWorker(
+                List.of(
+                        new ScoredWorker(cacheLeader, 2000, 2000, 100),
+                        new ScoredWorker(cacheFallback, 1500, 1500, 200),
+                        new ScoredWorker(shortestTtftWorker, 1000, 1000, 300)),
+                balanceContext, RoleType.PREFILL, null, INPUT_TOKENS, cacheAffinityConfig());
+
+        Assertions.assertSame(cacheFallback, selectedWorker.worker());
+        var decision = balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals("CACHE_AFFINITY_FALLBACK", decision.selectionReason());
+        Assertions.assertEquals("127.0.0.1:8080", decision.cacheAffinityDecision().cacheLeaderIpPort());
+        Assertions.assertEquals("127.0.0.3:8080", decision.cacheAffinityDecision().shortestTtftWorkerIpPort());
     }
 
     private CacheAffinityFirstStrategy createStrategy(
@@ -194,11 +196,6 @@ class CacheAffinityFirstStrategyTest {
 
     private ServerStatus select(
             CacheAffinityFirstStrategy strategy, FlexlbConfig config, String requestId) {
-        return selectWithContext(strategy, config, requestId).serverStatus();
-    }
-
-    private SelectionResult selectWithContext(
-            CacheAffinityFirstStrategy strategy, FlexlbConfig config, String requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(INPUT_TOKENS);
@@ -207,16 +204,13 @@ class CacheAffinityFirstStrategyTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setConfig(config);
         balanceContext.setRequest(request);
-        return new SelectionResult(
-                strategy.select(balanceContext, RoleType.PREFILL, null), balanceContext);
+        return strategy.select(balanceContext, RoleType.PREFILL, null);
     }
 
     private FlexlbConfig cacheAffinityConfig() {
         FlexlbConfig config = new FlexlbConfig();
         config.setPrefillCacheHitDiscount(1.0);
-        config.setPrefillCachePreferenceMinBlockGap(2);
         config.setCacheAffinityFirstQueueToleranceFactor(2.0);
-        config.setCacheAffinityFirstColdWorkerProbeIntervalMs(5000);
         return config;
     }
 
@@ -243,6 +237,4 @@ class CacheAffinityFirstStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
     }
-
-    private record SelectionResult(ServerStatus serverStatus, BalanceContext balanceContext) {}
 }

@@ -1,5 +1,6 @@
 package org.flexlb.dao.pv;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
@@ -15,7 +16,20 @@ public record ShortestTtftDecision(
         long requestInputTokens,
         long minimumTtft,
         double similarTtftThreshold,
-        List<WorkerDecision> workers) {
+        List<WorkerDecision> workers,
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        CacheAffinityDecision cacheAffinityDecision) {
+
+    /**
+     * Cache-affinity-specific inputs for one routing decision. Null for other TTFT strategies.
+     */
+    public record CacheAffinityDecision(
+            String cacheLeaderIpPort,
+            String shortestTtftWorkerIpPort,
+            long cacheLeadTokens,
+            long extraTtft,
+            double toleratedExtraTtft) {
+    }
 
     public record WorkerDecision(
             String ip,

@@ -87,8 +87,7 @@ worker 选择契约，两者组合完成多角色多阶段路由。
    - 取 Top 候选：≤3 个全取，否则 `max(2, ⌈数量×0.3⌉)`；
    - 相似阈值 `max(minTTFT × shortestTtftSimilarityThresholdRatio(0.2), 标准差 × 0.5)`，
      筛出与最短 ttft 相近的 worker；
-   - 相似集合内做 **cache 偏好**：cache 命中最多者领先最短者
-     `≥ blockSize × prefillCachePreferenceMinBlockGap(2)` 个 token 才改选 cache leader；
+   - 相似集合内做 **cache 偏好**：cache 命中只要高于最短 ttft worker 就改选 cache leader；
    - **CAS 抢占**：按偏好序对 `lastSelectedTime` 做 `compareAndSet(快照值, now)`，第一个
      成功者当选——防止并发调度线程用同一快照选中同一 worker。
 5. **提交**：`putLocalTask()` 记账（预扣队列时间与 KV token）、上报 cache 命中指标、
@@ -96,12 +95,11 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 
 ### CacheAffinityFirstStrategy（继承 ShortestTTFT，只重写选择步骤）
 
-- **冷 worker 探测**：每 `cacheAffinityFirstColdWorkerProbeIntervalMs`(5000ms) 允许把请求
-  发给一个"cache 落后、队列空闲（估算排队工作量=0）、长时间未被选中"的 worker，让 cache 贫乏
-  的空闲 worker 也能积累共享前缀，避免饿死（选择原因 `COLD_WORKER_PROBE`）。
-- **cache leader vs 负载守卫**：cache leader 相比最短 ttft worker 的额外排队工作量
-  `≤ cache 领先 token 数 × prefillCacheHitDiscount × cacheAffinityFirstQueueToleranceFactor(2.0)`
-  时才选 leader（`CACHE_LEADER`），否则回到最短 ttft（`SHORTEST_TTFT`）。
+- **终态 TTFT 成本守卫**：每个 worker 的 `ttft` 已包含当前请求的预估 Prefill 时间和已有队列时间。
+  计算 cache leader 相对最短 ttft worker 的 `extraTtft`；只有该差异不大于
+  `cacheLeadTokens × prefillCacheHitDiscount × cacheAffinityFirstQueueToleranceFactor(2.0)`
+  且缓存命中更多时，才选 leader
+  （`CACHE_LEADER`），否则选最短 ttft（`SHORTEST_TTFT`）。
 - CAS 抢占失败落到其他 worker 时记 `CONCURRENT_FALLBACK`。决策快照（debug 级）写入
   `BalanceContext.shortestTtftDecisionByRole`。
 

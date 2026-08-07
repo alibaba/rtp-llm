@@ -56,7 +56,8 @@ class PvLogDataTest {
                 128,
                 90,
                 9.0,
-                List.of(new WorkerDecision(
+                List.of(
+                        new WorkerDecision(
                         "10.0.0.2",
                         8080,
                         true,
@@ -73,7 +74,9 @@ class PvLogDataTest {
                         1,
                         List.of(new QueueTask("queued-1", "running", 32, 16, 20, 3)),
                         List.of(),
-                        List.of(new QueueTask("queued-1", "running", 32, 16, 20, 3))))));
+                        List.of(new QueueTask("queued-1", "running", 32, 16, 20, 3)))
+                ),
+                null));
         context.finishRequestTiming();
 
         PvLogData data = new PvLogData(context);

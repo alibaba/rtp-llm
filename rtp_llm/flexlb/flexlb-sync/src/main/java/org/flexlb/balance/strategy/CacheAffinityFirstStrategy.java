@@ -4,37 +4,38 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.pv.ShortestTtftDecision.CacheAffinityDecision;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
- * Cache-affinity-first routing with bounded queue spillover.
+ * Cache-affinity-first routing with bounded additional TTFT.
  *
  * <p>Cold requests have no cache lead and therefore follow the shortest TTFT. Each local
  * assignment immediately increases that worker's estimated queue, so subsequent cold requests
- * naturally spread to other workers. A cache-poor worker that remains idle receives a bounded
- * probe request so it can build the shared prefix instead of starving indefinitely. Once cache
- * locality appears, the cache leader is preferred until its additional queue work exceeds the
- * configured multiple of the saved prefill work.
+ * naturally spread to other workers. A cache leader may have a bounded higher TTFT when its cache
+ * lead justifies that additional cost.
  */
 @Component("cacheAffinityFirstStrategy")
 public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
 
-    public CacheAffinityFirstStrategy(
-            EngineWorkerStatus engineWorkerStatus,
-            EngineHealthReporter engineHealthReporter,
-            CacheAwareService cacheAwareService,
-            ResourceMeasureFactory resourceMeasureFactory) {
+    // Highest cache hit wins; ties prefer lower TTFT, then the worker selected least recently.
+    private static final Comparator<ScoredWorker> CACHE_LEADER_ORDER =
+            Comparator.comparingLong(ScoredWorker::hitCacheTokens).reversed()
+                    .thenComparingLong(ScoredWorker::ttft)
+                    .thenComparingLong(ScoredWorker::lastSelectedTime);
+
+    public CacheAffinityFirstStrategy(EngineWorkerStatus engineWorkerStatus,
+                                      EngineHealthReporter engineHealthReporter, CacheAwareService cacheAwareService,
+                                      ResourceMeasureFactory resourceMeasureFactory) {
         super(
                 engineWorkerStatus,
                 engineHealthReporter,
@@ -44,177 +45,138 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
     }
 
     @Override
-    protected ScoredWorker selectBestWorker(
-            List<ScoredWorker> scoredWorkers,
-            BalanceContext balanceContext,
-            RoleType roleType,
-            String group,
-            long seqLen,
-            FlexlbConfig config) {
+    protected ScoredWorker selectBestWorker(List<ScoredWorker> scoredWorkers, BalanceContext balanceContext,
+                                            RoleType roleType, String group, long seqLen, FlexlbConfig config) {
         if (scoredWorkers.isEmpty()) {
             return null;
         }
 
-        List<ScoredWorker> sortedWorkers = sortByTTFT(scoredWorkers);
-        ScoredWorker shortestTtftWorker = sortedWorkers.getFirst();
-        ScoredWorker cacheLeader = sortedWorkers.stream()
-                .min(Comparator.comparingLong(ScoredWorker::hitCacheTokens)
-                        .reversed()
-                        .thenComparingLong(ScoredWorker::ttft)
-                        .thenComparingLong(ScoredWorker::lastSelectedTime))
-                .orElse(shortestTtftWorker);
+        // The first worker is the lowest predicted completion time for this request.
+        List<ScoredWorker> workersByTtft = sortByTTFT(scoredWorkers);
+        ScoredWorker shortestTtftWorker = workersByTtft.getFirst();
 
-        ScoredWorker coldWorker = findColdWorkerForProbe(
-                sortedWorkers, cacheLeader, seqLen, config);
-        if (coldWorker != null) {
-            Logger.debug(
-                    "Cache affinity first cold worker probe - cacheLeader: {}, cacheLeaderHitTokens: {}, coldWorker: {}, coldWorkerHitTokens: {}, idleTimeUs: {}",
-                    cacheLeader.worker().getIpPort(),
-                    cacheLeader.hitCacheTokens(),
-                    coldWorker.worker().getIpPort(),
-                    coldWorker.hitCacheTokens(),
-                    idleTimeUs(coldWorker));
-            return selectAndRecordDecision(
-                    coldWorker,
-                    sortedWorkers,
-                    shortestTtftWorker,
-                    balanceContext,
-                    roleType,
-                    group,
-                    seqLen,
-                    config,
-                    "COLD_WORKER_PROBE");
-        }
+        // Evaluate cache affinity against the TTFT minimum, not an average worker.
+        ScoredWorker cacheLeader = findCacheLeader(workersByTtft);
 
-        long blockSize = cacheLeader.worker().getCacheStatus() == null
-                ? 0
-                : cacheLeader.worker().getCacheStatus().getBlockSize();
-        long cacheLeadTokens = Math.max(
-                0, cacheLeader.hitCacheTokens() - shortestTtftWorker.hitCacheTokens());
-        long minimumCacheLeadTokens = blockSize
-                * Math.max(0, config.getPrefillCachePreferenceMinBlockGap());
-        long additionalQueueWork = Math.max(
-                0,
-                estimateQueueWork(cacheLeader, seqLen, config.getPrefillCacheHitDiscount())
-                        - estimateQueueWork(
-                                shortestTtftWorker,
-                                seqLen,
-                                config.getPrefillCacheHitDiscount()));
-        double toleratedQueueWork = cacheLeadTokens
-                * Math.max(0.0, config.getPrefillCacheHitDiscount())
-                * Math.max(0.0, config.getCacheAffinityFirstQueueToleranceFactor());
+        // Cache lead buys a bounded amount of additional TTFT; otherwise keep the TTFT minimum.
+        CacheLeaderDecision decision = evaluateCacheLeader(cacheLeader, shortestTtftWorker, config);
 
-        boolean cacheLeaderWithinLoadGuard = cacheLeader.equals(shortestTtftWorker)
-                || (blockSize > 0
-                        && cacheLeadTokens >= minimumCacheLeadTokens
-                        && additionalQueueWork <= toleratedQueueWork);
-        ScoredWorker preferredWorker = cacheLeaderWithinLoadGuard
-                ? cacheLeader
-                : shortestTtftWorker;
+        // The preferred worker may have been selected concurrently, so try ordered fallbacks.
+        ScoredWorker selectedWorker = selectWorkerByCacheAffinity(
+                decision.preferredWorker(), workersByTtft, shortestTtftWorker, config);
+        String selectionReason = selectedWorker.equals(decision.preferredWorker())
+                ? decision.selectionReason()
+                : satisfiesCacheAffinityTolerance(selectedWorker, shortestTtftWorker, config)
+                        ? "CACHE_AFFINITY_FALLBACK"
+                        : "SHORTEST_TTFT_FALLBACK";
 
-        Logger.debug(
-                "Cache affinity first - shortest: {}, cacheLeader: {}, cacheLeadTokens: {}, additionalQueueWork: {}, toleratedQueueWork: {}, preferred: {}",
-                shortestTtftWorker.worker().getIpPort(),
-                cacheLeader.worker().getIpPort(),
-                cacheLeadTokens,
-                additionalQueueWork,
-                toleratedQueueWork,
-                preferredWorker.worker().getIpPort());
-
-        String selectionReason = preferredWorker.equals(cacheLeader)
-                        && !preferredWorker.equals(shortestTtftWorker)
-                ? "CACHE_LEADER"
-                : "SHORTEST_TTFT";
-        return selectAndRecordDecision(
-                preferredWorker,
-                sortedWorkers,
-                shortestTtftWorker,
-                balanceContext,
-                roleType,
-                group,
-                seqLen,
-                config,
-                selectionReason);
-    }
-
-    private ScoredWorker selectAndRecordDecision(
-            ScoredWorker preferredWorker,
-            List<ScoredWorker> sortedWorkers,
-            ScoredWorker shortestTtftWorker,
-            BalanceContext balanceContext,
-            RoleType roleType,
-            String group,
-            long seqLen,
-            FlexlbConfig config,
-            String selectionReason) {
-        ScoredWorker selectedWorker = claimPreferredWorker(
-                preferredWorker, sortedWorkers, shortestTtftWorker);
-        String effectiveReason = selectedWorker.equals(preferredWorker)
-                ? selectionReason
-                : "CONCURRENT_FALLBACK";
-        recordDecisionSnapshot(
-                balanceContext,
-                selectedWorker,
-                sortedWorkers,
-                sortedWorkers,
-                List.of(),
-                shortestTtftWorker.ttft(),
-                0,
-                roleType,
-                group,
-                seqLen,
-                config.getPrefillCacheHitDiscount(),
-                effectiveReason);
+        // Preserve the decision path in the debug snapshot, including a concurrent fallback.
+        recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, workersByTtft, List.of(),
+                shortestTtftWorker.ttft(), 0, roleType, group, seqLen, config.getPrefillCacheHitDiscount(),
+                selectionReason,
+                new CacheAffinityDecision(
+                        cacheLeader.worker().getIpPort(),
+                        shortestTtftWorker.worker().getIpPort(),
+                        decision.cacheLeadTokens(),
+                        decision.extraTtft(),
+                        decision.toleratedExtraTtft()));
         return selectedWorker;
     }
 
-    private ScoredWorker findColdWorkerForProbe(
-            List<ScoredWorker> workers,
-            ScoredWorker cacheLeader,
-            long seqLen,
-            FlexlbConfig config) {
-        long probeIntervalMs = config.getCacheAffinityFirstColdWorkerProbeIntervalMs();
-        if (probeIntervalMs <= 0 || workers.size() < 2) {
-            return null;
-        }
-
-        long blockSize = cacheLeader.worker().getCacheStatus() == null
-                ? 0
-                : cacheLeader.worker().getCacheStatus().getBlockSize();
-        if (blockSize <= 0) {
-            return null;
-        }
-
-        long minimumCacheGap = blockSize
-                * Math.max(0, config.getPrefillCachePreferenceMinBlockGap());
-        long probeIntervalUs = TimeUnit.MILLISECONDS.toMicros(probeIntervalMs);
-        long nowUs = System.nanoTime() / 1000;
-        return workers.stream()
-                .filter(worker -> !worker.equals(cacheLeader))
-                .filter(worker -> {
-                    long cacheGap = cacheLeader.hitCacheTokens() - worker.hitCacheTokens();
-                    return cacheGap > 0 && cacheGap >= minimumCacheGap;
-                })
-                .filter(worker -> estimateQueueWork(
-                        worker, seqLen, config.getPrefillCacheHitDiscount()) == 0)
-                .filter(worker -> worker.lastSelectedTime() < 0
-                        || nowUs - worker.lastSelectedTime() >= probeIntervalUs)
-                .min(Comparator.comparingLong(ScoredWorker::lastSelectedTime)
-                        .thenComparingLong(ScoredWorker::ttft))
-                .orElse(null);
+    private ScoredWorker findCacheLeader(List<ScoredWorker> workers) {
+        return workers.stream().min(CACHE_LEADER_ORDER).orElseThrow();
     }
 
-    private long idleTimeUs(ScoredWorker worker) {
-        if (worker.lastSelectedTime() < 0) {
-            return -1;
+    /**
+     * Compare cache lead and TTFT separately. TTFT already includes the worker queue and this
+     * request's prefill time, while cache lead determines how much additional TTFT is tolerated.
+     */
+    private CacheLeaderDecision evaluateCacheLeader(ScoredWorker cacheLeader, ScoredWorker shortestTtftWorker,
+                                                    FlexlbConfig config) {
+        // Cache lead is independent of queue state and measures the extra prefix reuse from caching.
+        long cacheLeadTokens = Math.max(0, cacheLeader.hitCacheTokens() - shortestTtftWorker.hitCacheTokens());
+
+        // Both TTFT values already include prior queue work and this request's predicted Prefill time.
+        long extraTtft = cacheLeader.ttft() - shortestTtftWorker.ttft();
+
+        // Translate cache lead into the maximum TTFT increase that cache affinity may accept.
+        double toleratedExtraTtft = calculateToleratedExtraTtft(cacheLeadTokens, config);
+
+        // Prefer cache only when its final TTFT cost stays within the configured tolerance.
+        if (extraTtft <= toleratedExtraTtft) {
+            return new CacheLeaderDecision(
+                    cacheLeader, cacheLeadTokens, extraTtft, toleratedExtraTtft, "CACHE_LEADER");
         }
-        return Math.max(0, System.nanoTime() / 1000 - worker.lastSelectedTime());
+        return new CacheLeaderDecision(
+                shortestTtftWorker, cacheLeadTokens, extraTtft, toleratedExtraTtft, "SHORTEST_TTFT");
     }
 
-    private long estimateQueueWork(
-            ScoredWorker worker, long seqLen, double cacheHitDiscount) {
-        long requestPrefillWork = TaskInfo.estimatePrefillTimeMs(
-                seqLen, worker.hitCacheTokens(), cacheHitDiscount);
-        return Math.max(0, worker.ttft() - requestPrefillWork);
+    /**
+     * Keep cache affinity when the preferred worker was selected concurrently. Every cache-first
+     * fallback must satisfy the same TTFT tolerance as the original cache leader.
+     */
+    private ScoredWorker selectWorkerByCacheAffinity(ScoredWorker preferredWorker, List<ScoredWorker> workersByTtft,
+                                                     ScoredWorker shortestTtftWorker, FlexlbConfig config) {
+        List<ScoredWorker> selectionOrder = new ArrayList<>(workersByTtft.size());
+
+        // Preserve the cache/TTFT decision made above as the first choice.
+        selectionOrder.add(preferredWorker);
+
+        // If it conflicts, retain cache affinity among workers that independently pass the guard.
+        workersByTtft.stream()
+                .filter(worker -> !worker.equals(preferredWorker))
+                .filter(worker -> satisfiesCacheAffinityTolerance(worker, shortestTtftWorker, config))
+                .sorted(CACHE_LEADER_ORDER)
+                .forEach(selectionOrder::add);
+
+        // Once cache-affinity candidates are exhausted, fall back to the minimum-TTFT worker.
+        if (!selectionOrder.contains(shortestTtftWorker)) {
+            selectionOrder.add(shortestTtftWorker);
+        }
+
+        // The remaining workers are already in ascending TTFT order.
+        workersByTtft.stream()
+                .filter(worker -> !selectionOrder.contains(worker))
+                .forEach(selectionOrder::add);
+
+        return selectFirstWorkerWithoutConcurrentConflict(selectionOrder, shortestTtftWorker);
     }
+
+    private boolean satisfiesCacheAffinityTolerance(ScoredWorker worker, ScoredWorker shortestTtftWorker,
+                                                    FlexlbConfig config) {
+        // Workers without a cache lead belong to the final TTFT fallback, not the affinity group.
+        long cacheLeadTokens = worker.hitCacheTokens() - shortestTtftWorker.hitCacheTokens();
+        if (cacheLeadTokens <= 0) {
+            return false;
+        }
+
+        // Apply the same cache-lead versus TTFT-cost rule used for the preferred worker.
+        long extraTtft = worker.ttft() - shortestTtftWorker.ttft();
+        return extraTtft <= calculateToleratedExtraTtft(cacheLeadTokens, config);
+    }
+
+    private ScoredWorker selectFirstWorkerWithoutConcurrentConflict(List<ScoredWorker> selectionOrder,
+                                                                    ScoredWorker fallbackWorker) {
+        // A changed timestamp means another scheduler has selected this worker after scoring.
+        long now = System.nanoTime() / 1000;
+        for (ScoredWorker candidate : selectionOrder) {
+            // CAS lets only one scheduler select a worker from the same status snapshot.
+            if (candidate.worker().getLastSelectedTime().compareAndSet(candidate.lastSelectedTime(), now)) {
+                return candidate;
+            }
+        }
+
+        // All snapshots changed concurrently; preserve the original minimum-TTFT fallback.
+        return fallbackWorker;
+    }
+
+    private double calculateToleratedExtraTtft(long cacheLeadTokens, FlexlbConfig config) {
+        // Cache tokens are converted to tolerated time by the cache discount and policy multiplier.
+        return cacheLeadTokens
+                * Math.max(0.0, config.getPrefillCacheHitDiscount())
+                * Math.max(0.0, config.getCacheAffinityFirstQueueToleranceFactor());
+    }
+
+    private record CacheLeaderDecision(ScoredWorker preferredWorker, long cacheLeadTokens,
+                                       long extraTtft, double toleratedExtraTtft, String selectionReason) {}
 }

@@ -191,7 +191,7 @@ class ShortestTTFTStrategyTest {
     }
 
     @Test
-    void keepsShortestTtftWorkerWhenCacheLeadIsBelowConfiguredBlocks() {
+    void prefersCacheLeaderWithOneBlockLeadWhenTtftIsSimilar() {
         FlexlbConfig config = cacheFocusedConfig();
         WorkerStatus shortestTtftWorker = createWorkerStatus("127.0.0.1", 0, 2128);
         WorkerStatus oneBlockLeader = createWorkerStatus("127.0.0.2", 2500, 2128);
@@ -207,7 +207,7 @@ class ShortestTTFTStrategyTest {
                 50000,
                 "cache-lead-one-block");
 
-        Assertions.assertEquals(shortestTtftWorker.getIp(), selection.serverStatus().getServerIp());
+        Assertions.assertEquals(oneBlockLeader.getIp(), selection.serverStatus().getServerIp());
     }
 
     @Test
@@ -233,7 +233,6 @@ class ShortestTTFTStrategyTest {
     private FlexlbConfig cacheFocusedConfig() {
         FlexlbConfig config = new FlexlbConfig();
         config.setPrefillCacheHitDiscount(1.0);
-        config.setPrefillCachePreferenceMinBlockGap(2);
         config.setShortestTtftSimilarityThresholdRatio(0.2);
         return config;
     }

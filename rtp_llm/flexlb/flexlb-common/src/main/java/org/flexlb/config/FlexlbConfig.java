@@ -105,29 +105,16 @@ public class FlexlbConfig {
     private double p2pHitDiscount = 0.2;
 
     /**
-     * Minimum cache lead, in blocks, required to prefer a cache-richer worker
-     * over the shortest-TTFT worker when their estimated TTFT is similar.
-     */
-    private int prefillCachePreferenceMinBlockGap = 2;
-
-    /**
      * Relative TTFT difference allowed when treating shortest-TTFT candidates as similar.
      * A value of 0.2 allows candidates within 20% of the minimum estimated TTFT.
      */
     private double shortestTtftSimilarityThresholdRatio = 0.2;
 
     /**
-     * Extra queue work tolerated by CACHE_AFFINITY_FIRST per token of cache lead.
-     * A value above 1 strengthens cache affinity; the request spills to the shortest-TTFT
-     * worker once the additional queue exceeds the cache saving multiplied by this factor.
+     * Multiplier for the additional TTFT tolerated by CACHE_AFFINITY_FIRST. The allowed amount is
+     * cache lead tokens multiplied by the cache-hit discount and this value.
      */
     private double cacheAffinityFirstQueueToleranceFactor = 2.0;
-
-    /**
-     * Maximum time a cache-poor, idle worker may remain unselected before
-     * CACHE_AFFINITY_FIRST sends it one warm-up request. Set to 0 to disable.
-     */
-    private long cacheAffinityFirstColdWorkerProbeIntervalMs = 5000;
 
     /**
      * KV cache available threshold for DECODE role (percentage)
