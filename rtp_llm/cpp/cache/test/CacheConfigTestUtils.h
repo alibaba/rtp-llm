@@ -407,6 +407,31 @@ inline KVCacheSpecPtr makeMhaSpec(const std::string& tag,
     return SpecBuilder::build(desc, ctx);
 }
 
+inline KVCacheSpecPtr makeMlaSpec(const std::string& tag,
+                                  size_t             tokens_per_block,
+                                  rtp_llm::DataType  dtype,
+                                  uint32_t           kv_lora_rank,
+                                  uint32_t           rope_head_dim) {
+    AttentionConfigs attn_config;
+    attn_config.kv_lora_rank  = kv_lora_rank;
+    attn_config.rope_head_dim = rope_head_dim;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
+    desc.dtype      = dtype;
+
+    SpecBuildContext ctx;
+    ctx.dtype              = dtype;
+    ctx.seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
+    return SpecBuilder::build(desc, ctx);
+}
+
 inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
                                      size_t             tokens_per_block,
                                      rtp_llm::DataType  dtype,
@@ -475,6 +500,43 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
                                             uint32_t          size_per_head     = 1) {
     auto spec = makeMhaSpec("default", tokens_per_block, dtype, local_head_num_kv, size_per_head);
     return makeSingleGroupCacheConfig(std::move(spec), CacheGroupType::FULL, layer_num, block_num);
+}
+
+inline CacheConfig makeSimpleMlaCacheConfig(int               layer_num,
+                                            int               block_num,
+                                            size_t            tokens_per_block,
+                                            rtp_llm::DataType dtype,
+                                            bool              sparse                  = false,
+                                            size_t            kv_scale_stride_bytes   = 0,
+                                            size_t            kernel_tokens_per_block = 0,
+                                            uint32_t          kv_lora_rank            = 4,
+                                            uint32_t          rope_head_dim           = 4) {
+    CacheConfig config;
+    config.dtype                     = dtype;
+    config.layer_num                 = static_cast<uint32_t>(layer_num);
+    config.layer_all_num             = static_cast<uint32_t>(layer_num);
+    config.block_num                 = static_cast<uint32_t>(block_num);
+    config.seq_size_per_block        = tokens_per_block;
+    config.kernel_seq_size_per_block = kernel_tokens_per_block == 0 ? tokens_per_block : kernel_tokens_per_block;
+    config.use_mla                   = true;
+    config.is_sparse                 = sparse;
+
+    auto             spec = makeMlaSpec("default", tokens_per_block, dtype, kv_lora_rank, rope_head_dim);
+    std::vector<int> layer_ids(layer_num);
+    for (int i = 0; i < layer_num; ++i) {
+        layer_ids[i] = i;
+    }
+    config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+
+    config.kv_block_stride_bytes = spec->block_size_bytes();
+    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
+    config.kv_scale_stride_bytes = kv_scale_stride_bytes == 0 ? spec->scale_block_size_bytes() : kv_scale_stride_bytes;
+    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
+    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
+    return config;
 }
 
 inline CacheConfig makeSimpleLinearCacheConfig(int               layer_num,

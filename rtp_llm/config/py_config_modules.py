@@ -179,13 +179,15 @@ class LoadConfig:
         self.force_cpu_load_weights: bool = False
         self.loader_recycle_handles: bool = True
         self.moe_pure_tp_preshard: bool = False
+        self.keep_mla_checkpoint_weights: bool = False
 
     def to_string(self):
         return (
             f"load_method: {self.load_method}\n"
             f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
             f"loader_recycle_handles: {self.loader_recycle_handles}\n"
-            f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}"
+            f"moe_pure_tp_preshard: {self.moe_pure_tp_preshard}\n"
+            f"keep_mla_checkpoint_weights: {self.keep_mla_checkpoint_weights}"
         )
 
 
