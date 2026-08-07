@@ -98,14 +98,15 @@ public class BatchScheduler extends AbstractScheduler {
                 return future;
             }
 
-            // Auto-TPM D11 (task40): with the switch on, a prioritized request
-            // whose SLO deadline (startTime + resolveSloMs(seqLen)) has already
-            // passed is rejected right at the admission gate (8400) — remaining
+            // Auto-TPM D11 (task40, scope widened per owner sign-off): with the
+            // switch on, ANY request — including the 0 sentinel (D12) — whose
+            // SLO deadline (startTime + resolveSloMs(seqLen)) has already passed
+            // is rejected right at the admission gate (8400) — remaining
             // budget ≤ 0 is not schedulable work. Switch off keeps the pre-D11
-            // parity; the 0 sentinel (D12) stays on the full legacy path and is
-            // never deadline-rejected here.
+            // parity. The sentinel still skips every other Auto-TPM mechanism
+            // (registry, yield, preemption, priority metrics).
             var d11Cfg = configService.loadBalanceConfig();
-            if (d11Cfg.isAutoTpmEnabled() && ctx.getPriority() > 0) {
+            if (d11Cfg.isAutoTpmEnabled()) {
                 long sloMs = d11Cfg.resolveSloMs(
                         ctx.getRequest() != null ? ctx.getRequest().getSeqLen() : 0);
                 if (sloMs > 0) {

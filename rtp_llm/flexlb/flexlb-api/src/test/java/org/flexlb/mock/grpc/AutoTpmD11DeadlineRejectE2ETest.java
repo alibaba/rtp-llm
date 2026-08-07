@@ -15,20 +15,19 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * D11 (task40) guard — SLO-deadline admission rejection at the scheduling
- * entry point:
+ * D11 (task40, scope widened per owner sign-off) guard — SLO-deadline
+ * admission rejection at the scheduling entry point:
  *
  * <ul>
- *   <li>AUTO_TPM on: a prioritized request whose deadline
- *       ({@code startTime + resolveSloMs(seqLen)}) is already ≤ now is
- *       rejected 8400 at {@code BatchScheduler.submit} — before InflightStore
- *       registration, before routing, and without ever reaching the engine;
- *       the reason message carries "slo deadline exceeded" with the
- *       deadline/now values</li>
+ *   <li>AUTO_TPM on: ANY request — prioritized or the 0 sentinel — whose
+ *       deadline ({@code startTime + resolveSloMs(seqLen)}) is already ≤ now
+ *       is rejected 8400 at {@code BatchScheduler.submit} — before
+ *       InflightStore registration, before routing, and without ever reaching
+ *       the engine; the reason message carries "slo deadline exceeded" with
+ *       the deadline/now values</li>
  *   <li>AUTO_TPM off: the same expired request keeps the pre-D11 baseline
- *       behavior (scheduled and completed normally) — off-state parity</li>
- *   <li>D12 boundary: the 0 sentinel (no priority carried) stays on the full
- *       legacy path and is never deadline-rejected, even with the switch on</li>
+ *       behavior (scheduled and completed normally) — off-state parity, for
+ *       both prioritized and no-priority requests</li>
  * </ul>
  */
 class AutoTpmD11DeadlineRejectE2ETest extends FlexLBMockTestBase {
@@ -85,16 +84,40 @@ class AutoTpmD11DeadlineRejectE2ETest extends FlexLBMockTestBase {
         assertEquals(0, inflightStore.activeCount());
     }
 
-    // ---- D12 boundary: 0 sentinel is never deadline-rejected ----
+    // ---- widened scope: the 0 sentinel is deadline-rejected too ----
 
     @Test
-    void expiredDeadline_noPrioritySentinel_neverRejected() throws Exception {
+    void expiredDeadline_noPrioritySentinel_switchOn_rejected8400AtEntry() throws Exception {
         BalanceContext ctx = createBalanceContext(8203);
         ctx.setStartTime(System.currentTimeMillis() - EXPIRED_BY_MS);
 
         CompletableFuture<Response> future = scheduler.submit(ctx);
+        assertTrue(future.isDone(), "D11 rejection must settle at submit time");
+        Response response = future.get(1, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode(),
+                "the expired 0 sentinel must be rejected 8400 at the entry too");
+        assertTrue(response.getErrorMessage().contains("slo deadline exceeded"),
+                "reason message must name the slo deadline: " + response.getErrorMessage());
+
+        // Rejected before registration and before dispatch.
+        assertEquals(0, inflightStore.activeCount(),
+                "the rejected sentinel must never enter the inflight store");
+        Thread.sleep(200);
+        assertEquals(0, mockPrefillWorker.getEnqueueCount(),
+                "the rejected sentinel must never reach the engine");
+    }
+
+    @Test
+    void expiredDeadline_noPrioritySentinel_switchOff_keepsBaselineBehavior() throws Exception {
+        config.setAutoTpmEnabled(false);
+
+        BalanceContext ctx = createBalanceContext(8204);
+        ctx.setStartTime(System.currentTimeMillis() - EXPIRED_BY_MS);
+
+        CompletableFuture<Response> future = scheduler.submit(ctx);
         assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess(),
-                "the 0 sentinel takes the full legacy path — no D11 rejection");
+                "with AUTO_TPM off an expired 0 sentinel must not be rejected (parity)");
         assertEquals(1, mockPrefillWorker.getEnqueueCount());
 
         simulatePrefillFinishedReport();
