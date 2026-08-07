@@ -183,6 +183,14 @@ public final class JavaMockEngineCluster {
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             controlServer.stop();
+            // Drain BEFORE killing the scheduler: cancel every in-flight request
+            // through the existing cancel() bookkeeping so counters net to zero
+            // and checkLeakDrain stops evaluating. Without this, requests whose
+            // simulated completion (up to ~90s for long decodes) has not fired
+            // yet were reported as LEAK DETECTED during test teardown.
+            for (FastRpcService service : services.values()) {
+                service.drainAndShutdown();
+            }
             scheduler.shutdownNow();
             for (FastRpcService service : services.values()) {
                 service.shutdown();
@@ -415,6 +423,10 @@ public final class JavaMockEngineCluster {
         private volatile FaultInjectionConfig faultConfig = FaultInjectionConfig.builder().build();
         private final AtomicInteger enqueueCount = new AtomicInteger();
         private volatile boolean stopped = false;
+        // Set once by drainAndShutdown(): rejects new admissions and disables
+        // checkLeakDrain so shutdown-time in-flight requests are not misreported
+        // as leaks. Never reset (the process is exiting).
+        private volatile boolean shuttingDown = false;
         private final AtomicBoolean leakDetected = new AtomicBoolean(false);
         private final AtomicLong lastEnqueueTime = new AtomicLong(System.nanoTime());
         private final AtomicLong acceptedCount = new AtomicLong();
@@ -850,6 +862,12 @@ public final class JavaMockEngineCluster {
             if (shapes.isEmpty()) {
                 return true;
             }
+            // Shutdown drain in progress — reject before claiming any counter so
+            // a racing enqueue (entry stopped-check passed pre-drain) leaves no
+            // residue behind the drain's cancel sweep.
+            if (shuttingDown) {
+                return false;
+            }
             // Hard gate on maxPrefillConcurrency (change 2): a batch is either admitted
             // immediately (occupies a concurrency slot) or parked in the pending
             // queue until a running batch finishes. activePrefillBatches is reserved
@@ -1060,6 +1078,13 @@ public final class JavaMockEngineCluster {
         private boolean scheduleDecodeCompletion(MockPerformanceModel.RequestShape shape, long batchId,
                 LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue) {
             long requestId = shape.input().getRequestId();
+            // Shutdown drain in progress — reject before the putIfAbsent claim so
+            // a cross-engine prefill hand-off racing the drain cannot re-populate
+            // runningTasks after the cancel sweep. The caller degrades exactly
+            // like pending-queue backpressure (no residue on this engine).
+            if (shuttingDown) {
+                return false;
+            }
             // Guard: never schedule the same requestId twice on this engine.
             EngineRpcService.TaskInfoPB existing = runningTasks.putIfAbsent(
                     requestId,
@@ -1288,6 +1313,13 @@ public final class JavaMockEngineCluster {
         }
 
         void checkLeakDrain(long graceWindowNanos) {
+            // Shutdown drain in progress: remaining in-flight requests are being
+            // cancelled deliberately, not leaking — a non-zero count here is
+            // teardown noise, so never set leak_detected. Runtime leak detection
+            // (below) is unchanged while the engine is live.
+            if (shuttingDown) {
+                return;
+            }
             long timeSinceLastEnqueue = System.nanoTime() - lastEnqueueTime.get();
             if (timeSinceLastEnqueue < graceWindowNanos) {
                 return;
@@ -1331,6 +1363,61 @@ public final class JavaMockEngineCluster {
         }
 
         /**
+         * Graceful-stop drain for process shutdown: reject new admissions and
+         * cancel every in-flight request through the existing {@link #cancel}
+         * bookkeeping (verified idempotent against racing completion callbacks
+         * via the runningTasks remove-guard), so pendingRequests /
+         * activeDecodeRequests / activeKvTokens / waitingPrefillRequests and
+         * both pending queues net to zero without waiting for the simulated
+         * completions (up to ~90s for long decodes) to fire. Called from the
+         * JVM shutdown hook; completes in milliseconds.
+         *
+         * <p>Counters owned by RUNNING prefill batch completions
+         * (activePrefillBatches / activePrefillRequests) are left to their
+         * already-scheduled ms-scale callbacks — cancel() intentionally never
+         * touches them, and with {@link #shuttingDown} set they can no longer
+         * trip checkLeakDrain.
+         */
+        void drainAndShutdown() {
+            shuttingDown = true;
+            stopped = true; // same rejection semantics as the control-plane /stop_engine
+            // Cancel sweep. A pass can promote queued decode tasks into running
+            // slots (cancel's slot hand-off) and a racing cross-engine hand-off
+            // may slip in before the shuttingDown guard was observed, so retry
+            // a bounded number of passes until runningTasks is empty.
+            for (int pass = 0; pass < 3 && !runningTasks.isEmpty(); pass++) {
+                for (Long requestId : List.copyOf(runningTasks.keySet())) {
+                    cancel(requestId);
+                }
+            }
+            // Queued prefill batches: cancel() removed every member's
+            // runningTasks entry (and decremented pendingRequests) but by design
+            // leaves the batch parked for the completion drain, which will never
+            // fire once the scheduler stops. Drop dead batches with the same
+            // anyAlive bookkeeping as the completion drain; any member still
+            // alive (raced past the sweep) goes through cancel() first so no
+            // counter is decremented twice.
+            synchronized (prefillQueueLock) {
+                while (!prefillPendingQueue.isEmpty()) {
+                    PrefillPendingBatch batch = prefillPendingQueue.pollFirst();
+                    for (MockPerformanceModel.RequestShape shape : batch.shapes()) {
+                        if (runningTasks.containsKey(shape.input().getRequestId())) {
+                            cancel(shape.input().getRequestId());
+                        }
+                    }
+                    waitingPrefillRequests.addAndGet(-batch.shapes().size());
+                }
+            }
+            // Decode queue is emptied by the cancel sweep (queued tasks always
+            // have a runningTasks entry); clear any dead leftovers, mirroring
+            // the drain's skip-cancelled check. Dead entries carry no counters.
+            synchronized (decodeQueueLock) {
+                decodePendingQueue.removeIf(
+                        t -> !runningTasks.containsKey(t.shape().input().getRequestId()));
+            }
+        }
+
+        /**
          * Shut down the dedicated response-polling executor.
          */
         void shutdown() {
@@ -1362,6 +1449,11 @@ public final class JavaMockEngineCluster {
         long getCacheKeyCount() { return cache.snapshotKeys().size(); }
         long getCacheEvictions() { return cache.evictions(); }
         boolean isLeakDetected() { return leakDetected.get(); }
+        boolean isShuttingDown() { return shuttingDown; }
+        int getActiveDecodeCount() { return activeDecodeRequests.get(); }
+        int getActivePrefillBatchCount() { return activePrefillBatches.get(); }
+        int getDecodePendingQueueDepth() { return decodePendingQueueSize(); }
+        int getPrefillPendingQueueDepth() { return prefillPendingQueueSize(); }
         Map<Long, String> getRequestStates() { return requestStates; }
 
         /**
