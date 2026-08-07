@@ -321,17 +321,18 @@ public class FlexlbConfig {
     /**
      * Maximum in-flight prefill batches per worker for the fixed_window batcher.
      * When the engine already has this many batches inflight, the batcher parks
-     * instead of dispatching new batches.  Set to 0 to disable backpressure —
+     * instead of dispatching new batches.  Default 0 disables backpressure —
      * the fixed_window batcher dispatches regardless of engine load.
+     *
+     * <p>Set to a small value (e.g. 2–3) to prevent engine overload when
+     * using fixed_window; set to 0 to keep the original always-dispatch behavior.
      */
-    // 111 实测（run 20260807_204244）：inflight=1 流水线 + 150ms 窗口 → batch 7→11、超 SLO 5.91%→0.93%、gRPC 队列 p99 3231→195ms
-    private int flexlbBatchFixedMaxInflightBatches = 1;
+    private int flexlbBatchFixedMaxInflightBatches = 0;
 
     /**
      * Deadline in milliseconds for EnqueueBatch.
      */
-    // 111 实测：与 queue cap 128 配套，0.8s 内消化不完即快速失败，避免请求在 master 侧陈化后超 SLO
-    private long flexlbBatchEnqueueDeadlineMs = 800;
+    private long flexlbBatchEnqueueDeadlineMs = 5000;
 
     /**
      * TTL for inflight entries before eviction (used by all routing paths).
@@ -460,8 +461,7 @@ public class FlexlbConfig {
      * BATCH routing path, distinct from {@link #queueingComponentQueueMaxSize}
      * which is the global queue for the DIRECT/QUEUE routing path.
      */
-    // 111 实测：128 ≈ 0.8s enqueue deadline 内单 worker 可消化量，与 deadline=800ms 配套压住队列陈化
-    private int flexlbBatchQueueMaxSize = 128;
+    private int flexlbBatchQueueMaxSize = 1024;
 
     /**
      * Maximum total in-flight requests across all batchers. Acts as a global
@@ -476,8 +476,7 @@ public class FlexlbConfig {
      * algorithm. After a request has waited this long, the batcher dispatches
      * whatever has accumulated regardless of batch size.
      */
-    // 111 实测（run 20260807_204244）：150ms 窗口 + inflight=1 → batch 7→11、超 SLO 5.91%→0.93%
-    private long flexlbBatchFixedWaitMs = 150;
+    private long flexlbBatchFixedWaitMs = 300;
 
     /**
      * Predicted batch execution time threshold in milliseconds for the
