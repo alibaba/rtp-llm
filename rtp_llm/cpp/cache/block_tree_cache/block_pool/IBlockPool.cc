@@ -32,7 +32,7 @@ std::string IBlockPool::debugString() const {
     oss << "IBlockPool{name=" << config_->pool_name << ", total=" << totalBlocksNumNoLock() << ", used=" << used_blocks
         << ", free=" << free_blocks << ", active_tree_cached=" << active_tree_cached_blocks_num_
         << ", request_ref_blocks=" << referenced_block_counts_[refTypeIndex(BlockRefType::REQUEST)]
-        << ", connector_ref_blocks=" << referenced_block_counts_[refTypeIndex(BlockRefType::CONNECTOR)]
+        << ", storage_backend_ref_blocks=" << referenced_block_counts_[refTypeIndex(BlockRefType::STORAGE_BACKEND)]
         << ", block_cache_ref_blocks=" << referenced_block_counts_[refTypeIndex(BlockRefType::BLOCK_CACHE)]
         << ", eviction_ref_blocks=" << referenced_block_counts_[refTypeIndex(BlockRefType::EVICTION)]
         << ", store_ref_blocks=" << referenced_block_counts_[refTypeIndex(BlockRefType::STORE)] << "}";
@@ -300,7 +300,7 @@ void IBlockPool::decRefOneNoLock(BlockIdxType block, size_t ref_type_index) {
 
 bool IBlockPool::isActiveTreeCachedBlockNoLock(BlockIdxType block) const {
     const size_t request_index     = refTypeIndex(BlockRefType::REQUEST);
-    const size_t connector_index   = refTypeIndex(BlockRefType::CONNECTOR);
+    const size_t connector_index   = refTypeIndex(BlockRefType::STORAGE_BACKEND);
     const size_t block_cache_index = refTypeIndex(BlockRefType::BLOCK_CACHE);
     return metric_refcounts_by_type_[block_cache_index][block] > 0
            && (metric_refcounts_by_type_[request_index][block] > 0

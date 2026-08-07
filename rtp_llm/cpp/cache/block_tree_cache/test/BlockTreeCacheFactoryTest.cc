@@ -435,6 +435,102 @@ void expectDevicePattern(const void* address, size_t bytes, uint8_t pattern) {
 
 class BlockTreeCacheFactoryTest: public DeviceTestBase {};
 
+class ShutdownCountingStorageBackend: public StorageBackend {
+public:
+    ShutdownCountingStorageBackend(std::shared_ptr<size_t> shutdown_count, std::shared_ptr<size_t> resolved_count):
+        shutdown_count_(std::move(shutdown_count)), resolved_count_(std::move(resolved_count)) {}
+
+    void shutdown() override {
+        const auto buffers = convertIndexToBuffer(/*layer_id=*/0, /*group_id=*/0, /*block_id=*/0);
+        if (!buffers.empty() && buffers.front().addr != nullptr) {
+            ++*resolved_count_;
+        }
+        ++*shutdown_count_;
+    }
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    void matchImpl(StorageRequest request, MatchDone done) override {
+        done(request.handles.size(), nullptr);
+    }
+    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
+        done();
+    }
+    void writeImpl(StorageRequest, Done done) override {
+        done();
+    }
+
+private:
+    std::shared_ptr<size_t> shutdown_count_;
+    std::shared_ptr<size_t> resolved_count_;
+};
+
+class CountingStorageBackend: public StorageBackend {
+public:
+    size_t matchCalls() const {
+        return match_calls_;
+    }
+    const CacheKeysType& matchKeys() const {
+        return match_keys_;
+    }
+    size_t localMatchedBlocks() const {
+        return local_matched_blocks_;
+    }
+    const std::vector<size_t>& matchHandleCounts() const {
+        return match_handle_counts_;
+    }
+    void shutdown() override {}
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    void matchImpl(StorageRequest request, MatchDone done) override {
+        ++match_calls_;
+        match_keys_             = *request.keys;
+        local_matched_blocks_   = request.local_matched_blocks_num;
+        match_handle_counts_.clear();
+        for (const auto& handles : request.handles) {
+            match_handle_counts_.push_back(handles.size());
+        }
+        done(local_matched_blocks_, nullptr);
+    }
+    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
+        done();
+    }
+    void writeImpl(StorageRequest, Done done) override {
+        done();
+    }
+
+private:
+    size_t              match_calls_{0};
+    CacheKeysType       match_keys_;
+    size_t              local_matched_blocks_{0};
+    std::vector<size_t> match_handle_counts_;
+};
+
+class FailingInitStorageBackend: public StorageBackend {
+public:
+    size_t initCalls() const {
+        return init_calls_;
+    }
+    void shutdown() override {}
+
+protected:
+    bool initImpl() override {
+        ++init_calls_;
+        return false;
+    }
+    void matchImpl(StorageRequest, MatchDone) override {}
+    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done) override {}
+    void writeImpl(StorageRequest, Done) override {}
+
+private:
+    size_t init_calls_{0};
+};
+
 }  // namespace
 
 TEST(BlockTreeCacheFactoryUtilityTest, UsableBlockCountReservesBlockZeroWithinBudget) {
@@ -462,6 +558,101 @@ TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
 
     ASSERT_EQ(allocator->cacheGroups().size(), 1u);
     expectTargetGroupsBoundById(cache, allocator);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheAndAllocatorAlive) {
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       shutdown_count = std::make_shared<size_t>(0);
+    auto       resolved_count = std::make_shared<size_t>(0);
+    auto       backend = std::make_shared<ShutdownCountingStorageBackend>(shutdown_count, resolved_count);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_remote_cache = true;
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
+    ASSERT_NE(cache, nullptr);
+    allocator->attachBlockTreeCache(cache);
+
+    std::weak_ptr<KVCacheAllocator> weak_allocator = allocator;
+    std::weak_ptr<BlockTreeCache>   weak_cache     = cache;
+    std::weak_ptr<StorageBackend>   weak_backend   = backend;
+    cache.reset();
+    backend.reset();
+    allocator.reset();
+
+    EXPECT_TRUE(weak_allocator.expired());
+    EXPECT_TRUE(weak_cache.expired());
+    EXPECT_TRUE(weak_backend.expired());
+    EXPECT_EQ(*resolved_count, 1u);
+    EXPECT_EQ(*shutdown_count, 1u);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPrefixReuse) {
+    auto config   = makeSingleConfig();
+    auto policies = config.groupPoliciesSnapshot();
+    ASSERT_EQ(policies.size(), 1u);
+    policies[0].enable_prefix_reuse = false;
+    config.setGroupPolicies(std::move(policies));
+
+    auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto backend   = std::make_shared<CountingStorageBackend>();
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_remote_cache = true;
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_TRUE(cache->groupSets().empty());
+
+    const BlockTreeMatchResult result = cache->match({1, 2});
+    EXPECT_EQ(result.async_context, nullptr);
+    EXPECT_EQ(backend->matchCalls(), 0u);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RemoteMatchReceivesCompleteKeysAndExplicitLocalBoundary) {
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       backend   = std::make_shared<CountingStorageBackend>();
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_remote_cache = true;
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
+    ASSERT_NE(cache, nullptr);
+    allocator->attachBlockTreeCache(cache);
+
+    constexpr CacheKeyType local_key = 700;
+    const auto request_blocks = insertOneKeyThroughAllocator(config, allocator, local_key);
+    BlockTreeMatchResult result = cache->match({local_key, local_key + 1});
+    EXPECT_EQ(result.matched_device_blocks, 1u);
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(context, nullptr);
+    size_t matched_blocks = 0;
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        matched_blocks = matched;
+        return current.commit();
+    });
+    context->startBackendMatch();
+
+    EXPECT_EQ(backend->matchCalls(), 1u);
+    EXPECT_EQ(backend->matchKeys(), (CacheKeysType{local_key, local_key + 1}));
+    EXPECT_EQ(backend->localMatchedBlocks(), 1u);
+    EXPECT_EQ(backend->matchHandleCounts(), (std::vector<size_t>{1, 1}));
+    EXPECT_EQ(matched_blocks, 1u);
+    EXPECT_TRUE(context->success());
+
+    cache->releaseMatchedResources(result.matched_device_resources);
+    BlockReleaseBatch releases;
+    releaseInsertedRequestBlocks(allocator, request_blocks, releases);
+    submitBlockReleases(cache, releases);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RemoteBackendInitFailureIsFatal) {
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       backend   = std::make_shared<FailingInitStorageBackend>();
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_remote_cache = true;
+
+    CoreDumpGuard guard;
+    EXPECT_ANY_THROW(
+        createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend));
+    EXPECT_EQ(backend->initCalls(), 1u);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {

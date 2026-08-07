@@ -25,8 +25,7 @@ protected:
         const GroupSetPtr group_set = makeTestGroupSet(0, makeTestTopology({group}), {0}, {device_pool_});
         tree_                       = std::make_unique<BlockTree>(std::vector<GroupSetPtr>{group_set});
         target_blocks_              = device_pool_->malloc(10).value();
-        coordinator_ = std::make_shared<LoadContextCoordinator>(LoadContextCoordinator::CommitCallback{},
-                                                                LoadContextCoordinator::AbortCallback{});
+        coordinator_ = std::make_shared<LoadContextCoordinator>([](const auto&) { return true; }, [](auto&) {});
     }
 
     void TearDown() override {
@@ -42,7 +41,11 @@ protected:
             desc.source_tier  = Tier::HOST;
             desc.target_tier  = Tier::DEVICE;
         }
-        return coordinator_->create(load_descs, std::vector<bool>(load_descs.size(), joined), 1);
+        auto context = coordinator_->create(load_descs, std::vector<bool>(load_descs.size(), joined), 1);
+        EXPECT_NE(context, nullptr);
+        EXPECT_TRUE(coordinator_->registerContext(context));
+        EXPECT_TRUE(context->commit());
+        return context;
     }
 
     DeviceBlockPoolPtr                      device_pool_;

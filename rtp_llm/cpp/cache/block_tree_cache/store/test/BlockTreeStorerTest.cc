@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,7 +50,8 @@ StoreEnvironment makeStoreEnvironment(const std::string&         name,
                                       bool                       host_cache_on,
                                       bool                       disk_cache_on,
                                       const std::vector<size_t>& lower_tier_blocks = {2},
-                                      int                        task_pool_size    = 4) {
+                                      int                             task_pool_size    = 4,
+                                      std::shared_ptr<StorageBackend> storage_backend   = nullptr) {
     StoreEnvironment env;
     for (size_t group_set_id = 0; group_set_id < lower_tier_blocks.size(); ++group_set_id) {
         env.device_pools.push_back(
@@ -67,12 +69,91 @@ StoreEnvironment makeStoreEnvironment(const std::string&         name,
     config.enable_device_cache      = device_cache_on;
     config.enable_host_cache        = host_cache_on;
     config.enable_disk_cache        = disk_cache_on;
+    config.enable_remote_cache      = storage_backend != nullptr;
     config.task_pool_size           = task_pool_size;
     std::vector<GroupSetPtr> groups = env.groups;
-    env.cache                       = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
+    env.cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config), std::move(storage_backend));
     RTP_LLM_CHECK(env.cache != nullptr);
     return env;
 }
+
+class PendingWriteBackend: public StorageBackend {
+public:
+    void setCache(BlockTreeCache* cache) {
+        cache_ = cache;
+    }
+    void finishWrite() {
+        Done done;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            done = std::move(done_);
+        }
+        if (done) {
+            done();
+        }
+    }
+    void shutdown() override {
+        finishWrite();
+    }
+    std::vector<BlockIdxType> blocks() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return blocks_;
+    }
+    std::vector<std::string> groupTags() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return group_tags_;
+    }
+    std::vector<size_t> keyHandleCounts() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return key_handle_counts_;
+    }
+    std::vector<void*> addresses() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return addresses_;
+    }
+    bool submittedOutsideTreeLock() const {
+        return submitted_outside_tree_lock_;
+    }
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    void matchImpl(StorageRequest request, MatchDone done) override {
+        done(request.handles.size(), nullptr);
+    }
+    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
+        done();
+    }
+    void writeImpl(StorageRequest request, Done done) override {
+        submitted_outside_tree_lock_ = cache_ != nullptr && cache_->mutex_.try_lock();
+        if (submitted_outside_tree_lock_) {
+            cache_->mutex_.unlock();
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& key_handles : request.handles) {
+            key_handle_counts_.push_back(key_handles.size());
+            for (const auto& handle : key_handles) {
+                const auto& group = topology().groupById(handle.group_id);
+                group_tags_.push_back(group.tag);
+                blocks_.push_back(handle.block);
+                const auto buffers = convertIndexToBuffer(group.layer_ids.front(), handle.group_id, handle.block);
+                addresses_.push_back(buffers.front().addr);
+            }
+        }
+        done_ = std::move(done);
+    }
+
+private:
+    BlockTreeCache*           cache_{nullptr};
+    mutable std::mutex        mutex_;
+    std::vector<BlockIdxType> blocks_;
+    std::vector<std::string>  group_tags_;
+    std::vector<size_t>       key_handle_counts_;
+    std::vector<void*>        addresses_;
+    Done                      done_;
+    bool                      submitted_outside_tree_lock_{false};
+};
 
 std::shared_ptr<ControlledPerRankBlockTransferEngine> installStoreTransferEngine(
     StoreEnvironment& env, TransferCopyAction action, std::shared_ptr<CallbackBarrier> barrier = nullptr) {
@@ -147,6 +228,79 @@ TEST(BlockTreeStorerTest, StorePublishesTargetTierOnlyWithoutDeviceResidency) {
 
         releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
     }
+}
+
+TEST(BlockTreeStorerTest, DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUntilCompletion) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto             backend = std::make_shared<PendingWriteBackend>();
+    StoreEnvironment env     = makeStoreEnvironment("storage_write",
+                                                /*device_cache_on=*/true,
+                                                /*host_cache_on=*/false,
+                                                /*disk_cache_on=*/false,
+                                                /*lower_tier_blocks=*/{2},
+                                                /*task_pool_size=*/4,
+                                                backend);
+    backend->setCache(env.cache.get());
+    MultiNodeBlocks holder = allocateDeviceBlocksForTest(*env.groups[0], 2, BlockRefType::REQUEST);
+    ASSERT_EQ(holder.size(), 2u);
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = holder[0];
+    resources[1][0].device_blocks = holder[1];
+
+    env.cache->insert({100, 101}, resources, Tier::DEVICE);
+    EXPECT_TRUE(backend->submittedOutsideTreeLock());
+    EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{1, 1}));
+    EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[1][0]}));
+    EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 2u);
+    backend->finishWrite();
+    EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+
+    releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], holder[0], BlockRefType::REQUEST);
+    releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], holder[1], BlockRefType::REQUEST);
+}
+
+TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    auto make_group = [](std::string tag, int layer) {
+        GroupBase group =
+            block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {layer});
+        auto spec  = group.spec->clone();
+        spec->tag  = tag;
+        group.tag  = std::move(tag);
+        group.spec = std::move(spec);
+        return group;
+    };
+    auto topology  = CacheTopology::create({make_group("z_group", 0), make_group("a_group", 1)},
+                                           {{0, {"z_group"}}, {1, {"a_group"}}});
+    auto pool_z    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_z");
+    auto pool_a    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_a");
+    auto group_set = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_z, pool_a}, nullptr, nullptr);
+    group_set->initialize(0, topology, {0, 1});
+
+    auto                 backend = std::make_shared<PendingWriteBackend>();
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    config.enable_remote_cache = true;
+    auto cache                 = makeBlockTreeCacheForTest({group_set}, std::move(config), backend);
+    backend->setCache(cache.get());
+
+    MultiNodeBlocks holder = allocateDeviceBlocksForTest(*group_set, 1, BlockRefType::REQUEST);
+    ASSERT_EQ(holder.size(), 1u);
+    cache->insert({100}, deviceSourceResources({holder.front()}), Tier::DEVICE);
+    EXPECT_EQ(backend->keyHandleCounts(), (std::vector<size_t>{2}));
+    EXPECT_EQ(backend->groupTags(), (std::vector<std::string>{"z_group", "a_group"}));
+    EXPECT_EQ(backend->blocks(), (std::vector<BlockIdxType>{holder[0][0], holder[0][1]}));
+    EXPECT_EQ(backend->addresses(),
+              (std::vector<void*>{pool_z->convertIndexToBuffer(0, holder[0][0]).front().addr,
+                                  pool_a->convertIndexToBuffer(0, holder[0][1]).front().addr}));
+
+    backend->finishWrite();
+    releaseDeviceBlocksAndNotify(*cache, pool_z, {holder[0][0]}, BlockRefType::REQUEST);
+    releaseDeviceBlocksAndNotify(*cache, pool_a, {holder[0][1]}, BlockRefType::REQUEST);
 }
 
 TEST(BlockTreeStorerTest, StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled) {

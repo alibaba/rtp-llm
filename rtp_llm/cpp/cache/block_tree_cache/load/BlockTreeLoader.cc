@@ -22,6 +22,7 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                     tree,
                                  int                            disk_timeout_ms,
                                  int                            host_timeout_ms,
                                  bool                           enable_device_cache,
+                                 std::shared_ptr<StorageBackend> storage_backend,
                                  SettledFn                      settled):
     tree_(tree),
     evictor_(evictor),
@@ -32,6 +33,7 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                     tree,
     disk_timeout_ms_(disk_timeout_ms),
     host_timeout_ms_(host_timeout_ms),
     enable_device_cache_(enable_device_cache),
+    storage_backend_(std::move(storage_backend)),
     settled_(std::move(settled)),
     load_task_runner_(tree_->groupSets()),
     load_join_registry_(tree),
@@ -49,12 +51,7 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_key
     }
 
     std::vector<TreeNode*> path = tree_->findNode(cache_keys);
-    if (path.empty()) {
-        RTP_LLM_LOG_DEBUG("no match found for %zu cache_keys", cache_keys.size());
-        return {};
-    }
-
-    BlockTreeMatchResult result = createMatchResult(path);
+    BlockTreeMatchResult   result = createMatchResult(path, cache_keys);
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
@@ -149,11 +146,12 @@ std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeLoader::collectReus
     return metrics_reporter_.collectCacheReuseTimeMetrics(reuse_time_samples);
 }
 
-BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& path) {
+BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& path,
+                                                        const CacheKeysType&    cache_keys) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
-    if (!validMatch(path, candidate_valid)) {
-        return result;
+    if (!path.empty()) {
+        validMatch(path, candidate_valid);
     }
     const int64_t access_time_us = currentTimeUs();
 
@@ -229,8 +227,18 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
     }
 
-    if (!pending_load_descs.empty()) {
-        result.async_context = load_context_coordinator_->create(pending_load_descs, joined_loads, path.size());
+    StorageRequest storage_request;
+    if (storage_backend_ && path.size() < cache_keys.size()) {
+        storage_request = makeStorageRequest(cache_keys, path.size());
+    }
+    const bool use_storage = !storage_request.empty();
+    if (!pending_load_descs.empty() || use_storage) {
+        result.async_context = load_context_coordinator_->create(
+            pending_load_descs,
+            joined_loads,
+            path.size(),
+            use_storage ? storage_backend_ : nullptr,
+            std::move(storage_request));
         if (result.async_context == nullptr) {
             abortLoadLocked(pending_load_descs, joined_loads, 0, 0);
         } else if (!load_join_registry_.join(result.async_context)
@@ -245,7 +253,22 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
     return result;
 }
 
-bool BlockTreeLoader::cancelLoadLocked(const std::shared_ptr<AsyncContext>& context) {
+StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_keys,
+                                                   size_t               local_matched_blocks_num) const {
+    StorageRequest request{std::make_shared<CacheKeysType>(cache_keys),
+                           std::vector<std::vector<StorageBlockHandle>>(cache_keys.size()),
+                           local_matched_blocks_num};
+    for (auto& key_handles : request.handles) {
+        for (const auto& group_set : tree_->groupSets()) {
+            for (size_t group_id : group_set->groupIds()) {
+                key_handles.push_back({group_id, NULL_BLOCK_IDX});
+            }
+        }
+    }
+    return request;
+}
+
+bool BlockTreeLoader::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
     std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(context);
     if (load_context == nullptr) {
         RTP_LLM_LOG_WARNING("context is not owned by BlockTreeCache");

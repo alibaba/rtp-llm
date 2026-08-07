@@ -49,35 +49,39 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         return init_result;
     }
 
-    std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
-    MallocResult                  incr_result           = incrMalloc(malloc_info);
-    if (!incr_result.success) {
-        pending_async_context.reset();
-        FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
-        free(free_info);
-        incr_result.match_cost_time_us         = init_result.match_cost_time_us;
-        incr_result.match_end_time_us          = init_result.match_end_time_us;
-        incr_result.block_aligned_input_length = init_result.block_aligned_input_length;
-        incr_result.load_attempted             = init_result.load_attempted;
-        return incr_result;
-    }
-
-    if (pending_async_context != nullptr) {
-        std::shared_ptr<LoadAsyncContext> load_context =
-            std::dynamic_pointer_cast<LoadAsyncContext>(pending_async_context);
-        if (load_context == nullptr || !load_context->commit()) {
-            load_context.reset();
+    std::shared_ptr<LoadAsyncContext> load_context =
+        std::dynamic_pointer_cast<LoadAsyncContext>(init_result.async_context);
+    if (load_context && load_context->deferredMalloc()) {
+        load_context->startBackendMatch();
+    } else {
+        std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
+        MallocResult incr_result = incrMalloc(malloc_info);
+        if (!incr_result.success) {
             pending_async_context.reset();
             FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
             free(free_info);
-            init_result.success        = false;
-            init_result.reuse_len      = 0;
-            init_result.host_reuse_len = 0;
-            init_result.disk_reuse_len = 0;
-            init_result.async_context  = nullptr;
-            return init_result;
+            incr_result.match_cost_time_us         = init_result.match_cost_time_us;
+            incr_result.match_end_time_us          = init_result.match_end_time_us;
+            incr_result.block_aligned_input_length = init_result.block_aligned_input_length;
+            incr_result.load_attempted             = init_result.load_attempted;
+            return incr_result;
         }
-        init_result.async_context = std::move(pending_async_context);
+        if (pending_async_context != nullptr) {
+            load_context = std::dynamic_pointer_cast<LoadAsyncContext>(pending_async_context);
+            if (load_context == nullptr || !load_context->commit()) {
+                load_context.reset();
+                pending_async_context.reset();
+                FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
+                free(free_info);
+                init_result.success        = false;
+                init_result.reuse_len      = 0;
+                init_result.host_reuse_len = 0;
+                init_result.disk_reuse_len = 0;
+                init_result.async_context  = nullptr;
+                return init_result;
+            }
+            init_result.async_context = std::move(pending_async_context);
+        }
     }
 
     return init_result;
@@ -410,7 +414,7 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
         snapshot.active_tree_cached_blocks = pool->activeTreeCachedBlocksNum();
         snapshot.reserve_blocks            = reserveBlocksForPoolMetrics(pool_index);
         snapshot.request_ref_blocks        = pool->referencedBlocksNum(BlockRefType::REQUEST);
-        snapshot.connector_ref_blocks      = pool->referencedBlocksNum(BlockRefType::CONNECTOR);
+        snapshot.connector_ref_blocks      = pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND);
         snapshot.block_cache_ref_blocks    = pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE);
         snapshot.eviction_ref_blocks       = pool->referencedBlocksNum(BlockRefType::EVICTION);
         snapshot.store_ref_blocks          = pool->referencedBlocksNum(BlockRefType::STORE);

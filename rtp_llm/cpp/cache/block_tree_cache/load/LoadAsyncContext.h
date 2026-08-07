@@ -12,38 +12,48 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
 class LoadContextCoordinator;
 
-class LoadAsyncContext: public AsyncContext {
+class LoadAsyncContext: public AsyncContext, public std::enable_shared_from_this<LoadAsyncContext> {
 public:
     enum class State : int {
-        PENDING          = 0,
-        CANCEL_REQUESTED = 1,
-        SUCCEEDED        = 2,
-        FAILED           = 3,
-        CANCELLED        = 4
+        PENDING,
+        CANCEL_REQUESTED,
+        SUCCEEDED,
+        FAILED,
+        CANCELLED
     };
+    using MatchCallback = std::function<bool(LoadAsyncContext&, size_t matched_blocks)>;
 
     LoadAsyncContext(std::vector<TransferDescriptor>                load_descs,
                      std::vector<bool>                              joined_load,
-                     size_t                                         matched_blocks,
+                     size_t                                         local_matched_blocks,
                      uint64_t                                       context_id,
-                     const std::shared_ptr<LoadContextCoordinator>& coordinator);
+                     const std::shared_ptr<LoadContextCoordinator>& coordinator,
+                     std::shared_ptr<StorageBackend>                storage_backend = nullptr,
+                     StorageRequest                                 storage_request = {});
     ~LoadAsyncContext() override;
 
     bool     empty() const;
     uint64_t contextId() const;
+    size_t   localMatchedBlocks() const;
     size_t   matchedBlocks() const;
     size_t   matchedBlocks(Tier tier) const;
+    bool     deferredMalloc() const;
 
+    void setMatchCallback(MatchCallback callback);
+    void startBackendMatch();
     void setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
+    void setBackendTargetBlock(size_t key_index, size_t handle_index, BlockIdxType target_block);
 
     const std::vector<TransferDescriptor>& loadDescs() const;
     const std::vector<bool>& joinedLoads() const;
+    const std::vector<std::vector<StorageBlockHandle>>& backendHandles() const;
 
     bool commit();
     void abort();
@@ -59,20 +69,37 @@ public:
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
+    void   onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta);
+    void   onBackendRead();
+    void   failBeforeCommit();
+    void   finishIfReadyLocked(bool& notify);
+    void   finishMatchCallback();
 
-    // Keep the coordinator alive so a registered context can perform RAII abort.
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
-
     std::vector<TransferDescriptor> load_descs_;
     std::vector<bool>     joined_load_;
-    const size_t                    matched_blocks_{0};
+    const size_t                            local_matched_blocks_{0};
+    size_t                                  matched_blocks_{0};
+    size_t                                  backend_matched_blocks_{0};
     std::array<size_t, 3>           matched_blocks_by_tier_{};
+
+    std::shared_ptr<StorageBackend> storage_backend_;
+    StorageRequest                  storage_request_;
+    MatchCallback                   match_callback_;
+    const bool                      deferred_malloc_{false};
+    bool                            backend_started_{false};
+    bool                            backend_pending_{false};
+    bool                            committed_{false};
+
+    std::mutex              match_callback_mutex_;
+    std::condition_variable match_callback_cv_;
+    bool                    match_callback_running_{false};
 
     std::atomic<State>      state_{State::PENDING};
     mutable std::mutex      mutex_;
     std::condition_variable cv_;
-    size_t                  remaining_transfer_count_;
+    size_t                  remaining_transfer_count_{0};
     bool                    has_failure_{false};
 };
 
@@ -83,18 +110,23 @@ public:
 
     LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback);
 
-    std::shared_ptr<LoadAsyncContext>
-    create(std::vector<TransferDescriptor> load_descs, std::vector<bool> joined_load, size_t matched_blocks);
+    std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,
+                                             std::vector<bool>               joined_load,
+                                             size_t                          matched_blocks,
+                                             std::shared_ptr<StorageBackend> storage_backend = nullptr,
+                                             StorageRequest                  storage_request = {});
     bool                              registerContext(const std::shared_ptr<LoadAsyncContext>& context);
     bool                              commit(uint64_t context_id);
     bool                              abort(LoadAsyncContext& context) noexcept;
     void                              shutdown();
 
 private:
-    // Pending registration must not keep a context alive; its destructor performs RAII abort.
     using PendingContextMap = std::unordered_map<uint64_t, std::weak_ptr<LoadAsyncContext>>;
 
     void retireActiveCallback();
+    bool beginActiveCallback();
+
+    friend class LoadAsyncContext;
 
     std::mutex              mutex_;
     std::condition_variable cv_;

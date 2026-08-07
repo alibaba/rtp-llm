@@ -72,11 +72,6 @@ bool SingleTypeKVCacheAllocator::doInit() {
 MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto& kv_resource = malloc_info.batch_kv_cache_resource;
     auto& block_ids_0 = kv_resource->mutableBlockIds(0, 0);
-    int   common_seq_len =
-        std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
-    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(config_, 0, common_seq_len);
-    }
     const auto& cache_keys        = kv_resource->cacheKeys(0);
     const int   seq_len           = malloc_info.complete_token_ids->seqLength();
     const int reuse_unit_tokens =
@@ -137,7 +132,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             return rollback();
         }
         matched_device_blocks = match_result.matched_device_blocks;
-        total_logical_blocks  = load_context ? load_context->matchedBlocks() : matched_device_blocks;
+        total_logical_blocks                = load_context ? load_context->localMatchedBlocks() : matched_device_blocks;
         BlockIndicesType ready_group_blocks = block_tree_cache_->matchedBlocksForGroup(0, matched_resources);
         block_ids_0.assign(BlockIndicesType(total_logical_blocks, NULL_BLOCK_IDX));
         for (size_t i = 0; i < ready_group_blocks.size(); ++i) {
@@ -183,71 +178,116 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         release_matched_blocks();
     }
 
-    RequiredPositions materialize_positions;
-    if (load_context && !load_context->empty()) {
-        for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
-            if (load_context->loadDescs()[desc_index].source_tier == Tier::DEVICE) {
-                continue;
-            }
-            if (load_context->joinedLoads()[desc_index]) {
-                continue;
-            }
-            const size_t path_index = load_context->loadDescs()[desc_index].path_index;
-            materialize_positions.insert(path_index);
-        }
-        for (size_t position = 0; position < total_logical_blocks; ++position) {
-            if (isNullBlockIdx(block_ids_0.blocks()[position])
-                && materialize_positions.find(position) == materialize_positions.end()) {
-                return rollback();
-            }
-        }
+    if (load_context && load_context->deferredMalloc()) {
+        auto self = shared_from_this();
+        load_context->setMatchCallback(
+            [self = std::move(self), malloc_info](LoadAsyncContext& context, size_t matched_blocks) {
+                return self->finishDeferredMalloc(malloc_info, context, matched_blocks);
+            });
+        MallocResult result{
+            true, static_cast<int>(matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
+        result.match_end_time_us = match_end_time_us;
+        result.load_attempted    = load_attempted;
+        return result;
     }
 
-    size_t missing_targets = 0;
-    for (const size_t position : materialize_positions) {
-        if (position >= block_ids_0.blocksNum()) {
-            return rollback();
-        }
-        missing_targets += isNullBlockIdx(block_ids_0.blocks()[position]) ? 1 : 0;
-    }
-    const size_t reserve_blocks = reserveBlocksNum();
-    if (reserve_blocks > 0) {
-        const int    need_blocks = getNeedBlocks(malloc_info);
-        const size_t required    = static_cast<size_t>(std::max(need_blocks, 0)) + missing_targets + reserve_blocks;
-        if (freeBlocksNum() < required) {
-            return rollback();
-        }
-    }
-    if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len, false, 0, nullptr, materialize_positions)) {
+    if (!materializeInitialBlocks(malloc_info, load_context.get(), total_logical_blocks)) {
         return rollback();
-    }
-
-    if (load_context && !load_context->empty()) {
-        for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
-            const size_t path_index = load_context->loadDescs()[desc_index].path_index;
-            if (path_index >= block_ids_0.blocksNum() || isNullBlockIdx(block_ids_0.blocks()[path_index])) {
-                return rollback();
-            }
-            const BlockIdxType target = block_ids_0.blocks()[path_index];
-            if (load_context->joinedLoads()[desc_index]) {
-                const std::vector<BlockIdxType>& joined_targets = load_context->loadDescs()[desc_index].target_blocks;
-                if (joined_targets.size() != 1 || target != joined_targets.front()) {
-                    return rollback();
-                }
-                continue;
-            }
-            load_context->setTargetBlocks(desc_index, {target});
-        }
-    }
-
-    for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
-        full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id, 0), block_ids_0.blocks());
     }
     const int    reuse_len = static_cast<int>(matched_device_blocks) * reuse_unit_tokens;
     MallocResult result{true, reuse_len, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
     return result;
+}
+
+bool SingleTypeKVCacheAllocator::materializeInitialBlocks(const MallocInfo& malloc_info,
+                                                          LoadAsyncContext* context,
+                                                          size_t            matched_blocks) {
+    auto& kv_resource = *malloc_info.batch_kv_cache_resource;
+    auto& block_ids   = kv_resource.mutableBlockIds(0, 0);
+    block_ids.resize(matched_blocks, NULL_BLOCK_IDX);
+
+    RequiredPositions positions;
+    if (context != nullptr) {
+        for (size_t i = 0; i < context->loadDescs().size(); ++i) {
+            const auto& desc = context->loadDescs()[i];
+            if (desc.source_tier != Tier::DEVICE && !context->joinedLoads()[i]) {
+                positions.insert(desc.path_index);
+            }
+        }
+        const auto& backend_handles = context->backendHandles();
+        for (size_t key_index = 0; key_index < backend_handles.size(); ++key_index) {
+            if (!backend_handles[key_index].empty()) {
+                positions.insert(key_index);
+            }
+        }
+    }
+
+    size_t missing_targets = 0;
+    for (const size_t position : positions) {
+        if (position >= block_ids.blocksNum()) {
+            return false;
+        }
+        missing_targets += isNullBlockIdx(block_ids.blocks()[position]) ? 1 : 0;
+    }
+    const size_t reserve_blocks = reserveBlocksNum();
+    if (reserve_blocks > 0) {
+        const int    need_blocks = getNeedBlocks(malloc_info);
+        const size_t required    = static_cast<size_t>(std::max(need_blocks, 0)) + missing_targets + reserve_blocks;
+        if (freeBlocksNum() < required) {
+            return false;
+        }
+    }
+
+    int common_seq_len =
+        std::min(malloc_info.complete_token_ids->commonSeqLength(), malloc_info.complete_token_ids->totalSeqLength());
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+        common_seq_len = cp_slot_mapper_->effectiveSeqLenForAlloc(config_, 0, common_seq_len);
+    }
+    if (!full_kv_cache_group_->malloc(block_ids, common_seq_len, false, 0, nullptr, positions)) {
+        return false;
+    }
+
+    if (context != nullptr) {
+        for (size_t i = 0; i < context->loadDescs().size(); ++i) {
+            const auto& desc = context->loadDescs()[i];
+            if (desc.path_index >= block_ids.blocksNum() || isNullBlockIdx(block_ids.blocks()[desc.path_index])) {
+                return false;
+            }
+            const BlockIdxType target = block_ids.blocks()[desc.path_index];
+            if (context->joinedLoads()[i]) {
+                if (desc.target_blocks.size() != 1 || target != desc.target_blocks.front()) {
+                    return false;
+                }
+            } else {
+                context->setTargetBlocks(i, {target});
+            }
+        }
+        const auto& backend_handles = context->backendHandles();
+        for (size_t key_index = 0; key_index < backend_handles.size(); ++key_index) {
+            for (size_t handle_index = 0; handle_index < backend_handles[key_index].size(); ++handle_index) {
+                context->setBackendTargetBlock(key_index, handle_index, block_ids.blocks()[key_index]);
+            }
+        }
+    }
+
+    for (int batch = 1; batch < kv_resource.batchSize(); ++batch) {
+        full_kv_cache_group_->reference(kv_resource.mutableBlockIds(batch, 0), block_ids.blocks());
+    }
+    return true;
+}
+
+bool SingleTypeKVCacheAllocator::finishDeferredMalloc(const MallocInfo& malloc_info,
+                                                      LoadAsyncContext& context,
+                                                      size_t            matched_blocks) {
+    bool success = materializeInitialBlocks(malloc_info, &context, matched_blocks);
+    success      = success && !context.isRequestCanceled() && incrMalloc(malloc_info).success && context.commit();
+    if (!success) {
+        free(FreeInfo{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids});
+        return false;
+    }
+    return true;
 }
 
 MallocResult SingleTypeKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
@@ -455,7 +495,7 @@ std::shared_ptr<KVCacheResource> SingleTypeKVCacheAllocator::incrKVCacheRef(cons
         return nullptr;
     }
 
-    const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
+    const BlockRefType ref_type = is_connector ? BlockRefType::STORAGE_BACKEND : BlockRefType::REQUEST;
     full_kv_cache_group_->KVCacheGroup::reference(real_blocks, ref_type);
     selected_resource->mutableBlockIds(0).assign(std::move(selected_blocks));
     selected_resource->cacheKeys() = std::move(selected_cache_keys);
@@ -474,7 +514,7 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
         }
     }
     if (!blocks_to_free.empty()) {
-        const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
+        const BlockRefType ref_type = is_connector ? BlockRefType::STORAGE_BACKEND : BlockRefType::REQUEST;
         BlockReleaseBatch  releases;
         releases.append(/*group_id=*/0, full_kv_cache_group_->release(blocks_to_free, ref_type));
         submitBlockReleases(releases);

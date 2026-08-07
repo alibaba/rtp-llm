@@ -158,6 +158,16 @@ int StreamCacheResource::estimatePeakNeedBlocks(
                                                                    target_batch_size);
 }
 
+void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int backend) {
+    stream_->setReuseLength(total);
+    stream_->setMtpTokenIndex(total);
+    stream_->setInitialReuseLength(total);
+    stream_->setLocalReuseLength(total - backend);
+    stream_->setRemoteReuseLength(backend);
+    stream_->setHostReuseLength(host);
+    stream_->setDiskReuseLength(disk);
+}
+
 // TODO(xinfei.sxf) 保证这个函数的原子性
 absl::Status StreamCacheResource::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
@@ -194,13 +204,11 @@ absl::Status StreamCacheResource::initKVBlock() {
         return absl::InternalError("malloc failed");
     }
 
-    stream_->setReuseLength(result.reuse_len);
-    stream_->setMtpTokenIndex(result.reuse_len);
-    stream_->setInitialReuseLength(result.reuse_len);
-    stream_->setLocalReuseLength(result.reuse_len);
     const bool load_pending = result.async_context != nullptr;
-    stream_->setHostReuseLength(load_pending ? 0 : result.host_reuse_len);
-    stream_->setDiskReuseLength(load_pending ? 0 : result.disk_reuse_len);
+    publishReuseLengths(result.reuse_len,
+                        load_pending ? 0 : result.host_reuse_len,
+                        load_pending ? 0 : result.disk_reuse_len,
+                        0);
     allocator_load_context_ = std::move(result.async_context);
     return absl::OkStatus();
 }
@@ -246,14 +254,18 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const auto error        = allocator_load_context_->errorInfo();
     if (load_success) {
         const auto context            = std::static_pointer_cast<LoadAsyncContext>(allocator_load_context_);
-        const int  reuse_block_tokens = reuseBlockTokens();
-        const int  total_reuse_len    = static_cast<int>(context->matchedBlocks()) * reuse_block_tokens;
-        stream_->setReuseLength(total_reuse_len);
-        stream_->setMtpTokenIndex(total_reuse_len);
-        stream_->setInitialReuseLength(total_reuse_len);
-        stream_->setLocalReuseLength(total_reuse_len);
-        stream_->setHostReuseLength(static_cast<int>(context->matchedBlocks(Tier::HOST)) * reuse_block_tokens);
-        stream_->setDiskReuseLength(static_cast<int>(context->matchedBlocks(Tier::DISK)) * reuse_block_tokens);
+        const size_t total   = context->matchedBlocks();
+        const size_t local   = context->localMatchedBlocks();
+        const size_t host    = context->matchedBlocks(Tier::HOST);
+        const size_t disk    = context->matchedBlocks(Tier::DISK);
+        const size_t backend = total - local;
+        auto&        resource = batch_kv_cache_resource_->cacheResource(0);
+        resource.setDeviceReuseBlockNum(local - host - disk);
+        resource.setMemoryReuseBlockNum(host);
+        resource.setDiskReuseBlockNum(disk);
+        resource.setStorageBackendReuseBlockNum(backend);
+        const int tokens = reuseBlockTokens();
+        publishReuseLengths(total * tokens, host * tokens, disk * tokens, backend * tokens);
     } else if (resource_context_.role_type == RoleType::PREFILL) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);
@@ -338,12 +350,7 @@ absl::Status StreamCacheResource::incrKVBlock() {
     }
 
     if (result.reuse_len > 0) {
-        stream_->setReuseLength(result.reuse_len);
-        stream_->setMtpTokenIndex(result.reuse_len);
-        stream_->setInitialReuseLength(result.reuse_len);
-        stream_->setLocalReuseLength(result.reuse_len);
-        stream_->setHostReuseLength(result.host_reuse_len);
-        stream_->setDiskReuseLength(result.disk_reuse_len);
+        publishReuseLengths(result.reuse_len, result.host_reuse_len, result.disk_reuse_len, 0);
     }
     if (result.async_context) {
         resource_context_.cache_manager->cancelLoad(result.async_context);
@@ -435,10 +442,6 @@ bool StreamCacheResource::reuseCache() const {
     return resource_context_.reuse_cache && stream_->reuseCache();
 }
 
-bool StreamCacheResource::enableRemoteCache() const {
-    return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
-}
-
 bool StreamCacheResource::enableHostCache() const {
     return resource_context_.enable_host_cache && stream_->enableHostCache();
 }
@@ -453,7 +456,7 @@ bool StreamCacheResource::enableDiskCache() const {
 
 bool StreamCacheResource::enableCacheLookup() const {
     const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_host_cache
-                                 || resource_context_.enable_disk_cache;
+                                 || resource_context_.enable_disk_cache || resource_context_.enable_remote_cache;
     return reuseCache() && any_global_tier;
 }
 

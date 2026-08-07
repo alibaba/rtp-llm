@@ -43,7 +43,6 @@ protected:
     struct PreparedKVCache {
         size_t                            matched_device_blocks = 0;
         size_t                            total_logical_blocks  = 0;
-        std::shared_ptr<LoadAsyncContext> load_context;
         std::vector<RequiredPositions>    required_positions;
         std::vector<BlockIndicesType>     referenced_blocks;
         std::vector<size_t>               original_sizes;
@@ -67,16 +66,25 @@ protected:
     void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
-    void prepareKVCache(const CacheKeysType&                 cache_keys,
+    std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
                         BatchKVCacheResource&                kv_resource,
                         const std::shared_ptr<CPSlotMapper>& cp_mapper,
                         PreparedKVCache&                     prepared);
+    bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
+                                                               PreparedKVCache&  prepared,
+                                                               LoadAsyncContext* context,
+                                                               size_t            matched_blocks);
+    bool                              finishDeferredMalloc(const MallocInfo& malloc_info,
+                                                           PreparedKVCache&  prepared,
+                                                           LoadAsyncContext& context,
+                                                           size_t            matched_blocks);
 
     std::vector<BlockRefTransition>
     freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
     bool hasAvailableBlocksForReserve(const MallocInfo&       malloc_info,
                                       size_t                  reserve_blocks,
-                                      const PreparedKVCache& prepared) const;
+                                              const PreparedKVCache& prepared,
+                                              bool                   has_load_context) const;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
     size_t       loadTargetPosition(size_t                               path_index,
                                     size_t                               group_id,

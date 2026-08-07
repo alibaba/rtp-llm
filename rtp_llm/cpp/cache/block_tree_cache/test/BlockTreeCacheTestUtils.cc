@@ -370,6 +370,29 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           std::shared_ptr<StorageBackend>   storage_backend,
                                                           std::shared_ptr<BroadcastManager> broadcast_manager) {
     prepareGroupSets(group_sets);
+    std::shared_ptr<const CacheTopology>       storage_topology;
+    std::vector<std::shared_ptr<IBlockPool>> storage_group_pools;
+    StorageBackend::BufferResolver             storage_buffer_resolver;
+    if (storage_backend != nullptr && config.enable_remote_cache) {
+        storage_topology = group_sets.front()->topologyPtr();
+        std::vector<DeviceBlockPoolPtr> device_pools(storage_topology->groups().size());
+        for (const auto& group_set : group_sets) {
+            for (size_t member = 0; member < group_set->groupIds().size(); ++member) {
+                device_pools[group_set->groupIds()[member]] = group_set->devicePools()[member];
+            }
+        }
+        storage_group_pools.assign(device_pools.begin(), device_pools.end());
+        storage_buffer_resolver =
+            [topology = storage_topology, device_pools = std::move(device_pools)](int layer_id,
+                                                                                 int group_id,
+                                                                                 int block_id) {
+                const auto& layers = topology->groupById(static_cast<size_t>(group_id)).layer_ids;
+                const auto  layer  = std::find(layers.begin(), layers.end(), layer_id);
+                RTP_LLM_CHECK(layer != layers.end());
+                return device_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
+                    static_cast<int>(std::distance(layers.begin(), layer)), block_id);
+            };
+    }
     auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
@@ -385,6 +408,17 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                   std::move(storage_backend),
                                                   std::move(transfer_dispatcher),
                                                   std::move(task_pool));
+    if (cache->storageBackend()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            cache->storageBackend()->init(
+                std::move(storage_topology),
+                std::move(storage_group_pools),
+                std::move(storage_buffer_resolver),
+                [cache_ptr = cache.get()](const std::vector<BlockReleaseReceipt>& receipts) {
+                    cache_ptr->onBlocksReleased(receipts);
+                }),
+            "StorageBackend init failed");
+    }
     if (!cache->init()) {
         return nullptr;
     }

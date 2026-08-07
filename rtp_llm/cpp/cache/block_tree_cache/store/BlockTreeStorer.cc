@@ -6,10 +6,10 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-
 BlockTreeStorer::BlockTreeStorer(BlockTree*                     tree,
                                  BlockTreeEvictor&              evictor,
                                  BlockTransferDispatcher*       transfer_dispatcher,
@@ -18,6 +18,7 @@ BlockTreeStorer::BlockTreeStorer(BlockTree*                     tree,
                                  std::mutex&                    mutex,
                                  int                            host_timeout_ms,
                                  int                            disk_timeout_ms,
+                                 std::shared_ptr<StorageBackend> storage_backend,
                                  SettledFn                      settled):
     tree_(tree),
     evictor_(evictor),
@@ -28,30 +29,55 @@ BlockTreeStorer::BlockTreeStorer(BlockTree*                     tree,
     mutex_(mutex),
     host_timeout_ms_(host_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
+    storage_backend_(std::move(storage_backend)),
     settled_(std::move(settled)) {}
 
 void BlockTreeStorer::stopAdmissionLocked() {
     stopping_.store(true);
 }
 
-void BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
+StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                   const std::vector<std::vector<GroupSetResource>>& resources,
                                   Tier                                              target_tier) {
     if (target_tier == Tier::DEVICE) {
-        publishDeviceLocked(cache_keys, resources);
-    } else {
-        submitLowerTierLocked(cache_keys, resources, target_tier);
+        return publishDeviceLocked(cache_keys, resources);
     }
+    if (target_tier == Tier::HOST || target_tier == Tier::DISK) {
+        submitLowerTierLocked(cache_keys, resources, target_tier);
+        return {};
+    }
+    RTP_LLM_FAIL("unsupported store target tier: %s", tierName(target_tier));
 }
 
-void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
-                                          const std::vector<std::vector<GroupSetResource>>& resources) {
+StorageWriteTask BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
+                                                      const std::vector<std::vector<GroupSetResource>>& resources) {
     const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false);
-    if (insert_result.inserted_nodes.empty() && insert_result.adopted_nodes.empty()) {
-        return;
+    if (!insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty()) {
+        evictor_.onInserted(insert_result);
+        settled_(true, true);
     }
-    evictor_.onInserted(insert_result);
-    settled_(true, true);
+    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
+                              StorageWriteTask{};
+}
+
+StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
+                                                   const std::vector<std::vector<GroupSetResource>>& resources) const {
+    StorageRequest request{std::make_shared<CacheKeysType>(cache_keys),
+                           std::vector<std::vector<StorageBlockHandle>>(cache_keys.size())};
+    for (size_t key_index = 0; key_index < resources.size(); ++key_index) {
+        auto& key_handles = request.handles[key_index];
+        for (size_t group_set = 0; group_set < tree_->groupSets().size(); ++group_set) {
+            const auto& resource = resources[key_index][group_set];
+            if (!resource.hasCompleteDeviceValue()) {
+                continue;
+            }
+            const auto& group_ids = tree_->groupSets()[group_set]->groupIds();
+            for (size_t member = 0; member < group_ids.size(); ++member) {
+                key_handles.push_back({group_ids[member], resource.device_blocks[member]});
+            }
+        }
+    }
+    return request;
 }
 
 void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                              cache_keys,

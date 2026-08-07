@@ -7,7 +7,7 @@ std::unique_ptr<MatchValidator> LinearGroupSet::createMatchValidator() {
 }
 
 size_t LinearGroupSet::computeReuseBlockCount(size_t matched_block_count) const {
-    return matched_block_count == 0 ? 0 : 1;
+    return groupAt(0).reuseBlockCount(matched_block_count);
 }
 
 bool LinearMatchValidator::validate(const GroupSetResource& resource) {

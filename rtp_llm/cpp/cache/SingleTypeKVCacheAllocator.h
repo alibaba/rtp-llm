@@ -6,6 +6,8 @@
 
 namespace rtp_llm {
 
+class LoadAsyncContext;
+
 // SingleTypedKVCacheAllocator is used for model with full attentions only
 class SingleTypeKVCacheAllocator:
     public KVCacheAllocator,
@@ -60,6 +62,8 @@ private:
                                                     bool enable_reuse_cache,
                                                     int  target_batch_size) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
+    bool materializeInitialBlocks(const MallocInfo& malloc_info, LoadAsyncContext* context, size_t matched_blocks);
+    bool finishDeferredMalloc(const MallocInfo& malloc_info, LoadAsyncContext& context, size_t matched_blocks);
 
 private:
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;

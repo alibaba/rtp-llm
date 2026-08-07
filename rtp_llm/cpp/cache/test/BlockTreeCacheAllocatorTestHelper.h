@@ -24,7 +24,8 @@ public:
         if (!Allocator::init()) {
             return false;
         }
-        auto block_tree_cache = createBlockTreeCache(config_, kv_cache_config_, this->shared_from_this());
+        auto block_tree_cache = createBlockTreeCache(
+            config_, kv_cache_config_, this->shared_from_this(), ParallelismConfig{}, storage_backend_);
         if (!block_tree_cache) {
             return false;
         }
@@ -40,9 +41,14 @@ public:
         kv_cache_config_ = std::move(config);
     }
 
+    void setStorageBackendForTest(std::shared_ptr<StorageBackend> storage_backend) {
+        storage_backend_ = std::move(storage_backend);
+    }
+
 private:
     CacheConfig   config_;
     KVCacheConfig kv_cache_config_;
+    std::shared_ptr<StorageBackend> storage_backend_;
 };
 
 struct BlockTreeSeedResult {

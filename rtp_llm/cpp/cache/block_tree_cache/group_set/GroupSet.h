@@ -47,6 +47,9 @@ public:
     const std::vector<size_t>& groupIds() const {
         return group_ids_;
     }
+    std::shared_ptr<const CacheTopology> topologyPtr() const {
+        return topology_;
+    }
     const GroupBase& groupAt(size_t member_group_id) const {
         return topology_->groupById(group_ids_[member_group_id]);
     }

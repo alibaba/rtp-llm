@@ -9,7 +9,7 @@ void BlockReleaseBatch::append(size_t group_id, const std::vector<BlockRefTransi
         if (isNullBlockIdx(transition.block_id)) {
             continue;
         }
-        if (transition.ref_type != BlockRefType::REQUEST && transition.ref_type != BlockRefType::CONNECTOR) {
+        if (transition.ref_type != BlockRefType::REQUEST && transition.ref_type != BlockRefType::STORAGE_BACKEND) {
             continue;
         }
 

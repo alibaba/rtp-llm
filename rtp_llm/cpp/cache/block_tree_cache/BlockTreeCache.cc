@@ -22,7 +22,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
                                std::unique_ptr<BlockTreeTaskPool>       task_pool):
     config_(std::move(config)),
     tree_(std::move(tree)),
-    storage_backend_(std::move(storage_backend)),
+    storage_backend_(config_.enable_remote_cache ? std::move(storage_backend) : nullptr),
     transfer_dispatcher_(std::move(transfer_dispatcher)),
     task_pool_(std::move(task_pool)),
     evictor_(
@@ -39,11 +39,6 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
         [this](bool tree_data_mutated, bool check_watermark) {
             onWorkflowSettledLocked(tree_data_mutated, check_watermark);
-        },
-        [this](CacheKeyType cache_key, size_t group_set_id) {
-            if (config_.enable_remote_cache) {
-                evictor_.writeRemoteThrough(storage_backend_, cache_key, group_set_id);
-            }
         }),
     loader_(tree_.get(),
             evictor_,
@@ -54,6 +49,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
             config_.disk_cache_sync_timeout_ms,
             config_.host_cache_sync_timeout_ms,
             config_.enable_device_cache,
+            storage_backend_,
             [this](bool tree_data_mutated, bool check_watermark) {
                 onWorkflowSettledLocked(tree_data_mutated, check_watermark);
             }),
@@ -65,6 +61,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
             mutex_,
             config_.host_cache_sync_timeout_ms,
             config_.disk_cache_sync_timeout_ms,
+            storage_backend_,
             [this](bool tree_data_mutated, bool check_watermark) {
                 onWorkflowSettledLocked(tree_data_mutated, check_watermark);
             }) {}
@@ -103,6 +100,9 @@ bool BlockTreeCache::init() {
 BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     loader_.shutdown();
+    if (storage_backend_) {
+        storage_backend_->shutdown();
+    }
     RTP_LLM_LOG_INFO("load tickets closed, stopping store admission and draining cache tasks...");
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -130,8 +130,14 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& resources,
                             Tier                                              target_tier) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    storer_.storeLocked(cache_keys, resources, target_tier);
+    StorageWriteTask storage_write;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        storage_write = storer_.storeLocked(cache_keys, resources, target_tier);
+    }
+    if (storage_write) {
+        storage_backend_->write(std::move(storage_write));
+    }
 }
 
 int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
@@ -312,8 +318,7 @@ void BlockTreeCache::onBlocksReleased(const std::vector<BlockReleaseReceipt>& re
 }
 
 bool BlockTreeCache::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return loader_.cancelLoadLocked(context);
+    return loader_.cancelLoad(context);
 }
 
 void BlockTreeCache::onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark) {

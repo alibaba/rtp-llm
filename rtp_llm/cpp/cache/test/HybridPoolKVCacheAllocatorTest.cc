@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -16,6 +18,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -89,6 +92,142 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
 static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 6, uint32_t swa_block_num = 8) {
     return makeTinyMultiPoolHybridConfig(linear_block_num, swa_block_num, CacheGroupType::SWA);
 }
+
+static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num = 12,
+                                                        uint32_t swa_block_num  = 12) {
+    CacheConfig config;
+    config.dtype                       = DataType::TYPE_FP16;
+    config.layer_num                   = 4;
+    config.layer_all_num               = 4;
+    config.block_num                   = std::max(full_block_num, swa_block_num);
+    config.seq_size_per_block          = 4;
+    config.kernel_seq_size_per_block   = 4;
+    config.linear_step                 = 2;
+    config.group_layer_num             = 2;
+    config.use_independent_block_pools = true;
+
+    auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
+    auto swa_spec  = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "swa");
+    auto full_policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto swa_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.enable_prefix_reuse  = true;
+    swa_policy.sliding_window_size  = 8;
+    config.fromGroupedSpecs({full_spec, swa_spec},
+                            {{0, 1}, {2, 3}},
+                            {CacheGroupType::FULL, CacheGroupType::SWA},
+                            {"full", "swa"},
+                            {full_policy, swa_policy});
+
+    const size_t full_stride       = full_spec->block_size_bytes();
+    const size_t swa_stride        = swa_spec->block_size_bytes();
+    config.kv_block_stride_bytes   = std::max(full_stride, swa_stride);
+    config.kv_block_size_bytes     = 2 * config.kv_block_stride_bytes;
+    config.kv_scale_stride_bytes   = 0;
+    config.kv_scale_size_bytes     = 0;
+    config.block_size_bytes        = config.kv_block_size_bytes;
+    config.layer_to_block_stride_bytes.assign(4, static_cast<int>(config.kv_block_stride_bytes));
+    config.setGroupBlockLayout({full_block_num, swa_block_num}, {full_stride, swa_stride}, {0, 0});
+    return config;
+}
+
+struct MemoryStorageState {
+    std::mutex                                             mutex;
+    std::unordered_map<CacheKeyType, std::unordered_set<size_t>> groups_by_key;
+};
+
+class PolicyMemoryStorageBackend: public StorageBackend {
+public:
+    explicit PolicyMemoryStorageBackend(std::shared_ptr<MemoryStorageState> state): state_(std::move(state)) {}
+
+    size_t matchedKeys() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return matched_keys_;
+    }
+    std::vector<std::vector<size_t>> writeGroupIds() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return write_group_ids_;
+    }
+    std::vector<std::vector<size_t>> readGroupIds() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return read_group_ids_;
+    }
+    void shutdown() override {}
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    void matchImpl(StorageRequest request, MatchDone done) override {
+        size_t matched = request.local_matched_blocks_num;
+        {
+            std::lock_guard<std::mutex> storage_lock(state_->mutex);
+            for (size_t candidate = request.local_matched_blocks_num + 1; candidate <= request.handles.size();
+                 ++candidate) {
+                bool found = true;
+                for (size_t key_index = request.local_matched_blocks_num; found && key_index < candidate;
+                     ++key_index) {
+                    const auto stored = state_->groups_by_key.find((*request.keys)[key_index]);
+                    for (const auto& handle : request.handles[key_index]) {
+                        if (isHandleRequired(key_index, candidate, handle.group_id)
+                            && (stored == state_->groups_by_key.end() || !stored->second.count(handle.group_id))) {
+                            found = false;
+                            break;
+                        }
+                    }
+                }
+                if (found) {
+                    matched = candidate;
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            matched_keys_ = matched;
+        }
+        done(matched, nullptr);
+    }
+
+    void readImpl(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
+        std::vector<std::vector<size_t>> group_ids;
+        for (const auto& handles : request.handles) {
+            group_ids.emplace_back();
+            for (const auto& handle : handles) {
+                group_ids.back().push_back(handle.group_id);
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            read_group_ids_ = std::move(group_ids);
+        }
+        done();
+    }
+
+    void writeImpl(StorageRequest request, Done done) override {
+        std::vector<std::vector<size_t>> group_ids(request.handles.size());
+        {
+            std::lock_guard<std::mutex> storage_lock(state_->mutex);
+            for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
+                auto& stored = state_->groups_by_key[(*request.keys)[key_index]];
+                for (const auto& handle : request.handles[key_index]) {
+                    stored.insert(handle.group_id);
+                    group_ids[key_index].push_back(handle.group_id);
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            write_group_ids_ = std::move(group_ids);
+        }
+        done();
+    }
+
+private:
+    std::shared_ptr<MemoryStorageState> state_;
+    mutable std::mutex                 mutex_;
+    size_t                             matched_keys_{0};
+    std::vector<std::vector<size_t>>   write_group_ids_;
+    std::vector<std::vector<size_t>>   read_group_ids_;
+};
 
 static ModelConfig makeTinyDSV4ModelConfig() {
     ModelConfig mc;
@@ -376,6 +515,104 @@ protected:
         createDevice();
     }
 };
+
+static void runStorageRoundTrip(const CacheConfig&                       config,
+                                const CacheKeysType&                     writer_keys,
+                                int                                      writer_seq_len,
+                                const CacheKeysType&                     reader_keys,
+                                int                                      reader_seq_len,
+                                const std::shared_ptr<CPSlotMapper>&     cp_mapper,
+                                const std::vector<std::vector<size_t>>& expected_write_groups,
+                                const std::vector<std::vector<size_t>>& expected_read_groups) {
+    auto state          = std::make_shared<MemoryStorageState>();
+    auto writer_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
+    auto writer         = makeAllocator(config);
+    KVCacheConfig remote_config;
+    remote_config.enable_remote_cache = true;
+    writer->setBlockTreeCacheConfigForTest(remote_config);
+    writer->setStorageBackendForTest(writer_backend);
+    ASSERT_TRUE(writer->init());
+    writer->setCPSlotMapper(cp_mapper);
+
+    auto writer_resource = makeBatchResource(/*batch_size=*/1, config);
+    writer_resource->setBatchCacheKeys(0, writer_keys);
+    auto writer_tokens = makeCompleteTokenIds(/*batch_size=*/1, writer_seq_len, config.seq_size_per_block);
+    MallocInfo writer_malloc{writer_resource, writer_tokens};
+    writer_malloc.enable_cache_lookup          = false;
+    writer_malloc.reuse_cache                  = true;
+    writer_malloc.enable_remove_skipped_blocks = false;
+    ASSERT_TRUE(writer->malloc(writer_malloc).success);
+    writer->insertIntoCache(InsertInfo{writer_resource, writer_tokens, /*is_resident=*/false});
+    EXPECT_EQ(writer_backend->writeGroupIds(), expected_write_groups);
+
+    auto reader_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
+    auto reader         = makeAllocator(config);
+    reader->setBlockTreeCacheConfigForTest(remote_config);
+    reader->setStorageBackendForTest(reader_backend);
+    ASSERT_TRUE(reader->init());
+    reader->setCPSlotMapper(cp_mapper);
+
+    auto reader_resource = makeBatchResource(/*batch_size=*/1, config);
+    reader_resource->setBatchCacheKeys(0, reader_keys);
+    auto reader_tokens = makeCompleteTokenIds(/*batch_size=*/1, reader_seq_len, config.seq_size_per_block);
+    MallocInfo reader_malloc{reader_resource, reader_tokens};
+    reader_malloc.enable_cache_lookup          = true;
+    reader_malloc.reuse_cache                  = true;
+    reader_malloc.enable_remove_skipped_blocks = false;
+    auto result = reader->malloc(reader_malloc);
+    ASSERT_TRUE(result.success);
+    ASSERT_NE(result.async_context, nullptr);
+    result.async_context->waitDone();
+    EXPECT_TRUE(result.async_context->success());
+    EXPECT_EQ(reader_backend->matchedKeys(), 4u);
+    EXPECT_EQ(reader_backend->readGroupIds(), expected_read_groups);
+
+    reader->free(FreeInfo{reader_resource, reader_tokens});
+    writer->free(FreeInfo{writer_resource, writer_tokens});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesSparseFullLinearShape) {
+    const auto config      = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/12, /*full_block_num=*/12);
+    const CacheKeysType stored_keys{100, 101, 102, 103};
+    const CacheKeysType request_keys{100, 101, 102, 103, 104, 105};
+    runStorageRoundTrip(config,
+                        stored_keys,
+                        /*writer_seq_len=*/16,
+                        request_keys,
+                        /*reader_seq_len=*/21,
+                        nullptr,
+                        {{1}, {0, 1}, {1}, {0, 1}},
+                        {{1}, {1}, {1}, {0, 1}});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripUsesFullSwaWindowShape) {
+    const auto config      = makeTinyFullSwaMultiPoolHybridConfig();
+    const CacheKeysType stored_keys{200, 201, 202, 203};
+    const CacheKeysType request_keys{200, 201, 202, 203, 204, 205};
+    runStorageRoundTrip(config,
+                        stored_keys,
+                        /*writer_seq_len=*/16,
+                        request_keys,
+                        /*reader_seq_len=*/21,
+                        nullptr,
+                        {{0}, {0, 1}, {0, 1}, {0, 1}},
+                        {{0}, {0}, {0, 1}, {0, 1}});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, StorageRoundTripMapsCpCanonicalFullLinearTargets) {
+    const auto config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/16, /*full_block_num=*/16);
+    const CacheKeysType stored_keys{300, 301, 302, 303, 304, 305, 306, 307};
+    const CacheKeysType request_keys{300, 301, 302, 303, 304, 305, 306, 307, 308, 309};
+    auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+    runStorageRoundTrip(config,
+                        stored_keys,
+                        /*writer_seq_len=*/32,
+                        request_keys,
+                        /*reader_seq_len=*/41,
+                        cp_mapper,
+                        {{0, 1}, {0, 1}, {0, 1}, {0, 1}},
+                        {{1}, {1}, {1}, {0, 1}});
+}
 
 // ---------------------------------------------------------------------------
 // Init / per-group pool creation

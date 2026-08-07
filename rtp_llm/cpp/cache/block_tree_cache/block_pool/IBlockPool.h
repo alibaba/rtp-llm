@@ -24,7 +24,7 @@ enum class BlockPoolType {
 
 enum class BlockRefType : uint8_t {
     REQUEST = 0,
-    CONNECTOR,
+    STORAGE_BACKEND,
     BLOCK_CACHE,
     EVICTION,
     // Pins source and target blocks during an asynchronous lower-tier copy.

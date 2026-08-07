@@ -7,10 +7,14 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -21,8 +25,10 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -77,7 +83,8 @@ private:
 };
 
 std::shared_ptr<LoadAsyncContext> makeAllocatorLoadContext(size_t matched_blocks,
-                                                            const std::vector<Tier>& source_tiers) {
+                                                            const std::vector<Tier>& source_tiers,
+                                                            bool                     commit = true) {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
     std::vector<TransferDescriptor> descriptors;
@@ -90,8 +97,101 @@ std::shared_ptr<LoadAsyncContext> makeAllocatorLoadContext(size_t matched_blocks
                                        std::vector<bool>(source_tiers.size(), false),
                                        matched_blocks);
     EXPECT_TRUE(coordinator->registerContext(context));
+    if (commit) {
+        EXPECT_TRUE(context->commit());
+    }
     return context;
 }
+
+class StreamReadStorageBackend: public StorageBackend {
+public:
+    ~StreamReadStorageBackend() override {
+        shutdown();
+        io_pool_.shutdown();
+    }
+
+    void blockMatches() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_matches_ = false;
+    }
+
+    void releaseMatches() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_matches_ = true;
+        cv_.notify_all();
+    }
+
+    void blockReads() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_reads_ = false;
+    }
+
+    void releaseReads() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        release_reads_ = true;
+        cv_.notify_all();
+    }
+
+    void waitForMatches(size_t count) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&] { return match_calls_ >= count; });
+    }
+
+    void waitForReads(size_t count) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&] { return read_calls_ >= count; });
+    }
+
+    size_t matchCalls() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return match_calls_;
+    }
+
+    void shutdown() override {
+        releaseMatches();
+        releaseReads();
+        io_pool_.waitForIdle();
+    }
+
+protected:
+    bool initImpl() override {
+        return io_pool_.start();
+    }
+    void matchImpl(StorageRequest request, MatchDone done) override {
+        RTP_LLM_CHECK(io_pool_.submit([this, request = std::move(request), done = std::move(done)]() mutable {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ++match_calls_;
+            cv_.notify_all();
+            cv_.wait(lock, [&] { return release_matches_; });
+            lock.unlock();
+            done(request.handles.size(), nullptr);
+        }));
+    }
+
+    void readImpl(StorageRequest, std::shared_ptr<StorageBackendMatchMeta>, Done done) override {
+        RTP_LLM_CHECK(io_pool_.submit([this, done = std::move(done)]() mutable {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ++read_calls_;
+            cv_.notify_all();
+            cv_.wait(lock, [&] { return release_reads_; });
+            lock.unlock();
+            done();
+        }));
+    }
+
+    void writeImpl(StorageRequest, Done done) override {
+        RTP_LLM_CHECK(io_pool_.submit([done = std::move(done)]() mutable { done(); }));
+    }
+
+private:
+    mutable std::mutex      mutex_;
+    std::condition_variable cv_;
+    bool                    release_matches_{true};
+    bool                    release_reads_{true};
+    size_t                  match_calls_{0};
+    size_t                  read_calls_{0};
+    BlockTreeTaskPool       io_pool_{1, 128, "stream_storage_io"};
+};
 
 class StreamCacheResourceTest: public DeviceTestBase {
 protected:
@@ -159,6 +259,49 @@ protected:
         stream_                  = std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
         stream_->generate_status_->status = StreamState::RUNNING;
+    }
+
+    std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(bool block_matches,
+                                                                            bool seed_host = false) {
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.enable_remote_cache  = true;
+        kv_cache_config.enable_host_cache  = seed_host;
+        kv_cache_config.host_cache_size_mb = seed_host ? 1 : 0;
+        prepareResourceWithCacheConfig(
+            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::PDFUSION, kv_cache_config);
+
+        auto backend = std::make_shared<StreamReadStorageBackend>();
+        if (block_matches) {
+            backend->blockMatches();
+        }
+        cache_manager_->allocator_->block_tree_cache_.reset();
+        cache_manager_->block_tree_cache_.reset();
+        auto cache = createBlockTreeCache(
+            cache_manager_->cacheConfig(), kv_cache_config, cache_manager_->allocator_, ParallelismConfig{}, backend);
+        EXPECT_NE(cache, nullptr);
+        cache_manager_->block_tree_cache_ = cache;
+        cache_manager_->allocator_->attachBlockTreeCache(cache);
+
+        if (seed_host) {
+            auto& resource = stream_->streamCacheResource();
+            initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+            const GroupSetPtr& group = cache->groupSets().front();
+            const BlockIdxType block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+            RTP_LLM_CHECK(!isNullBlockIdx(block));
+            std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+            resources[0][0].host_block = block;
+            RTP_LLM_CHECK(cache->tree()
+                              ->insertNode({resource.batch_kv_cache_resource_->cacheKeys(0).front()}, resources, false)
+                              .accepted_resource_count
+                          == 1);
+            group->releaseSingleBlock(Tier::HOST, block, BlockRefType::BLOCK_CACHE);
+        }
+
+        auto& resource                                                 = stream_->streamCacheResource();
+        resource.resource_context_.enable_remote_cache                 = true;
+        stream_->generate_input_->generate_config->enable_remote_cache = true;
+        resource.kvCacheMutable().setBatchCacheKeys(0, {100, 200, 300});
+        return backend;
     }
 
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
@@ -344,16 +487,20 @@ TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
     request.enable_device_cache = false;
     request.enable_host_cache   = false;
     request.enable_disk_cache   = false;
+    request.enable_remote_cache = false;
 
     for (const bool device_on : {false, true}) {
         for (const bool host_on : {false, true}) {
             for (const bool disk_on : {false, true}) {
-                SCOPED_TRACE("L1=" + std::to_string(device_on) + " L2=" + std::to_string(host_on)
-                             + " L3=" + std::to_string(disk_on));
-                deployment.enable_device_cache = device_on;
-                deployment.enable_host_cache   = host_on;
-                deployment.enable_disk_cache   = disk_on;
-                EXPECT_EQ(resource.enableCacheLookup(), device_on || host_on || disk_on);
+                for (const bool remote_on : {false, true}) {
+                    SCOPED_TRACE("L1=" + std::to_string(device_on) + " L2=" + std::to_string(host_on)
+                                 + " L3=" + std::to_string(disk_on) + " remote=" + std::to_string(remote_on));
+                    deployment.enable_device_cache = device_on;
+                    deployment.enable_host_cache   = host_on;
+                    deployment.enable_disk_cache   = disk_on;
+                    deployment.enable_remote_cache = remote_on;
+                    EXPECT_EQ(resource.enableCacheLookup(), device_on || host_on || disk_on || remote_on);
+                }
             }
         }
     }
@@ -592,6 +739,91 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_PendingAllocatorLoad_ReturnsFa
     EXPECT_EQ(resource.allocator_load_context_, load_context);
 }
 
+TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompletes) {
+    auto  backend  = prepareStorageBackendResource(/*block_matches=*/false);
+    auto& resource = stream_->streamCacheResource();
+    backend->blockReads();
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    backend->waitForReads(1);
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
+    ASSERT_NE(context, nullptr);
+    EXPECT_EQ(context->matchedBlocks(), 0u);
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).deviceReuseBlockNum(), 0u);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).memoryReuseBlockNum(), 0u);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).diskReuseBlockNum(), 0u);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 0u);
+    EXPECT_FALSE(resource.loadCacheDone());
+
+    backend->releaseReads();
+    context->waitDone();
+    ASSERT_TRUE(context->success());
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->reuseLength(), 4);
+    EXPECT_EQ(stream_->localReuseLength(), 0);
+    EXPECT_EQ(stream_->remoteReuseLength(), 4);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).deviceReuseBlockNum(), 0u);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).memoryReuseBlockNum(), 0u);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).diskReuseBlockNum(), 0u);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
+}
+
+TEST_F(StreamCacheResourceTest, StorageMatchDoesNotBlockIndependentAllocation) {
+    auto  backend        = prepareStorageBackendResource(/*block_matches=*/true);
+    auto& first_resource = stream_->streamCacheResource();
+    ASSERT_TRUE(first_resource.initKVBlock().ok());
+    backend->waitForMatches(1);
+
+    ResourceContext second_context             = stream_->resourceContext();
+    second_context.enable_remote_cache         = true;
+    auto second_input                          = std::make_shared<GenerateInput>();
+    second_input->input_ids                    = torch::tensor(std::vector<int32_t>{7, 8, 9, 10}, torch::kInt32);
+    second_input->generate_config              = std::make_shared<GenerateConfig>();
+    second_input->generate_config->reuse_cache = true;
+    second_input->generate_config->enable_remote_cache = false;
+    ModelConfig model_config;
+    model_config.attn_config.tokens_per_block = 2;
+    model_config.max_seq_len                  = 2048;
+    auto second_stream =
+        std::make_shared<NormalGenerateStream>(second_input, model_config, RuntimeConfig{}, second_context, nullptr);
+    second_stream->generate_status_->status = StreamState::RUNNING;
+    second_stream->streamCacheResource().kvCacheMutable().setBatchCacheKeys(0, {400, 500});
+
+    ASSERT_TRUE(second_stream->streamCacheResource().initKVBlock().ok());
+    EXPECT_TRUE(second_stream->streamCacheResource().asyncLoadCache());
+    // Request-level remote disable is not propagated below lookup admission. The process-level backend still matches.
+    EXPECT_EQ(backend->matchCalls(), 1u);
+
+    backend->releaseMatches();
+    backend->waitForMatches(2);
+    ASSERT_TRUE(first_resource.waitForAllocatorLoad().ok());
+    ASSERT_TRUE(second_stream->streamCacheResource().waitForAllocatorLoad().ok());
+}
+
+TEST_F(StreamCacheResourceTest, DeferredResultPublishesOnlyDeviceReadyReuseLength) {
+    auto  backend  = prepareStorageBackendResource(/*block_matches=*/true, /*seed_host=*/true);
+    auto& resource = stream_->streamCacheResource();
+
+    MallocInfo info;
+    info.batch_kv_cache_resource      = resource.batch_kv_cache_resource_;
+    info.complete_token_ids           = stream_->completeTokenIdsPtr();
+    info.reuse_cache                  = true;
+    info.enable_cache_lookup          = true;
+    MallocResult result               = cache_manager_->malloc(info);
+    ASSERT_TRUE(result.success);
+    backend->waitForMatches(1);
+    ASSERT_NE(result.async_context, nullptr);
+    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_EQ(result.host_reuse_len, 0);
+    EXPECT_EQ(result.disk_reuse_len, 0);
+
+    backend->releaseMatches();
+    result.async_context->waitDone();
+    ASSERT_TRUE(result.async_context->success());
+    cache_manager_->free(FreeInfo{resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr()});
+}
+
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_CompletedAllocatorLoad_ClearsContext) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
@@ -622,7 +854,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
 
-    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/3, {Tier::DEVICE, Tier::HOST, Tier::DISK});
+    auto load_context =
+        makeAllocatorLoadContext(/*matched_blocks=*/3, {Tier::DEVICE, Tier::HOST, Tier::DISK}, /*commit=*/false);
     auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
@@ -672,7 +905,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCpGroupPolicyReuseUn
     auto& resource = stream_->streamCacheResource();
 
     cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/2);
-    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST});
+    auto load_context =
+        makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false);
     auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
@@ -700,7 +934,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadPendingPublishesZeroDeviceReady
     stream_->setHostReuseLength(2);
     stream_->setDiskReuseLength(2);
 
-    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
+    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST}, /*commit=*/false);
     auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
     cache_manager_->allocator_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))

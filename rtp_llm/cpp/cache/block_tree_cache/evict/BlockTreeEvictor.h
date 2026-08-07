@@ -13,7 +13,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -37,7 +36,6 @@ class BlockTreeEvictor {
 public:
     using IsTierEnabledFn   = std::function<bool(Tier)>;
     using SettledFn         = std::function<void(bool tree_data_mutated, bool check_watermark)>;
-    using RemoteWriteFn     = std::function<void(CacheKeyType cache_key, size_t group_set_id)>;
 
     struct EvictionTimingSnapshot {
         int64_t tier_enter_time_us{0};
@@ -82,8 +80,7 @@ public:
                      int                            memory_timeout_ms,
                      int                            disk_timeout_ms,
                      IsTierEnabledFn                is_tier_enabled,
-                     SettledFn                      settled,
-                     RemoteWriteFn                  remote_write);
+                     SettledFn                      settled);
     ~BlockTreeEvictor();
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
@@ -108,9 +105,6 @@ public:
     void rollbackPreparedPlan(const EvictionPlan& plan);
     // Discard a detached operation's source without publishing its target.
     void discardDetachedTransfer(const TransferDescriptor& transfer_desc);
-    void writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
-                            CacheKeyType                           cache_key,
-                            size_t                                 group_set_id);
 
     // Refresh one node after an external owner changes its transfer state.
     void refreshCandidate(TreeNode* node, size_t group_set_id);

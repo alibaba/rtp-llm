@@ -17,7 +17,6 @@ class EvictionTaskRunner {
 public:
     using IsTierEnabledFn   = BlockTreeEvictor::IsTierEnabledFn;
     using SettledFn         = BlockTreeEvictor::SettledFn;
-    using RemoteWriteFn     = BlockTreeEvictor::RemoteWriteFn;
 
     EvictionTaskRunner(const std::vector<GroupSetPtr>& group_sets,
                        const BlockTransferDispatcher* transfer_dispatcher,
@@ -27,8 +26,7 @@ public:
                        int                            memory_timeout_ms,
                        int                            disk_timeout_ms,
                        IsTierEnabledFn                is_tier_enabled,
-                       SettledFn                      settled,
-                       RemoteWriteFn                  remote_write);
+                       SettledFn                      settled);
     bool submitLocked(BlockTreeEvictor& evictor, TransferDescriptor& eviction_desc);
 
     BlockTreeEvictor::CopyResultSet performCopy(const BlockTreeEvictor::EvictionPlan& plan) const;
@@ -52,7 +50,6 @@ private:
     int                            disk_timeout_ms_{0};
     IsTierEnabledFn                is_tier_enabled_;
     SettledFn                      settled_;
-    RemoteWriteFn                  remote_write_;
 };
 
 }  // namespace rtp_llm

@@ -216,8 +216,7 @@ public:
             0,
             0,
             [](Tier) { return true; },
-            [](bool, bool) {},
-            [](CacheKeyType, size_t) {});
+            [](bool, bool) {});
     }
 
     std::shared_ptr<ScriptedTransferEngine> transferEngine() const {

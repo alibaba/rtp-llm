@@ -49,6 +49,7 @@ cc_library(
     srcs = [
         "BlockTree.cc",
         "BlockTreeCache.cc",
+        "storage_backend/StorageBackend.cc",
         "BlockTreeCacheFactory.cc",
         "BlockTreeCacheMetricsReporter.cc",
         "group_set/GroupSetResource.cc",
@@ -102,7 +103,7 @@ cc_library(
         "store/StoreTaskRunner.h",
         "group_set/SWAGroupSet.h",
         "ScopeRollback.h",
-        "StorageBackend.h",
+        "storage_backend/StorageBackend.h",
         "TreeNode.h",
         "transfer/BlockTransferDispatcher.h",
         "transfer/MultiRankBlockTransferEngine.h",

@@ -16,12 +16,7 @@ std::unique_ptr<MatchValidator> SWAGroupSet::createMatchValidator() {
 }
 
 size_t SWAGroupSet::computeReuseBlockCount(size_t matched_block_count) const {
-    if (sliding_window_size_ == 0) {
-        return matched_block_count;
-    }
-    const size_t window_block_count =
-        sliding_window_size_ / seq_size_per_block_ + (sliding_window_size_ % seq_size_per_block_ != 0);
-    return std::min(matched_block_count, window_block_count);
+    return groupAt(0).reuseBlockCount(matched_block_count);
 }
 
 // SWAMatchValidator

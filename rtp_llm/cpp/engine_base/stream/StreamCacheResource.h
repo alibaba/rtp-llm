@@ -117,7 +117,6 @@ public:
 
     bool reuseCache() const;
     bool enableHostCache() const;
-    bool enableRemoteCache() const;
     bool enableDeviceCache() const;
     bool enableDiskCache() const;
     bool enableCacheLookup() const;
@@ -141,6 +140,7 @@ public:
 private:
     void clearCacheReuseState();
     void recordCacheReuseMallocResult(const MallocResult& result);
+    void publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
 
     GenerateStream*                stream_;
@@ -158,7 +158,7 @@ private:
     int64_t                       malloc_begin_time_us_    = 0;
     int64_t                       load_wait_begin_time_us_ = 0;
 
-    // Connector reference counting for PD separation (RAII auto-release)
+    // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
 };
 

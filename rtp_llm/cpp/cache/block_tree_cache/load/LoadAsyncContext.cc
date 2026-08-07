@@ -11,21 +11,25 @@ namespace rtp_llm {
 
 LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>                load_descs,
                                    std::vector<bool>                              joined_load,
-                                   size_t                                         matched_blocks,
+                                   size_t                                         local_matched_blocks,
                                    uint64_t                                       context_id,
-                                   const std::shared_ptr<LoadContextCoordinator>& coordinator):
+                                   const std::shared_ptr<LoadContextCoordinator>& coordinator,
+                                   std::shared_ptr<StorageBackend>                storage_backend,
+                                   StorageRequest                                 storage_request):
     coordinator_(coordinator),
     context_id_(context_id),
     load_descs_(std::move(load_descs)),
     joined_load_(std::move(joined_load)),
-    matched_blocks_(matched_blocks),
-    remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const TransferDescriptor& desc) {
+    local_matched_blocks_(local_matched_blocks),
+    matched_blocks_(local_matched_blocks),
+    storage_backend_(std::move(storage_backend)),
+    storage_request_(std::move(storage_request)),
+    deferred_malloc_(storage_backend_ && !storage_request_.empty()),
+    backend_pending_(deferred_malloc_),
+    remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
         return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
     })) {
     rebuildMatchedBlocksByTier();
-    if (remaining_transfer_count_ == 0) {
-        state_.store(State::SUCCEEDED);
-    }
 }
 
 LoadAsyncContext::~LoadAsyncContext() {
@@ -39,40 +43,65 @@ void LoadAsyncContext::rebuildMatchedBlocksByTier() {
         if (desc.source_tier < Tier::DEVICE || desc.source_tier > Tier::DISK) {
             continue;
         }
-        const std::pair<std::unordered_map<size_t, Tier>::iterator, bool> insert_result =
-            reuse_tier_by_path.emplace(desc.path_index, desc.source_tier);
-        if (!insert_result.second
-            && (desc.source_tier == Tier::DISK
-                || (desc.source_tier == Tier::HOST && insert_result.first->second == Tier::DEVICE))) {
-            insert_result.first->second = desc.source_tier;
+        auto [it, inserted] = reuse_tier_by_path.emplace(desc.path_index, desc.source_tier);
+        if (!inserted && desc.source_tier > it->second) {
+            it->second = desc.source_tier;
         }
     }
-    for (const std::pair<const size_t, Tier>& reuse_tier : reuse_tier_by_path) {
-        ++matched_blocks_by_tier_[static_cast<size_t>(reuse_tier.second)];
+    for (const auto& [_, tier] : reuse_tier_by_path) {
+        ++matched_blocks_by_tier_[static_cast<size_t>(tier)];
     }
 }
 
 bool LoadAsyncContext::empty() const {
-    return load_descs_.empty();
+    return load_descs_.empty() && !deferred_malloc_;
 }
 
 uint64_t LoadAsyncContext::contextId() const {
     return context_id_;
 }
 
+size_t LoadAsyncContext::localMatchedBlocks() const {
+    return local_matched_blocks_;
+}
+
 size_t LoadAsyncContext::matchedBlocks() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return matched_blocks_;
 }
 
 size_t LoadAsyncContext::matchedBlocks(Tier tier) const {
-    if (tier < Tier::DEVICE || tier > Tier::DISK) {
-        return 0;
-    }
-    return matched_blocks_by_tier_[static_cast<size_t>(tier)];
+    return tier >= Tier::DEVICE && tier <= Tier::DISK ? matched_blocks_by_tier_[static_cast<size_t>(tier)] : 0;
+}
+
+bool LoadAsyncContext::deferredMalloc() const {
+    return deferred_malloc_;
+}
+
+void LoadAsyncContext::setMatchCallback(MatchCallback callback) {
+    RTP_LLM_CHECK(deferred_malloc_ && callback && !match_callback_ && !backend_started_);
+    match_callback_ = std::move(callback);
+}
+
+void LoadAsyncContext::startBackendMatch() {
+    RTP_LLM_CHECK(deferred_malloc_ && match_callback_ && !backend_started_);
+    backend_started_                     = true;
+    std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
+    storage_backend_->match(storage_request_,
+                            [weak](size_t matched_blocks_num,
+                                   std::shared_ptr<StorageBackendMatchMeta> match_meta) {
+        if (auto context = weak.lock()) {
+            context->onBackendMatch(matched_blocks_num, std::move(match_meta));
+        }
+    });
 }
 
 void LoadAsyncContext::setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
     load_descs_[desc_index].target_blocks = std::move(target_blocks);
+}
+
+void LoadAsyncContext::setBackendTargetBlock(size_t key_index, size_t handle_index, BlockIdxType target_block) {
+    storage_request_.handles[key_index][handle_index].block = target_block;
 }
 
 const std::vector<TransferDescriptor>& LoadAsyncContext::loadDescs() const {
@@ -83,13 +112,115 @@ const std::vector<bool>& LoadAsyncContext::joinedLoads() const {
     return joined_load_;
 }
 
+const std::vector<std::vector<StorageBlockHandle>>& LoadAsyncContext::backendHandles() const {
+    return storage_request_.handles;
+}
+
+void LoadAsyncContext::onBackendMatch(size_t matched_blocks_num,
+                                      std::shared_ptr<StorageBackendMatchMeta> match_meta) {
+    if (!coordinator_->beginActiveCallback()) {
+        return;
+    }
+    block_tree_cache_detail::ScopeRollback active_callback_guard(
+        [coordinator = coordinator_] { coordinator->retireActiveCallback(); });
+    bool callback_started = false;
+    {
+        std::lock_guard<std::mutex> lock(match_callback_mutex_);
+        if (!isRequestCanceled()) {
+            match_callback_running_ = true;
+            callback_started        = true;
+        }
+    }
+    if (!callback_started) {
+        failBeforeCommit();
+        return;
+    }
+    block_tree_cache_detail::ScopeRollback match_callback_guard([this] { finishMatchCallback(); });
+    RTP_LLM_CHECK(storage_request_.keys && storage_request_.keys->size() == storage_request_.handles.size()
+                  && storage_request_.local_matched_blocks_num == local_matched_blocks_
+                  && matched_blocks_num >= local_matched_blocks_
+                  && matched_blocks_num <= storage_request_.handles.size());
+    backend_matched_blocks_ = matched_blocks_num;
+    if (matched_blocks_num < storage_request_.handles.size()) {
+        storage_request_.keys = std::make_shared<CacheKeysType>(storage_request_.keys->begin(),
+                                                                storage_request_.keys->begin() + matched_blocks_num);
+        storage_request_.handles.resize(matched_blocks_num);
+    }
+    for (size_t key_index = 0; key_index < storage_request_.handles.size(); ++key_index) {
+        auto& handles = storage_request_.handles[key_index];
+        if (key_index < local_matched_blocks_) {
+            handles.clear();
+            continue;
+        }
+        handles.erase(std::remove_if(handles.begin(),
+                                     handles.end(),
+                                     [&](const StorageBlockHandle& handle) {
+                                         return !storage_backend_->isHandleRequired(
+                                             key_index, matched_blocks_num, handle.group_id);
+                                     }),
+                      handles.end());
+    }
+    if (!match_callback_(*this, matched_blocks_num)) {
+        failBeforeCommit();
+        return;
+    }
+    if (storage_request_.empty()) {
+        onBackendRead();
+        return;
+    }
+    std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
+    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak] {
+        if (auto context = weak.lock()) {
+            context->onBackendRead();
+        }
+    });
+}
+
+void LoadAsyncContext::finishMatchCallback() {
+    {
+        std::lock_guard<std::mutex> lock(match_callback_mutex_);
+        match_callback_running_ = false;
+    }
+    match_callback_cv_.notify_all();
+}
+
+void LoadAsyncContext::onBackendRead() {
+    bool notify = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        matched_blocks_  = backend_matched_blocks_;
+        backend_pending_ = false;
+        finishIfReadyLocked(notify);
+    }
+    if (notify) {
+        cv_.notify_all();
+    }
+}
+
+void LoadAsyncContext::failBeforeCommit() {
+    coordinator_->abort(*this);
+    onTaskFail();
+}
+
 bool LoadAsyncContext::commit() {
-    return coordinator_->commit(context_id_);
+    if (!coordinator_->commit(context_id_)) {
+        return false;
+    }
+    bool notify = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        committed_ = true;
+        finishIfReadyLocked(notify);
+    }
+    if (notify) {
+        cv_.notify_all();
+    }
+    return true;
 }
 
 void LoadAsyncContext::abort() {
-    const bool aborted = coordinator_->abort(*this);
-    if (aborted) {
+    requestCancel();
+    if (coordinator_->abort(*this)) {
         markAborted();
     }
 }
@@ -102,19 +233,20 @@ void LoadAsyncContext::markAborted() {
             return;
         }
         remaining_transfer_count_ = 0;
+        backend_pending_          = false;
         state_.store(State::CANCELLED);
     }
     cv_.notify_all();
 }
 
 bool LoadAsyncContext::requestCancel() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    const State                 state = state_.load();
-    if (state == State::PENDING) {
+    std::unique_lock<std::mutex> lock(match_callback_mutex_);
+    const State                  initial_state = state_.load();
+    if (initial_state == State::PENDING) {
         state_.store(State::CANCEL_REQUESTED);
-        return true;
     }
-    return state == State::CANCEL_REQUESTED;
+    match_callback_cv_.wait(lock, [this] { return !match_callback_running_; });
+    return initial_state == State::PENDING || initial_state == State::CANCEL_REQUESTED;
 }
 
 bool LoadAsyncContext::isRequestCanceled() const {
@@ -132,16 +264,7 @@ bool LoadAsyncContext::completeOne(bool success) {
         }
         has_failure_ = has_failure_ || !success;
         --remaining_transfer_count_;
-        if (remaining_transfer_count_ == 0) {
-            if (state == State::CANCEL_REQUESTED) {
-                state_.store(State::CANCELLED);
-            } else if (has_failure_) {
-                state_.store(State::FAILED);
-            } else {
-                state_.store(State::SUCCEEDED);
-            }
-            notify = true;
-        }
+        finishIfReadyLocked(notify);
     }
     if (notify) {
         cv_.notify_all();
@@ -157,14 +280,23 @@ bool LoadAsyncContext::onTaskFail() {
             return false;
         }
         remaining_transfer_count_ = 0;
-        if (state == State::CANCEL_REQUESTED) {
-            state_.store(State::CANCELLED);
-        } else {
-            state_.store(State::FAILED);
-        }
+        backend_pending_          = false;
+        state_.store(state == State::CANCEL_REQUESTED ? State::CANCELLED : State::FAILED);
     }
     cv_.notify_all();
     return true;
+}
+
+void LoadAsyncContext::finishIfReadyLocked(bool& notify) {
+    if (!committed_ || remaining_transfer_count_ != 0 || backend_pending_) {
+        return;
+    }
+    const State state = state_.load();
+    if (state != State::PENDING && state != State::CANCEL_REQUESTED) {
+        return;
+    }
+    state_.store(state == State::CANCEL_REQUESTED ? State::CANCELLED : has_failure_ ? State::FAILED : State::SUCCEEDED);
+    notify = true;
 }
 
 void LoadAsyncContext::waitDone() {
@@ -186,34 +318,38 @@ LoadContextCoordinator::LoadContextCoordinator(CommitCallback commit_callback, A
 
 std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<TransferDescriptor> load_descs,
                                                                  std::vector<bool>               joined_load,
-                                                                 size_t                          matched_blocks) {
-    const std::shared_ptr<LoadContextCoordinator> coordinator = shared_from_this();
-
+                                                                 size_t                          matched_blocks,
+                                                                 std::shared_ptr<StorageBackend> storage_backend,
+                                                                 StorageRequest                  storage_request) {
+    const auto coordinator = shared_from_this();
     uint64_t context_id = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!accepting_) {
             return nullptr;
         }
-        context_id = next_context_id_;
-        ++next_context_id_;
+        context_id = next_context_id_++;
     }
-
-    return std::make_shared<LoadAsyncContext>(
-        std::move(load_descs), std::move(joined_load), matched_blocks, context_id, coordinator);
+    return std::make_shared<LoadAsyncContext>(std::move(load_descs),
+                                              std::move(joined_load),
+                                              matched_blocks,
+                                              context_id,
+                                              coordinator,
+                                              std::move(storage_backend),
+                                              std::move(storage_request));
 }
 
 bool LoadContextCoordinator::registerContext(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex> lock(mutex_);
+    return accepting_ && pending_contexts_.emplace(context->contextId(), context).second;
+}
+
+bool LoadContextCoordinator::beginActiveCallback() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!accepting_) {
         return false;
     }
-
-    const std::pair<PendingContextMap::iterator, bool> inserted =
-        pending_contexts_.emplace(context->contextId(), std::weak_ptr<LoadAsyncContext>(context));
-    if (!inserted.second) {
-        return false;
-    }
+    ++active_callbacks_;
     return true;
 }
 
@@ -221,41 +357,32 @@ bool LoadContextCoordinator::commit(uint64_t context_id) {
     std::shared_ptr<LoadAsyncContext> context;
     {
         std::lock_guard<std::mutex>       lock(mutex_);
-        const PendingContextMap::iterator pending_it = pending_contexts_.find(context_id);
-        if (!accepting_ || pending_it == pending_contexts_.end()) {
+        const auto                  pending = pending_contexts_.find(context_id);
+        if (!accepting_ || pending == pending_contexts_.end() || !(context = pending->second.lock())) {
             return false;
         }
-        context = pending_it->second.lock();
-        if (context == nullptr || context->contextId() != context_id) {
-            return false;
-        }
-        pending_contexts_.erase(pending_it);
+        pending_contexts_.erase(pending);
         ++active_callbacks_;
     }
-
-    block_tree_cache_detail::ScopeRollback callback_guard([this]() { retireActiveCallback(); });
+    block_tree_cache_detail::ScopeRollback callback_guard([this] { retireActiveCallback(); });
     if (!commit_callback_(context)) {
-        if (!context->onTaskFail()) {
-            RTP_LLM_CHECK(context->done());
-        }
+        context->onTaskFail();
         return false;
     }
     return true;
 }
 
 bool LoadContextCoordinator::abort(LoadAsyncContext& context) noexcept {
-    const uint64_t context_id = context.contextId();
     {
         std::lock_guard<std::mutex>       lock(mutex_);
-        const PendingContextMap::iterator pending_it = pending_contexts_.find(context_id);
-        if (pending_it == pending_contexts_.end()) {
+        const auto                  pending = pending_contexts_.find(context.contextId());
+        if (pending == pending_contexts_.end()) {
             return false;
         }
-        pending_contexts_.erase(pending_it);
+        pending_contexts_.erase(pending);
         ++active_callbacks_;
     }
-
-    block_tree_cache_detail::ScopeRollback callback_guard([this]() { retireActiveCallback(); });
+    block_tree_cache_detail::ScopeRollback callback_guard([this] { retireActiveCallback(); });
     abort_callback_(context);
     return true;
 }
@@ -269,37 +396,22 @@ void LoadContextCoordinator::retireActiveCallback() {
 }
 
 void LoadContextCoordinator::shutdown() {
-    // Keep contexts alive only while shutdown explicitly aborts their pending operations.
-    std::vector<std::shared_ptr<LoadAsyncContext>> live_contexts;
+    std::vector<std::shared_ptr<LoadAsyncContext>> contexts;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (accepting_) {
-            accepting_ = false;
-            for (const auto & pending_context : pending_contexts_) {
-                std::shared_ptr<LoadAsyncContext> context = pending_context.second.lock();
-                if (context != nullptr) {
-                    live_contexts.push_back(std::move(context));
-                }
+        accepting_ = false;
+        for (const auto& [_, weak] : pending_contexts_) {
+            if (auto context = weak.lock()) {
+                contexts.push_back(std::move(context));
             }
         }
     }
-
-    for (const std::shared_ptr<LoadAsyncContext>& context : live_contexts) {
+    for (const auto& context : contexts) {
         context->abort();
     }
 
     std::unique_lock<std::mutex> lock(mutex_);
-    bool                         wait_observer_invoked = false;
-    cv_.wait(lock, [this, &wait_observer_invoked] {
-        if ((!pending_contexts_.empty() || active_callbacks_ != 0) && !wait_observer_invoked) {
-            wait_observer_invoked                                       = true;
-            const std::function<void()> shutdown_wait_observer_for_test = shutdown_wait_observer_for_test_;
-            if (shutdown_wait_observer_for_test) {
-                shutdown_wait_observer_for_test();
-            }
-        }
-        return pending_contexts_.empty() && active_callbacks_ == 0;
-    });
+    cv_.wait(lock, [this] { return pending_contexts_.empty() && active_callbacks_ == 0; });
     commit_callback_ = {};
     abort_callback_  = {};
 }

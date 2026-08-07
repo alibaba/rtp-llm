@@ -15,15 +15,14 @@ TEST(BlockReleaseBatchTest, DeduplicatesByGroupAndBlockAndKeepsFinalState) {
             BlockRefTransition{block_id, BlockRefType::REQUEST, 3, 2, false}});
     batch.append(
         /*group_id=*/7,
-        std::vector<BlockRefTransition>{
-            BlockRefTransition{block_id, BlockRefType::CONNECTOR, 2, 1, false}});
+        std::vector<BlockRefTransition>{BlockRefTransition{block_id, BlockRefType::STORAGE_BACKEND, 2, 1, false}});
 
     const auto receipts = batch.finish();
 
     ASSERT_EQ(receipts.size(), 1u);
     EXPECT_EQ(receipts[0].group_id, 7u);
     EXPECT_EQ(receipts[0].block_id, block_id);
-    EXPECT_EQ(receipts[0].released_ref_type, BlockRefType::CONNECTOR);
+    EXPECT_EQ(receipts[0].released_ref_type, BlockRefType::STORAGE_BACKEND);
     EXPECT_EQ(receipts[0].old_total_ref_count, 3u);
     EXPECT_EQ(receipts[0].new_total_ref_count, 1u);
     EXPECT_FALSE(receipts[0].block_released);

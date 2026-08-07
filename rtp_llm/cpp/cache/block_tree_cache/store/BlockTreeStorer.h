@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/StoreTaskRunner.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 
 namespace rtp_llm {
 
@@ -31,9 +32,10 @@ public:
                     std::mutex&                    mutex,
                     int                            host_timeout_ms,
                     int                            disk_timeout_ms,
+                    std::shared_ptr<StorageBackend> storage_backend,
                     SettledFn                      settled);
 
-    void storeLocked(const CacheKeysType&                              cache_keys,
+    StorageWriteTask storeLocked(const CacheKeysType&                              cache_keys,
                      const std::vector<std::vector<GroupSetResource>>& resources,
                      Tier                                              target_tier);
     void stopAdmissionLocked();
@@ -42,8 +44,10 @@ private:
     using StoreTask    = StoreTaskRunner::Task;
     using StoreTaskPtr = std::shared_ptr<StoreTask>;
 
-    void   publishDeviceLocked(const CacheKeysType&                              cache_keys,
+    StorageWriteTask publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                const std::vector<std::vector<GroupSetResource>>& resources);
+    StorageRequest   makeStorageRequest(const CacheKeysType&                              cache_keys,
+                                        const std::vector<std::vector<GroupSetResource>>& resources) const;
     void   submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                  const std::vector<std::vector<GroupSetResource>>& resources,
                                  Tier                                              target_tier);
@@ -60,6 +64,7 @@ private:
     std::mutex&                    mutex_;
     int                            host_timeout_ms_{0};
     int                            disk_timeout_ms_{0};
+    std::shared_ptr<StorageBackend> storage_backend_;
     SettledFn                      settled_;
     std::atomic<bool>              stopping_{false};
 };

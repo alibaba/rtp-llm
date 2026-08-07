@@ -29,8 +29,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    int                            memory_timeout_ms,
                                    int                            disk_timeout_ms,
                                    IsTierEnabledFn                is_tier_enabled,
-                                   SettledFn                      settled,
-                                   RemoteWriteFn                  remote_write):
+                                   SettledFn                      settled):
     tree_(tree),
     task_runner_(std::make_unique<EvictionTaskRunner>(tree->groupSets(),
                                                       transfer_dispatcher,
@@ -40,8 +39,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                                       memory_timeout_ms,
                                                       disk_timeout_ms,
                                                       std::move(is_tier_enabled),
-                                                      std::move(settled),
-                                                      std::move(remote_write))) {
+                                                      std::move(settled))) {
     // GroupSetFactory has already validated that group_set_id equals the vector
     // position. Own one heap per (group resource, tier).
     heaps_.resize(tree_->groupSets().size());
@@ -596,30 +594,6 @@ void BlockTreeEvictor::rollbackPreparedPlan(const EvictionPlan& plan) {
     }
     if (detached) {
         finalizeEviction(plan.primary_desc.node);
-    }
-}
-
-void BlockTreeEvictor::writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
-                                          CacheKeyType                           cache_key,
-                                          size_t                                 group_set_id) {
-    if (!storage_backend) {
-        return;
-    }
-
-    auto key = std::to_string(cache_key) + "_g" + std::to_string(group_set_id);
-    std::vector<std::pair<std::string, std::vector<char>>> entries;
-    entries.emplace_back(std::move(key), std::vector<char>{});
-    if (!entries.back().second.empty()) {
-        storage_backend->batchWrite(entries);
-        RTP_LLM_LOG_DEBUG("remote write-through "
-                          "group_set[%zu] node_key=%ld",
-                          group_set_id,
-                          cache_key);
-    } else {
-        RTP_LLM_LOG_WARNING("remote write-through SKIPPED "
-                            "(no data serialization yet) group_set[%zu] node_key=%ld",
-                            group_set_id,
-                            cache_key);
     }
 }
 

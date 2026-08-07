@@ -61,7 +61,7 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
     snapshot.available_blocks          = std::min(snapshot.total_blocks, snapshot.free_blocks + candidate_blocks);
     snapshot.active_tree_cached_blocks = pool.activeTreeCachedBlocksNum();
     snapshot.request_ref_blocks        = pool.referencedBlocksNum(BlockRefType::REQUEST);
-    snapshot.connector_ref_blocks      = pool.referencedBlocksNum(BlockRefType::CONNECTOR);
+    snapshot.connector_ref_blocks      = pool.referencedBlocksNum(BlockRefType::STORAGE_BACKEND);
     snapshot.block_cache_ref_blocks    = pool.referencedBlocksNum(BlockRefType::BLOCK_CACHE);
     snapshot.eviction_ref_blocks       = pool.referencedBlocksNum(BlockRefType::EVICTION);
     snapshot.store_ref_blocks          = pool.referencedBlocksNum(BlockRefType::STORE);

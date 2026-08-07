@@ -39,8 +39,7 @@ EvictionTaskRunner::EvictionTaskRunner(const std::vector<GroupSetPtr>& group_set
                                        int                             memory_timeout_ms,
                                        int                             disk_timeout_ms,
                                        IsTierEnabledFn                 is_tier_enabled,
-                                       SettledFn                       settled,
-                                       RemoteWriteFn                   remote_write):
+                                       SettledFn                       settled):
     group_sets_(group_sets),
     transfer_dispatcher_(transfer_dispatcher),
     task_pool_(task_pool),
@@ -49,8 +48,7 @@ EvictionTaskRunner::EvictionTaskRunner(const std::vector<GroupSetPtr>& group_set
     memory_timeout_ms_(memory_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
     is_tier_enabled_(std::move(is_tier_enabled)),
-    settled_(std::move(settled)),
-    remote_write_(std::move(remote_write)) {}
+    settled_(std::move(settled)) {}
 
 bool EvictionTaskRunner::submitLocked(BlockTreeEvictor& evictor, TransferDescriptor& eviction_desc) {
     if (!isCanonicalEvictionTarget(eviction_desc.source_tier, eviction_desc.target_tier)) {
@@ -140,15 +138,6 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor& evictor, const BlockTreeEvict
         bool       completion_succeeded = false;
         bool       plan_terminalized    = false;
         bool       plan_succeeded       = false;
-        const bool copy_ok              = copy_results.primary_success;
-
-        CacheKeyType          remote_cache_key = 0;
-        std::optional<size_t> remote_group_set_id;
-        if (copy_ok && plan.primary_desc.node != nullptr) {
-            remote_cache_key    = plan.primary_desc.node->cache_key;
-            remote_group_set_id = plan.primary_desc.group_set_id;
-        }
-
         try {
             std::lock_guard<std::mutex> lock(*mutex_);
             try {
@@ -186,15 +175,6 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor& evictor, const BlockTreeEvict
         }
         metrics_reporter_->reportEvictionFinished(plan, copy_results, group_sets_);
 
-        if (plan_terminalized && completion_succeeded && copy_ok && remote_group_set_id.has_value()) {
-            try {
-                remote_write_(remote_cache_key, *remote_group_set_id);
-            } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("remote eviction write-through failed: %s", error.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("remote eviction write-through failed with unknown exception");
-            }
-        }
     };
     block_tree_cache_detail::ScopeRollback<decltype(finalization_action)> finalization_guard(
         std::move(finalization_action));

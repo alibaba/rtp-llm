@@ -1,485 +1,477 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 
-#include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <future>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <utility>
 
 #include <gtest/gtest.h>
 
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+
 namespace rtp_llm {
+namespace {
 
-class LoadAsyncContextTest: public ::testing::Test {
-protected:
-    class CallbackBarrier {
-    public:
-        void enterAndWait() {
-            std::unique_lock<std::mutex> lock(mutex_);
-            entered_ = true;
-            cv_.notify_all();
-            cv_.wait(lock, [this] { return released_; });
-        }
-
-        void waitUntilEntered() {
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] { return entered_; });
-        }
-
-        void release() {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                released_ = true;
-            }
-            cv_.notify_all();
-        }
-
-    private:
-        std::mutex              mutex_;
-        std::condition_variable cv_;
-        bool                    entered_{false};
-        bool                    released_{false};
-    };
-
-    class ThreadEvent {
-    public:
-        void notify() {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                notified_ = true;
-            }
-            cv_.notify_all();
-        }
-
-        void wait() {
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] { return notified_; });
-        }
-
-    private:
-        std::mutex              mutex_;
-        std::condition_variable cv_;
-        bool                    notified_{false};
-    };
-
-    void SetUp() override {
-        coordinator_ = makeCoordinator();
-    }
-
-    void TearDown() override {
-        coordinator_->shutdown();
-    }
-
-    std::shared_ptr<LoadContextCoordinator> makeCoordinator() {
-        return std::make_shared<LoadContextCoordinator>(
-            [this](const std::shared_ptr<LoadAsyncContext>& context) {
-                ++commit_count_;
-                return context != nullptr;
-            },
-            [this](LoadAsyncContext& /*context*/) { ++abort_count_; });
-    }
-
-    void resetCoordinator(LoadContextCoordinator::CommitCallback commit_callback,
-                          LoadContextCoordinator::AbortCallback  abort_callback) {
-        coordinator_->shutdown();
-        coordinator_ = std::make_shared<LoadContextCoordinator>(std::move(commit_callback), std::move(abort_callback));
-    }
-
-    TransferDescriptor makePendingHostDescriptor() {
-        TransferDescriptor desc;
-        desc.source_tier   = Tier::HOST;
-        desc.source_blocks = {11};
-        return desc;
-    }
-
-    std::shared_ptr<LoadAsyncContext> createRegisteredContext(std::vector<TransferDescriptor> load_descs,
-                                                              std::vector<bool>               joined_load,
-                                                              size_t                          matched_blocks) {
-        const std::shared_ptr<LoadAsyncContext> context =
-            coordinator_->create(std::move(load_descs), std::move(joined_load), matched_blocks);
-        if (!coordinator_->registerContext(context)) {
-            return nullptr;
-        }
-        return context;
-    }
-
-    std::shared_ptr<LoadAsyncContext> makeContext(size_t transfer_count) {
-        std::vector<TransferDescriptor> load_descs;
-        if (transfer_count == 0) {
-            TransferDescriptor desc;
-            desc.source_tier = Tier::DEVICE;
-            load_descs.push_back(std::move(desc));
-        } else {
-            load_descs.assign(transfer_count, makePendingHostDescriptor());
-        }
-        std::vector<bool> joined_load(load_descs.size(), false);
-        return createRegisteredContext(std::move(load_descs), std::move(joined_load), 1);
-    }
-
-    std::shared_ptr<LoadAsyncContext> makeCommittedContext(size_t transfer_count) {
-        const std::shared_ptr<LoadAsyncContext> context = makeContext(transfer_count);
-        if (context == nullptr || !context->commit()) {
-            return nullptr;
-        }
-        return context;
-    }
-
-    size_t                                  commit_count_{0};
-    size_t                                  abort_count_{0};
-    std::shared_ptr<LoadContextCoordinator> coordinator_;
+struct TestMatchMeta: StorageBackendMatchMeta {
+    size_t remote_version{0};
 };
 
-TEST_F(LoadAsyncContextTest, SetsTargetBlocks) {
-    TransferDescriptor first;
-    first.group_set_id  = 3;
-    first.path_index    = 5;
-    first.source_tier   = Tier::HOST;
-    first.source_blocks = {11};
-
-    TransferDescriptor joined;
-    joined.group_set_id         = 4;
-    joined.path_index           = 6;
-    joined.source_tier          = Tier::DISK;
-    joined.source_blocks        = {12};
-
-    const std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({first, joined}, {false, true}, 7);
-    ASSERT_NE(context, nullptr);
-
-    context->setTargetBlocks(1, {21});
-    EXPECT_EQ(context->load_descs_.size(), 2u);
-    EXPECT_FALSE(context->joined_load_[0]);
-    EXPECT_TRUE(context->joined_load_[1]);
-    EXPECT_EQ(context->load_descs_[0].group_set_id, 3u);
-    EXPECT_EQ(context->load_descs_[1].path_index, 6u);
-    EXPECT_EQ(context->load_descs_[1].target_blocks, (std::vector<BlockIdxType>{21}));
-    context->setTargetBlocks(0, {20});
-    EXPECT_EQ(context->load_descs_[0].target_blocks, (std::vector<BlockIdxType>{20}));
-    context->abort();
-    EXPECT_EQ(abort_count_, 1u);
-}
-
-TEST_F(LoadAsyncContextTest, CountsStrongestTierOncePerPath) {
-    TransferDescriptor device;
-    device.path_index  = 1;
-    device.source_tier = Tier::DEVICE;
-
-    TransferDescriptor host = device;
-    host.source_tier                       = Tier::HOST;
-
-    TransferDescriptor disk = device;
-    disk.path_index                        = 2;
-    disk.source_tier                       = Tier::DISK;
-
-    const std::shared_ptr<LoadAsyncContext> context =
-        createRegisteredContext({device, host, disk}, {false, false, false}, 9);
-    ASSERT_NE(context, nullptr);
-
-    EXPECT_EQ(context->matchedBlocks(), 9u);
-    EXPECT_EQ(context->matchedBlocks(Tier::DEVICE), 0u);
-    EXPECT_EQ(context->matchedBlocks(Tier::HOST), 1u);
-    EXPECT_EQ(context->matchedBlocks(Tier::DISK), 1u);
-    EXPECT_EQ(context->matchedBlocks(Tier::NONE), 0u);
-    context->abort();
-}
-
-TEST_F(LoadAsyncContextTest, DestructionAbortsPendingContext) {
-    std::weak_ptr<LoadAsyncContext> weak_context;
-    {
-        const std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-        ASSERT_NE(context, nullptr);
-        weak_context = context;
+class TestBlockPool: public IBlockPool {
+public:
+    TestBlockPool(): IBlockPool(makeConfig()) {
+        markInitialized();
+    }
+    size_t blockSizeBytes() const override {
+        return 16;
     }
 
-    EXPECT_TRUE(weak_context.expired());
-    EXPECT_EQ(commit_count_, 0u);
-    EXPECT_EQ(abort_count_, 1u);
+private:
+    static std::shared_ptr<const BlockPoolConfigBase> makeConfig() {
+        auto config                  = std::make_shared<BlockPoolConfigBase>();
+        config->pool_type            = BlockPoolType::DEVICE;
+        config->pool_name            = "load_context_test";
+        config->physical_block_count = 4;
+        return config;
+    }
+};
+
+class ManualBackend: public StorageBackend {
+public:
+    void completeMatch(size_t keys, std::shared_ptr<StorageBackendMatchMeta> match_meta = nullptr) {
+        auto done = std::move(match_done_);
+        done(keys, std::move(match_meta));
+    }
+    void completeRead() {
+        auto done = std::move(read_done_);
+        done();
+    }
+    bool readPending() const {
+        return static_cast<bool>(read_done_);
+    }
+    const CacheKeysType& readKeys() const {
+        return read_keys_;
+    }
+    const std::vector<size_t>& readHandleCounts() const {
+        return read_handle_counts_;
+    }
+    const std::vector<std::vector<size_t>>& readGroupIds() const {
+        return read_group_ids_;
+    }
+    const CacheKeysType& matchKeys() const {
+        return match_keys_;
+    }
+    size_t matchLocalBlocks() const {
+        return match_local_blocks_;
+    }
+    const std::shared_ptr<TestMatchMeta>& readMatchMeta() const {
+        return read_match_meta_;
+    }
+    void shutdown() override {}
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    void matchImpl(StorageRequest request, MatchDone done) override {
+        match_keys_         = *request.keys;
+        match_local_blocks_ = request.local_matched_blocks_num;
+        match_done_ = std::move(done);
+    }
+    void readImpl(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) override {
+        read_match_meta_ = std::dynamic_pointer_cast<TestMatchMeta>(match_meta);
+        read_keys_ = *request.keys;
+        for (const auto& key_handles : request.handles) {
+            read_handle_counts_.push_back(key_handles.size());
+            std::vector<size_t> group_ids;
+            for (const auto& handle : key_handles) {
+                group_ids.push_back(handle.group_id);
+            }
+            read_group_ids_.push_back(std::move(group_ids));
+        }
+        read_done_ = std::move(done);
+    }
+    void writeImpl(StorageRequest, Done done) override {
+        done();
+    }
+
+private:
+    MatchDone match_done_;
+    Done      read_done_;
+    CacheKeysType       read_keys_;
+    CacheKeysType       match_keys_;
+    size_t              match_local_blocks_{0};
+    std::vector<size_t> read_handle_counts_;
+    std::vector<std::vector<size_t>> read_group_ids_;
+    std::shared_ptr<TestMatchMeta> read_match_meta_;
+};
+
+std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> types = {CacheGroupType::FULL}) {
+    std::vector<GroupBase>  groups;
+    std::vector<std::string> tags;
+    for (size_t group_id = 0; group_id < types.size(); ++group_id) {
+        auto spec = std::make_shared<MHAKVCacheSpec>();
+        spec->tag = "group_" + std::to_string(group_id);
+        GroupBase group;
+        group.tag                       = spec->tag;
+        group.spec                      = std::move(spec);
+        group.policy                    = defaultCacheGroupPolicy(types[group_id]);
+        group.policy.enable_prefix_reuse = true;
+        if (types[group_id] == CacheGroupType::SWA) {
+            group.policy.sliding_window_size = 2;
+        }
+        group.layer_ids                 = {0};
+        group.seq_size_per_block        = 1;
+        group.kernel_seq_size_per_block = 1;
+        tags.push_back(group.tag);
+        groups.push_back(std::move(group));
+    }
+    return CacheTopology::create(std::move(groups), {{0, std::move(tags)}});
 }
 
-TEST_F(LoadAsyncContextTest, ContextIdsAreStableAndUnique) {
-    const std::shared_ptr<LoadAsyncContext> first_context  = makeContext(1);
-    const std::shared_ptr<LoadAsyncContext> second_context = makeContext(1);
-    ASSERT_NE(first_context, nullptr);
-    ASSERT_NE(second_context, nullptr);
-
-    const uint64_t first_context_id = first_context->contextId();
-    EXPECT_NE(first_context_id, 0u);
-    EXPECT_NE(first_context_id, second_context->contextId());
-    EXPECT_EQ(first_context->contextId(), first_context_id);
-    EXPECT_FALSE(coordinator_->registerContext(first_context));
-    first_context->abort();
-    second_context->abort();
+void initBackend(ManualBackend& backend, const std::shared_ptr<IBlockPool>& pool) {
+    RTP_LLM_CHECK(backend.init(
+        makeTopology(), {pool}, [](int, int, int) { return std::vector<BlockInfo>{}; }, [](const auto&) {}));
 }
 
-TEST_F(LoadAsyncContextTest, CommitConsumesPendingRegistration) {
-    std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-    ASSERT_NE(context, nullptr);
-
-    ASSERT_TRUE(context->commit());
-    EXPECT_EQ(commit_count_, 1u);
-    EXPECT_FALSE(context->commit());
-    context.reset();
-    EXPECT_EQ(abort_count_, 0u);
+void initBackend(ManualBackend&                                  backend,
+                 std::shared_ptr<const CacheTopology>            topology,
+                 const std::vector<std::shared_ptr<IBlockPool>>& pools) {
+    RTP_LLM_CHECK(backend.init(std::move(topology),
+                               pools,
+                               [](int, int, int) { return std::vector<BlockInfo>{}; },
+                               [](const auto&) {}));
 }
 
-TEST_F(LoadAsyncContextTest, CommitDelegatesEmptyRegisteredContext) {
-    std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({}, {}, 0);
-    ASSERT_NE(context, nullptr);
-
-    EXPECT_TRUE(context->commit());
-    EXPECT_EQ(commit_count_, 1u);
+StorageRequest makeRequest(size_t key_count) {
+    CacheKeysType keys;
+    keys.reserve(key_count);
+    std::vector<std::vector<StorageBlockHandle>> handles;
+    handles.reserve(key_count);
+    for (size_t i = 0; i < key_count; ++i) {
+        keys.push_back(i + 1);
+        handles.push_back({{0, NULL_BLOCK_IDX}});
+    }
+    return {std::make_shared<CacheKeysType>(std::move(keys)), std::move(handles)};
 }
 
-TEST_F(LoadAsyncContextTest, CommitFailureTerminalizesContext) {
-    resetCoordinator(
-        [this](const std::shared_ptr<LoadAsyncContext>& /*context*/) {
-            ++commit_count_;
-            return false;
+std::shared_ptr<LoadContextCoordinator> makeCoordinator(size_t& commits, size_t& aborts) {
+    return std::make_shared<LoadContextCoordinator>(
+        [&](const auto&) {
+            ++commits;
+            return true;
         },
-        [this](LoadAsyncContext& /*context*/) { ++abort_count_; });
-    std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-    ASSERT_NE(context, nullptr);
-
-    EXPECT_FALSE(context->commit());
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_FALSE(context->commit());
-    context.reset();
-    EXPECT_EQ(commit_count_, 1u);
-    EXPECT_EQ(abort_count_, 0u);
+        [&](auto&) { ++aborts; });
 }
 
-TEST_F(LoadAsyncContextTest, AbortDoesNotOverwriteConcurrentCompletion) {
-    CallbackBarrier abort_callback;
-    resetCoordinator([](const std::shared_ptr<LoadAsyncContext>& context) { return context != nullptr; },
-                     [&abort_callback](LoadAsyncContext& /*context*/) { abort_callback.enterAndWait(); });
-    const std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-    ASSERT_NE(context, nullptr);
-
-    std::thread abort_thread([&context] { context->abort(); });
-    abort_callback.waitUntilEntered();
-    EXPECT_TRUE(context->completeOne(true));
-    EXPECT_TRUE(context->success());
-
-    abort_callback.release();
-    abort_thread.join();
-    EXPECT_TRUE(context->success());
-}
-
-TEST_F(LoadAsyncContextTest, ShutdownAbortsLivePendingContextOnce) {
-    std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-    ASSERT_NE(context, nullptr);
-
-    coordinator_->shutdown();
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_TRUE(context->isRequestCanceled());
-    EXPECT_EQ(abort_count_, 1u);
-
-    context.reset();
-    EXPECT_EQ(abort_count_, 1u);
-}
-
-TEST_F(LoadAsyncContextTest, ShutdownWaitsForCommitCallback) {
-    CallbackBarrier   commit_callback;
-    ThreadEvent       shutdown_waiting;
-    std::atomic<bool> shutdown_finished{false};
-    bool              commit_result = false;
-    resetCoordinator(
-        [&commit_callback](const std::shared_ptr<LoadAsyncContext>& context) {
-            commit_callback.enterAndWait();
-            return context != nullptr;
-        },
-        [](LoadAsyncContext& /*context*/) {});
-    coordinator_->shutdown_wait_observer_for_test_  = [&shutdown_waiting] { shutdown_waiting.notify(); };
-    const std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-    ASSERT_NE(context, nullptr);
-
-    std::thread commit_thread([&context, &commit_result] { commit_result = context->commit(); });
-    commit_callback.waitUntilEntered();
-    std::thread shutdown_thread([this, &shutdown_finished] {
-        coordinator_->shutdown();
-        shutdown_finished.store(true);
+TEST(LoadAsyncContextTest, EmptyStorageMatchStillRunsDeferredAllocationAndCommit) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto   context     = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    size_t callbacks = 0;
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        ++callbacks;
+        EXPECT_EQ(matched, 0u);
+        return current.commit();
     });
-    shutdown_waiting.wait();
-    EXPECT_FALSE(shutdown_finished.load());
 
-    commit_callback.release();
-    commit_thread.join();
-    shutdown_thread.join();
-
-    EXPECT_TRUE(commit_result);
-    EXPECT_TRUE(shutdown_finished.load());
-    EXPECT_TRUE(context->completeOne(true));
-    EXPECT_FALSE(context->commit());
-}
-
-TEST_F(LoadAsyncContextTest, ShutdownWaitsForAbortCallback) {
-    CallbackBarrier   abort_callback;
-    ThreadEvent       shutdown_waiting;
-    std::atomic<bool> shutdown_finished{false};
-    resetCoordinator([](const std::shared_ptr<LoadAsyncContext>& context) { return context != nullptr; },
-                     [this, &abort_callback](LoadAsyncContext& /*context*/) {
-                         ++abort_count_;
-                         abort_callback.enterAndWait();
-                     });
-    coordinator_->shutdown_wait_observer_for_test_  = [&shutdown_waiting] { shutdown_waiting.notify(); };
-    const std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-    ASSERT_NE(context, nullptr);
-
-    std::thread abort_thread([&context] { context->abort(); });
-    abort_callback.waitUntilEntered();
-    std::thread shutdown_thread([this, &shutdown_finished] {
-        coordinator_->shutdown();
-        shutdown_finished.store(true);
-    });
-    shutdown_waiting.wait();
-    EXPECT_FALSE(shutdown_finished.load());
-
-    abort_callback.release();
-    abort_thread.join();
-    shutdown_thread.join();
-
-    EXPECT_TRUE(shutdown_finished.load());
-    EXPECT_TRUE(context->done());
-    EXPECT_TRUE(context->isRequestCanceled());
-    EXPECT_EQ(abort_count_, 1u);
-    context->abort();
-    EXPECT_EQ(abort_count_, 1u);
-}
-
-TEST_F(LoadAsyncContextTest, ConcurrentShutdownCallersWaitForSameAbortCallback) {
-    CallbackBarrier   abort_callback;
-    ThreadEvent       second_shutdown_waiting;
-    std::atomic<bool> first_shutdown_finished{false};
-    std::atomic<bool> second_shutdown_finished{false};
-    resetCoordinator([](const std::shared_ptr<LoadAsyncContext>& context) { return context != nullptr; },
-                     [this, &abort_callback](LoadAsyncContext& /*context*/) {
-                         ++abort_count_;
-                         abort_callback.enterAndWait();
-                     });
-    coordinator_->shutdown_wait_observer_for_test_  = [&second_shutdown_waiting] { second_shutdown_waiting.notify(); };
-    const std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-    ASSERT_NE(context, nullptr);
-
-    std::thread first_shutdown_thread([this, &first_shutdown_finished] {
-        coordinator_->shutdown();
-        first_shutdown_finished.store(true);
-    });
-    abort_callback.waitUntilEntered();
-
-    std::thread second_shutdown_thread([this, &second_shutdown_finished] {
-        coordinator_->shutdown();
-        second_shutdown_finished.store(true);
-    });
-    second_shutdown_waiting.wait();
-    EXPECT_FALSE(first_shutdown_finished.load());
-    EXPECT_FALSE(second_shutdown_finished.load());
-    EXPECT_EQ(abort_count_, 1u);
-
-    abort_callback.release();
-    first_shutdown_thread.join();
-    second_shutdown_thread.join();
-
-    EXPECT_TRUE(first_shutdown_finished.load());
-    EXPECT_TRUE(second_shutdown_finished.load());
-    EXPECT_EQ(abort_count_, 1u);
-    EXPECT_TRUE(context->done());
-    EXPECT_TRUE(context->isRequestCanceled());
-}
-
-TEST_F(LoadAsyncContextTest, ShutdownRejectsNewContext) {
-    coordinator_->shutdown();
-    const std::shared_ptr<LoadAsyncContext> context = makeContext(1);
-
-    EXPECT_EQ(context, nullptr);
-    EXPECT_EQ(commit_count_, 0u);
-    EXPECT_EQ(abort_count_, 0u);
-}
-
-TEST_F(LoadAsyncContextTest, CompleteSingleWork) {
-    const std::shared_ptr<LoadAsyncContext> context = makeCommittedContext(1);
-    ASSERT_NE(context, nullptr);
+    context->startBackendMatch();
     EXPECT_FALSE(context->done());
-
-    EXPECT_TRUE(context->completeOne(true));
-
+    backend->completeMatch(0);
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->success());
-    context->waitDone();
+    EXPECT_EQ(callbacks, 1u);
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
 }
 
-TEST_F(LoadAsyncContextTest, CompleteAfterEveryTransfer) {
-    const std::shared_ptr<LoadAsyncContext> context = makeCommittedContext(3);
-    ASSERT_NE(context, nullptr);
+TEST(LoadAsyncContextTest, MatchedKeyExposesAllOfItsHandles) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block, BlockRefType::REQUEST);
+    initBackend(*backend, pool);
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2}),
+                           {{{0, NULL_BLOCK_IDX}, {0, NULL_BLOCK_IDX}}, {{0, NULL_BLOCK_IDX}}}};
+    auto context = coordinator->create({}, {}, 0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 1u);
+        EXPECT_EQ(current.backendHandles().size(), 1u);
+        EXPECT_EQ(current.backendHandles().front().size(), 2u);
+        current.setBackendTargetBlock(0, 0, block);
+        current.setBackendTargetBlock(0, 1, block);
+        return current.commit();
+    });
 
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    ASSERT_TRUE(backend->readPending());
+    EXPECT_EQ(backend->readKeys(), (CacheKeysType{1}));
+    EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{2}));
+    backend->completeRead();
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    pool->decRef(block, BlockRefType::REQUEST);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, MatchedKeysKeepReuseShapeAndForwardDerivedMatchMeta) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    std::vector<std::shared_ptr<TestBlockPool>> pools;
+    std::vector<std::shared_ptr<IBlockPool>>    bound_pools;
+    std::vector<BlockIdxType>                   blocks;
+    for (size_t group_id = 0; group_id < 3; ++group_id) {
+        auto pool  = std::make_shared<TestBlockPool>();
+        auto block = pool->malloc().value();
+        pool->incRef(block, BlockRefType::REQUEST);
+        pools.push_back(pool);
+        bound_pools.push_back(pool);
+        blocks.push_back(block);
+    }
+    initBackend(*backend,
+                makeTopology({CacheGroupType::FULL, CacheGroupType::LINEAR, CacheGroupType::SWA}),
+                bound_pools);
+
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1, 2, 3, 4}),
+                           std::vector<std::vector<StorageBlockHandle>>(4)};
+    for (auto& handles : request.handles) {
+        handles = {{0, NULL_BLOCK_IDX}, {1, NULL_BLOCK_IDX}, {2, NULL_BLOCK_IDX}};
+    }
+    auto context = coordinator->create({}, {}, 0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 4u);
+        const auto& handles = current.backendHandles();
+        EXPECT_EQ(handles.size(), 4u);
+        EXPECT_EQ(handles[0].size(), 1u);
+        EXPECT_EQ(handles[1].size(), 1u);
+        EXPECT_EQ(handles[2].size(), 2u);
+        EXPECT_EQ(handles[3].size(), 3u);
+        for (size_t key_index = 0; key_index < handles.size(); ++key_index) {
+            for (size_t handle_index = 0; handle_index < handles[key_index].size(); ++handle_index) {
+                current.setBackendTargetBlock(
+                    key_index, handle_index, blocks[handles[key_index][handle_index].group_id]);
+            }
+        }
+        return current.commit();
+    });
+
+    context->startBackendMatch();
+    auto match_meta            = std::make_shared<TestMatchMeta>();
+    match_meta->remote_version = 17;
+    backend->completeMatch(4, match_meta);
+    ASSERT_TRUE(backend->readPending());
+    ASSERT_EQ(backend->readMatchMeta(), match_meta);
+    EXPECT_EQ(backend->readMatchMeta()->remote_version, 17u);
+    EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{1, 1, 2, 3}));
+    EXPECT_EQ(backend->readGroupIds(),
+              (std::vector<std::vector<size_t>>{{0}, {0}, {0, 2}, {0, 1, 2}}));
+    backend->completeRead();
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    for (size_t group_id = 0; group_id < pools.size(); ++group_id) {
+        pools[group_id]->decRef(blocks[group_id], BlockRefType::REQUEST);
+    }
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemoteRows) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto first = pool->malloc().value();
+    auto second = pool->malloc().value();
+    pool->incRef(first, BlockRefType::REQUEST);
+    pool->incRef(second, BlockRefType::REQUEST);
+    initBackend(*backend, pool);
+
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{10, 20, 30, 40}),
+                           std::vector<std::vector<StorageBlockHandle>>(4, {{0, NULL_BLOCK_IDX}}),
+                           /*local_matched_blocks_num=*/2};
+    auto context = coordinator->create({}, {}, 2, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 4u);
+        const auto& handles = current.backendHandles();
+        EXPECT_EQ(handles.size(), 4u);
+        EXPECT_TRUE(handles[0].empty());
+        EXPECT_TRUE(handles[1].empty());
+        EXPECT_EQ(handles[2].size(), 1u);
+        EXPECT_EQ(handles[3].size(), 1u);
+        current.setBackendTargetBlock(2, 0, first);
+        current.setBackendTargetBlock(3, 0, second);
+        return current.commit();
+    });
+
+    context->startBackendMatch();
+    EXPECT_EQ(backend->matchKeys(), (CacheKeysType{10, 20, 30, 40}));
+    EXPECT_EQ(backend->matchLocalBlocks(), 2u);
+    backend->completeMatch(4);
+    ASSERT_TRUE(backend->readPending());
+    EXPECT_EQ(backend->readKeys(), (CacheKeysType{10, 20, 30, 40}));
+    EXPECT_EQ(backend->readHandleCounts(), (std::vector<size_t>{0, 0, 1, 1}));
+    backend->completeRead();
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(context->matchedBlocks(), 4u);
+    EXPECT_EQ(commits, 1u);
+    EXPECT_EQ(aborts, 0u);
+    pool->decRef(first, BlockRefType::REQUEST);
+    pool->decRef(second, BlockRefType::REQUEST);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, LocalAndStorageReadsMustBothComplete) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block, BlockRefType::REQUEST);
+    initBackend(*backend, pool);
+
+    TransferDescriptor local;
+    local.source_tier = Tier::HOST;
+    auto context      = coordinator->create({local}, {false}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 1u);
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+
+    context->startBackendMatch();
+    backend->completeMatch(1);
+    ASSERT_TRUE(backend->readPending());
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 1u);
     EXPECT_TRUE(context->completeOne(true));
     EXPECT_FALSE(context->done());
-    EXPECT_TRUE(context->completeOne(false));
-    EXPECT_FALSE(context->done());
-    EXPECT_TRUE(context->completeOne(true));
-
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-}
-
-TEST_F(LoadAsyncContextTest, CancellationWaitsForEveryTransfer) {
-    const std::shared_ptr<LoadAsyncContext> context = makeCommittedContext(2);
-    ASSERT_NE(context, nullptr);
-
-    EXPECT_TRUE(context->requestCancel());
-    EXPECT_TRUE(context->isRequestCanceled());
-    EXPECT_TRUE(context->requestCancel());
-    EXPECT_TRUE(context->completeOne(true));
-    EXPECT_FALSE(context->done());
-    EXPECT_TRUE(context->completeOne(true));
-
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-}
-
-TEST_F(LoadAsyncContextTest, RejectCompletionAfterTerminalState) {
-    const std::shared_ptr<LoadAsyncContext> context = makeCommittedContext(1);
-    ASSERT_NE(context, nullptr);
-
-    EXPECT_TRUE(context->completeOne(true));
-    EXPECT_FALSE(context->completeOne(true));
-}
-
-TEST_F(LoadAsyncContextTest, TaskFailureCompletesAllPendingTransfers) {
-    const std::shared_ptr<LoadAsyncContext> context = makeCommittedContext(3);
-    ASSERT_NE(context, nullptr);
-
-    EXPECT_TRUE(context->completeOne(true));
-    EXPECT_FALSE(context->done());
-    EXPECT_TRUE(context->onTaskFail());
-
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_FALSE(context->completeOne(true));
-    EXPECT_FALSE(context->onTaskFail());
-}
-
-TEST_F(LoadAsyncContextTest, TaskFailureCompletesCanceledContext) {
-    const std::shared_ptr<LoadAsyncContext> context = makeCommittedContext(2);
-    ASSERT_NE(context, nullptr);
-
-    EXPECT_TRUE(context->requestCancel());
-    EXPECT_TRUE(context->isRequestCanceled());
-    EXPECT_TRUE(context->onTaskFail());
-
-    EXPECT_TRUE(context->done());
-    EXPECT_TRUE(context->isRequestCanceled());
-    EXPECT_FALSE(context->success());
-}
-
-TEST_F(LoadAsyncContextTest, ZeroTransferContextIsImmediatelySuccessful) {
-    const std::shared_ptr<LoadAsyncContext> context = makeCommittedContext(0);
-    ASSERT_NE(context, nullptr);
-
+    backend->completeRead();
     EXPECT_TRUE(context->done());
     EXPECT_TRUE(context->success());
-    EXPECT_FALSE(context->completeOne(true));
+    EXPECT_EQ(context->matchedBlocks(), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::STORAGE_BACKEND), 0u);
+    pool->decRef(block, BlockRefType::REQUEST);
+    coordinator->shutdown();
 }
 
+TEST(LoadAsyncContextTest, PendingContextAbortsOnDestruction) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    {
+        auto context = coordinator->create({TransferDescriptor{}}, {false}, 1);
+        ASSERT_TRUE(coordinator->registerContext(context));
+    }
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, CancelWaitsForDeferredAllocatorCallback) {
+    using namespace std::chrono_literals;
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto   context     = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    entered  = false;
+    bool                    released = false;
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        std::unique_lock<std::mutex> lock(mutex);
+        entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return released; });
+        return !current.isRequestCanceled() && current.commit();
+    });
+    context->startBackendMatch();
+    auto completion = std::async(std::launch::async, [&] { backend->completeMatch(1); });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&] { return entered; });
+    }
+    auto cancel = std::async(std::launch::async, [&] { return context->requestCancel(); });
+    EXPECT_EQ(cancel.wait_for(50ms), std::future_status::timeout);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+    }
+    cv.notify_all();
+    completion.get();
+    EXPECT_TRUE(cancel.get());
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, CoordinatorShutdownWaitsForDeferredAllocatorCallback) {
+    using namespace std::chrono_literals;
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto   context     = coordinator->create({}, {}, 0, backend, makeRequest(1));
+    ASSERT_TRUE(coordinator->registerContext(context));
+
+    std::mutex              mutex;
+    std::condition_variable cv;
+    bool                    entered  = false;
+    bool                    released = false;
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t) {
+        std::unique_lock<std::mutex> lock(mutex);
+        entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return released; });
+        return current.commit();
+    });
+    context->startBackendMatch();
+    auto completion = std::async(std::launch::async, [&] { backend->completeMatch(1); });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [&] { return entered; });
+    }
+    auto shutdown = std::async(std::launch::async, [&] { coordinator->shutdown(); });
+    EXPECT_EQ(shutdown.wait_for(50ms), std::future_status::timeout);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+    }
+    cv.notify_all();
+    completion.get();
+    shutdown.get();
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(commits, 0u);
+    EXPECT_EQ(aborts, 1u);
+}
+
+}  // namespace
 }  // namespace rtp_llm

@@ -667,7 +667,7 @@ TEST_F(BlockTreeCacheTest, PreciseReleaseRefreshesOnlyTheBoundTreeResource) {
     const GroupSetPtr&        group_set = cache_->groupSets()[0];
     const DeviceBlockPoolPtr& pool      = group_set->devicePools()[0];
     pool->incRef(42, BlockRefType::REQUEST);
-    pool->incRef(43, BlockRefType::CONNECTOR);
+    pool->incRef(43, BlockRefType::STORAGE_BACKEND);
 
     std::vector<std::vector<GroupSetResource>> first_resources(1, std::vector<GroupSetResource>(1));
     first_resources[0][0].device_blocks = {42};
@@ -681,7 +681,7 @@ TEST_F(BlockTreeCacheTest, PreciseReleaseRefreshesOnlyTheBoundTreeResource) {
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 1u);
     EXPECT_EQ(pool->refCount(43), 2u);
 
-    releaseDeviceBlocksAndNotify(*cache_, pool, {43}, BlockRefType::CONNECTOR);
+    releaseDeviceBlocksAndNotify(*cache_, pool, {43}, BlockRefType::STORAGE_BACKEND);
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 2u);
 }
 

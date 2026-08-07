@@ -30,8 +30,7 @@ protected:
                                   0,
                                   0,
                                   [](Tier) { return true; },
-                                  [](bool, bool) {},
-                                  [](CacheKeyType, size_t) {});
+                                  [](bool, bool) {});
     }
 
     std::vector<GroupSetPtr>                 group_sets_;

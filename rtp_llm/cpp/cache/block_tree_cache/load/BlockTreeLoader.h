@@ -42,6 +42,7 @@ public:
                     int                            disk_timeout_ms,
                     int                            host_timeout_ms,
                     bool                           enable_device_cache,
+                    std::shared_ptr<StorageBackend> storage_backend,
                     SettledFn                      settled);
 
     // The caller must hold the shared BlockTreeCache mutex.
@@ -50,7 +51,7 @@ public:
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
     // The caller must hold the shared BlockTreeCache mutex.
-    bool cancelLoadLocked(const std::shared_ptr<AsyncContext>& context);
+    bool cancelLoad(const std::shared_ptr<AsyncContext>& context);
     void shutdown();
 
 private:
@@ -59,7 +60,8 @@ private:
     collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
                               size_t                        matched_device_blocks,
                               int64_t                       access_time_us) const;
-    BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path);
+    BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path, const CacheKeysType& cache_keys);
+    StorageRequest makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     bool releaseDeviceLoadSourcesLocked(const LoadAsyncContext& context);
     void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
@@ -83,6 +85,7 @@ private:
     int                                     disk_timeout_ms_{0};
     int                                     host_timeout_ms_{0};
     bool                                    enable_device_cache_{true};
+    std::shared_ptr<StorageBackend>                              storage_backend_;
     SettledFn                               settled_;
     LoadTaskRunner                          load_task_runner_;
     LoadJoinRegistry                        load_join_registry_;
