@@ -1,17 +1,28 @@
+import json
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from typing import List
 
 import torch
 
+from rtp_llm.config.output_vocab_config import OUTPUT_TOKENS_FILENAME
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
     select_output_vocab_rows,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, sp_0_pad8, sp_0_pad8_size
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    WeightStyle,
+    sp_0_pad8,
+    sp_0_pad8_size,
+)
 
 
 class FakeCkptFileInfo:
@@ -410,6 +421,299 @@ class OutputVocabWeightTest(unittest.TestCase):
 
         self.assertEqual(sp_0_pad8(source, tp=2, tp_rank=0).shape, (8,))
         self.assertEqual(sp_0_pad8(source, tp=2, tp_rank=1).shape, (8,))
+
+    def test_sp_0_pad8_divisible_rows_split_evenly(self):
+        source = torch.arange(32, dtype=torch.float32).reshape(16, 2)
+
+        rank_zero = sp_0_pad8(source, tp=2, tp_rank=0)
+        rank_one = sp_0_pad8(source, tp=2, tp_rank=1)
+
+        torch.testing.assert_close(rank_zero, source[:8])
+        torch.testing.assert_close(rank_one, source[8:])
+        torch.testing.assert_close(torch.cat([rank_zero, rank_one], 0), source)
+
+    def test_sp_0_pad8_indivisible_rows_keep_real_rows_and_zero_tail(self):
+        source = torch.arange(40, dtype=torch.float32).reshape(20, 2)
+
+        rank_zero = sp_0_pad8(source, tp=2, tp_rank=0)
+        rank_one = sp_0_pad8(source, tp=2, tp_rank=1)
+
+        self.assertEqual(rank_zero.shape, (16, 2))
+        self.assertEqual(rank_one.shape, (16, 2))
+        torch.testing.assert_close(rank_zero, source[:16])
+        torch.testing.assert_close(rank_one[:4], source[16:])
+        self.assertEqual(torch.count_nonzero(rank_one[4:]).item(), 0)
+        torch.testing.assert_close(torch.cat([rank_zero, rank_one], 0)[:20], source)
+
+    def test_sp_0_pad8_rejects_invalid_inputs(self):
+        with self.assertRaisesRegex(ValueError, "row_count must be non-negative"):
+            sp_0_pad8_size(-1, 2)
+        with self.assertRaisesRegex(ValueError, "tp must be positive"):
+            sp_0_pad8_size(8, 0)
+        with self.assertRaisesRegex(ValueError, "at least one dimension"):
+            sp_0_pad8(torch.tensor(1.0), tp=2, tp_rank=0)
+
+        source = torch.ones(3, 2)
+        with self.assertRaisesRegex(ValueError, "tp_rank must be in"):
+            sp_0_pad8(source, tp=2, tp_rank=2)
+        with self.assertRaisesRegex(ValueError, "tp_rank must be in"):
+            sp_0_pad8(source, tp=2, tp_rank=-1)
+
+
+class FakeQuantAlgo:
+    def isQuant(self):
+        return False
+
+    def isGroupwise(self):
+        return False
+
+    def isFp8PTPC(self):
+        return False
+
+
+def make_minimal_configs(
+    output_vocab_ids=(),
+    tie_word_embeddings=False,
+    enable_fp32_lm_head=False,
+    has_lm_head_bias=False,
+):
+    attn_config = SimpleNamespace(
+        head_num=2,
+        kv_head_num=2,
+        size_per_head=4,
+        is_sparse=False,
+        kv_lora_rank=0,
+        nope_head_dim=0,
+        rope_head_dim=0,
+        v_head_dim=0,
+        kv_cache_dtype="AUTO",
+        use_mla=False,
+    )
+    eplb_config = SimpleNamespace(
+        enable_eplb=lambda: False, phy_exp_num=lambda expert_num: expert_num
+    )
+    model_config = SimpleNamespace(
+        qk_norm=False,
+        hidden_size=4,
+        quant_algo=FakeQuantAlgo(),
+        attn_config=attn_config,
+        quant_config=None,
+        num_layers=1,
+        src_quantization_bit=0,
+        isGatedActivation=lambda: False,
+        expert_num=0,
+        moe_n_group=0,
+        eplb_config=eplb_config,
+        moe_k=0,
+        moe_layer_index=[],
+        moe_style=None,
+        tie_word_embeddings=tie_word_embeddings,
+        enable_fp32_lm_head=enable_fp32_lm_head,
+        output_vocab_ids=list(output_vocab_ids),
+        has_lm_head_bias=has_lm_head_bias,
+        vocab_size=5,
+    )
+    parallelism_config = SimpleNamespace(
+        get_attn_tp_size=lambda: 1,
+        get_attn_tp_rank=lambda: 0,
+        ep_size=1,
+        ep_rank=0,
+        dp_size=1,
+        dp_rank=0,
+        world_size=1,
+        local_world_size=1,
+        get_ffn_tp_rank=lambda: 0,
+        get_ffn_tp_size=lambda: 1,
+        ffn_disaggregate_config=SimpleNamespace(
+            is_ffn_service=lambda: False, enable_ffn_disaggregate=False
+        ),
+        tp_size=1,
+        tp_rank=0,
+    )
+    hw_kernel_config = SimpleNamespace(use_swizzleA=False)
+    return model_config, parallelism_config, hw_kernel_config
+
+
+class MinimalLmHeadDeployWeightInfo(ModelDeployWeightInfo):
+    """Runs the production get_weight_info pipeline with a minimal descriptor set."""
+
+    def __init__(self, configs, weights):
+        model_config, parallelism_config, hw_kernel_config = configs
+        super().__init__(model_config, parallelism_config, hw_kernel_config, object())
+        self._weights = weights
+
+    def _get_weight_info(self):
+        return ModelWeightInfo(list(self._weights), [])
+
+    def process_meta_from_ckpt(self, ckpt_metas):
+        pass
+
+
+def make_lm_head(ckpt_names=("lm_head.weight",)):
+    return AtomicWeight(
+        W.lm_head,
+        [CkptWeightInfo(name) for name in ckpt_names],
+        lambda tensors: tensors[0],
+        data_type=torch.float16,
+    )
+
+
+class GetWeightInfoOutputVocabPipelineTest(unittest.TestCase):
+    def build(self, weights, **config_kwargs):
+        configs = make_minimal_configs(**config_kwargs)
+        return MinimalLmHeadDeployWeightInfo(configs, weights)
+
+    def test_pipeline_rejects_special_weight_style(self):
+        deploy = self.build([make_lm_head()], output_vocab_ids=(1, 3))
+        deploy.weight_style = WeightStyle.TRT_ENGINE
+        with self.assertRaisesRegex(ValueError, "special checkpoint weight styles"):
+            deploy.get_weight_info()
+
+    def test_pipeline_rejects_lm_head_bias(self):
+        deploy = self.build(
+            [make_lm_head()], output_vocab_ids=(1, 3), has_lm_head_bias=True
+        )
+        with self.assertRaisesRegex(ValueError, "does not support LM head bias"):
+            deploy.get_weight_info()
+
+        bias_weight = AtomicWeight(W.lm_head_b, [CkptWeightInfo("lm_head.bias")])
+        deploy = self.build([make_lm_head(), bias_weight], output_vocab_ids=(1, 3))
+        with self.assertRaisesRegex(ValueError, "does not support LM head bias"):
+            deploy.get_weight_info()
+
+    def test_pipeline_requires_exactly_one_lm_head_descriptor(self):
+        deploy = self.build([], output_vocab_ids=(1, 3))
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            deploy.get_weight_info()
+
+        deploy = self.build([make_lm_head(), make_lm_head()], output_vocab_ids=(1, 3))
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            deploy.get_weight_info()
+
+    def test_pipeline_rejects_tied_multi_checkpoint_source(self):
+        tied_lm_head = make_lm_head(("lm_head.weight", "extra.weight"))
+        embedding = AtomicWeight(
+            W.embedding, [CkptWeightInfo("embed.weight")], data_type=torch.float16
+        )
+        deploy = self.build(
+            [tied_lm_head, embedding],
+            output_vocab_ids=(1, 3),
+            tie_word_embeddings=True,
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one checkpoint source"):
+            deploy.get_weight_info()
+
+    def test_pipeline_replaces_after_tie_fix_with_fp32(self):
+        embedding = AtomicWeight(
+            W.embedding,
+            [CkptWeightInfo("embed.weight")],
+            lambda tensors: tensors[0],
+            data_type=torch.float16,
+        )
+        deploy = self.build(
+            [make_lm_head(), embedding],
+            output_vocab_ids=(1, 3),
+            tie_word_embeddings=True,
+            enable_fp32_lm_head=True,
+        )
+        result = deploy.get_weight_info()
+        lm_heads = [w for w in result.weights if w.name == W.lm_head]
+        self.assertEqual(len(lm_heads), 1)
+        replacement = lm_heads[0]
+        self.assertIs(type(replacement), AtomicWeight)
+        self.assertEqual(replacement.data_type, torch.float32)
+        # Replacement must be built from the tie-fixed descriptor, which carries
+        # both checkpoint sources (lm_head first, embedding as fallback).
+        self.assertEqual(
+            [w.name for w in replacement.weights], ["lm_head.weight", "embed.weight"]
+        )
+
+    def test_pipeline_keeps_original_dtype_without_fp32(self):
+        deploy = self.build(
+            [make_lm_head()], output_vocab_ids=(1, 3), enable_fp32_lm_head=False
+        )
+        result = deploy.get_weight_info()
+        replacement = [w for w in result.weights if w.name == W.lm_head][0]
+        self.assertEqual(replacement.data_type, torch.float16)
+        source = torch.arange(20, dtype=torch.float16).reshape(5, 4)
+        torch.testing.assert_close(
+            replacement.process_fun([source]),
+            source.index_select(0, torch.tensor([1, 3])),
+        )
+
+
+class FinalizeOutputVocabConfigTest(unittest.TestCase):
+    """Coverage for BaseModel._finalize_output_vocab_config P derivation."""
+
+    class _FakeRealTokenizer:
+        def get_vocab(self):
+            return {}
+
+    class _FakeTokenizer:
+        def get_real_tokenizer(self):
+            return FinalizeOutputVocabConfigTest._FakeRealTokenizer()
+
+    def _make_fake(self, tp, dp, ep, pruning=True, has_lm_head=True):
+        model_config = SimpleNamespace(
+            enable_output_vocab_pruning=pruning,
+            has_lm_head=has_lm_head,
+            vocab_size=100,
+            input_vocab_size=0,
+            ckpt_path="",
+            output_vocab_ids=[99],  # dirty value that must be overwritten or reset
+            output_vocab_padded_size=999,
+            special_tokens=SimpleNamespace(eos_token_id=0),
+        )
+        return SimpleNamespace(
+            model_config=model_config,
+            parallelism_config=SimpleNamespace(tp_size=tp, dp_size=dp, ep_size=ep),
+            tokenizer=self._FakeTokenizer(),
+        )
+
+    def _finalize_with_manifest(self, fake, ids):
+        with tempfile.TemporaryDirectory() as ckpt_path:
+            manifest_path = os.path.join(ckpt_path, OUTPUT_TOKENS_FILENAME)
+            with open(manifest_path, "w", encoding="utf-8") as writer:
+                json.dump(list(ids), writer)
+            fake.model_config.ckpt_path = ckpt_path
+            fake.model_config.vocab_size = max(ids) + 50  # manifest is a proper subset
+            BaseModel._finalize_output_vocab_config(fake)
+
+    def test_single_device_padded_size_equals_k(self):
+        fake = self._make_fake(tp=1, dp=1, ep=1)
+        self._finalize_with_manifest(fake, [1, 3, 5])
+        # eos 0 is merged automatically: K = {0, 1, 3, 5}; single device -> P == K.
+        self.assertEqual(fake.model_config.output_vocab_ids, [0, 1, 3, 5])
+        self.assertEqual(fake.model_config.output_vocab_padded_size, 4)
+
+    def test_tp_gt1_pads_to_multiple_of_tp_times_8(self):
+        fake = self._make_fake(tp=2, dp=1, ep=1)
+        self._finalize_with_manifest(fake, [1, 3, 5])
+        padded = fake.model_config.output_vocab_padded_size
+        self.assertEqual(padded, 16)  # sp_0_pad8_size(K=4, tp=2)
+        self.assertEqual(padded % (2 * 8), 0)
+        self.assertGreaterEqual(padded, 4)
+
+    def test_dp_only_distributed_pads_to_multiple_of_8(self):
+        fake = self._make_fake(tp=1, dp=2, ep=1)
+        self._finalize_with_manifest(fake, [1, 3, 5])
+        self.assertEqual(fake.model_config.output_vocab_padded_size, 8)
+
+    def test_ep_only_distributed_pads_to_multiple_of_8(self):
+        fake = self._make_fake(tp=1, dp=1, ep=2)
+        self._finalize_with_manifest(fake, [1, 3, 5])
+        self.assertEqual(fake.model_config.output_vocab_padded_size, 8)
+
+    def test_disabled_pruning_resets_both_fields(self):
+        fake = self._make_fake(tp=1, dp=1, ep=1, pruning=False)
+        BaseModel._finalize_output_vocab_config(fake)
+        self.assertEqual(fake.model_config.output_vocab_ids, [])
+        self.assertEqual(fake.model_config.output_vocab_padded_size, 0)
+
+    def test_missing_lm_head_raises(self):
+        fake = self._make_fake(tp=1, dp=1, ep=1, has_lm_head=False)
+        with self.assertRaisesRegex(ValueError, "requires a model LM head"):
+            BaseModel._finalize_output_vocab_config(fake)
 
 
 if __name__ == "__main__":

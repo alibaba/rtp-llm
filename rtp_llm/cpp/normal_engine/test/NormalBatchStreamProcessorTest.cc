@@ -581,6 +581,147 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsUnsupportedRequestO
     EXPECT_EQ(think_stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsEachUnsupportedConfigItem) {
+    ResourceContext resource_context;
+    auto            model_config = makeOutputVocabModelConfig();
+    RuntimeConfig   runtime_config;
+
+    struct RejectCase {
+        std::string                          message_keyword;
+        std::function<void(GenerateConfig&)> mutate;
+    };
+    std::vector<RejectCase> cases = {
+        {"repetition", [](GenerateConfig& c) { c.repetition_penalty = 1.1f; }},
+        {"presence", [](GenerateConfig& c) { c.presence_penalty = 0.1f; }},
+        {"frequency", [](GenerateConfig& c) { c.frequency_penalty = 0.1f; }},
+        {"no_repeat_ngram_size", [](GenerateConfig& c) { c.no_repeat_ngram_size = 2; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.return_logits = true; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.return_prompt_logits = true; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.calculate_loss = 1; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.select_tokens_id = {2}; }},
+        {"full-vocabulary logits", [](GenerateConfig& c) { c.select_tokens_str = {"a"}; }},
+        {"think mode", [](GenerateConfig& c) { c.in_think_mode = true; }},
+    };
+    for (const auto& reject_case : cases) {
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({2});
+        query->generate_config = make_shared<GenerateConfig>();
+        reject_case.mutate(*query->generate_config);
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        EXPECT_TRUE(stream->hasError()) << "keyword=" << reject_case.message_keyword;
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS) << "keyword=" << reject_case.message_keyword;
+        EXPECT_NE(stream->statusInfo().ToString().find(reject_case.message_keyword), std::string::npos)
+            << "keyword=" << reject_case.message_keyword;
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsMissingPrimaryEos) {
+    ResourceContext resource_context;
+    // Default special_tokens.eos_token_id is 0; this vocabulary does not contain it.
+    auto          model_config = makeOutputVocabModelConfig({2, 4, 7});
+    RuntimeConfig runtime_config;
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({2});
+    query->generate_config = make_shared<GenerateConfig>();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_NE(stream->statusInfo().ToString().find("EOS"), std::string::npos);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDynamicBeamDispatchReordersAndPlacesTokenAtSeqLength) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;  // no output vocab: beam layout is orthogonal to pruning
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 10;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    auto query                                   = make_shared<GenerateInput>();
+    query->input_ids                             = hostIntBuffer({5});
+    query->generate_config                       = make_shared<GenerateConfig>();
+    query->generate_config->variable_num_beams   = {2, 2};
+    query->generate_config->max_new_tokens       = 2;
+    query->generate_config->return_hidden_states = true;
+    query->generate_config->return_logits        = true;
+    query->generate_config->return_softmax_probs = true;
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    ASSERT_FALSE(stream->hasError());
+
+    // Advance one beam step so currentBatchSize == nextBatchSize == 2 and the
+    // stream uses the beam token layout (seqLength 1 -> 2).
+    int  error_token_id = -1;
+    auto first_tokens   = torch::tensor({5, 1, 5, 2}, torch::kInt32).reshape({2, 2});
+    ASSERT_TRUE(
+        stream->complete_token_ids_->update(first_tokens, 0, 1, 1, 8, 10, true, stream->streamId(), error_token_id));
+    stream->generate_status_->status = StreamState::RUNNING;
+    ASSERT_EQ(stream->currentBatchSize(), 2);
+    ASSERT_EQ(stream->nextBatchSize(), 2);
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups({stream});
+    MergedOutput merge_outputs;
+    // Per-output-beam rows; the new token sits at column seqLength()==2 while the
+    // trailing column holds a different token, so a wrong token_position (last column)
+    // would be observable instead of silently passing.
+    merge_outputs.sampler_output.token_ids  = torch::tensor({5, 1, 2, 1, 5, 2, 3, 1}, torch::kInt32).reshape({2, 4});
+    merge_outputs.sampler_output.beam_index = torch::tensor({1, 0}, torch::kInt32);
+    merge_outputs.sampler_output.success    = torch::tensor({true, true}, torch::kBool);
+    // Distinct per-row values so parent reordering is observable.
+    merge_outputs.model_output.hidden_states =
+        torch::tensor({10.0f, 10.0f, 20.0f, 20.0f}).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.model_output.logits =
+        torch::tensor({0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}).reshape({2, 4}).to(torch::kCUDA);
+
+    ASSERT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    ASSERT_FALSE(stream->hasError()) << "code=" << static_cast<int>(stream->statusInfo().code())
+                                     << " msg=" << stream->statusInfo().ToString();
+
+    // (1) New tokens land in the seqLength column (index 2), not the last column,
+    // and each beam keeps its own parent history.
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{5, 1, 2}));
+    EXPECT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{5, 2, 3}));
+
+    // (2) Hidden states and logits follow beam_index: output row 0 <- parent row 1,
+    // output row 1 <- parent row 0.
+    auto outputs_status = stream->nextOutput();
+    ASSERT_TRUE(outputs_status.ok());
+    auto outputs = std::move(outputs_status.value());
+    ASSERT_EQ(outputs.generate_outputs.size(), 2u);
+    ASSERT_TRUE(outputs.generate_outputs[0].hidden_states.has_value());
+    ASSERT_TRUE(outputs.generate_outputs[1].hidden_states.has_value());
+    ASSERT_TRUE(outputs.generate_outputs[0].logits.has_value());
+    ASSERT_TRUE(outputs.generate_outputs[1].logits.has_value());
+    EXPECT_EQ(toVec<float>(*outputs.generate_outputs[0].hidden_states), (std::vector<float>{20.0f, 20.0f}));
+    EXPECT_EQ(toVec<float>(*outputs.generate_outputs[1].hidden_states), (std::vector<float>{10.0f, 10.0f}));
+    EXPECT_EQ(toVec<float>(*outputs.generate_outputs[0].logits), (std::vector<float>{4.0f, 5.0f, 6.0f, 7.0f}));
+    EXPECT_EQ(toVec<float>(*outputs.generate_outputs[1].logits), (std::vector<float>{0.0f, 1.0f, 2.0f, 3.0f}));
+
+    // (3) Softmax probabilities are gathered from the parent's raw logits row:
+    // beam 0 <- raw row 1 at token 2, beam 1 <- raw row 0 at token 3.
+    auto probs = stream->getSoftmaxProbs();
+    ASSERT_TRUE(probs.defined());
+    const auto row1_softmax  = torch::softmax(torch::tensor({4.0f, 5.0f, 6.0f, 7.0f}), -1);
+    const auto row0_softmax  = torch::softmax(torch::tensor({0.0f, 1.0f, 2.0f, 3.0f}), -1);
+    bool       beam0_matched = false, beam1_matched = false;
+    for (int pos = 0; pos < probs.size(1); ++pos) {
+        if (std::abs(probs[0][pos].item<float>() - row1_softmax[2].item<float>()) < 1e-5) {
+            beam0_matched = true;
+        }
+        if (std::abs(probs[1][pos].item<float>() - row0_softmax[3].item<float>()) < 1e-5) {
+            beam1_matched = true;
+        }
+    }
+    EXPECT_TRUE(beam0_matched);
+    EXPECT_TRUE(beam1_matched);
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     ResourceContext resource_context;
     ModelConfig     model_config;
