@@ -1,6 +1,7 @@
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
+#include "rtp_llm/cpp/engine_base/EmbeddingIdRange.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
@@ -138,6 +139,9 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     std::vector<torch::Tensor> gathered_input_embeddings;
     std::vector<int>           gathered_input_embeddings_locs;
     merged_text_mask.resize(token_num, 1);
+    const int input_vocab_size = model_config_.input_vocab_size ? static_cast<int>(model_config_.input_vocab_size) :
+                                                                  static_cast<int>(model_config_.vocab_size);
+    const int type_vocab_size  = static_cast<int>(model_config_.type_vocab_size);
     for (auto& stream : streams) {
         int         length     = stream->inputLength();
         int         batchSize  = stream->batchSize();
@@ -152,6 +156,10 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                 new_locs.push_back(mm_locs_data[i] + token_idx);
             }
             const auto text_token_mask = mm_feature.value().text_tokens_mask;
+            RETURN_IF_STATUS_ERROR(validateTextTokensMaskLength(stream->streamId(),
+                                                                text_token_mask.data_ptr<int>(),
+                                                                static_cast<int>(text_token_mask.numel()),
+                                                                length));
             memcpy(merged_text_mask.data() + token_idx,
                    text_token_mask.data_ptr<int>(),
                    text_token_mask.numel() * sizeof(int));
@@ -166,6 +174,20 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         memcpy(merged_token_type_ids + (int)token_idx,
                stream->embeddingInput()->token_type_ids.data_ptr(),
                length * sizeof(int32_t));
+        // VisionBert uses -1 as an image-row token-type sentinel. The embedding
+        // kernel still reads the token-type table for masked rows before those
+        // rows are replaced by projected features, so normalize only masked
+        // rows to a safe table index and preserve all text-row validation.
+        normalizeMaskedTokenTypeIds(
+            merged_token_type_ids + token_idx, merged_text_mask.data() + token_idx, length, length);
+        RETURN_IF_STATUS_ERROR(validateEmbeddingIdRanges(stream->streamId(),
+                                                         merged_tokens + token_idx,
+                                                         merged_token_type_ids + token_idx,
+                                                         merged_text_mask.data() + token_idx,
+                                                         length,
+                                                         length,
+                                                         input_vocab_size,
+                                                         type_vocab_size));
         memcpy(input_lengths + (int)batch_idx,
                stream->embeddingInput()->input_lengths.data_ptr(),
                stream->batchSize() * sizeof(int32_t));
