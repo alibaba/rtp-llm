@@ -70,18 +70,30 @@ timeout. This gate is batch-level and independent of the request-level fault-inj
 `queue_depth_limit` check at the RPC entry; both stack.
 
 **Queue metrics — four-state naming and units**: the periodic `java_mock_stats` log
-line reports symmetric P/D queue states:
+line (interval configurable via `--stats-interval-ms`, default 5000 ms; the
+`run_online_eval.sh` env passthrough is `JAVA_MOCK_STATS_INTERVAL_MS`) reports
+symmetric P/D queue states:
 
 | Field | Unit | Meaning |
 |-------|------|---------|
+| `ts_epoch_ms` | epoch ms | Sampling wall-clock timestamp (`System.currentTimeMillis()`), aligns with client `send_start_epoch_ms` |
 | `prefill_waiting` | requests | Queued (not running) prefill requests, sum over prefill engines |
 | `prefill_running` | batches | Running prefill batches (a batch may hold several requests), sum |
 | `max_prefill_waiting` | requests | Peak single-engine queued prefill requests |
 | `decode_waiting` | requests | Queued (not running) decode requests, sum over decode engines |
 | `decode_running` | requests | Running decode requests, sum |
+| `decode_run_min` | requests | Min single-engine running decode requests (mean = `decode_running` / n_decode) |
+| `decode_run_max` | requests | Max single-engine running decode requests |
+| `max_decode_waiting` | requests | Peak single-engine queued decode requests (symmetric with `max_prefill_waiting`) |
+| `decode_done` | requests | Decode requests completed since the previous sample (window counter) |
+| `decode_exec_p50` | ms | Window p50 of decode execution time (end − running-start; bounded reservoir approximation) |
+| `decode_exec_p95` | ms | Window p95 of decode execution time |
+| `decode_exec_max` | ms | Window max of decode execution time (exact) |
 
 The old `prefill_pending` (waiting + running mixed) and `max_prefill_pending` fields
-are gone. `/snapshot` additionally exposes `prefill_waiting_batches` per prefill
+are gone. All other pre-existing fields are unchanged (additive-only evolution).
+`/snapshot` additionally exposes a top-level `ts_epoch_ms` (sampling timestamp) and
+`prefill_waiting_batches` per prefill
 engine — the queued BATCH count, i.e. the same unit as `prefill.max_waiting_batches`
 (the `waiting` snapshot field counts requests).
 

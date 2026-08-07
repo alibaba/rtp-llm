@@ -86,6 +86,7 @@ class ClusterConfigParamTest {
         assertEquals(JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY,
                 config.decodeMaxConcurrency);
         assertEquals(132, config.decodeMaxConcurrency);
+        assertEquals(5000, config.statsIntervalMs, "stats interval keeps the historical 5s cadence");
     }
 
     @Test
@@ -94,10 +95,20 @@ class ClusterConfigParamTest {
                 with(baseArgs(),
                         "--total-kv-tokens", "1234567",
                         "--block-size", "256",
-                        "--decode-max-concurrency", "64"));
+                        "--decode-max-concurrency", "64",
+                        "--stats-interval-ms", "1000"));
         assertEquals(1_234_567L, config.totalKvTokens);
         assertEquals(256, config.blockSize);
         assertEquals(64, config.decodeMaxConcurrency);
+        assertEquals(1000, config.statsIntervalMs);
+    }
+
+    @Test
+    void parseRejectsNonPositiveStatsInterval() {
+        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
+                with(baseArgs(), "--stats-interval-ms", "0")));
+        assertThrows(IllegalArgumentException.class, () -> JavaMockEngineCluster.Config.parse(
+                with(baseArgs(), "--stats-interval-ms", "-5")));
     }
 
     // ──────────── Single-role discovery files ────────────
