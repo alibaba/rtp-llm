@@ -32,6 +32,18 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Shared id-range contract for the embedding kernels, used by both engines
+cc_library(
+    name = "embedding_id_range",
+    hdrs = [
+        "EmbeddingIdRange.h",
+    ],
+    deps = [
+        "@com_google_absl//absl/status",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Profiling and performance monitoring
 cc_library(
     name = "profiler",

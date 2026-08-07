@@ -1146,9 +1146,9 @@ class ChunkedPrefillBatchStreamProcessorTest: public NormalBatchStreamProcessorT
 protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
-        model_config_.max_seq_len            = 2048;
-        model_config_.vocab_size             = 2048;
-        model_config_.num_layers             = 1;
+        model_config_.max_seq_len             = 2048;
+        model_config_.vocab_size              = 2048;
+        model_config_.num_layers              = 1;
         model_config_.has_positional_encoding = true;
         initFullCacheConfig(cache_config_, model_config_.num_layers);
         processor_ = make_unique<NormalBatchStreamProcessor>(
@@ -2498,10 +2498,19 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     stream3->setIsContextStream(true);
 
+    std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
+    query4->input_ids                     = hostIntBuffer({9});
+    query4->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream4 =
+        make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
+    stream4->setIsContextStream(false);
+    stream4->setSeqLength(2);
+
     std::list<GenerateStreamPtr> streams;
     streams.emplace_back(stream1);
     streams.emplace_back(stream2);
     streams.emplace_back(stream3);
+    streams.emplace_back(stream4);
 
     for (const auto& stream : streams) {
         stream->generate_status_->status = StreamState::RUNNING;
@@ -2514,14 +2523,20 @@ TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
         auto merge_input_status = processor.gatherModelInput(stream_groups, holder);
         EXPECT_TRUE(merge_input_status.ok());
 
-        auto&       model_input      = merge_input_status.value();
-        vector<int> combo_tokens     = {1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, -1, 8};
-        vector<int> input_lengths    = {5, 3, 5};
-        vector<int> text_tokens_mask = {1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1};
-        vector<int> mm_features_locs = {1, 10};
+        auto& model_input = merge_input_status.value();
+        // The decode stream has no generated token yet, so its current-token
+        // slot has no contract. Verify only the context rows that follow it.
+        vector<int> context_tokens   = {1, -1, -1, -1, 2, 3, 4, 5, 6, 7, -1, -1, 8};
+        vector<int> input_lengths    = {1, 5, 3, 5};
+        vector<int> sequence_lengths = {1};
+        vector<int> text_tokens_mask = {1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1};
+        vector<int> mm_features_locs = {2, 11};
 
-        EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
+        const auto combo_tokens = toVec<int>(model_input.combo_tokens);
+        ASSERT_EQ(combo_tokens.size(), context_tokens.size() + 1);
+        EXPECT_EQ(context_tokens, vector<int>(combo_tokens.begin() + 1, combo_tokens.end()));
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
+        EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(text_tokens_mask, toVec<int>(model_input.text_tokens_mask));
         EXPECT_EQ(mm_features_locs, toVec<int>(model_input.mm_features_locs));
 
@@ -2837,15 +2852,15 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSki
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNormalDeviceState) {
     autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", "1");
-    auto stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
+    auto            stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
     stream->setChunkSize(4);
     setKvCacheBlocks(stream, {1});
 
     EngineInitParams params;
     params.model_config_                         = model_config_;
     params.model_config_.has_positional_encoding = false;
-    params.py_model                             = py::none();
-    NormalExecutor executor(params, nullptr, true);
+    params.py_model                              = py::none();
+    NormalExecutor             executor(params, nullptr, true);
     NormalBatchStreamProcessor processor(
         params.model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
     MergedOutput outputs;
@@ -2878,9 +2893,9 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNorm
 }
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDeviceStateAndSamplerRowOrder) {
-    auto middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
-    auto plain_stream  = makeRunningStream({1, 2, 3});
-    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    auto       plain_stream  = makeRunningStream({1, 2, 3});
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     middle_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
         .last_sample_token_gpu = torch::full({1}, 41, cuda_i32),
         .next_seq_len_gpu      = torch::full({1}, 10, cuda_i32),
@@ -2892,7 +2907,7 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDev
     params.model_config_ = model_config_;
     params.py_model      = py::none();
     NormalExecutor executor(params, nullptr, true);
-    SamplerOutput outputs;
+    SamplerOutput  outputs;
     outputs.token_ids = torch::tensor({42, 43}, torch::kInt32).reshape({2, 1}).cuda();
     executor.publishNormalDeviceState(StreamGroups({middle_stream, plain_stream}), outputs);
 
@@ -2903,6 +2918,276 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDev
     const auto& plain_state = plain_stream->getNormalAsyncDeviceState();
     EXPECT_EQ(plain_state.next_real_seq_len, 4);
     EXPECT_EQ(toVec<int32_t>(plain_state.last_sample_token_gpu), (vector<int32_t>{43}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testFullyReusedMultimodalPrefixProducesPlainTextTail) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query                 = make_shared<GenerateInput>();
+    query->input_ids           = hostIntBuffer({1, -1, -1, -1, 2});
+    query->generate_config     = make_shared<GenerateConfig>();
+    query->mm_locs             = torch::tensor({1}, torch::kInt32);
+    query->text_tokens_mask    = torch::tensor({1, 0, 0, 0, 1}, torch::kInt32);
+    query->multimodal_features = {torch::rand({3, 10}, torch::kFloat16)};
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(true);
+    stream->setReuseLength(4);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    TensorHolder holder;
+    auto         gathered = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(gathered.ok()) << gathered.status();
+    EXPECT_EQ(vector<int>({2}), toVec<int>(gathered->combo_tokens));
+    EXPECT_FALSE(gathered->text_tokens_mask.defined());
+    EXPECT_FALSE(gathered->mm_features_locs.defined());
+    EXPECT_FALSE(gathered->multimodal_features.has_value());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testContextRejectsNegativeEmbeddingIdWithoutMask) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({-1});
+    query->generate_config = make_shared<GenerateConfig>();
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(true);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    TensorHolder holder;
+    auto         gathered = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_FALSE(gathered.ok());
+    EXPECT_EQ(gathered.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_NE(std::string(gathered.status().message()).find(std::to_string(stream->streamId())), std::string::npos);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testContextRejectsIncompleteMultimodalProducerState) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    struct ProducerCase {
+        const char* name;
+        bool        with_features;
+        bool        with_locs;
+        bool        with_mask;
+    };
+    const ProducerCase cases[] = {
+        {"missing_locations", true, false, true},
+        {"missing_mask", true, true, false},
+        {"missing_features", false, true, true},
+    };
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto query             = make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer({1, -1, -1, -1, 2});
+        query->generate_config = make_shared<GenerateConfig>();
+        if (test_case.with_features) {
+            query->multimodal_features = {torch::rand({3, 10}, torch::kFloat16)};
+        }
+        if (test_case.with_locs) {
+            query->mm_locs = torch::tensor({1}, torch::kInt32);
+        }
+        if (test_case.with_mask) {
+            query->text_tokens_mask = torch::tensor({1, 0, 0, 0, 1}, torch::kInt32);
+        }
+
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(true);
+        stream->generate_status_->status = StreamState::RUNNING;
+
+        StreamGroups stream_groups({stream});
+        TensorHolder holder;
+        auto         gathered = processor.gatherModelInput(stream_groups, holder);
+        ASSERT_FALSE(gathered.ok());
+        EXPECT_EQ(gathered.status().code(), absl::StatusCode::kInvalidArgument);
+        EXPECT_NE(std::string(gathered.status().message()).find(std::to_string(stream->streamId())), std::string::npos);
+        EXPECT_NE(std::string(gathered.status().message()).find("incomplete multimodal producer state"),
+                  std::string::npos);
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testNonMultimodalModelRejectsMultimodalProducerState) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query                 = make_shared<GenerateInput>();
+    query->input_ids           = hostIntBuffer({1, -1, -1, -1, 2});
+    query->generate_config     = make_shared<GenerateConfig>();
+    query->mm_locs             = torch::tensor({1}, torch::kInt32);
+    query->text_tokens_mask    = torch::tensor({1, 0, 0, 0, 1}, torch::kInt32);
+    query->multimodal_features = {torch::rand({3, 10}, torch::kFloat16)};
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(true);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    TensorHolder holder;
+    auto         gathered = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_FALSE(gathered.ok());
+    EXPECT_EQ(gathered.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_NE(std::string(gathered.status().message()).find(std::to_string(stream->streamId())), std::string::npos);
+    EXPECT_NE(std::string(gathered.status().message()).find("non-multimodal model"), std::string::npos);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testContextRejectsMismatchedMultimodalMaskLength) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query                 = make_shared<GenerateInput>();
+    query->input_ids           = hostIntBuffer({1, -1, -1, -1, 2});
+    query->generate_config     = make_shared<GenerateConfig>();
+    query->mm_locs             = torch::tensor({1}, torch::kInt32);
+    query->text_tokens_mask    = torch::tensor({1, 0, 0, 0}, torch::kInt32);
+    query->multimodal_features = {torch::rand({3, 10}, torch::kFloat16)};
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(true);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    TensorHolder holder;
+    auto         gathered = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_FALSE(gathered.ok());
+    EXPECT_EQ(gathered.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_NE(std::string(gathered.status().message()).find(std::to_string(stream->streamId())), std::string::npos);
+    EXPECT_NE(std::string(gathered.status().message()).find("text_tokens_mask length 4 does not match input length 5"),
+              std::string::npos);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testContextRejectsMaskShorterThanReusedPrefix) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.mm_model_config.is_multimodal = true;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query                 = make_shared<GenerateInput>();
+    query->input_ids           = hostIntBuffer({1, -1, -1, -1, 2});
+    query->generate_config     = make_shared<GenerateConfig>();
+    query->mm_locs             = torch::tensor({1}, torch::kInt32);
+    query->text_tokens_mask    = torch::tensor({1, 0, 0}, torch::kInt32);
+    query->multimodal_features = {torch::rand({3, 10}, torch::kFloat16)};
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(true);
+    stream->setReuseLength(4);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups stream_groups({stream});
+    TensorHolder holder;
+    auto         gathered = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_FALSE(gathered.ok());
+    EXPECT_EQ(gathered.status().code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_NE(std::string(gathered.status().message()).find(std::to_string(stream->streamId())), std::string::npos);
+    EXPECT_NE(std::string(gathered.status().message()).find("reuse length 4 exceeds text_tokens_mask length 3"),
+              std::string::npos);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDecodeBatchCarriesNoTextTokensMask) {
+    // Request-level multimodal features remain attached after prefill. A pure
+    // decode batch has no context feature rows and must not allocate stale
+    // prefill-only mask/location buffers.
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len                   = 2048;
+    model_config.vocab_size                    = 2048;
+    model_config.num_layers                    = 2;
+    model_config.mm_model_config.is_multimodal = true;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query                 = make_shared<GenerateInput>();
+    query->input_ids           = hostIntBuffer({1, -1, -1, -1, 2});
+    query->generate_config     = make_shared<GenerateConfig>();
+    query->mm_locs             = torch::tensor({1}, torch::kInt32);
+    query->text_tokens_mask    = torch::tensor({1, 0, 0, 0, 1}, torch::kInt32);
+    query->multimodal_features = {torch::rand({3, 10}, torch::kFloat16)};
+    auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource kv_cache;
+    kv_cache.resetBatchSize(1);
+    kv_cache.initGroups(cache_config.topologyPtr());
+    kv_cache.setBatchBlocks(0, 0, {1});
+    stream->setKVCache(kv_cache);
+    stream->setIsContextStream(false);
+    stream->setSeqLength(stream->inputLength() + 1);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    std::list<GenerateStreamPtr> stream_list{stream};
+    StreamGroups                 stream_groups(stream_list);
+    TensorHolder                 holder;
+    auto                         gathered = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(gathered.ok());
+    EXPECT_FALSE(gathered.value().text_tokens_mask.defined());
+    EXPECT_FALSE(gathered.value().mm_features_locs.defined());
 }
 
 }  // namespace rtp_llm

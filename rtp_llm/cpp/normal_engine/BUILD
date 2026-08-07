@@ -59,6 +59,7 @@ cc_library(
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/observability:execution_recorder",
         "//rtp_llm/cpp/engine_base:engine_base",
+        "//rtp_llm/cpp/engine_base:embedding_id_range",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
