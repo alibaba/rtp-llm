@@ -12,6 +12,7 @@ from rtp_llm.distribute.distributed_server import DistributedServer, get_world_i
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.utils.concurrency_controller import get_global_controller
 
 if TYPE_CHECKING:
@@ -84,6 +85,17 @@ class BackendManager(object):
             model_config=model_config,
         )
 
+        propose_model_config = None
+        if engine_config.sp_config.type == SpeculativeType.DSPARK:
+            # DSpARK must validate model gamma before any runtime resource uses
+            # speculative width. Keep the legacy initialization order below
+            # for every other speculative strategy.
+            propose_model_config = ModelFactory.create_propose_model_config(
+                engine_config=engine_config,
+                model_config=model_config,
+                model_args=self.py_env_configs.model_args,
+            )
+
         # Initialize DeepEP wrapper if MOE model and DeepEP is enabled
         if (
             engine_config.moe_config.use_deepep_moe
@@ -96,12 +108,12 @@ class BackendManager(object):
             logging.info("initialize deepep wrapper")
             init_deepep_wrapper(engine_config, model_config)
 
-        # Optional propose model config
-        propose_model_config = ModelFactory.create_propose_model_config(
-            engine_config=engine_config,
-            model_config=model_config,
-            model_args=self.py_env_configs.model_args,
-        )
+        if engine_config.sp_config.type != SpeculativeType.DSPARK:
+            propose_model_config = ModelFactory.create_propose_model_config(
+                engine_config=engine_config,
+                model_config=model_config,
+                model_args=self.py_env_configs.model_args,
+            )
 
         # Finally create engine using the new API
         self.engine = ModelFactory.from_model_configs(

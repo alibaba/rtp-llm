@@ -119,6 +119,21 @@ TEST_F(GenerateStreamTest, testInitialReuseLengthMustBeLessThanSeqLength) {
     EXPECT_THROW(stream->setInitialReuseLength(stream->seqLength()), RTPException);
 }
 
+TEST_F(GenerateStreamTest, testSyncSpeculativeMaxLengthDoesNotCountAnchorAsNewToken) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    auto            builder = GenerateStreamBuilder();
+    auto            stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
+
+    auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output_buffer->propose_step = 3;
+    stream->setSPOutputBuffer(sp_output_buffer);
+    // Scheduler/cache reservation includes the target-verify anchor, but the
+    // output-length limit must reserve only the three newly proposed tokens.
+    stream->setReserveStep(4);
+
+    EXPECT_EQ(stream->maxTokenNum(), 2045);
+}
+
 // clearMtpAsyncDeviceState rejects stale epochs. A worker that
 // captured epoch N must not clear state that step N+1 already published
 // under epoch N+1.
