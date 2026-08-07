@@ -3,10 +3,12 @@
   "sleep_scale": 1.0,
   "prefill": {
     "fixed_ms": 1.0,
+    "min_ms": 150.0,
     "scale": 1.0
   },
   "decode": {
     "scale": 1.0,
+    "per_token_ms": 45.0,
     "step_ms_by_batch": [
       [1, 1.0],
       [2, 1.0],

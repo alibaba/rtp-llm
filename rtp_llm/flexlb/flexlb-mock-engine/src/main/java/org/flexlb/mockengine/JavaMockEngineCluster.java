@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -179,6 +180,13 @@ public final class JavaMockEngineCluster {
                     .bossEventLoopGroup(bossGroup)
                     .workerEventLoopGroup(workerGroup)
                     .channelType(NioServerSocketChannel.class)
+                    // SO_REUSEADDR on the listening (server) socket: allows rebind
+                    // after kill while the port is in TIME_WAIT. grpc 1.65.0
+                    // NettyServerBuilder.withOption() maps to ServerBootstrap.option(),
+                    // which sets the option on the parent (listening) channel.
+                    .withOption(ChannelOption.SO_REUSEADDR, true)
+                    // SO_REUSEADDR on accepted (child) sockets — defense in depth.
+                    .withChildOption(ChannelOption.SO_REUSEADDR, true)
                     .directExecutor()
                     .maxInboundMessageSize(16 * 1024 * 1024)
                     .addService(service)
@@ -327,6 +335,21 @@ public final class JavaMockEngineCluster {
         private final AtomicInteger waitingPrefillRequests = new AtomicInteger();
         private final AtomicInteger activePrefillBatches = new AtomicInteger();
         private final AtomicInteger activeDecodeRequests = new AtomicInteger();
+        // ── Decode wait queue + hard concurrency gate (change 1) ──
+        // Pending decode requests waiting for a concurrency slot. Drained by the
+        // decode completion callback after a running request finishes.
+        // decodeMaxConcurrency becomes a real hard gate: activeDecodeRequests is
+        // reserved under decodeQueueLock at admission/drain time so it can never
+        // exceed the cap, and a completion hands its freed slot to one queued
+        // request atomically (no lost slot, no over-admission).
+        private final ArrayDeque<DecodePendingTask> decodePendingQueue = new ArrayDeque<>();
+        private final Object decodeQueueLock = new Object();
+        // ── Prefill batch-level wait queue (change 2) ──
+        // Pending prefill batches waiting for a maxPrefillConcurrency slot. Drained
+        // by the prefill completion callback. waitingPrefillRequests now reports the
+        // real queued depth (queued requests) instead of lane-delayed batches.
+        private final ArrayDeque<PrefillPendingBatch> prefillPendingQueue = new ArrayDeque<>();
+        private final Object prefillQueueLock = new Object();
         private final ConcurrentLinkedQueue<VersionedTask> completions = new ConcurrentLinkedQueue<>();
         private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks = new ConcurrentHashMap<>();
         private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues = new ConcurrentHashMap<>();
@@ -496,8 +519,12 @@ public final class JavaMockEngineCluster {
                             // Python worker_status: max(0, _max_prefill_concurrency - len(_running))
                             ? Math.max(0, maxPrefillConcurrency - activePrefillBatches.get())
                             : Math.max(0, decodeMaxConcurrency - (int) runningCount))
+                    // waitingQueryLen now reports the real pending-queue depth for
+                    // BOTH roles: prefill queued requests (waitingPrefillRequests)
+                    // and decode queued requests (decodePendingQueue size). Previously
+                    // decode always reported 0. Reuses the existing proto field.
                     .setWaitingQueryLen(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
-                            ? waitingPrefillRequests.get() : 0)
+                            ? waitingPrefillRequests.get() : decodePendingQueueSize())
                     .setRunningQueryLen((int) runningCount)
                     .setAvailableKvCache(totalKvTokens - usedKv)
                     .setTotalKvCache(totalKvTokens)
@@ -551,7 +578,15 @@ public final class JavaMockEngineCluster {
                     responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
 
             if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
-                scheduleDecodeCompletion(shape, -1, queue);
+                if (!scheduleDecodeCompletion(shape, -1, queue)) {
+                    // Backpressure: decode pending queue full — reject so the
+                    // caller (master/client) perceives decode overload and can
+                    // retry elsewhere. Clean up the per-request state set up above.
+                    responseQueues.remove(requestId);
+                    requestStates.put(requestId, "rejected");
+                    observer.onError(new RuntimeException("decode queue full (backpressure)"));
+                    return;
+                }
             } else {
                 schedulePrefillCompletion(List.of(shape), -1, 0);
             }
@@ -614,12 +649,48 @@ public final class JavaMockEngineCluster {
             cancelledRequests.put(requestId, System.nanoTime());
             addCancelledRid(requestId);
             recordLifecycleEnd(requestId, true);
+            // If the request is still parked in the decode pending queue (not yet
+            // running), it has NOT been counted in activeDecodeRequests nor
+            // activeKvTokens, so those must not be decremented. removeIf under the
+            // admission lock atomically determines queued-vs-running: if the task is
+            // still in the queue it is removed here (wasQueued=true); if it was
+            // already drained into a running slot, removeIf finds nothing and the
+            // request is treated as running (decrement activeDecodeRequests below).
+            boolean wasQueuedDecode = false;
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                synchronized (decodeQueueLock) {
+                    wasQueuedDecode = decodePendingQueue.removeIf(
+                            t -> t.shape().input().getRequestId() == requestId);
+                }
+            }
+            // For prefill, partial batches are left in the queue (other requests in
+            // the batch may still be alive); the drain's anyAlive check drops fully-
+            // cancelled batches and the completion's !alreadyCancelled guard
+            // prevents double-decrement of pendingRequests for cancelled members.
+            DecodePendingTask drainNext = null;
             EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
             if (removed != null) {
                 pendingRequests.decrementAndGet();
-                if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE && !wasQueuedDecode) {
                     activeDecodeRequests.decrementAndGet();
                     activeKvTokens.addAndGet(-removed.getInputLength());
+                    // Drain the queue to hand the freed slot to a queued request.
+                    // Without this, a cancelled running request's slot would sit
+                    // idle until the next completion fires, stalling queued
+                    // requests. Reuses the same skip-cancelled + pollFirst +
+                    // activeDecodeRequests++ pattern as the completion drain.
+                    synchronized (decodeQueueLock) {
+                        while (!decodePendingQueue.isEmpty()) {
+                            DecodePendingTask candidate = decodePendingQueue.peekFirst();
+                            if (!runningTasks.containsKey(candidate.shape().input().getRequestId())) {
+                                decodePendingQueue.pollFirst();
+                                continue;
+                            }
+                            activeDecodeRequests.incrementAndGet();
+                            drainNext = decodePendingQueue.pollFirst();
+                            break;
+                        }
+                    }
                 }
             }
             requestStates.put(requestId, "cancelled");
@@ -650,6 +721,13 @@ public final class JavaMockEngineCluster {
                 // to remove it from the map after offering the cancel response.
                 responseQueues.remove(requestId);
             }
+            // Run the next queued decode request outside the lock (slot already
+            // reserved by the drain above) to avoid holding decodeQueueLock while
+            // scheduling.
+            if (drainNext != null) {
+                lastEnqueueTime.set(System.nanoTime());
+                runDecode(drainNext.shape(), drainNext.batchId(), drainNext.responseQueue());
+            }
         }
 
         private void schedulePrefillCompletion(List<MockPerformanceModel.RequestShape> shapes,
@@ -658,6 +736,46 @@ public final class JavaMockEngineCluster {
             if (shapes.isEmpty()) {
                 return;
             }
+            // Hard gate on maxPrefillConcurrency (change 2): a batch is either admitted
+            // immediately (occupies a concurrency slot) or parked in the pending
+            // queue until a running batch finishes. activePrefillBatches is reserved
+            // under prefillQueueLock at admission/drain time so admission and the
+            // completion-callback drain cannot over-admit into the same slot.
+            synchronized (prefillQueueLock) {
+                if (activePrefillBatches.get() < maxPrefillConcurrency) {
+                    activePrefillBatches.incrementAndGet();
+                    pendingRequests.addAndGet(shapes.size());
+                    for (MockPerformanceModel.RequestShape shape : shapes) {
+                        runningTasks.put(shape.input().getRequestId(),
+                                task(shape, batchId, dpRank,
+                                        EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+                    }
+                } else {
+                    prefillPendingQueue.addLast(new PrefillPendingBatch(shapes, batchId, dpRank));
+                    waitingPrefillRequests.addAndGet(shapes.size());
+                    pendingRequests.addAndGet(shapes.size());
+                    for (MockPerformanceModel.RequestShape shape : shapes) {
+                        runningTasks.put(shape.input().getRequestId(),
+                                task(shape, batchId, dpRank,
+                                        EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+                    }
+                    return;
+                }
+            }
+            runPrefillBatch(shapes, batchId, dpRank);
+        }
+
+        /**
+         * Execute a prefill batch through the lane time-axis serialization and
+         * schedule its completion. The concurrency slot is already reserved by the
+         * caller (schedulePrefillCompletion admission or pending-queue drain), so
+         * this method must NOT touch activePrefillBatches, pendingRequests, nor
+         * waitingPrefillRequests — only lane timing, runningTask phase, and the
+         * completion callback (which frees the slot and drains the queue).
+         */
+        private void runPrefillBatch(List<MockPerformanceModel.RequestShape> shapes,
+                                     long batchId,
+                                     int dpRank) {
             long executionMs = performance.prefillMs(shapes);
             long generateDelayMs = faultConfig.getGenerateDelayMs();
             long now = System.nanoTime();
@@ -678,20 +796,12 @@ public final class JavaMockEngineCluster {
             }
 
             stats.recordPrefillBatch(shapes.size(), executionMs);
-            pendingRequests.addAndGet(shapes.size());
-            for (MockPerformanceModel.RequestShape shape : shapes) {
-                runningTasks.put(shape.input().getRequestId(),
-                        task(shape, batchId, dpRank, EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
-            }
             long startDelayNanos = Math.max(0, startNanos - now);
             if (startDelayNanos == 0) {
                 startPrefillBatch(shapes, batchId, dpRank);
             } else {
-                waitingPrefillRequests.addAndGet(shapes.size());
-                scheduler.schedule(() -> {
-                    waitingPrefillRequests.addAndGet(-shapes.size());
-                    startPrefillBatch(shapes, batchId, dpRank);
-                }, startDelayNanos, TimeUnit.NANOSECONDS);
+                scheduler.schedule(() -> startPrefillBatch(shapes, batchId, dpRank),
+                        startDelayNanos, TimeUnit.NANOSECONDS);
             }
 
             long delayNanos = Math.max(0, finishNanos - now);
@@ -699,12 +809,17 @@ public final class JavaMockEngineCluster {
                 int activeCount = 0;
                 for (MockPerformanceModel.RequestShape shape : shapes) {
                     long requestId = shape.input().getRequestId();
+                    boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                     EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
-                    if (removed != null) {
+                    // Only count non-cancelled requests toward pendingRequests
+                    // decrement. A cancelled member was re-put to RUNNING by
+                    // startPrefillBatch (which loops all shapes), so removed!=null
+                    // alone would double-decrement pendingRequests (cancel already
+                    // decremented it). The !alreadyCancelled guard fixes this.
+                    if (removed != null && !alreadyCancelled) {
                         activeCount++;
                     }
                     recordCompletion(shape, batchId, executionMs, dpRank);
-                    boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                     // Python marks the prefill-side lifecycle entry finished when the
                     // prefill phase ends, even though decode may continue elsewhere.
                     recordLifecycleEnd(requestId, alreadyCancelled);
@@ -738,13 +853,45 @@ public final class JavaMockEngineCluster {
                 }
                 activePrefillBatches.decrementAndGet();
                 pendingRequests.addAndGet(-activeCount);
+                // Drain one pending batch under the same lock that guards admission,
+                // handing this completion's freed slot to a queued batch atomically.
+                PrefillPendingBatch nextBatch = null;
+                synchronized (prefillQueueLock) {
+                    while (!prefillPendingQueue.isEmpty()) {
+                        PrefillPendingBatch candidate = prefillPendingQueue.peekFirst();
+                        // Skip batches whose every member was cancelled while queued
+                        // (cancel removed their runningTasks entries and already
+                        // decremented pendingRequests). Drop them without reserving.
+                        boolean anyAlive = false;
+                        for (MockPerformanceModel.RequestShape s : candidate.shapes()) {
+                            if (runningTasks.containsKey(s.input().getRequestId())) {
+                                anyAlive = true;
+                                break;
+                            }
+                        }
+                        if (!anyAlive) {
+                            prefillPendingQueue.pollFirst();
+                            waitingPrefillRequests.addAndGet(-candidate.shapes().size());
+                            continue;
+                        }
+                        activePrefillBatches.incrementAndGet();
+                        waitingPrefillRequests.addAndGet(-candidate.shapes().size());
+                        nextBatch = prefillPendingQueue.pollFirst();
+                        break;
+                    }
+                }
+                if (nextBatch != null) {
+                    runPrefillBatch(nextBatch.shapes(), nextBatch.batchId(), nextBatch.dpRank());
+                }
             }, delayNanos, TimeUnit.NANOSECONDS);
         }
 
         private void startPrefillBatch(List<MockPerformanceModel.RequestShape> shapes,
                                        long batchId,
                                        int dpRank) {
-            activePrefillBatches.incrementAndGet();
+            // activePrefillBatches is reserved at admission (schedulePrefillCompletion)
+            // and drain time, not here, so maxPrefillConcurrency acts as a real hard
+            // gate rather than a report-only value.
             for (MockPerformanceModel.RequestShape shape : shapes) {
                 runningTasks.put(shape.input().getRequestId(),
                         task(shape, batchId, dpRank, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
@@ -761,36 +908,118 @@ public final class JavaMockEngineCluster {
                 }
                 FastRpcService decode = services.get(addr.getGrpcPort());
                 if (decode != null && decode.grpcPort != grpcPort) {
-                    decode.scheduleDecodeCompletion(shape, batchId, queue);
-                    return true;
+                    // Propagate the decode admission result: true = admitted/queued,
+                    // false = backpressure (decode pending queue full). On false the
+                    // caller treats decodeStarted=false and delivers the finished
+                    // output from the prefill side (degraded but no request lost).
+                    return decode.scheduleDecodeCompletion(shape, batchId, queue);
                 }
                 return false;
             }
             return false;
         }
 
-        private void scheduleDecodeCompletion(MockPerformanceModel.RequestShape shape, long batchId,
+        /**
+         * Admission point for a decode request. Returns true if the request was
+         * accepted (scheduled immediately, queued behind the concurrency gate, or
+         * already scheduled previously); false if rejected due to pending-queue
+         * backpressure (RESOURCE_EXHAUSTED) so the caller can degrade.
+         *
+         * <p>The putIfAbsent guard (ConcurrentDoubleSchedulingTest) is preserved at
+         * the entry to prevent double-scheduling the same requestId.
+         */
+        private boolean scheduleDecodeCompletion(MockPerformanceModel.RequestShape shape, long batchId,
                 LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue) {
+            long requestId = shape.input().getRequestId();
+            // Guard: never schedule the same requestId twice on this engine.
             EngineRpcService.TaskInfoPB existing = runningTasks.putIfAbsent(
-                    shape.input().getRequestId(),
+                    requestId,
                     task(shape, batchId, 0, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
             if (existing != null) {
-                return; // 已调度，原子跳过避免双重计数
+                return true; // already accepted/scheduled on this engine
             }
-            recordLifecycleStart(shape.input().getRequestId(), batchId,
+
+            int pendingCap = effectiveDecodePendingCap();
+            synchronized (decodeQueueLock) {
+                if (activeDecodeRequests.get() < decodeMaxConcurrency) {
+                    // Free slot — reserve it now (under the lock) so a concurrent
+                    // completion-callback drain cannot admit another request into
+                    // the same slot. runDecode does the actual scheduling outside
+                    // the lock; activeDecodeRequests is already accounted here.
+                    // pendingRequests is incremented here to match the unconditional
+                    // decrement in the completion callback (wasRunning path). The
+                    // queued path increments it at enqueue; both must balance so
+                    // checkLeakDrain / periodicCleanup see net zero.
+                    activeDecodeRequests.incrementAndGet();
+                    pendingRequests.incrementAndGet();
+                } else if (pendingCap <= 0 || decodePendingQueue.size() < pendingCap) {
+                    // Concurrency gate hit — park the request in the pending queue.
+                    // It will be drained when a running request completes.
+                    decodePendingQueue.addLast(new DecodePendingTask(shape, batchId, responseQueue));
+                    pendingRequests.incrementAndGet();
+                    recordLifecycleStart(requestId, batchId,
+                            batchId >= 0 ? "enqueue_batch" : "generate_stream");
+                    lastEnqueueTime.set(System.nanoTime());
+                    return true; // queued (accepted, will run when a slot frees)
+                } else {
+                    // Backpressure: pending queue full — reject so the caller
+                    // (master / prefill hand-off) perceives decode overload.
+                    // Undo the runningTasks claim made by putIfAbsent above.
+                    runningTasks.remove(requestId);
+                    return false;
+                }
+            }
+            // Admitted immediately — record lifecycle and run (outside the lock so
+            // scheduler.schedule never blocks the admission/drain critical section).
+            recordLifecycleStart(requestId, batchId,
                     batchId >= 0 ? "enqueue_batch" : "generate_stream");
             lastEnqueueTime.set(System.nanoTime());
-            int activeBatch = activeDecodeRequests.incrementAndGet();
+            runDecode(shape, batchId, responseQueue);
+            return true;
+        }
+
+        /**
+         * Actually schedule a decode completion. The concurrency slot is already
+         * reserved by the caller (scheduleDecodeCompletion admission or the
+         * pending-queue drain), so this method must NOT touch activeDecodeRequests
+         * — only activeKvTokens (modelled when the request starts running).
+         */
+        private void runDecode(MockPerformanceModel.RequestShape shape, long batchId,
+                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue) {
             activeKvTokens.addAndGet(shape.inputLen());
-            pendingRequests.incrementAndGet();
+            int activeBatch = activeDecodeRequests.get();
             long executionMs = performance.decodeMs(shape.outputLen(), activeBatch);
             scheduler.schedule(() -> {
                 long requestId = shape.input().getRequestId();
                 EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
-                if (removed != null) {
-                    activeDecodeRequests.decrementAndGet();
-                    activeKvTokens.addAndGet(-shape.inputLen());
-                    pendingRequests.decrementAndGet();
+                boolean wasRunning = removed != null;
+                // Free the slot and drain one pending request under the same lock
+                // that guards admission, so the freed slot is handed to a queued
+                // request atomically (no lost slot, no over-admission). Skip
+                // queued requests cancelled while queued (cancel removed their
+                // runningTasks entry and already decremented pendingRequests).
+                DecodePendingTask nextPending = null;
+                synchronized (decodeQueueLock) {
+                    if (wasRunning) {
+                        activeDecodeRequests.decrementAndGet();
+                        activeKvTokens.addAndGet(-shape.inputLen());
+                        pendingRequests.decrementAndGet();
+                        // Only drain when this completion actually freed a slot.
+                        // If wasRunning=false the request was cancelled before the
+                        // completion fired; cancel() already released the slot and
+                        // drained the queue, so draining here would over-admit
+                        // beyond decodeMaxConcurrency.
+                        while (!decodePendingQueue.isEmpty()) {
+                            DecodePendingTask candidate = decodePendingQueue.peekFirst();
+                            if (!runningTasks.containsKey(candidate.shape().input().getRequestId())) {
+                                decodePendingQueue.pollFirst();
+                                continue;
+                            }
+                            activeDecodeRequests.incrementAndGet();
+                            nextPending = decodePendingQueue.pollFirst();
+                            break;
+                        }
+                    }
                 }
                 recordCompletion(shape, batchId, executionMs, 0);
                 boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
@@ -811,7 +1040,32 @@ public final class JavaMockEngineCluster {
                 if (performance.shouldAdmitCache() && cache.admit(shape.blockKeys())) {
                     cacheVersion.incrementAndGet();
                 }
+                // Run the next queued decode request (slot already reserved).
+                if (nextPending != null) {
+                    lastEnqueueTime.set(System.nanoTime());
+                    runDecode(nextPending.shape(), nextPending.batchId(),
+                            nextPending.responseQueue());
+                }
             }, executionMs, TimeUnit.MILLISECONDS);
+        }
+
+        /**
+         * Effective pending-queue capacity for decode backpressure. Reuses the
+         * fault-injection {@code queue_depth_limit} when configured (>0); otherwise
+         * falls back to a sane default so the queue acts as a real backpressure
+         * gate (2× decode concurrency, at least 256). /set_queue_depth can still
+         * override at runtime.
+         */
+        private int effectiveDecodePendingCap() {
+            int qdl = faultConfig.getQueueDepthLimit();
+            return qdl > 0 ? qdl : Math.max(256, decodeMaxConcurrency * 2);
+        }
+
+        /** Snapshot size of the decode pending queue (for waitingQueryLen reporting). */
+        private int decodePendingQueueSize() {
+            synchronized (decodeQueueLock) {
+                return decodePendingQueue.size();
+            }
         }
 
         private EngineRpcService.TaskInfoPB task(MockPerformanceModel.RequestShape shape,
@@ -1132,7 +1386,11 @@ public final class JavaMockEngineCluster {
             snap.put("running", runningTasks.size());
             // Python: max(_injected_queue_depth, _prefill_waiting). Java has no fake injected
             // depth (see /set_queue_depth note), so this is the real waiting count.
-            snap.put("waiting", waitingPrefillRequests.get());
+            // For decode engines, report the decode pending queue depth (consistent
+            // with getWorkerStatus waitingQueryLen) instead of waitingPrefillRequests
+            // which is always 0 for decode engines.
+            snap.put("waiting", roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
+                    ? decodePendingQueueSize() : waitingPrefillRequests.get());
             snap.put("accepted", acceptedCount.get());
             snap.put("completed", completedCount.get());
             snap.put("cache_keys", cache.snapshotKeys().size());
@@ -1182,6 +1440,20 @@ public final class JavaMockEngineCluster {
         }
 
         private record VersionedTask(long version, EngineRpcService.TaskInfoPB task) {
+        }
+
+        /** A decode request parked in the pending queue waiting for a concurrency slot. */
+        private record DecodePendingTask(
+                MockPerformanceModel.RequestShape shape,
+                long batchId,
+                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue) {
+        }
+
+        /** A prefill batch parked in the pending queue waiting for a concurrency slot. */
+        private record PrefillPendingBatch(
+                List<MockPerformanceModel.RequestShape> shapes,
+                long batchId,
+                int dpRank) {
         }
     }
 
