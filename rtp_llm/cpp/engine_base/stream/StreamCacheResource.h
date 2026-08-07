@@ -120,6 +120,7 @@ public:
     }
 
 private:
+    bool startAsyncLoadCache();
     void loadCacheSync();
     void waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context);
     void updateReuseLengthsFromContext(const std::shared_ptr<FusedAsyncReadContext>& read_context);
@@ -146,8 +147,8 @@ private:
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
     /// Async connector load is gated to once per cache lifecycle: duplicate `initKVBlock` must
-    /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared
-    /// so any future reuse of this resource can load again. Concurrent callers use `exchange`.
+    /// not re-issue async read (see tests). Reset in `releaseResource()` when blocks are cleared.
+    /// GenerateStream serializes the context and retry state; this atomic only owns the one-shot gate.
     std::atomic<bool> load_cache_once_{false};
 };
 
