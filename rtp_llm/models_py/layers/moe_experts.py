@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.device import get_current_device
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import FusedMoeFactory
@@ -921,6 +922,15 @@ class BaseMoEExperts(RtpModule):
     # ------------------------------------------------------------------ #
     #  Forward
     # ------------------------------------------------------------------ #
+
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        if self.fused_moe is None:
+            raise RuntimeError(
+                "Fused MoE executor is not initialized; complete weight loading "
+                "and post-load processing before reading topk_ids_dtype"
+            )
+        return self.fused_moe.topk_ids_dtype
 
     def forward(
         self,

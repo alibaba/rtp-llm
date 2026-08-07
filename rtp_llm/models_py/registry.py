@@ -183,3 +183,21 @@ register_lazy_model(
     "rtp_llm.models_py.new_models.qwen3_vl.vision",
     "Qwen3VLForVisionEmbedding",
 )
+for _deepseek_model_type in (
+    "deepseek2",
+    "deepseek3",
+    "deepseek_v31",
+    "deepseek_v32",
+    "glm_5",
+    "kimi_k2",
+):
+    register_lazy_model(
+        _deepseek_model_type,
+        "rtp_llm.models_py.new_models.deepseek_v3",
+        "DeepSeekV32ForCausalLM",
+    )
+register_lazy_model(
+    "deepseek-v3-mtp",
+    "rtp_llm.models_py.new_models.deepseek_v3_mtp",
+    "DeepSeekV32MTPForCausalLM",
+)

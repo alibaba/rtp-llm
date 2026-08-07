@@ -6,6 +6,8 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from safetensors.torch import save_file
+
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
@@ -13,7 +15,6 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
-from safetensors.torch import save_file
 
 
 def _model_config():
@@ -32,9 +33,35 @@ def _model_config():
         enable_fp32_lm_head=False,
         tie_word_embeddings=True,
         compute_dtype=torch.float32,
+        generate_env_config=None,
         lora_infos={},
         quant_config=types.SimpleNamespace(get_runtime_method_key=lambda: "none"),
     )
+
+
+def _base_model(config, hw_kernel_config=None):
+    if hw_kernel_config is None:
+        hw_kernel_config = types.SimpleNamespace(enable_cuda_graph=False)
+    kv_cache_config = types.SimpleNamespace(
+        multi_task_prompt=False,
+        multi_task_prompt_str="",
+    )
+    with patch.object(BaseModel, "load_tokenizer", return_value=None):
+        model = BaseModel(
+            model_config=config,
+            parallelism_config=_parallelism_config(),
+            hw_kernel_config=hw_kernel_config,
+            kv_cache_config=kv_cache_config,
+            fmha_config=None,
+            moe_config=None,
+            max_generate_batch_size=0,
+            load_method=LoadMethod.SCRATCH,
+            vit_config=None,
+            merge_lora=False,
+            device_resource_config=None,
+        )
+    model.tokenizer = None
+    return model
 
 
 def _parallelism_config():
@@ -168,15 +195,8 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         ]
         excluded = "model.layers.0.mlp.down_proj"
         config = _model_config()
-        base_model = object.__new__(BaseModel)
-        base_model.model_config = config
-        base_model.parallelism_config = _parallelism_config()
-        base_model.force_cpu_load_weights = False
-        base_model.load_method = LoadMethod.SCRATCH
-        base_model.fmha_config = None
-        base_model.device_resource_config = None
-        base_model.tokenizer = None
-        base_model.hw_kernel_config = types.SimpleNamespace(enable_cuda_graph=False)
+        base_model = _base_model(config)
+        self.assertFalse(base_model.keep_mla_checkpoint_weights)
 
         with tempfile.TemporaryDirectory() as model_path:
             with open(f"{model_path}/config.json", "w") as output:
@@ -276,19 +296,11 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 config = _model_config()
                 config.quant_config = source_config
                 config.ckpt_path = model_path
-                base_model = object.__new__(BaseModel)
-                base_model.model_config = config
-                base_model.parallelism_config = _parallelism_config()
-                base_model.force_cpu_load_weights = False
-                base_model.load_method = LoadMethod.SCRATCH
-                base_model.fmha_config = None
-                base_model.device_resource_config = None
-                base_model.tokenizer = None
                 hw_kernel_config = types.SimpleNamespace(
                     enable_cuda_graph=False,
                     use_swizzleA=True,
                 )
-                base_model.hw_kernel_config = hw_kernel_config
+                base_model = _base_model(config, hw_kernel_config)
 
                 with patch.object(
                     BaseModel, "_get_device_str", return_value="cpu"
@@ -350,15 +362,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
 
     def test_base_model_entry_loads_registered_qwen_runtime(self):
         config = _model_config()
-        base_model = object.__new__(BaseModel)
-        base_model.model_config = config
-        base_model.parallelism_config = _parallelism_config()
-        base_model.force_cpu_load_weights = False
-        base_model.load_method = LoadMethod.SCRATCH
-        base_model.fmha_config = None
-        base_model.device_resource_config = None
-        base_model.tokenizer = None
-        base_model.hw_kernel_config = types.SimpleNamespace(enable_cuda_graph=False)
+        base_model = _base_model(config)
 
         with tempfile.TemporaryDirectory() as model_path:
             config.ckpt_path = model_path
