@@ -453,8 +453,16 @@ class ModelFactory:
             ModelFactory._setup_dspark_configs(
                 sp_config, model_config, propose_model_config
             )
+            ModelFactory._sync_dspark_deepep_capacity(engine_config)
 
         return propose_model_config
+
+    @staticmethod
+    def _sync_dspark_deepep_capacity(engine_config: EngineConfig) -> None:
+        """Refresh DeepEP capacity after checkpoint gamma replaces the CLI value."""
+        gamma = int(engine_config.sp_config.gen_num_per_cycle)
+        concurrency = int(engine_config.concurrency_config.concurrency_limit)
+        engine_config.moe_config.ll_num_max_token = concurrency * (gamma + 1)
 
     @staticmethod
     def _setup_dspark_configs(
@@ -464,10 +472,12 @@ class ModelFactory:
 
         DeepSeek-V4 DSpARK uses a draft query block of exactly ``gamma`` rows
         (one anchor plus ``gamma - 1`` noise tokens). The target verifies
-        ``gamma + 1`` rows. ``gen_num_per_cycle`` therefore remains the single
-        source of truth for the fixed proposal width in the engine.
+        ``gamma + 1`` rows. Gamma is a model property stored as
+        ``dspark_block_size``; the user-facing ``gen_num_per_cycle`` value must
+        not change the trained block geometry.
         """
         required = {
+            "dspark_block_size": propose_model_config.dspark_block_size,
             "dspark_noise_token_id": propose_model_config.dspark_noise_token_id,
             "dspark_target_layer_ids": propose_model_config.dspark_target_layer_ids,
             "dspark_markov_rank": propose_model_config.dspark_markov_rank,
@@ -479,11 +489,25 @@ class ModelFactory:
                 + ", ".join(missing)
             )
 
-        gamma = int(sp_config.gen_num_per_cycle)
+        gamma = int(propose_model_config.dspark_block_size)
         if gamma <= 0:
             raise ValueError(
-                f"dspark requires a positive gen_num_per_cycle, got {gamma}"
+                f"dspark requires a positive dspark_block_size, got {gamma}"
             )
+
+        configured_gamma = int(sp_config.gen_num_per_cycle)
+        if configured_gamma != gamma:
+            logging.info(
+                "DSpARK ignores configured gen_num_per_cycle=%d and uses "
+                "checkpoint dspark_block_size=%d",
+                configured_gamma,
+                gamma,
+            )
+        # This is the common engine width carried into cache sizing, CUDA graph
+        # capture, ProposeModelEngineInitParams and MtpExecutor::propose_step_.
+        sp_config.gen_num_per_cycle = gamma
+        model_config.gen_num_per_cycle = gamma
+        propose_model_config.gen_num_per_cycle = gamma
 
         noise_token_id = int(propose_model_config.dspark_noise_token_id)
         if noise_token_id < 0 or noise_token_id >= propose_model_config.vocab_size:

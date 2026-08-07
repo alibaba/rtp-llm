@@ -640,9 +640,10 @@ class DeepSeekV4(DeepSeekV2):
         config.swiglu_limit = float(config_json.get("swiglu_limit", 0.0))
         config.num_hash_layers = int(config_json.get("num_hash_layers", 0))
 
-        # DSpARK weight metadata is present in the target checkpoint as well
-        # as the draft view. Proposal width is deliberately not read from the
-        # checkpoint: GEN_NUM_PER_CIRCLE is the runtime source of truth.
+        # DSpARK metadata is present in the target checkpoint as well as the
+        # draft view. dspark_block_size is the model-defined proposal width.
+        block_size = config_json.get("dspark_block_size")
+        config.dspark_block_size = int(block_size) if block_size is not None else None
         config.dspark_noise_token_id = config_json.get("dspark_noise_token_id")
         target_layer_ids = config_json.get("dspark_target_layer_ids")
         config.dspark_target_layer_ids = (

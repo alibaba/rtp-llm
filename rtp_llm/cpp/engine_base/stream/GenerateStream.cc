@@ -760,13 +760,12 @@ size_t GenerateStream::curBlocksNum() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
-    auto reserve_tokens = reserveStep();
+    size_t reserve_tokens = 0;
     if (sp_output_buffer_) {
-        auto sp_reserve_tokens = static_cast<size_t>(sp_output_buffer_->propose_step);
+        reserve_tokens = static_cast<size_t>(sp_output_buffer_->propose_step);
         if (useStreamAsyncReserveTokens()) {
-            sp_reserve_tokens = sp_reserve_tokens * 2 + 1;
+            reserve_tokens = reserve_tokens * 2 + 1;
         }
-        reserve_tokens = std::max(reserve_tokens, sp_reserve_tokens);
     }
 
     const auto max_token_num_by_seq_len  = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;
