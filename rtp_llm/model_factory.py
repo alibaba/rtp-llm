@@ -106,6 +106,9 @@ class ModelFactory:
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+            keep_mla_checkpoint_weights=(
+                engine_config.load_config.keep_mla_checkpoint_weights
+            ),
         )
         return model
 
@@ -196,6 +199,9 @@ class ModelFactory:
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
+                keep_mla_checkpoint_weights=(
+                    engine_config.load_config.keep_mla_checkpoint_weights
+                ),
             )
             aliased_local_bytes = 0
             for name in alias_names:

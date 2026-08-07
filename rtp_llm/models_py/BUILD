@@ -172,6 +172,9 @@ py_library(
     ] + glob([
         "layers/*.py",
         "new_models/*.py",
+        "new_models/deepseek_v3/*.py",
+        "new_models/deepseek_v3_mtp/*.py",
+        "new_models/mtp/*.py",
         "new_models/qwen2/*.py",
         "new_models/qwen2_moe/*.py",
         "new_models/qwen2_vl/*.py",
