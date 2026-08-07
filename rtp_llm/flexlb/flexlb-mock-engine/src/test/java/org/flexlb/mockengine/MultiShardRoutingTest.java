@@ -338,10 +338,10 @@ class MultiShardRoutingTest {
                 "block_size", 1024,
                 "sleep_scale", 1.0,
                 "jitter_pct", 0.0,
-                // Routing tests enqueue more batches per engine than the default
-                // waiting-queue cap (4) allows; disable it to keep the original
+                // Routing tests enqueue more batches per engine than a bounded
+                // waiting queue allows; use -1 (unbounded) to keep the original
                 // unbounded-queue routing semantics under test.
-                "prefill", Map.of("scale", 1.0, "max_waiting_batches", 0),
+                "prefill", Map.of("scale", 1.0, "max_waiting_batches", -1),
                 "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MAPPER.writeValue(master.toFile(), Map.of(
                 "zone_process_setting", Map.of(
