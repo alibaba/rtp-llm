@@ -1,4 +1,7 @@
+import json
+import os
 import unittest
+from unittest.mock import patch
 
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
@@ -216,6 +219,142 @@ class TestGlm4MoeDetector(unittest.TestCase):
         )
         self.assertIn('"city": "杭州"', result.calls[0].parameters)
         self.assertIn('"city": "北京"', result.calls[1].parameters)
+
+    def test_streaming_final_chunk_drains_all_tool_calls_and_trailing_text(self):
+        text = (
+            "准备查询"
+            "<tool_call>get_time</tool_call>"
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value>杭州</arg_value></tool_call>"
+            "查询已提交"
+        )
+
+        result = self.detector.parse_streaming_increment(text, self.tools)
+
+        self.assertEqual(result.normal_text, "准备查询查询已提交")
+        self.assertEqual(
+            [call.name for call in result.calls], ["get_time", "get_weather"]
+        )
+        self.assertEqual([call.tool_index for call in result.calls], [0, 1])
+        self.assertEqual(json.loads(result.calls[0].parameters), {})
+        self.assertEqual(json.loads(result.calls[1].parameters), {"city": "杭州"})
+        self.assertEqual(self.detector._buffer, "")
+
+    def test_streaming_multiple_tool_calls_are_independent_of_chunk_boundary(self):
+        text = (
+            "前缀"
+            "<tool_call>get_time</tool_call>"
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value>杭州</arg_value></tool_call>"
+            "后缀"
+        )
+
+        for split in range(len(text) + 1):
+            with self.subTest(split=split):
+                detector = Glm4MoeDetector()
+                results = [
+                    detector.parse_streaming_increment(text[:split], self.tools),
+                    detector.parse_streaming_increment(text[split:], self.tools),
+                ]
+                calls = [call for result in results for call in result.calls]
+
+                self.assertEqual(
+                    "".join(result.normal_text for result in results), "前缀后缀"
+                )
+                self.assertEqual(
+                    [call.name for call in calls], ["get_time", "get_weather"]
+                )
+                self.assertEqual([call.tool_index for call in calls], [0, 1])
+                self.assertEqual(json.loads(calls[0].parameters), {})
+                self.assertEqual(json.loads(calls[1].parameters), {"city": "杭州"})
+                self.assertEqual(detector._buffer, "")
+
+    def test_streaming_preserves_whitespace_around_multiple_tool_calls(self):
+        text = (
+            "  前文\n"
+            "<tool_call>get_time</tool_call>"
+            "\n  中间正文  \n"
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value>杭州</arg_value></tool_call>"
+            "\n尾文  "
+        )
+
+        result = self.detector.parse_streaming_increment(text, self.tools)
+
+        self.assertEqual(result.normal_text, "  前文\n\n  中间正文  \n\n尾文  ")
+        self.assertEqual(
+            [call.name for call in result.calls], ["get_time", "get_weather"]
+        )
+        self.assertEqual(self.detector._buffer, "")
+
+    def test_streaming_releases_partial_tool_prefix_that_diverges(self):
+        first = self.detector.parse_streaming_increment("abc<tool_", self.tools)
+        second = self.detector.parse_streaming_increment("x", self.tools)
+
+        self.assertEqual(first.normal_text, "abc")
+        self.assertEqual(second.normal_text, "<tool_x")
+        self.assertEqual(self.detector._buffer, "")
+
+    def test_streaming_invalid_closed_blocks_do_not_consume_tool_indices(self):
+        text = (
+            "<tool_call>get_time</tool_call>"
+            "<tool_call>missing_tool</tool_call>"
+            "<tool_call></tool_call>"
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value>杭州</arg_value></tool_call>"
+        )
+
+        with patch.dict(os.environ, {"RTP_LLM_FORWARD_UNKNOWN_TOOLS": ""}):
+            result = self.detector.parse_streaming_increment(text, self.tools)
+
+        self.assertEqual(
+            [call.name for call in result.calls], ["get_time", "get_weather"]
+        )
+        self.assertEqual([call.tool_index for call in result.calls], [0, 1])
+        self.assertEqual(self.detector.current_tool_id, 2)
+        self.assertEqual(
+            self.detector.prev_tool_call_arr,
+            [
+                {"name": "get_time", "arguments": {}},
+                {"name": "get_weather", "arguments": {"city": "杭州"}},
+            ],
+        )
+        self.assertEqual(
+            [json.loads(value) for value in self.detector.streamed_args_for_tool],
+            [{}, {"city": "杭州"}],
+        )
+        self.assertEqual(self.detector._buffer, "")
+
+    def test_streaming_forwarded_unknown_tool_uses_a_contiguous_index(self):
+        text = (
+            "<tool_call>get_time</tool_call>"
+            "<tool_call>custom_tool</tool_call>"
+            "<tool_call>get_weather<arg_key>city</arg_key>"
+            "<arg_value>杭州</arg_value></tool_call>"
+        )
+
+        with patch.dict(os.environ, {"RTP_LLM_FORWARD_UNKNOWN_TOOLS": "true"}):
+            result = self.detector.parse_streaming_increment(text, self.tools)
+
+        self.assertEqual(
+            [call.name for call in result.calls],
+            ["get_time", "custom_tool", "get_weather"],
+        )
+        self.assertEqual([call.tool_index for call in result.calls], [0, 1, 2])
+        self.assertEqual(self.detector.current_tool_id, 3)
+        self.assertEqual(len(self.detector.prev_tool_call_arr), 3)
+        self.assertEqual(len(self.detector.streamed_args_for_tool), 3)
+        self.assertEqual(self.detector._buffer, "")
+
+    def test_streaming_isolated_end_tag_before_tool_call_is_normal_text(self):
+        text = "literal</tool_call>text<tool_call>get_time</tool_call>"
+
+        result = self.detector.parse_streaming_increment(text, self.tools)
+
+        self.assertEqual(result.normal_text, "literal</tool_call>text")
+        self.assertEqual([call.name for call in result.calls], ["get_time"])
+        self.assertEqual([call.tool_index for call in result.calls], [0])
+        self.assertEqual(self.detector._buffer, "")
 
     # ========== Normal Text Tests ==========
 

@@ -185,46 +185,60 @@ class Glm4MoeDetector(BaseFormatDetector):
         """
         Streaming incremental parsing tool calls for GLM-4.5 and GLM-4.6 format.
         """
-        self._buffer += new_text
-        current_text = self._buffer
+        text = self._buffer + new_text
+        self._buffer = ""
+        cursor = 0
+        normal_text_parts = []
+        calls = []
 
-        start = current_text.find(self.bot_token)
-        if start == -1:
-            self._buffer = ""
-            if self.current_tool_id > 0:
-                current_text = ""
-            return StreamingParseResult(normal_text=current_text)
-        # find ensures we find the first self.eot_token so there will be at most one tool_call in current_text[:end+len(self.eot_token)
-        end = current_text.find(self.eot_token)
-        if end != -1:
-            # Initialize state if this is the first tool call
-            if self.current_tool_id == -1:
-                self.current_tool_id = 0
-                self.prev_tool_call_arr = []
-                self.streamed_args_for_tool = [""]
-            # Ensure we have enough entries in our tracking arrays
-            while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                self.prev_tool_call_arr.append({})
-            while len(self.streamed_args_for_tool) <= self.current_tool_id:
-                self.streamed_args_for_tool.append("")
-            result = self.detect_and_parse(
-                current_text[: end + len(self.eot_token)], tools=tools
-            )
-            if result.calls:
+        while cursor < len(text):
+            start = text.find(self.bot_token, cursor)
+            if start == -1:
+                tail = text[cursor:]
+                partial_length = self._ends_with_partial_token(tail, self.bot_token)
+                if partial_length:
+                    normal_text_parts.append(tail[:-partial_length])
+                    self._buffer = tail[-partial_length:]
+                else:
+                    normal_text_parts.append(tail)
+                break
+
+            normal_text_parts.append(text[cursor:start])
+            end = text.find(self.eot_token, start + len(self.bot_token))
+            if end == -1:
+                self._buffer = text[start:]
+                break
+
+            block_end = end + len(self.eot_token)
+            result = self.detect_and_parse(text[start:block_end], tools=tools)
+            if result.normal_text:
+                normal_text_parts.append(result.normal_text)
+
+            for call in result.calls:
+                if self.current_tool_id == -1:
+                    self.current_tool_id = 0
+                    self.prev_tool_call_arr = []
+                    self.streamed_args_for_tool = []
+
+                while len(self.prev_tool_call_arr) <= self.current_tool_id:
+                    self.prev_tool_call_arr.append({})
+                while len(self.streamed_args_for_tool) <= self.current_tool_id:
+                    self.streamed_args_for_tool.append("")
+
+                call.tool_index = self.current_tool_id
                 self.prev_tool_call_arr[self.current_tool_id] = {
-                    "name": result.calls[0].name,
-                    "arguments": json.loads(result.calls[0].parameters),
+                    "name": call.name,
+                    "arguments": json.loads(call.parameters),
                 }
-                self.streamed_args_for_tool[self.current_tool_id] = result.calls[
-                    0
-                ].parameters
-                result.calls[0].tool_index = self.current_tool_id
+                self.streamed_args_for_tool[self.current_tool_id] = call.parameters
+                calls.append(call)
                 self.current_tool_id += 1
-            self._buffer = current_text[end + len(self.eot_token) :]
-            return result
-        normal_text = current_text[:start]
-        self._buffer = current_text[start:]
-        return StreamingParseResult(normal_text=normal_text)
+
+            cursor = block_end
+
+        return StreamingParseResult(
+            normal_text="".join(normal_text_parts), calls=calls
+        )
 
     def supports_structural_tag(self) -> bool:
         return False
