@@ -46,30 +46,44 @@ public:
         for (size_t i = 0; i < cache_config.mtp_sub_configs.size(); ++i) {
             const auto& mtp_sub_config = cache_config.mtp_sub_configs[i];
             RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);
-            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config->groupNums() > 0,
-                                    "MTP module %zu cache groups must not be empty",
-                                    i);
+            RTP_LLM_CHECK_WITH_INFO(
+                mtp_sub_config->groupNums() > 0, "MTP module %zu cache groups must not be empty", i);
+            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config->block_num == cache_config.block_num,
+                                    "MTP module %zu block_num=%u must match main block_num=%u",
+                                    i,
+                                    mtp_sub_config->block_num,
+                                    cache_config.block_num);
 
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
-            size_t real_mtp_gid = 0;
+            size_t real_mtp_gid = static_cast<size_t>(mtp_sub_config->groupNums());
             for (size_t gid = 0; gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++gid) {
                 if (!mtp_sub_config->layerIdsForGroup(gid).empty()) {
                     real_mtp_gid = gid;
                     break;
                 }
             }
+            RTP_LLM_CHECK_WITH_INFO(real_mtp_gid < static_cast<size_t>(mtp_sub_config->groupNums()),
+                                    "MTP module %zu has no cache group containing layers",
+                                    i);
             const auto& mtp_spec = mtp_sub_config->specForGroup(real_mtp_gid);
-            // MTP block size may differ from the main model. Use the real
-            // MTP group that owns a layer; target-aligned placeholder groups
-            // must not affect the sub-model memory layout.
-            MemoryLayoutConfig mtp_layout = createMemoryLayoutConfig(false,
-                                                                     mtp_layer_num,
-                                                                     mtp_spec->block_size_bytes(),
-                                                                     mtp_spec->scale_block_size_bytes(),
-                                                                     mtp_spec,
-                                                                     cache_config,
-                                                                     mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid));
+            // The selected group owns the physical KV stride, including any
+            // hybrid padding. Sparse MLA is the exception for scale storage:
+            // its indexer cache is not represented by MLAKVCacheSpec (whose
+            // scale size is zero), so SingleConfigCreator records that
+            // physical stride on CacheConfig instead.
+            const auto         mtp_kv_stride_bytes    = mtp_sub_config->kvBlockStrideBytesForGroup(real_mtp_gid);
+            const auto         mtp_scale_stride_bytes = mtp_sub_config->is_sparse ?
+                                                            mtp_sub_config->kv_scale_stride_bytes :
+                                                            mtp_sub_config->kvScaleStrideBytesForGroup(real_mtp_gid);
+            MemoryLayoutConfig mtp_layout =
+                createMemoryLayoutConfig(false,
+                                         mtp_layer_num,
+                                         mtp_kv_stride_bytes,
+                                         mtp_scale_stride_bytes,
+                                         mtp_spec,
+                                         *mtp_sub_config,
+                                         mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid));
 
             mtp_layout.kv_cache_offset_bytes = current_offset;
             RTP_LLM_LOG_INFO("mtp_layout.kv_block_pool_size_bytes = %ld", mtp_layout.kv_block_pool_size_bytes);
@@ -121,13 +135,13 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig createMemoryLayoutConfig(bool           enable_hybrid_attention,
-                                                       uint32_t       layer_num,
-                                                       size_t         kv_block_stride_bytes,
-                                                       size_t         kv_scale_stride_bytes,
-                                                       KVCacheSpecPtr spec,
-                                                       CacheConfig    cache_config,
-                                                       uint32_t       local_kv_head_num) {
+    static MemoryLayoutConfig createMemoryLayoutConfig(bool               enable_hybrid_attention,
+                                                       uint32_t           layer_num,
+                                                       size_t             kv_block_stride_bytes,
+                                                       size_t             kv_scale_stride_bytes,
+                                                       KVCacheSpecPtr     spec,
+                                                       const CacheConfig& cache_config,
+                                                       uint32_t           local_kv_head_num) {
         MemoryLayoutConfig cfg;
         cfg.layer_num             = layer_num;
         cfg.block_num             = cache_config.block_num;
@@ -143,9 +157,9 @@ private:
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla             = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla            = cache_config.use_mla;
-        cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
+        cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
+        cfg.use_mla                    = cache_config.use_mla;
+        cfg.seq_size_per_block         = static_cast<size_t>(cache_config.seq_size_per_block);
         cfg.kernel_blocks_per_kv_block = cache_config.kernelBlocksPerKvBlock();
 
         cfg.kv_block_pool_size_bytes =

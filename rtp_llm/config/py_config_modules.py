@@ -149,9 +149,14 @@ class LoadConfig:
     def __init__(self):
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
+        self.keep_mla_checkpoint_weights: bool = False
 
     def to_string(self):
-        return f"load_method: {self.load_method}\nforce_cpu_load_weights: {self.force_cpu_load_weights}"
+        return (
+            f"load_method: {self.load_method}\n"
+            f"force_cpu_load_weights: {self.force_cpu_load_weights}\n"
+            f"keep_mla_checkpoint_weights: {self.keep_mla_checkpoint_weights}"
+        )
 
 
 class RenderConfig:

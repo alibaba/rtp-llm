@@ -78,6 +78,18 @@ cc_library(
 )
 
 cc_library(
+    name = "block_pool_config",
+    hdrs = [
+        "BlockPoolConfig.h",
+        "BlockPoolConfigHelper.h",
+        "MemoryLayoutConfig.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [":cache_types"],
+)
+
+cc_library(
     name = "block_pool",
     srcs = [
         "BlockCache.cc",
@@ -87,15 +99,13 @@ cc_library(
     hdrs = [
         "BlockCache.h",
         "BlockPool.h",
-        "BlockPoolConfig.h",
-        "BlockPoolConfigHelper.h",
         "BlockRefCounter.h",
         "MemoryLayoutStrategy.h",
-        "MemoryLayoutConfig.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_pool_config",
         ":cache_types",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/disaggregate/cache_store",
