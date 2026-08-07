@@ -679,16 +679,34 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             RTP_LLM_LOG_INFO(
                 "[speculative decoding] enable_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_)",
                 static_cast<int>(enable_cuda_graph));
-            if (enable_cuda_graph) {
-                RTP_LLM_LOG_INFO(
-                    "[speculative decoding] creating separate prefill draft model with CUDA graph support");
+            // DSpARK's PREFILL role seeds feature KV through the standard CP
+            // path and never runs decode proposal/tail-commit. Capturing both
+            // fixed-width graphs there only consumes graph-pool memory and can
+            // turn CP-RR startup into an avoidable OOM.
+            const bool needs_draft_prefill_graphs = !is_dspark_ || role_type_ != RoleType::PREFILL;
+            if (enable_cuda_graph && needs_draft_prefill_graphs) {
+                RTP_LLM_LOG_INFO("[speculative decoding] creating prefill draft CUDA graph model(s)");
+                if (is_dspark_) {
+                    sp_prefill_draft_propose_model_.reset(new PyWrappedModel(model_params,
+                                                                             params.py_sp_model,
+                                                                             true,
+                                                                             false,
+                                                                             draft_cache_layer_layout.layer_to_groups,
+                                                                             model_inputs_logger_,
+                                                                             true,
+                                                                             DSparkCallPhase::PROPOSE));
+                }
                 sp_prefill_draft_model_.reset(new PyWrappedModel(model_params,
                                                                  params.py_sp_model,
                                                                  true,
                                                                  false,
                                                                  draft_cache_layer_layout.layer_to_groups,
                                                                  model_inputs_logger_,
-                                                                 is_dspark_));
+                                                                 is_dspark_,
+                                                                 is_dspark_ ? DSparkCallPhase::COMMIT :
+                                                                              DSparkCallPhase::NONE));
+            } else if (enable_cuda_graph && is_dspark_) {
+                RTP_LLM_LOG_INFO("[dspark-path] PREFILL role skips unused proposal/commit CUDA graph capture");
             }
         }
         break;  // NOTE: only support one mtp model now
@@ -825,6 +843,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         model_output                        = std::move(model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (is_dspark_ && !dspark_target_prefill_logged_) {
+            dspark_target_prefill_logged_ = true;
+            RTP_LLM_LOG_INFO("[dspark-path] target prefill completed (cp_enabled=%d)", cp_enabled);
+        }
     }
 
     // eplb
@@ -883,6 +905,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (cp_enabled || is_dspark_) {
             model_input.last_hidden_states = torch::Tensor();
         }
+        if (is_dspark_) {
+            model_input.dspark_call_phase = DSparkCallPhase::COMMIT;
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -901,6 +926,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // incremental-prefill geometry; output intentionally unused).
             // Proposals are produced exclusively at the decode round head and
             // are not persisted in stream or PD state.
+            if (!dspark_prefill_commit_logged_) {
+                dspark_prefill_commit_logged_ = true;
+                RTP_LLM_LOG_INFO("[dspark-path] prefill draft commit dispatch through standard CP path "
+                                 "(cp_enabled=%d)",
+                                 cp_enabled);
+            }
             (void)draft_model_->forward(model_input);
             draft_model_output = GptModelOutputs();
         } else {
@@ -1219,6 +1250,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         propose_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
         propose_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
         propose_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
+        propose_input.dspark_call_phase        = DSparkCallPhase::PROPOSE;
         auto propose_output                   = runDSparkProposeForward(propose_input);
         RTP_LLM_CHECK_WITH_INFO(propose_output.draft_tokens.defined(),
                                 "dspark round-head propose did not emit draft_tokens");
@@ -1623,6 +1655,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     // main-stream mutations cannot affect draft prefill prepare.
     auto* prefill_model    = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy = model_input;
+    if (is_dspark_) {
+        model_input_copy.dspark_call_phase = DSparkCallPhase::COMMIT;
+    }
     model_input_copy.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
     model_input_copy.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
     model_input_copy.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
@@ -1843,17 +1878,27 @@ GptModelOutputs MtpExecutor::runDSparkProposeForward(GptModelInputs& model_input
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dspark_propose_forward)");
     maybePrintModelInput(model_input, "decode dspark propose model");
     ensureModelInputsOnCuda(model_input, "decode.dspark_propose_forward");
+    RTP_LLM_CHECK_WITH_INFO(model_input.dspark_call_phase == DSparkCallPhase::PROPOSE,
+                            "dspark proposal forward requires explicit PROPOSE phase");
     // The proposal is prefill-style attention but carries no target features.
-    // It runs on the ordinary draft model, which never constructs a CUDA
-    // graph runner for DSpARK (see PyWrappedModel enable_cuda_graph_), so
-    // this call is always eager.
-    return draft_model_->forward(model_input);
+    // Its dedicated graph contract captures gamma rows per batch, distinct
+    // from the gamma+1 commit contract.
+    auto* propose_model = sp_prefill_draft_propose_model_ ? sp_prefill_draft_propose_model_.get() : draft_model_.get();
+    if (!dspark_propose_dispatch_logged_) {
+        dspark_propose_dispatch_logged_ = true;
+        RTP_LLM_LOG_INFO("[dspark-path] decode proposal dispatch to prefill CUDA graph model=%d",
+                         sp_prefill_draft_propose_model_ != nullptr);
+    }
+    return propose_model->forward(model_input);
 }
 
 GptModelOutputs MtpExecutor::runDraftCommitForward(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
     maybePrintModelInput(model_input, "decode post draft model");
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
+    if (is_dspark_) {
+        model_input.dspark_call_phase = DSparkCallPhase::COMMIT;
+    }
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     GptModelOutputs draft_prefill_model_output;
     if (sp_prefill_draft_model_) {
@@ -1933,6 +1978,9 @@ void MtpExecutor::releaseAllModelBuffers() {
     // staging buffers.
     model_->releaseBuffers();
     draft_model_->releaseBuffers();
+    if (sp_prefill_draft_propose_model_) {
+        sp_prefill_draft_propose_model_->releaseBuffers();
+    }
     if (sp_prefill_draft_model_) {
         sp_prefill_draft_model_->releaseBuffers();
     }

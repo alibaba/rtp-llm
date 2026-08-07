@@ -16,13 +16,13 @@ head.
 Engine input contract — two standard-slot calls per round (all token rows
 are request-major):
 
-* **Commit** (incremental-prefill shape): ``input_ids`` = the committed
+* **Commit** (``dspark_call_phase=COMMIT``, incremental-prefill shape): ``input_ids`` = the committed
   tokens, ``attention_inputs.input_lengths`` = newly committed rows per
   request, ``attention_inputs.prefix_lengths`` = where they start,
   ``input_hiddens`` = the matching target feature rows, flattenable to
   ``[rows, aux_feature_dim]`` (a zero-copy view of the shared MTP hidden
-  buffer). The presence of ``input_hiddens`` is what marks a commit call.
-* **Propose** (fixed-width block): ``input_ids`` = ``[B * width]`` query
+  buffer).
+* **Propose** (``dspark_call_phase=PROPOSE``, fixed-width block): ``input_ids`` = ``[B * width]`` query
   block (column zero is the anchor; the remaining columns are forced to
   the configured noise token here), ``attention_inputs.prefix_lengths`` =
   committed sequence length immediately before the query block. No

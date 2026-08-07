@@ -598,6 +598,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_seq_len].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.current_seq_len);
+        const auto& draft_tokens = graph_instances_[state.current_real_graph_seq_len].mem_hold_.draft_tokens_;
+        if (draft_tokens.defined()) {
+            outputs.draft_tokens = draft_tokens.slice(0, 0, state.current_batch_size);
+        }
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
@@ -668,6 +672,9 @@ bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs
 
 bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state) {
     RTP_LLM_PROFILE_SCOPE("cuda_graph.canRun");
+    if (inputs.dspark_call_phase != dspark_call_phase_) {
+        return false;
+    }
     // Check if this is speculative sampling:
     // 1. prefix_lengths is not empty
     // 2. all values in input_lengths are the same
@@ -887,6 +894,7 @@ void CudaGraphRunner::initCapture() {
         }
 
         PyModelInputs inputs;
+        inputs.dspark_call_phase = dspark_call_phase_;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
         RTP_LLM_CHECK_WITH_INFO(
@@ -977,7 +985,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
-        py_forward_method_(inputs, attn_pyobj);
+        auto warmup_outputs = py_forward_method_(inputs, attn_pyobj).cast<PyModelOutputs>();
+        if (warmup_outputs.draft_tokens.defined()) {
+            graph_instances_[key].mem_hold_.setDraftTokens(torch::empty_like(warmup_outputs.draft_tokens));
+        }
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
@@ -1013,6 +1024,11 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            if (outputs.draft_tokens.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(graph_instances_[key].mem_hold_.draft_tokens_.defined(),
+                                        "CUDA graph produced draft_tokens without a warmup output buffer");
+                graph_instances_[key].mem_hold_.draft_tokens_.copy_(outputs.draft_tokens);
+            }
             graph.capture_end();
         }
 
@@ -1042,6 +1058,7 @@ void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
 
 void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens) {
     // Common slice operations for input_ids and padding_offset
+    inputs.dspark_call_phase                  = dspark_call_phase_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and

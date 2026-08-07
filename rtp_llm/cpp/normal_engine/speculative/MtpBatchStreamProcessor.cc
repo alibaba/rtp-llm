@@ -800,6 +800,7 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
     model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
+    model_input.dspark_call_phase  = DSparkCallPhase::PROPOSE;
 }
 
 MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRoundHead(
@@ -860,6 +861,7 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs& 
     // rejection result; later rounds overwrite rows beyond the accepted
     // prefix. Only the rank-local target feature tensor is rebound here.
     model_input.last_hidden_states = target_features;
+    model_input.dspark_call_phase  = DSparkCallPhase::COMMIT;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(

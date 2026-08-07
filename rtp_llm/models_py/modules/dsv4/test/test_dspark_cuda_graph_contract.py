@@ -7,6 +7,7 @@ import torch
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
+from rtp_llm.ops.compute_ops import DSparkCallPhase, PyModelInputs
 
 
 def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
@@ -23,6 +24,24 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    def test_forward_requires_explicit_phase(self) -> None:
+        model = _dspark_harness(gamma=3)
+        model.v4 = SimpleNamespace(
+            embed=SimpleNamespace(weight=torch.empty((1, 8), dtype=torch.bfloat16))
+        )
+        model.kv_cache = None
+        model._dspark_width = 3
+        model._dspark_hidden_dim = 8
+        inputs = PyModelInputs()
+        inputs.input_ids = torch.zeros(3, dtype=torch.int32)
+
+        with self.assertRaisesRegex(RuntimeError, "explicit proposal/commit phase"):
+            model.forward(inputs)
+
+        inputs.dspark_call_phase = DSparkCallPhase.PROPOSE
+        outputs = model.forward(inputs)
+        self.assertEqual(tuple(outputs.draft_tokens.shape), (1, 3))
+
     def test_padded_bucket_rows_have_no_attention_work(self) -> None:
         model = _dspark_harness()
         prefix_lengths = torch.tensor([10, 0], dtype=torch.int32)

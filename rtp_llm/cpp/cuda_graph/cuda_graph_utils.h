@@ -22,6 +22,10 @@ public:
         decoder_layer_hidden_states_ = hidden_states;
     };
 
+    void setDraftTokens(at::Tensor draft_tokens) {
+        draft_tokens_ = draft_tokens;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
@@ -39,6 +43,7 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
         py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                = inputs.input_ids;
+        py_model_inputs_.dspark_call_phase                        = inputs.dspark_call_phase;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
@@ -62,6 +67,7 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
+    at::Tensor               draft_tokens_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

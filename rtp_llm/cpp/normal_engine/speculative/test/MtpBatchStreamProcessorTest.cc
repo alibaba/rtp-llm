@@ -899,6 +899,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, gamma}), toVec<int32_t>(model_input.lm_output_indexes));
+    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
@@ -935,6 +936,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGe
     EXPECT_TRUE(torch::equal(model_input.prefix_lengths, prefix_lengths));
     EXPECT_TRUE(torch::equal(model_input.lm_output_indexes, lm_output_indexes));
     EXPECT_TRUE(torch::equal(model_input.last_hidden_states, target_features));
+    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::COMMIT);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

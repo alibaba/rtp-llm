@@ -19,8 +19,9 @@ projection into each draft layer's paged SWA cache before evaluating the next
 query block.
 
 The width is fixed for the lifetime of a service and comes only from
-``GEN_NUM_PER_CIRCLE``. The executor evaluates proposal blocks eagerly and
-routes feature-KV commit calls through the ordinary prefill CUDA graph.
+``GEN_NUM_PER_CIRCLE``. Decode proposal and commit calls use separate prefill
+CUDA-graph contracts (``gamma`` versus ``gamma + 1`` rows per request); prompt
+seeding keeps the standard prefill/CP path.
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
     optional_tensor,
 )
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import DSparkCallPhase, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -596,6 +597,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
         )
+        if write_cache_store_impl is not None and not getattr(
+            self, "_dspark_commit_cache_store_logged", False
+        ):
+            self._dspark_commit_cache_store_logged = True
+            logging.info(
+                "[dspark-path] commit cache_store publishing draft layers "
+                "(cp_rr=%s, layers=%d)",
+                commit_ctx is not None and self._dspark_kv_cache_sharded,
+                len(self.v4.layers),
+            )
         gathered_req_ids: Optional[torch.Tensor] = None
         gathered_positions: Optional[torch.Tensor] = None
         if commit_ctx is not None:
@@ -831,13 +842,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
         device = self.v4.embed.weight.device
         gamma = self._gen_num_per_cycle
-        # The presence of feature rows is what marks a commit call; propose
-        # calls carry only the query block.
-        is_commit = (
-            inputs.input_hiddens is not None
-            and isinstance(inputs.input_hiddens, torch.Tensor)
-            and inputs.input_hiddens.numel() > 0
-        )
+        phase = getattr(inputs, "dspark_call_phase", DSparkCallPhase.NONE)
+        if phase == DSparkCallPhase.NONE:
+            raise RuntimeError("DSpark forward requires an explicit proposal/commit phase")
+        is_commit = phase == DSparkCallPhase.COMMIT
 
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.

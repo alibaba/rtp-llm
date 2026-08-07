@@ -630,7 +630,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
 
     graph_state_         = CudaGraphState();
     auto empty_tensor    = torch::Tensor();
-    auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+    auto py_model_inputs = PyModelInputs(
+        empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{}, inputs.dspark_call_phase);
 
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
@@ -666,7 +667,8 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
     if (enable_cuda_graph_) {
         auto empty_tensor    = torch::Tensor();
-        auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+        auto py_model_inputs = PyModelInputs(
+            empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{}, inputs.dspark_call_phase);
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
@@ -731,7 +733,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // and combo_tokens above used direct .to(non_blocking=true). Both are async on
         // the current stream and will be ordered correctly with the kernels below.
 
-        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
+        auto py_model_inputs = PyModelInputs(
+            token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs, inputs.dspark_call_phase);
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -744,12 +747,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_target_verify,
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state_.current_real_graph_bs);
-            if (is_dspark_draft_ && !dspark_dispatch_logged_[0][input_hiddens.numel() > 0]) {
-                dspark_dispatch_logged_[0][input_hiddens.numel() > 0] = true;
-                RTP_LLM_LOG_INFO("[dspark] draft %s forward replayed %s CUDA graph (graph_bs=%d)",
-                                 input_hiddens.numel() > 0 ? "commit" : "propose",
+            const bool is_dspark_commit = inputs.dspark_call_phase == DSparkCallPhase::COMMIT;
+            if (is_dspark_draft_ && !dspark_dispatch_logged_[0][is_dspark_commit]) {
+                dspark_dispatch_logged_[0][is_dspark_commit] = true;
+                const int graph_key = py_model_inputs.attention_inputs.is_prefill ?
+                                          graph_state_.current_real_graph_seq_len :
+                                          graph_state_.current_real_graph_bs;
+                RTP_LLM_LOG_INFO("[dspark-path] draft %s replayed %s CUDA graph (graph_key=%d, batch=%d)",
+                                 dsparkCallPhaseName(inputs.dspark_call_phase),
                                  py_model_inputs.attention_inputs.is_prefill ? "prefill" : "decode",
-                                 graph_state_.current_real_graph_bs);
+                                 graph_key,
+                                 graph_state_.current_batch_size);
             }
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
@@ -759,10 +767,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
-            if (is_dspark_draft_ && !dspark_dispatch_logged_[1][input_hiddens.numel() > 0]) {
-                dspark_dispatch_logged_[1][input_hiddens.numel() > 0] = true;
-                RTP_LLM_LOG_INFO("[dspark] draft %s forward ran eager (is_prefill=%d)",
-                                 input_hiddens.numel() > 0 ? "commit" : "propose",
+            const bool is_dspark_commit = inputs.dspark_call_phase == DSparkCallPhase::COMMIT;
+            if (is_dspark_draft_ && !dspark_dispatch_logged_[1][is_dspark_commit]) {
+                dspark_dispatch_logged_[1][is_dspark_commit] = true;
+                RTP_LLM_LOG_INFO("[dspark-path] draft %s ran eager (is_prefill=%d)",
+                                 dsparkCallPhaseName(inputs.dspark_call_phase),
                                  py_model_inputs.attention_inputs.is_prefill);
             }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",

@@ -55,7 +55,8 @@ public:
                    bool                               use_spec_decoding          = false,
                    const std::vector<int>&            kv_cache_layer_to_group    = {},
                    std::shared_ptr<ModelInputsLogger> model_inputs_logger        = nullptr,
-                   bool                               is_dspark_draft            = false);
+                   bool                               is_dspark_draft            = false,
+                   DSparkCallPhase                    dspark_graph_phase         = DSparkCallPhase::NONE);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -107,6 +108,7 @@ private:
     const rtp_llm::ExecProperties            device_props_;
     const bool                               enable_prefill_cp_;
     const bool                               is_dspark_draft_;
+    const DSparkCallPhase                    dspark_graph_phase_;
     // First-occurrence markers, keyed per (graph/eager, commit/propose), so
     // smoke logs positively confirm every draft dispatch path that engaged.
     bool dspark_dispatch_logged_[2][2] = {{false, false}, {false, false}};
@@ -151,7 +153,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                       bool                               use_spec_decoding,
                                       const std::vector<int>&            kv_cache_layer_to_group,
                                       std::shared_ptr<ModelInputsLogger> model_inputs_logger,
-                                      bool                               is_dspark_draft):
+                                      bool                               is_dspark_draft,
+                                      DSparkCallPhase                    dspark_graph_phase):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -162,13 +165,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     // rejected at executor construction).
     enable_prefill_cp_(device_props_.enable_prefill_cp),
     is_dspark_draft_(is_dspark_draft),
+    dspark_graph_phase_(dspark_graph_phase),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
-    // DSpARK proposals are prefill-shaped and intentionally run eagerly. Do
-    // not construct an unused decode graph: its synthetic input_hiddens would
-    // also misclassify the capture warmup as a commit.
+    // The ordinary DSpARK wrapper stays eager. Dedicated prefill-graph
+    // wrappers carry an explicit proposal/commit phase and fixed width.
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && (!is_dspark_draft || is_prefill_cuda_graph_mode)),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
@@ -305,6 +308,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
+        graph_params.dspark_call_phase            = dspark_graph_phase_;
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.tokens_per_block             = params.tokens_per_block;
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
@@ -333,14 +337,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         // | Model Type                | is_prefill_cuda_graph    | sp_config.type | model_id | num_tokens_per_bs       |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // | Embedding Model (prefill) | true                     | SP_TYPE_NONE   | -        | max_seq_len             |
-        // | Draft Model (prefill)     | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
+        // | DSpARK proposal (prefill) | true                     | DSpARK         | 1        | gen_num_per_cycle       |
+        // | Draft commit (prefill)    | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
         // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
         // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | gen_num_per_cycle + 1   |
         // | Draft Model (decode)      | false                    | != SP_TYPE_NONE| 1        | 1 (default)             |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // clang-format on
 
-        if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
+        if (is_dspark_draft_ && dspark_graph_phase_ == DSparkCallPhase::PROPOSE) {
+            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
+        } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0

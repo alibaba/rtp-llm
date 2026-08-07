@@ -5,9 +5,11 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <cstdint>
+#include <utility>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 // Forward declare for opaque pointers in PyCacheStoreInputs
@@ -342,10 +344,23 @@ struct BertEmbeddingInputs {
 };
 
 struct PyModelInputs {
-    torch::Tensor       input_ids;
-    torch::Tensor       input_hiddens;
-    PyAttentionInputs   attention_inputs;
-    BertEmbeddingInputs bert_embedding_inputs;
+    torch::Tensor             input_ids;
+    torch::Tensor             input_hiddens;
+    PyAttentionInputs         attention_inputs;
+    BertEmbeddingInputs       bert_embedding_inputs;
+    rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
+
+    PyModelInputs() = default;
+    PyModelInputs(torch::Tensor            input_ids,
+                  torch::Tensor            input_hiddens,
+                  PyAttentionInputs        attention_inputs,
+                  BertEmbeddingInputs      bert_embedding_inputs,
+                  rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE):
+        input_ids(std::move(input_ids)),
+        input_hiddens(std::move(input_hiddens)),
+        attention_inputs(std::move(attention_inputs)),
+        bert_embedding_inputs(std::move(bert_embedding_inputs)),
+        dspark_call_phase(dspark_call_phase) {}
 };
 
 struct PyModelOutputs {

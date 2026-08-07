@@ -199,8 +199,15 @@ private:
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool                                             is_dspark_ = false;
+    bool                                             dspark_target_prefill_logged_ = false;
+    bool                                             dspark_prefill_commit_logged_ = false;
+    bool                                             dspark_propose_dispatch_logged_ = false;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
+    // DSpARK uses two prefill-shaped graph contracts: gamma query rows for
+    // proposal and gamma+1 verified rows for commit. They must not share one
+    // capture-width/phase identity.
+    std::shared_ptr<ModelBase>                       sp_prefill_draft_propose_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
