@@ -112,6 +112,17 @@ py_test(
 )
 
 py_test(
+    name = "openai_endpoint_collect_response_test",
+    srcs = [
+        "openai_endpoint_collect_response_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "server_test",
     srcs = [
         "server_test.py",

@@ -2,7 +2,7 @@ import itertools
 import json
 import logging
 from functools import partial
-from typing import Any, AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import Request
 
@@ -308,77 +308,89 @@ class OpenaiEndpoint(object):
         tokenizer: Optional[Any] = None,
         model_name: str = "",
     ) -> ChatCompletionResponse:
-        all_choices = []
+        all_choices_by_index: Dict[int, ChatCompletionResponseChoice] = {}
         usage = None
         aux_info = None
         extra_outputs = None
         async for response in choice_generator:
-            if len(response.choices) != len(all_choices):
-                if all_choices == []:
-                    all_choices = [
-                        ChatCompletionResponseChoice(
-                            index=i,
-                            message=ChatMessage(
-                                role=choice.delta.role or RoleEnum.assistant,
-                                content=choice.delta.content or None,
-                                function_call=choice.delta.function_call or None,
-                                tool_calls=choice.delta.tool_calls or None,
-                            ),
-                            finish_reason=choice.finish_reason,
-                            logprobs=choice.logprobs,
-                        )
-                        for i, choice in enumerate(response.choices)
-                    ]
-                else:
-                    raise ValueError(
-                        f"response.choices has different length! "
-                        f"[{response.choices}] vs [{all_choices}]."
+            choice_indexes = [choice.index for choice in response.choices]
+            if any(index < 0 for index in choice_indexes):
+                raise ValueError(f"choice index must be non-negative: {choice_indexes}")
+            if len(choice_indexes) != len(set(choice_indexes)):
+                raise ValueError(
+                    "response chunk contains duplicate choice indexes: "
+                    f"{choice_indexes}"
+                )
+
+            for choice in response.choices:
+                accumulated_choice = all_choices_by_index.get(choice.index)
+                if accumulated_choice is None:
+                    accumulated_choice = ChatCompletionResponseChoice(
+                        index=choice.index,
+                        message=ChatMessage(
+                            role=RoleEnum.assistant,
+                            content=None,
+                        ),
                     )
-            else:
-                for i in range(len(all_choices)):
-                    if all_choices[i].message.content == None:
-                        all_choices[i].message.content = (
-                            response.choices[i].delta.content or None
+                    all_choices_by_index[choice.index] = accumulated_choice
+
+                delta = choice.delta
+                if delta.content is not None:
+                    if accumulated_choice.message.content is None:
+                        accumulated_choice.message.content = delta.content or None
+                    else:
+                        accumulated_choice.message.content += delta.content
+                if delta.reasoning_content is not None:
+                    if accumulated_choice.message.reasoning_content is None:
+                        accumulated_choice.message.reasoning_content = (
+                            delta.reasoning_content or None
                         )
                     else:
-                        all_choices[i].message.content += (
-                            response.choices[i].delta.content or ""
+                        accumulated_choice.message.reasoning_content += (
+                            delta.reasoning_content
                         )
-                    if all_choices[i].message.reasoning_content == None:
-                        all_choices[i].message.reasoning_content = (
-                            response.choices[i].delta.reasoning_content or None
+                accumulated_choice.message.role = (
+                    delta.role or accumulated_choice.message.role
+                )
+                accumulated_choice.message.function_call = (
+                    delta.function_call or accumulated_choice.message.function_call
+                )
+                accumulated_choice.message.tool_calls = (
+                    OpenaiEndpoint._merge_tool_calls(
+                        accumulated_choice.message.tool_calls,
+                        delta.tool_calls,
+                    )
+                )
+                accumulated_choice.finish_reason = (
+                    choice.finish_reason or accumulated_choice.finish_reason
+                )
+                if choice.logprobs is not None:
+                    if accumulated_choice.logprobs is None:
+                        accumulated_choice.logprobs = choice.logprobs.model_copy(
+                            deep=True
                         )
                     else:
-                        all_choices[i].message.reasoning_content += (
-                            response.choices[i].delta.reasoning_content or ""
-                        )
-                    all_choices[i].message.role = (
-                        response.choices[i].delta.role or all_choices[i].message.role
-                    )
-                    all_choices[i].message.function_call = (
-                        response.choices[i].delta.function_call
-                        or all_choices[i].message.function_call
-                    )
-                    all_choices[i].message.tool_calls = (
-                        OpenaiEndpoint._merge_tool_calls(
-                            all_choices[i].message.tool_calls,
-                            response.choices[i].delta.tool_calls,
-                        )
-                    )
-                    all_choices[i].finish_reason = (
-                        response.choices[i].finish_reason
-                        or all_choices[i].finish_reason
-                    )
-                    if all_choices[i].logprobs != None:
-                        if response.choices[i].logprobs != None:
-                            all_choices[i].logprobs.content += response.choices[
-                                i
-                            ].logprobs.content
-                    else:
-                        all_choices[i].logprobs = response.choices[i].logprobs
+                        for field_name in ("content", "refusal"):
+                            delta_logprobs = getattr(choice.logprobs, field_name)
+                            if delta_logprobs:
+                                accumulated_logprobs = getattr(
+                                    accumulated_choice.logprobs, field_name
+                                )
+                                if accumulated_logprobs is None:
+                                    accumulated_logprobs = []
+                                    setattr(
+                                        accumulated_choice.logprobs,
+                                        field_name,
+                                        accumulated_logprobs,
+                                    )
+                                accumulated_logprobs.extend(delta_logprobs)
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
             extra_outputs = response.extra_outputs or extra_outputs
+
+        all_choices = [
+            all_choices_by_index[index] for index in sorted(all_choices_by_index)
+        ]
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")

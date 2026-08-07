@@ -296,7 +296,7 @@ class DeltaMessage(BaseModel):
 
 
 class ChatCompletionResponseStreamChoice(BaseModel):
-    index: int
+    index: int = Field(strict=True, ge=0)
     delta: DeltaMessage
     finish_reason: Optional[FinisheReason] = None
     logprobs: Optional[ChoiceLogprobs] = None
