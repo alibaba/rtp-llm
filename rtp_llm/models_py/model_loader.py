@@ -137,6 +137,7 @@ class NewLoaderConfig:
     ffn_tp_rank: Optional[int] = None
     lm_head_tp_size: Optional[int] = None
     lm_head_tp_rank: Optional[int] = None
+    keep_mla_checkpoint_weights: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.load_method, str):
@@ -186,12 +187,28 @@ class NewLoaderConfig:
                 raise ValueError(
                     f"Invalid {prefix} partition: rank={rank}, size={size}"
                 )
+            if prefix in ("attn_tp", "ffn_tp"):
+                if size not in (1, self.tp_size):
+                    raise ValueError(
+                        f"{size_name}={size} must be either 1 or the physical "
+                        f"tp_size={self.tp_size}; independent TP subgroups are "
+                        "not supported by Group.TP collectives"
+                    )
+                expected_rank = 0 if size == 1 else self.tp_rank
+                if rank != expected_rank:
+                    raise ValueError(
+                        f"{rank_name}={rank} does not match the supported "
+                        f"{prefix} topology: expected rank={expected_rank} for "
+                        f"size={size}"
+                    )
         if self.ep_size <= 0 or not 0 <= self.ep_rank < self.ep_size:
             raise ValueError(
                 f"Invalid EP partition: rank={self.ep_rank}, size={self.ep_size}"
             )
         if not isinstance(self.compute_dtype, torch.dtype):
             raise TypeError("compute_dtype must be a torch.dtype")
+        if not isinstance(self.keep_mla_checkpoint_weights, bool):
+            raise TypeError("keep_mla_checkpoint_weights must be a bool")
         _validate_runtime_device(self.device, "device")
         if self.parallelism_config is not None:
             for prefix in ("tp", "ep"):
@@ -472,7 +489,7 @@ class NewModelLoader:
             )
         root_validator(loaded_tensor_ids)
 
-        for module in model.modules():
+        for module_name, module in model.named_modules():
             if module is model:
                 continue
             custom_loader = getattr(type(module), "load_weights", None)
@@ -486,7 +503,18 @@ class NewModelLoader:
                         f"Custom weight loader {type(module).__name__}.load_weights() "
                         "must define validate_weights_loaded()"
                     )
-                validator(loaded_tensor_ids)
+                try:
+                    validator(loaded_tensor_ids)
+                except Exception as exc:
+                    context = (
+                        f"Weight validation failed for {module_name} "
+                        f"({type(module).__name__})"
+                    )
+                    if exc.args:
+                        exc.args = (f"{context}: {exc.args[0]}", *exc.args[1:])
+                    else:
+                        exc.args = (context,)
+                    raise
 
     @staticmethod
     def _run_post_load_hooks(model: nn.Module) -> None:
