@@ -82,6 +82,17 @@ private:
     bool                                   track_store_completions_{false};
 };
 
+bool hasMicroBatchIncompatibleEmbeddingInputs(const GptModelInputs& inputs) {
+    const bool has_bert_token_type_ids =
+        inputs.combo_tokens_type_ids.defined() && inputs.combo_tokens_type_ids.numel() > 0;
+    const bool has_text_tokens_mask    = inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.numel() > 0;
+    const bool has_multimodal_features = inputs.multimodal_features && !inputs.multimodal_features->empty();
+    const bool has_multimodal_locs     = inputs.mm_features_locs.defined() && inputs.mm_features_locs.numel() > 0;
+    const bool has_multimodal_extra    = inputs.mm_extra_input && !inputs.mm_extra_input->empty();
+    return has_bert_token_type_ids || has_text_tokens_mask || has_multimodal_features || has_multimodal_locs
+           || has_multimodal_extra;
+}
+
 }  // namespace
 
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
@@ -769,7 +780,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            torch_ext::PyMultimodalInputs(),
                                            attention_inputs_,
                                            attention_inputs_by_tag_,
-                                           torch_ext::BertEmbeddingInputs()});
+                                           (weights_.position_encoding && weights_.token_type_embedding ?
+                                                buildBertEmbeddingInputs(inputs) : torch_ext::BertEmbeddingInputs())});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
     if (enable_cuda_graph_ && runner != nullptr
@@ -799,7 +811,8 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
                                                torch_ext::PyMultimodalInputs(),
                                                attention_inputs_,
                                                attention_inputs_by_tag_,
-                                               torch_ext::BertEmbeddingInputs()});
+                                               (weights_.position_encoding && weights_.token_type_embedding ?
+                                                buildBertEmbeddingInputs(inputs) : torch_ext::BertEmbeddingInputs())});
         auto* runner          = selectGraphRunner(attention_inputs_);
         auto& state           = selectGraphState(attention_inputs_);
         if (runner != nullptr && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
@@ -1227,6 +1240,19 @@ MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
         return {false, {}};
     }
 
+    // Bert and request-owned multimodal fields are token aligned, but the
+    // current micro-batch splitter does not slice or rebase them. Keep the
+    // request on the supported non-splitting plan instead of silently reusing
+    // full-request metadata in every micro batch.
+    if (hasMicroBatchIncompatibleEmbeddingInputs(inputs)) {
+        static std::once_flag warning_once;
+        std::call_once(warning_once, []() {
+            RTP_LLM_LOG_WARNING("Bert or request-owned multimodal inputs are incompatible with layer micro-batch; "
+                                "falling back to the non-splitting plan");
+        });
+        return {false, {}};
+    }
+
     const auto&  input_lengths      = inputs.input_lengths;
     const auto&  sequence_lengths   = inputs.sequence_lengths;
     const size_t decoder_batch_size = sequence_lengths.size(0);
@@ -1312,6 +1338,9 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                                          inputs.input_lengths.cpu().pin_memory() :
                                          inputs.input_lengths;
     const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+
+    RTP_LLM_CHECK_WITH_INFO(!micro_batch_plan.enable || !hasMicroBatchIncompatibleEmbeddingInputs(inputs),
+                            "Bert and request-owned multimodal inputs must not enter layer micro-batch splitting");
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

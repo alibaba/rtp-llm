@@ -21,11 +21,11 @@ cuda13_cc_test(
 )
 
 cc_test(
-    name = "combo_position_ids_validation_test",
-    srcs = ["combo_position_ids_validation_test.cc"],
+    name = "cuda_graph_replay_contracts_test",
+    srcs = ["cuda_graph_replay_contracts_test.cc"],
     copts = copts(),
     deps = [
-        "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_replay_contracts",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     exec_properties = {'gpu':'A10'},

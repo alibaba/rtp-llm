@@ -251,7 +251,7 @@ private:
     CaptureMemoryHold                      capture_mem_hold_;
     torch::Tensor                          position_encoding_;
     torch::Tensor                          token_type_embedding_;
-    float                                  input_embedding_scalar_;
+    float                                  input_embedding_scalar_{1.0f};
     c10::ScalarType                        model_data_type_;
     at::TensorOptions                      options_cuda_int32_;
     at::TensorOptions                      options_cpu_int32_;
@@ -270,6 +270,8 @@ private:
     mutable std::array<std::atomic<uint64_t>, kGenerationPrefillCudaGraphStatusCount>
                                   generation_prefill_cuda_graph_fallback_log_counts_;
     mutable std::atomic<uint64_t> generation_prefill_cuda_graph_replay_log_count_{0};
+    mutable std::atomic<uint64_t> bert_replay_id_fallback_log_count_{0};
+    mutable std::atomic<uint64_t> multimodal_input_fallback_log_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

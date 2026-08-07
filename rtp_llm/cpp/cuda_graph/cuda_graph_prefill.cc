@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_replay_contracts.h"
 #include <optional>
 
 namespace rtp_llm {
@@ -111,7 +112,7 @@ void CudaGraphRunner::capturePrefill() {
                 inputs.bert_embedding_inputs.combo_tokens_type_ids =
                     inputs.bert_embedding_inputs.combo_tokens_type_ids.slice(0, 0, seq_len);
             }
-        } else if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
+        } else if (hasBothBertEmbeddingTables(inputs.bert_embedding_inputs.position_encoding, inputs.bert_embedding_inputs.token_type_embedding)) {
             inputs.bert_embedding_inputs.combo_position_ids =
                 inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);
             inputs.bert_embedding_inputs.combo_tokens_type_ids =

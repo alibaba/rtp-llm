@@ -25,7 +25,8 @@ public:
                       int64_t                      hidden_size,
                       std::vector<std::string>     group_tags,
                       std::optional<torch::Tensor> position_encoding,
-                      std::optional<torch::Tensor> token_type_embedding) {
+                      std::optional<torch::Tensor> token_type_embedding,
+                      float input_embedding_scalar) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
@@ -48,6 +49,7 @@ public:
         if (token_type_embedding.has_value()) {
             params.token_type_embedding = std::move(*token_type_embedding);
         }
+        params.input_embedding_scalar = input_embedding_scalar;
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
@@ -225,7 +227,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("hidden_size"),
              py::arg("group_tags")           = std::vector<std::string>{},
              py::arg("position_encoding")    = py::none(),
-             py::arg("token_type_embedding") = py::none())
+             py::arg("token_type_embedding") = py::none(),
+             py::arg("input_embedding_scalar") = 1.0f)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),

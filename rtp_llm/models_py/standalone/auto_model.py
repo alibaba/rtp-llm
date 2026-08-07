@@ -240,7 +240,7 @@ class AutoModel:
                 attention_inputs, input_length + gen_tokens
             )
             model_inputs = PyModelInputs(
-                input_ids=next_token_id,
+                input_ids=next_token_id.to(dtype=torch.int32),
                 attention_inputs=attention_inputs,
             )
             model_outputs = self.model.forward(model_inputs)

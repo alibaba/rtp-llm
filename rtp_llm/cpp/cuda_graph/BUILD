@@ -12,8 +12,8 @@ cc_library(
 )
 
 cc_library(
-    name = "combo_position_ids_validation",
-    hdrs = ["combo_position_ids_validation.h"],
+    name = "cuda_graph_replay_contracts",
+    hdrs = ["cuda_graph_replay_contracts.h"],
     deps = torch_deps(),
     visibility = ["//visibility:public"],
 )
@@ -46,7 +46,7 @@ filegroup(
     name = "cuda_graph_hdrs",
     srcs = [
         "cuda_graph_base.h",
-        "combo_position_ids_validation.h",
+        "cuda_graph_replay_contracts.h",
         "generation_prefill_cuda_graph_replay_metadata.h",
         "cuda_graph_device_shims.h",
         "prepared_attention_inputs_guard.h",
@@ -88,7 +88,7 @@ cc_library(
     ],
     deps = torch_deps() + [
         ":cuda_graph_base",
-        ":combo_position_ids_validation",
+        ":cuda_graph_replay_contracts",
         ":prepared_attention_inputs_guard",
         ":generation_prefill_cuda_graph_replay_metadata",
         ":cuda_graph_hdrs_lib",
@@ -115,4 +115,11 @@ cc_library(
     }),
     visibility = ["//visibility:public"],
     alwayslink = 1,
+)
+
+cc_library(
+    name = "combo_position_ids_validation",
+    hdrs = ["combo_position_ids_validation.h"],
+    deps = [":cuda_graph_replay_contracts"],
+    visibility = ["//visibility:public"],
 )
