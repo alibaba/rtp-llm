@@ -19,9 +19,17 @@ final class MockPerformanceModel {
     private final double sleepScale;
     private final double prefillScale;
     private final Double fixedPrefillMs;
+    // Floor (ms) for the final post-scale prefill sleep from JSON "prefill.min_ms".
+    // Guards against sleep_scale making prefill unrealistically fast. Null signals
+    // "absent in JSON → no floor".
+    private final Double prefillMinMs;
     private final PrefillTimeFormula prefillFormula;
     private final List<DecodePoint> decodePoints;
     private final double decodeScale;
+    // Fixed per-token decode latency (ms) from JSON "decode.per_token_ms".
+    // When non-null, decodeMs uses outputLen * perTokenMs instead of the
+    // step_ms_by_batch curve. Null signals "absent in JSON → use curve fallback".
+    private final Double perTokenMs;
     private volatile double jitterPct;
     private volatile double cacheAdmissionRate;
     private volatile Double overrideFixedPrefillMs;
@@ -34,18 +42,22 @@ final class MockPerformanceModel {
                                  double sleepScale,
                                  double prefillScale,
                                  Double fixedPrefillMs,
+                                 Double prefillMinMs,
                                  PrefillTimeFormula prefillFormula,
                                  List<DecodePoint> decodePoints,
                                  double decodeScale,
+                                 Double perTokenMs,
                                  double jitterPct,
                                  double cacheAdmissionRate) {
         this.blockSize = blockSize;
         this.sleepScale = sleepScale;
         this.prefillScale = prefillScale;
         this.fixedPrefillMs = fixedPrefillMs;
+        this.prefillMinMs = prefillMinMs;
         this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
         this.decodeScale = decodeScale;
+        this.perTokenMs = perTokenMs;
         this.jitterPct = jitterPct;
         this.cacheAdmissionRate = cacheAdmissionRate;
     }
@@ -57,11 +69,13 @@ final class MockPerformanceModel {
         JsonNode prefill = performance.path("prefill");
         double prefillScale = prefill.path("scale").asDouble(1.0);
         Double fixedPrefillMs = prefill.has("fixed_ms") ? prefill.get("fixed_ms").asDouble() : null;
+        Double prefillMinMs = prefill.has("min_ms") ? prefill.get("min_ms").asDouble() : null;
 
         String formulaSource = loadPrefillFormula(masterConfigFile);
         PrefillTimeFormula formula = formulaSource == null ? null : PrefillTimeFormula.parse(formulaSource);
 
         JsonNode decode = performance.path("decode");
+        Double perTokenMs = decode.has("per_token_ms") ? decode.get("per_token_ms").asDouble() : null;
         List<DecodePoint> points = new ArrayList<>();
         for (JsonNode pair : decode.path("step_ms_by_batch")) {
             if (pair.isArray() && pair.size() >= 2) {
@@ -77,8 +91,8 @@ final class MockPerformanceModel {
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale, fixedPrefillMs,
-                formula, List.copyOf(points), decode.path("scale").asDouble(1.0),
-                jitterPct, cacheAdmissionRate);
+                prefillMinMs, formula, List.copyOf(points), decode.path("scale").asDouble(1.0),
+                perTokenMs, jitterPct, cacheAdmissionRate);
     }
 
     private static String loadPrefillFormula(String masterConfigFile) throws IOException {
@@ -144,7 +158,9 @@ final class MockPerformanceModel {
         } else {
             latency = 300.0;
         }
-        return scaledMs(latency * prefillScale);
+        long result = scaledMs(latency * prefillScale);
+        // Clamp on the final (post-scale) value: min_ms is the actual-sleep floor.
+        return prefillMinMs != null ? Math.max(result, Math.round(prefillMinMs)) : result;
     }
 
     void setOverrideFixedPrefillMs(Double ms) {
@@ -174,7 +190,18 @@ final class MockPerformanceModel {
     }
 
     long decodeMs(int outputLen, int activeBatchSize) {
-        double stepMs = overrideDecodeStepMs != null ? overrideDecodeStepMs : interpolateStepMs(activeBatchSize);
+        double stepMs;
+        if (overrideDecodeStepMs != null) {
+            // Runtime override (Python /set_perf decode_step_ms): fixed per-token semantics.
+            stepMs = overrideDecodeStepMs;
+        } else if (perTokenMs != null) {
+            // JSON "decode.per_token_ms": fixed per-token latency (e.g. 45ms ≈ DeepSeek V3 ~22 tok/s).
+            stepMs = perTokenMs;
+        } else {
+            // Fallback: step_ms_by_batch curve interpolation (backward compat for
+            // configs/tests that only set step_ms_by_batch without per_token_ms).
+            stepMs = interpolateStepMs(activeBatchSize);
+        }
         double effectiveScale = overrideDecodeScale != null ? overrideDecodeScale : decodeScale;
         return scaledMs(outputLen * stepMs * effectiveScale);
     }

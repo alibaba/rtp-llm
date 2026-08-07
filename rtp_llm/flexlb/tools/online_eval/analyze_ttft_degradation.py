@@ -817,8 +817,7 @@ def main() -> None:
         print("ERROR: no valid requests loaded", file=sys.stderr)
         sys.exit(1)
 
-    monitor_path = Path(args.monitor) if args.monitor else Path()
-    monitor = load_monitor(monitor_path)
+    monitor = load_monitor(Path(args.monitor)) if args.monitor else []
 
     # Resolve kill/restart epochs
     kill_epoch = args.kill_epoch

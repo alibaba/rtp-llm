@@ -14,6 +14,10 @@ if [[ "${FLEXLB_NETWORK_ISOLATED}" == "1" \
 fi
 FLEXLB_FAIL_ON_CONCURRENT_TEST="${FLEXLB_FAIL_ON_CONCURRENT_TEST:-1}"
 
+# Shared JavaLoadClient helpers: env-var mapping (run_java_load_client) and
+# JDK 21 detection (java_major/detect_java21_home/require_java21).
+source "${SCRIPT_DIR}/lib_load_client.sh"
+
 TRACE_FILE="${TRACE_FILE:-${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl}"
 PERFORMANCE_FILE="${PERFORMANCE_FILE:-${SCRIPT_DIR}/data/performance/dsv4_flash_performance.sample.json}"
 PROCESS_CONFIG_FILE="${PROCESS_CONFIG_FILE:-${SCRIPT_DIR}/data/config/master_fixed_window.json}"
@@ -64,6 +68,9 @@ LOOP="${LOOP:-0}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
 LOAD_CLIENT_START_DELAY_SECONDS="${LOAD_CLIENT_START_DELAY_SECONDS:-10}"
+# Warm up FlexLB before applying load so JIT/connections are hot and not
+# counted in stats. Overridable via env; 0 disables warmup.
+FLEXLB_WARMUP_SECONDS="${FLEXLB_WARMUP_SECONDS:-10}"
 CLIENT_PACING_LAG_P99_LIMIT_MS="${CLIENT_PACING_LAG_P99_LIMIT_MS:-100}"
 SLO_BATCH_ANALYSIS="${SLO_BATCH_ANALYSIS:-1}"
 SLO_BATCH_DRAIN_SECONDS="${SLO_BATCH_DRAIN_SECONDS:-0}"
@@ -138,42 +145,7 @@ JAVA_MODULE_OPTS=(
 # Limit Reactor boundedElastic scheduler threads to prevent thread explosion
 JVM_SYSTEM_PROPS=(-Dreactor.schedulers.defaultBoundedElasticSize=64)
 
-java_major() {
-  local java_bin="${1:-java}"
-  "${java_bin}" -version 2>&1 | awk -F'[\".]' '/version/ {print ($2 == "1" ? $3 : $2); exit}'
-}
-
-detect_java21_home() {
-  if [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/java" ]]; then
-    if [[ "$(java_major "${JAVA_HOME}/bin/java")" -ge 21 ]]; then
-      echo "${JAVA_HOME}"
-      return 0
-    fi
-  fi
-  if [[ -n "${JAVA21_HOME:-}" && -x "${JAVA21_HOME}/bin/java" ]]; then
-    echo "${JAVA21_HOME}"
-    return 0
-  fi
-  if [[ -x "${HOME}/java21/bin/java" \
-        && "$(java_major "${HOME}/java21/bin/java")" -ge 21 ]]; then
-    echo "${HOME}/java21"
-    return 0
-  fi
-  local java_bin
-  while IFS= read -r java_bin; do
-    if [[ -x "${java_bin}" && "$(java_major "${java_bin}")" -ge 21 ]]; then
-      dirname "$(dirname "${java_bin}")"
-      return 0
-    fi
-  done < <(
-    {
-      alternatives --display java 2>/dev/null || true
-      update-alternatives --display java 2>/dev/null || true
-    } | awk '/bin\/java/ {print $1}' | sort -u
-  )
-  return 1
-}
-
+# java_major/detect_java21_home are provided by lib_load_client.sh.
 JAVA21_HOME_DETECTED="$(detect_java21_home || true)"
 if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
   export JAVA_HOME="${JAVA21_HOME_DETECTED}"
@@ -224,24 +196,42 @@ PY
 }
 
 assert_ports_free() {
+  # SO_REUSEADDR lets a check socket bind against a port still in TIME_WAIT
+  # (no process listening, but kernel-held) — the common state right after a
+  # previous run is killed. Without it socket.bind() gives a false failure.
+  # Poll up to 5s for ports to drain; each check binds with SO_REUSEADDR so
+  # TIME_WAIT ports pass immediately.
   python3 - "$@" <<'PY'
 import socket
 import sys
+import time
 
-sockets = []
-try:
+max_wait = 5.0
+interval = 0.5
+deadline = time.monotonic() + max_wait
+last_errors = {}
+
+while True:
+    last_errors.clear()
+    ok = True
     for raw_port in sys.argv[1:]:
         port = int(raw_port)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("0.0.0.0", port))
         except OSError as exc:
-            print(f"required port {port} is not available: {exc}", file=sys.stderr)
-            sys.exit(1)
-        sockets.append(sock)
-finally:
-    for sock in sockets:
-        sock.close()
+            ok = False
+            last_errors[port] = exc
+        finally:
+            sock.close()
+    if ok:
+        sys.exit(0)
+    if time.monotonic() >= deadline:
+        for port, exc in last_errors.items():
+            print(f"required port {port} is not available after {max_wait:.0f}s: {exc}", file=sys.stderr)
+        sys.exit(1)
+    time.sleep(interval)
 PY
 }
 
@@ -603,7 +593,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     exit 1
   fi
   wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
-  if [[ "${FLEXLB_WARMUP_SECONDS:-0}" -gt 0 ]]; then
+  if [[ "${FLEXLB_WARMUP_SECONDS:-10}" -gt 0 ]]; then
     echo "Warming up FlexLB for ${FLEXLB_WARMUP_SECONDS}s before starting load..."
     sleep "${FLEXLB_WARMUP_SECONDS}"
   fi

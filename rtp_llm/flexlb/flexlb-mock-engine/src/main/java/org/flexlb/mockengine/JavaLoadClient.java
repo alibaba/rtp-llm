@@ -142,13 +142,18 @@ public final class JavaLoadClient {
         // Parity with the legacy Python load client: load_replay_requests applies
         // duration/limit filters FIRST, then num_shards slicing — so LIMIT applies
         // to the whole trace, not per shard. Loop mode skips both filters (duration
-        // becomes a wall-clock timeout, limit a total sent cap).
+        // becomes a wall-clock timeout, limit a total sent cap) but MUST still
+        // shard: request_ids are deterministic hashes of sourceRid, so without
+        // slicing every shard replays the identical trace and the master rejects
+        // all but the first arrival of each rid as "duplicate request_id".
         if (!config.loop) {
             records = filterAndShard(records, config.durationS, config.limit,
                     config.numShards, config.shardIndex);
-            if (records.isEmpty()) {
-                throw new RuntimeException("trace shard has no replayable requests");
-            }
+        } else {
+            records = shardSlice(records, config.numShards, config.shardIndex);
+        }
+        if (records.isEmpty()) {
+            throw new RuntimeException("trace shard has no replayable requests");
         }
 
         // Parity with Python: length truncation applied after sharding, before replay.
@@ -355,9 +360,13 @@ public final class JavaLoadClient {
         stopPushgateway();
     }
 
-    private TraceRecord makeLoopRequest(TraceRecord req, int loopIdx, int sentCount) {
-        String newSourceRid = req.sourceRid + "_L" + loopIdx;
-        String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + "_L" + loopIdx;
+    TraceRecord makeLoopRequest(TraceRecord req, int loopIdx, int sentCount) {
+        // Suffix carries the shard index defensively: even though loop mode now
+        // shards the trace, this keeps rid namespaces disjoint across shards if
+        // shard counts change or a trace contains duplicated sourceRids.
+        String loopSuffix = "_S" + config.shardIndex + "_L" + loopIdx;
+        String newSourceRid = req.sourceRid + loopSuffix;
+        String newTraceId = req.traceId.isEmpty() ? "" : req.traceId + loopSuffix;
         long newRequestId = stableRequestId(newSourceRid);
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
                 req.inputLen, req.outputLen, req.blockKeys, req.tokenIds);
@@ -970,7 +979,7 @@ public final class JavaLoadClient {
         return keys;
     }
 
-    private static long stableRequestId(String value) {
+    static long stableRequestId(String value) {
         return Hashing.murmur3_128()
                 .hashString(value, StandardCharsets.UTF_8)
                 .asLong() & 0x7FFF_FFFF_FFFF_FFFFL;
@@ -1170,19 +1179,28 @@ public final class JavaLoadClient {
         if (limit > 0) {
             out = out.subList(0, Math.min(limit, out.size()));
         }
-        if (numShards > 1) {
-            if (shardIndex < 0 || shardIndex >= numShards) {
-                throw new IllegalArgumentException("SHARD_INDEX must be in [0, NUM_SHARDS)");
-            }
-            List<TraceRecord> sharded = new ArrayList<>();
-            for (int i = 0; i < out.size(); i++) {
-                if (i % numShards == shardIndex) {
-                    sharded.add(out.get(i));
-                }
-            }
-            out = sharded;
+        return shardSlice(out, numShards, shardIndex);
+    }
+
+    /**
+     * Pure {@code i % numShards == shardIndex} slice with no duration/limit
+     * filtering. Used directly in loop mode, where duration is a wall-clock
+     * timeout and limit a total sent cap rather than trace filters.
+     */
+    static List<TraceRecord> shardSlice(List<TraceRecord> records, int numShards, int shardIndex) {
+        if (numShards <= 1) {
+            return new ArrayList<>(records);
         }
-        return new ArrayList<>(out);
+        if (shardIndex < 0 || shardIndex >= numShards) {
+            throw new IllegalArgumentException("SHARD_INDEX must be in [0, NUM_SHARDS)");
+        }
+        List<TraceRecord> sharded = new ArrayList<>();
+        for (int i = 0; i < records.size(); i++) {
+            if (i % numShards == shardIndex) {
+                sharded.add(records.get(i));
+            }
+        }
+        return sharded;
     }
 
     /**

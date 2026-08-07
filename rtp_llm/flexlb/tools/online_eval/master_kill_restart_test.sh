@@ -29,6 +29,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FLEXLB_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# Shared Java mock jar / JDK 21 detection helpers (require_java21).
+source "${SCRIPT_DIR}/lib_load_client.sh"
 FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar}"
 TRACE_FILE="${SCRIPT_DIR}/data/online_logs/trace_30min.jsonl"
 
@@ -149,6 +151,8 @@ if [[ ! -f "${TRACE_FILE}" ]]; then
   exit 1
 fi
 java -version 2>&1 | head -1
+# Fail fast on JDK < 21 before launching the mock engine jar / load client.
+require_java21
 echo "  JAR: ${FLEXLB_JAR}"
 echo "  Trace: ${TRACE_FILE} ($(wc -l < "${TRACE_FILE}") lines)"
 echo "  All prerequisites OK."
