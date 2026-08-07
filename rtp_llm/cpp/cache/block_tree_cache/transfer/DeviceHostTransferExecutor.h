@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -13,26 +14,13 @@ namespace rtp_llm {
 class DeviceHostTransferExecutor {
 public:
     explicit DeviceHostTransferExecutor(DeviceHostCopyOptions options = {});
-    ~DeviceHostTransferExecutor();
+    ~DeviceHostTransferExecutor() = default;
 
-    TransferStatus deviceToHost(const TransferDescriptor& desc, const GroupSet& group_set, HostBufferView host);
-    TransferStatus hostToDevice(HostBufferView host, const TransferDescriptor& desc, const GroupSet& group_set);
+    TransferStatus execute(HostBufferView host, const TransferDescriptor& desc, const GroupSet& group_set);
 
 private:
-    TransferStatus lowerAndExecute(const TransferDescriptor& desc,
-                                   const GroupSet&           group_set,
-                                   bool                      device_to_host,
-                                   HostBufferView            host);
-
-    DeviceHostCopyPlan lowerPlan(const TransferDescriptor& desc,
-                                 const GroupSet&           group_set,
-                                 bool                      device_to_host,
-                                 HostBufferView            host,
-                                 TransferStatus&           out_status) const;
-
-    TransferStatus executeStrategies(const DeviceHostCopyPlan& plan);
-
-    static std::vector<DeviceHostCopyPlan> splitByDevice(const DeviceHostCopyPlan& plan);
+    std::pair<TransferStatus, std::vector<DeviceHostCopyPlan>>
+    generatePlan(const TransferDescriptor& desc, const GroupSet& group_set, HostBufferView host) const;
 
     DeviceHostCopyOptions                                options_;
     std::vector<std::unique_ptr<DeviceHostCopyStrategy>> strategies_;

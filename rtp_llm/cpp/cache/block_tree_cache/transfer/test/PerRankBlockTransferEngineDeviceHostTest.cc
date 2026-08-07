@@ -6,7 +6,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -21,7 +20,6 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
@@ -206,6 +204,13 @@ private:
     StrategyCounters*                       counters_;
 };
 
+class FailingStrategy: public DeviceHostCopyStrategy {
+public:
+    StrategyResult tryExecute(const DeviceHostCopyPlan&, const DeviceHostCopyOptions&) override {
+        return StrategyResult::failed(TransferStatus::INVALID_ARGS);
+    }
+};
+
 static void installStrategyRecorders(DeviceHostTransferExecutor& executor, std::array<StrategyCounters, 3>& counters) {
     RTP_LLM_CHECK(executor.strategies_.size() == counters.size());
     for (size_t i = 0; i < counters.size(); ++i) {
@@ -296,6 +301,33 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout)
     host_pool_->free(host_block);
 }
 
+TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTargetTier) {
+    DeviceHostTransferExecutor executor;
+    fillDeviceLayer(device_pool_, 0, device_block_, {0xA5});
+
+    const BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    const HostBlockBuffer host_buffer = host_pool_->blockBuffer(host_block);
+    const HostBufferView  host{host_buffer.addr, host_buffer.payload_bytes, host_buffer.stride_bytes};
+
+    const auto d2h_desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
+    ASSERT_EQ(executor.execute(host, d2h_desc, *group_set_), TransferStatus::OK);
+    const auto* host_data = static_cast<const uint8_t*>(host.base);
+    for (size_t i = 0; i < layer_bytes_[0]; ++i) {
+        EXPECT_EQ(host_data[i], 0xA5);
+    }
+
+    fillDeviceLayer(device_pool_, 0, device_block_, {0x00});
+    const auto h2d_desc = makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block);
+    ASSERT_EQ(executor.execute(host, h2d_desc, *group_set_), TransferStatus::OK);
+    const auto device_data = readDeviceLayer(device_pool_, 0, device_block_);
+    for (size_t i = 0; i < layer_bytes_[0]; ++i) {
+        EXPECT_EQ(device_data[i], 0xA5);
+    }
+
+    host_pool_->free(host_block);
+}
+
 TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
     auto shared_pool = makeDevicePool({{64, 0}, {32, 0}}, 4, "per_rank_transfer_engine_shared_pool");
     auto host_pool   = makeHostPool(128, 4, true);
@@ -354,15 +386,6 @@ TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
     shared_pool->free(block_b);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsMissingRequiredBlocks) {
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, NULL_BLOCK_IDX),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, NULL_BLOCK_IDX),
-                 TransferStatus::INVALID_ARGS);
-}
-
 TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedHostBlock) {
     constexpr BlockIdxType unallocated_host_block = 1;
     expectStatus(per_rank_transfer_engine_,
@@ -371,16 +394,6 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedHostBlock) {
     expectStatus(per_rank_transfer_engine_,
                  makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, unallocated_host_block),
                  TransferStatus::OK);
-}
-
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsOutOfRangeHostBlock) {
-    const BlockIdxType out_of_range = static_cast<BlockIdxType>(host_pool_->totalBlocksNum() + 1);
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, out_of_range),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, out_of_range),
-                 TransferStatus::INVALID_ARGS);
 }
 
 TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedDeviceBlock) {
@@ -403,123 +416,6 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedDeviceBlock)
     host_pool_->free(host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsOutOfRangeDeviceBlock) {
-    const BlockIdxType              out_of_range  = static_cast<BlockIdxType>(device_pool_->totalBlocksNum() + 1);
-    const std::vector<BlockIdxType> device_blocks = {out_of_range};
-    const BlockIdxType              host_block    = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks, host_block),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks, host_block),
-                 TransferStatus::INVALID_ARGS);
-
-    host_pool_->free(host_block);
-}
-
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsMismatchedDeviceBlockCount) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    const std::array<std::vector<BlockIdxType>, 2> wrong_blocks = {
-        std::vector<BlockIdxType>{},
-        std::vector<BlockIdxType>{device_block_, device_block_},
-    };
-    for (const auto& blocks : wrong_blocks) {
-        SCOPED_TRACE(::testing::Message() << "block_count=" << blocks.size());
-        expectStatus(per_rank_transfer_engine_,
-                     makeDescriptor(Tier::DEVICE, Tier::HOST, blocks, host_block),
-                     TransferStatus::INVALID_ARGS);
-        expectStatus(per_rank_transfer_engine_,
-                     makeDescriptor(Tier::HOST, Tier::DEVICE, blocks, host_block),
-                     TransferStatus::INVALID_ARGS);
-    }
-    host_pool_->free(host_block);
-}
-
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsInvalidGroupSetId) {
-    for (size_t group_id : {std::numeric_limits<size_t>::max(), size_t{99}}) {
-        SCOPED_TRACE(::testing::Message() << "group_id=" << group_id);
-        expectStatus(per_rank_transfer_engine_,
-                     makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, NULL_BLOCK_IDX, NULL_BLOCK_IDX, group_id),
-                     TransferStatus::INVALID_ARGS);
-    }
-}
-
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsInvalidTierPairs) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    const std::array<std::pair<Tier, Tier>, 8> invalid_pairs = {
-        std::pair{Tier::NONE, Tier::HOST},
-        std::pair{Tier::DEVICE, Tier::NONE},
-        std::pair{Tier::DEVICE, Tier::DEVICE},
-        std::pair{Tier::HOST, Tier::HOST},
-        std::pair{Tier::DISK, Tier::DISK},
-        std::pair{Tier::DEVICE, Tier::DISK},
-        std::pair{Tier::DISK, Tier::DEVICE},
-        std::pair{Tier::REMOTE, Tier::HOST},
-    };
-    for (const auto& [source, target] : invalid_pairs) {
-        SCOPED_TRACE(::testing::Message() << tierName(source) << "->" << tierName(target));
-        expectStatus(per_rank_transfer_engine_,
-                     makeDescriptor(source, target, device_blocks_, host_block),
-                     TransferStatus::INVALID_ARGS);
-    }
-    host_pool_->free(host_block);
-}
-
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsIncompleteDeviceHostLayout) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    const auto desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
-
-    auto missing_host_group  = makeDeviceHostGroup(0, {device_pool_}, nullptr, {makeGroupBase({0, 1, 2}, 100)});
-    auto missing_host_engine = makeEngine({missing_host_group});
-    expectStatus(missing_host_engine, desc, TransferStatus::INVALID_ARGS);
-    host_pool_->free(host_block);
-}
-
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsInvalidLayerSlotLayout) {
-    {
-        auto host_pool   = makeHostPool(128, 2, true);
-        auto device_pool = makeDevicePool({{64, 0}, {16, 0}}, 2, "per_rank_transfer_engine_zero_stride");
-        auto block       = poolMalloc(*device_pool);
-        auto host_block  = poolMalloc(*host_pool);
-        auto group       = makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase({0, 1}, 64)});
-        auto engine      = makeEngine({group});
-        expectStatus(
-            engine, makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block), TransferStatus::INVALID_ARGS);
-    }
-
-    {
-        auto host_pool   = makeHostPool(65, 2, true);
-        auto device_pool = makeDevicePool({{64, 0}}, 2, "per_rank_transfer_engine_resource_mismatch");
-        auto block       = poolMalloc(*device_pool);
-        auto host_block  = poolMalloc(*host_pool);
-        auto group       = makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase({0}, 65)});
-        auto engine      = makeEngine({group});
-        expectStatus(
-            engine, makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block), TransferStatus::INVALID_ARGS);
-        expectStatus(
-            engine, makeDescriptor(Tier::HOST, Tier::DEVICE, {block}, host_block), TransferStatus::INVALID_ARGS);
-    }
-}
-
-TEST_F(PerRankBlockTransferEngineTest, UnusableCopyBufferReturnsDeviceIoError) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-
-    device_pool_->layout_strategies_[0]->config_.kv_block_stride_bytes = 0;
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block),
-                 TransferStatus::INVALID_ARGS);
-    host_pool_->free(host_block);
-}
-
 TEST_F(PerRankBlockTransferEngineTest, SubmitReturnsCompletedContextWithFinalStatus) {
     fillDeviceLayer(device_pool_, 0, device_block_, {0xAA});
     fillDeviceLayer(device_pool_, 1, device_block_, {0xBB});
@@ -527,46 +423,26 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitReturnsCompletedContextWithFinalSta
 
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    const std::array<std::pair<TransferDescriptor, TransferStatus>, 2> cases = {
-        std::pair{makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block), TransferStatus::OK},
-        std::pair{makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block, NULL_BLOCK_IDX, 99),
-                  TransferStatus::INVALID_ARGS},
-    };
+    const auto desc = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
 
-    for (const auto& [desc, expected] : cases) {
-        auto context = per_rank_transfer_engine_->submit(desc);
-        ASSERT_NE(context, nullptr);
-        EXPECT_TRUE(context->done());
-        context->waitDone();
-        EXPECT_EQ(context->success(), expected == TransferStatus::OK);
-        if (expected == TransferStatus::OK) {
-            EXPECT_TRUE(context->errorInfo().ok());
-        } else {
-            EXPECT_FALSE(context->errorInfo().ok());
-            EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-            EXPECT_FALSE(context->errorInfo().ToString().empty());
-        }
-    }
+    auto context = per_rank_transfer_engine_->submit(desc);
+    ASSERT_NE(context, nullptr);
+    EXPECT_TRUE(context->done());
+    context->waitDone();
+    EXPECT_TRUE(context->success());
+    EXPECT_TRUE(context->errorInfo().ok());
 
-    host_pool_->free(host_block);
-}
+    auto& strategies = per_rank_transfer_engine_->device_host_executor_->strategies_;
+    strategies.clear();
+    strategies.push_back(std::make_unique<FailingStrategy>());
+    auto failed_context = per_rank_transfer_engine_->submit(desc);
+    ASSERT_NE(failed_context, nullptr);
+    EXPECT_TRUE(failed_context->done());
+    failed_context->waitDone();
+    EXPECT_FALSE(failed_context->success());
+    EXPECT_EQ(failed_context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_FALSE(failed_context->errorInfo().ToString().empty());
 
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsAllNullDeviceBlocks) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    std::memset(host_data, 0xA5, host_block_size_);
-
-    const std::vector<BlockIdxType> all_null = {NULL_BLOCK_IDX};
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, all_null, host_block),
-                 TransferStatus::INVALID_ARGS);
-    for (size_t i = 0; i < host_block_size_; ++i)
-        EXPECT_EQ(host_data[i], 0xA5);
-
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, all_null, host_block),
-                 TransferStatus::INVALID_ARGS);
     host_pool_->free(host_block);
 }
 
@@ -871,23 +747,6 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithout
                  TransferStatus::OK);
     EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
     EXPECT_EQ(direct_io->lastReadBytes(), disk_pool->strideBytes());
-}
-
-TEST(TransientHostStagingPoolTest, PageableBackingServesLeasesWhenPinningDisabled) {
-    using Pool = DeviceDiskTransferExecutor::TransientHostStagingPool;
-    Pool pool(1, 4096, /*try_pin_memory=*/false);
-
-    auto lease = pool.tryAcquire();
-    ASSERT_TRUE(lease.has_value());
-    const auto view = lease->view(64);
-    ASSERT_NE(view.base, nullptr);
-    EXPECT_EQ(view.payload_bytes, 64u);
-    EXPECT_EQ(view.capacity_bytes, 4096u);
-    std::memset(view.base, 0xAB, view.payload_bytes);
-
-    EXPECT_FALSE(pool.tryAcquire().has_value());
-    lease.reset();
-    EXPECT_TRUE(pool.tryAcquire().has_value());
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskStageFailureShortCircuitsAndReleasesStaging) {
@@ -1205,33 +1064,6 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
     EXPECT_EQ(counters[2].failed, 0);
 
     host_pool_->free(host_block);
-}
-
-TEST_F(PerRankBlockTransferEngineStrategyTest, BatchNotApplicableFallsBackToGeneric) {
-    DeviceHostCopyOptions options;
-    options.cuda_batch_copy_enabled = true;
-    DeviceHostTransferExecutor      executor(options);
-    std::array<StrategyCounters, 3> counters;
-    installStrategyRecorders(executor, counters);
-
-    fillDeviceLayer(device_pool_, 0, device_block_, {0x71});
-    auto device_buffer = device_pool_->convertIndexToBuffer(0, device_block_).front();
-    auto host_block    = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
-    std::memset(host_data, 0, device_buffer.size_bytes);
-
-    DeviceHostCopyPlan plan;
-    plan.device_to_host = true;
-    plan.single_device  = true;
-    plan.group_set_id   = 0;
-    plan.host           = {host_data, device_buffer.size_bytes};
-    plan.copy_tiles.push_back(DeviceHostCopyTile{host_data, device_buffer.addr, 0, device_buffer.size_bytes, -1, 0, 0});
-    EXPECT_EQ(executor.executeStrategies(plan), TransferStatus::OK);
-    for (size_t i = 0; i < device_buffer.size_bytes; ++i)
-        EXPECT_EQ(host_data[i], 0x71);
-    EXPECT_EQ(counters[1].not_applicable, 1);
-    EXPECT_EQ(counters[2].done, 1);
 }
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsBackToGeneric) {

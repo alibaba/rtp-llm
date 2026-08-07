@@ -37,17 +37,6 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
     return false;
 }
 
-void BlockTransferRequestConverter::setDeviceBlocks(const std::vector<BlockIdxType>& blocks,
-                                                    const GroupSet&                  group_set,
-                                                    CopyItem&                        item) {
-    const auto& group_ids = group_set.groupIds();
-    for (size_t i = 0; i < blocks.size(); ++i) {
-        auto* group_block = item.add_group_blocks();
-        group_block->set_group_id(static_cast<int32_t>(group_ids[i]));
-        group_block->set_block_id(blocks[i]);
-    }
-}
-
 bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&            item,
                                                        const GroupSet&            group_set,
                                                        std::vector<BlockIdxType>& blocks) {
@@ -82,27 +71,28 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         if (descriptor.source_tier != first.source_tier || descriptor.target_tier != first.target_tier) {
             return false;
         }
-        appendTransferItem(descriptor, *group_sets[descriptor.group_set_id], request);
+        const GroupSet& group_set = *group_sets[descriptor.group_set_id];
+        CopyItem        item;
+        item.set_group_set_id(descriptor.group_set_id);
+
+        if (descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST) {
+            item.set_mem_block(descriptor.singleBlockAt(Tier::HOST));
+        }
+        if (descriptor.source_tier == Tier::DISK || descriptor.target_tier == Tier::DISK) {
+            item.set_disk_block(descriptor.singleBlockAt(Tier::DISK));
+        }
+        if (descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE) {
+            const auto& blocks    = descriptor.blocksAt(Tier::DEVICE);
+            const auto& group_ids = group_set.groupIds();
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                auto* group_block = item.add_group_blocks();
+                group_block->set_group_id(static_cast<int32_t>(group_ids[i]));
+                group_block->set_block_id(blocks[i]);
+            }
+        }
+        request.add_copy_items()->CopyFrom(item);
     }
     return true;
-}
-
-void BlockTransferRequestConverter::appendTransferItem(const TransferDescriptor& descriptor,
-                                                       const GroupSet&           group_set,
-                                                       MemoryOperationRequestPB& request) {
-    CopyItem item;
-    item.set_group_set_id(descriptor.group_set_id);
-
-    if (descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST) {
-        item.set_mem_block(descriptor.singleBlockAt(Tier::HOST));
-    }
-    if (descriptor.source_tier == Tier::DISK || descriptor.target_tier == Tier::DISK) {
-        item.set_disk_block(descriptor.singleBlockAt(Tier::DISK));
-    }
-    if (descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE) {
-        setDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), group_set, item);
-    }
-    request.add_copy_items()->CopyFrom(item);
 }
 
 bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&  request,

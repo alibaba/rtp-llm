@@ -40,54 +40,32 @@ TransferStatus HostDiskTransferExecutor::blockIOStatusToTransferStatus(BlockIOSt
     return TransferStatus::DISK_IO_ERROR;
 }
 
-TransferStatus
-HostDiskTransferExecutor::hostToDisk(HostBufferView            host,
-                                     const TransferDescriptor& desc,
-                                     const GroupSet&           group_set) const {
-    const BlockIdxType      disk_block  = desc.singleBlockAt(Tier::DISK);
-    BlockTreeDiskBlockPool& disk_pool   = *group_set.diskPool();
-    const size_t payload     = group_set.payloadBytes();
-    const size_t disk_stride = disk_pool.strideBytes();
+TransferStatus HostDiskTransferExecutor::execute(HostBufferView            host,
+                                                 const TransferDescriptor& desc,
+                                                 const GroupSet&           group_set) const {
+    const bool              write_to_disk = desc.target_tier == Tier::DISK;
+    const BlockIdxType      disk_block    = desc.singleBlockAt(Tier::DISK);
+    BlockTreeDiskBlockPool& disk_pool     = *group_set.diskPool();
+    const size_t            payload       = group_set.payloadBytes();
+    const size_t            disk_stride   = disk_pool.strideBytes();
     if (!isValidHostBufferView(host, payload, disk_stride)) {
-        RTP_LLM_LOG_WARNING("invalid host buffer for host->disk, disk=%d payload=%zu stride=%zu capacity=%zu",
+        RTP_LLM_LOG_WARNING("invalid host buffer for %s, disk=%d payload=%zu stride=%zu capacity=%zu",
+                            write_to_disk ? "host->disk" : "disk->host",
                             disk_block,
                             payload,
                             disk_stride,
                             host.capacity_bytes);
         return TransferStatus::DISK_IO_ERROR;
     }
-    // Write a full disk stride so O_DIRECT length stays block-aligned; zero the
-    // [payload, stride) padding so no uninitialized host memory reaches disk.
-    if (disk_stride > payload) {
+    if (write_to_disk && disk_stride > payload) {
         std::memset(static_cast<uint8_t*>(host.base) + payload, 0, disk_stride - payload);
     }
-    const BlockIOStatus status = disk_pool.write(disk_block, host.base, disk_stride);
+    const BlockIOStatus status =
+        write_to_disk ? disk_pool.write(disk_block, host.base, disk_stride) :
+                        disk_pool.read(disk_block, host.base, disk_stride);
     if (status != BlockIOStatus::OK) {
-        RTP_LLM_LOG_WARNING("write failed, disk=%d, status=%s", disk_block, blockIOStatusName(status));
-        return blockIOStatusToTransferStatus(status);
-    }
-    return TransferStatus::OK;
-}
-
-TransferStatus
-HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc,
-                                     const GroupSet&           group_set,
-                                     HostBufferView            host) const {
-    const BlockIdxType      disk_block  = desc.singleBlockAt(Tier::DISK);
-    BlockTreeDiskBlockPool& disk_pool   = *group_set.diskPool();
-    const size_t payload     = group_set.payloadBytes();
-    const size_t disk_stride = disk_pool.strideBytes();
-    if (!isValidHostBufferView(host, payload, disk_stride)) {
-        RTP_LLM_LOG_WARNING("invalid host buffer for disk->host, disk=%d payload=%zu stride=%zu capacity=%zu",
-                            disk_block,
-                            payload,
-                            disk_stride,
-                            host.capacity_bytes);
-        return TransferStatus::DISK_IO_ERROR;
-    }
-    const BlockIOStatus status = disk_pool.read(disk_block, host.base, disk_stride);
-    if (status != BlockIOStatus::OK) {
-        RTP_LLM_LOG_WARNING("read failed, disk=%d, status=%s", disk_block, blockIOStatusName(status));
+        RTP_LLM_LOG_WARNING(
+            "%s failed, disk=%d, status=%s", write_to_disk ? "write" : "read", disk_block, blockIOStatusName(status));
         return blockIOStatusToTransferStatus(status);
     }
     return TransferStatus::OK;

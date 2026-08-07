@@ -13,10 +13,6 @@ namespace rtp_llm {
 
 StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan& plan,
                                                                   const DeviceHostCopyOptions& /*options*/) {
-    if (plan.copy_tiles.empty()) {
-        return StrategyResult::done();
-    }
-
     std::vector<torch::Tensor> dst_buffers;
     std::vector<torch::Tensor> src_buffers;
 
@@ -26,9 +22,6 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
     };
 
     for (const auto& tile : plan.copy_tiles) {
-        if (tile.bytes == 0) {
-            continue;
-        }
         auto cpu_device = torch::Device(torch::kCPU);
         auto cuda_device =
             tile.device_index >= 0 ? torch::Device(torch::kCUDA, tile.device_index) : torch::Device(torch::kCUDA);
@@ -41,10 +34,8 @@ StrategyResult GenericMultiCopyDeviceHostCopyStrategy::tryExecute(const DeviceHo
         }
     }
 
-    if (!dst_buffers.empty()) {
-        MultiCopyParams mc{dst_buffers, src_buffers};
-        execNoBlockCopy(mc);
-    }
+    MultiCopyParams mc{dst_buffers, src_buffers};
+    execNoBlockCopy(mc);
     return StrategyResult::done();
 }
 
@@ -53,20 +44,10 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
     if (!options.cuda_batch_copy_enabled) {
         return StrategyResult::notApplicable();
     }
-    if (plan.copy_tiles.empty()) {
-        return StrategyResult::done();
-    }
 
-    int device_index = -1;
-    for (const auto& tile : plan.copy_tiles) {
-        if (tile.device_index < 0) {
-            return StrategyResult::notApplicable();
-        }
-        if (device_index < 0) {
-            device_index = tile.device_index;
-        } else if (tile.device_index != device_index) {
-            return StrategyResult::notApplicable();
-        }
+    const int device_index = plan.copy_tiles.front().device_index;
+    if (device_index < 0) {
+        return StrategyResult::notApplicable();
     }
 
     BatchedMemoryCopyParams params;
@@ -74,9 +55,6 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
     params.tiles.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
-        if (tile.bytes == 0) {
-            continue;
-        }
         BatchedMemoryCopyTile batch_tile;
         if (plan.device_to_host) {
             batch_tile.dst = tile.host_addr;
@@ -87,10 +65,6 @@ StrategyResult CudaBatchDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyP
         }
         batch_tile.bytes = tile.bytes;
         params.tiles.push_back(batch_tile);
-    }
-
-    if (params.tiles.empty()) {
-        return StrategyResult::done();
     }
 
     // The bool API cannot distinguish "unsupported CUDART" from "CUDA runtime error".
@@ -122,25 +96,17 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
         return StrategyResult::notApplicable();
     }
 
-    if (plan.copy_tiles.empty()) {
-        return StrategyResult::done();
-    }
-
     if (plan.copy_tiles.size() < options.staged_sm_min_tile_count) {
         return StrategyResult::notApplicable();
     }
 
-    size_t total_bytes  = 0;
-    int    device_index = -1;
+    const int device_index = plan.copy_tiles.front().device_index;
+    if (device_index < 0) {
+        return StrategyResult::notApplicable();
+    }
+
+    size_t total_bytes = 0;
     for (const auto& tile : plan.copy_tiles) {
-        if (tile.device_index < 0) {
-            return StrategyResult::notApplicable();
-        }
-        if (device_index < 0) {
-            device_index = tile.device_index;
-        } else if (tile.device_index != device_index) {
-            return StrategyResult::notApplicable();
-        }
         total_bytes += tile.bytes;
     }
 
@@ -159,9 +125,6 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
     staged_params.host_segments.reserve(plan.copy_tiles.size());
 
     for (const auto& tile : plan.copy_tiles) {
-        if (tile.bytes == 0) {
-            continue;
-        }
         size_t staging_offset = alignUp(current_staging_offset, kStagedAlignment);
 
         StagedMemoryCopyTile staged_tile;
@@ -189,10 +152,6 @@ StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPl
         current_staging_offset = staging_offset + tile.bytes;
     }
     staged_params.host_bytes = current_staging_offset;
-
-    if (staged_params.tiles.empty()) {
-        return StrategyResult::done();
-    }
 
     std::lock_guard<std::mutex> lock(scratch_mutex_);
     auto&                       entry = scratch_by_device_[device_index];

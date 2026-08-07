@@ -41,6 +41,22 @@ cc_test(
 )
 
 cc_test(
+    name = "aligned_host_memory_test",
+    srcs = ["AlignedHostMemoryTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
+    name = "host_staging_block_pool_test",
+    srcs = ["HostStagingBlockPoolTest.cc"],
+    copts = pool_test_copts,
+    deps = pool_test_deps,
+    env = {},
+)
+
+cc_test(
     name = "disk_block_pool_test",
     srcs = ["DiskBlockPoolTest.cc"],
     copts = pool_test_copts,

@@ -2,10 +2,10 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
 
-#include <torch/torch.h>
-
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
 
 namespace rtp_llm {
@@ -56,9 +56,7 @@ private:
     const HostBlockPoolConfig& config() const;
 
 private:
-    torch::Tensor backing_;
-    void*         base_ptr_{nullptr};
-    bool          pinned_{false};
+    std::optional<AlignedHostMemory> backing_;
 };
 
 }  // namespace rtp_llm

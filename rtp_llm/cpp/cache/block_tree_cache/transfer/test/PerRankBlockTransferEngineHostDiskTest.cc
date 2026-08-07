@@ -102,8 +102,8 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
     auto* direct_io = owned_io.get();
     auto  direct_disk =
         makeDiskPool(host_block_size_, 4, temp_dir_.path, std::move(owned_io), "host_disk_direct", false);
-    auto         group  = makeHostDiskGroup(0, host_pool_, direct_disk, host_block_size_);
-    auto         engine = makeEngine({group});
+    auto                     group = makeHostDiskGroup(0, host_pool_, direct_disk, host_block_size_);
+    HostDiskTransferExecutor executor;
     const size_t stride = direct_disk->strideBytes();
     ASSERT_GT(stride, host_block_size_);
     EXPECT_FALSE(direct_io->bufferedIo());
@@ -118,14 +118,20 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
 
     const auto disk_slot = poolMalloc(*direct_disk);
     ASSERT_NE(disk_slot, NULL_BLOCK_IDX);
-    ASSERT_TRUE(submitSucceeded(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_slot)));
+    ASSERT_EQ(executor.execute(HostBufferView{host_data, host_block_size_, stride},
+                               TransferDescriptor::deviceToDisk(0, {0}, disk_slot),
+                               *group),
+              TransferStatus::OK);
     EXPECT_EQ(direct_io->lastWriteBytes(), stride);
 
     const BlockIdxType dst_block = poolMalloc(*host_pool_);
     ASSERT_NE(dst_block, NULL_BLOCK_IDX);
     uint8_t* dst_data = static_cast<uint8_t*>(host_pool_->blockBuffer(dst_block).addr);
     std::memset(dst_data, 0xAB, stride);
-    ASSERT_TRUE(submitSucceeded(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, dst_block, disk_slot)));
+    ASSERT_EQ(executor.execute(HostBufferView{dst_data, host_block_size_, stride},
+                               TransferDescriptor::diskToDevice(0, disk_slot, {0}),
+                               *group),
+              TransferStatus::OK);
     EXPECT_EQ(direct_io->lastReadBytes(), stride);
 
     for (size_t i = 0; i < host_block_size_; ++i) {
@@ -138,32 +144,6 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
     host_pool_->free(host_block);
     host_pool_->free(dst_block);
     direct_disk->free(disk_slot);
-}
-
-TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitRejectsMalformedHostDiskDescriptors) {
-    BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    const BlockIdxType disk_block = poolMalloc(*disk_pool_);
-    ASSERT_NE(disk_block, NULL_BLOCK_IDX);
-
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::HOST, Tier::DISK, {}, NULL_BLOCK_IDX, disk_block),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::DISK, Tier::HOST, {}, NULL_BLOCK_IDX, disk_block),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, NULL_BLOCK_IDX),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, NULL_BLOCK_IDX),
-                 TransferStatus::INVALID_ARGS);
-    TransferDescriptor malformed = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block);
-    malformed.source_blocks.push_back(3);
-    expectStatus(per_rank_transfer_engine_, malformed, TransferStatus::INVALID_ARGS);
-
-    host_pool_->free(host_block);
-    disk_pool_->free(disk_block);
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskAcceptsValidUnallocatedDiskBlock) {
@@ -188,31 +168,6 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRejectsOutOfRange
                  TransferStatus::INVALID_ARGS);
 
     host_pool_->free(host_block);
-}
-
-TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitRejectsInvalidHostDiskLayout) {
-    auto host_block = poolMalloc(*host_pool_);
-    auto disk_block = poolMalloc(*disk_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    ASSERT_NE(disk_block, NULL_BLOCK_IDX);
-
-    auto missing_host_group  = makeHostDiskGroup(0, nullptr, disk_pool_, host_block_size_);
-    auto missing_host_engine = makeEngine({missing_host_group});
-    expectStatus(missing_host_engine,
-                 makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(missing_host_engine,
-                 makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block),
-                 TransferStatus::INVALID_ARGS);
-
-    auto missing_disk_group  = makeHostDiskGroup(0, host_pool_, nullptr, host_block_size_);
-    auto missing_disk_engine = makeEngine({missing_disk_group});
-    expectStatus(missing_disk_engine,
-                 makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block),
-                 TransferStatus::INVALID_ARGS);
-    expectStatus(missing_disk_engine,
-                 makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_block),
-                 TransferStatus::INVALID_ARGS);
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {

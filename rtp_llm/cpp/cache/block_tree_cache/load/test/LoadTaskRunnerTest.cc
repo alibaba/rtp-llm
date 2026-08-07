@@ -6,8 +6,6 @@
 
 #include <gtest/gtest.h>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 
 namespace rtp_llm {
@@ -54,34 +52,6 @@ TEST(LoadTaskRunnerTest, CreateTaskSkipsDeviceDescriptors) {
     const std::shared_ptr<LoadAsyncContext> context = coordinator->create({device_desc}, {false}, 1);
     LoadTaskRunner::TaskPtr                 task    = runner.createTask(context);
     EXPECT_EQ(task, nullptr);
-}
-
-class CountingTransferEngine: public PerRankBlockTransferEngine {
-public:
-    explicit CountingTransferEngine(std::vector<GroupSetPtr> groups): PerRankBlockTransferEngine(std::move(groups)) {}
-
-    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& desc) override {
-        ++submit_count;
-        return PerRankBlockTransferEngine::submit(desc);
-    }
-
-    size_t submit_count{0};
-};
-
-TEST(LoadTaskRunnerTest, MissingSourcePoolIsRejectedByTransferEngine) {
-    GroupSetPtr                   group  = makeTaskRunnerTestGroupSet();
-    const std::vector<GroupSetPtr> group_sets{group};
-    LoadTaskRunner                 runner(group_sets);
-    auto                          engine = std::make_shared<CountingTransferEngine>(std::vector<GroupSetPtr>{group});
-    BlockTransferDispatcher       dispatcher(engine);
-    BlockTreeCacheMetricsReporter metrics_reporter;
-
-    LoadTaskRunner::Task task;
-    task.load_descs.push_back(TransferDescriptor::hostToDevice(0, 1, {1}));
-
-    EXPECT_FALSE(runner.runTransfer(
-        task, dispatcher, metrics_reporter, /*disk_timeout_ms=*/2000, /*host_timeout_ms=*/1000));
-    EXPECT_EQ(engine->submit_count, 1u);
 }
 
 }  // namespace

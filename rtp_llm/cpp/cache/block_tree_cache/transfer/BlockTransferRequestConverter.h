@@ -23,10 +23,6 @@ private:
 
     static bool            directionFor(const TransferDescriptor&                descriptor,
                                         MemoryOperationRequestPB::CopyDirection& request_direction);
-    static void            appendTransferItem(const TransferDescriptor& descriptor,
-                                              const GroupSet&           group_set,
-                                              MemoryOperationRequestPB& request);
-    static void setDeviceBlocks(const std::vector<BlockIdxType>& blocks, const GroupSet& group_set, CopyItem& item);
     static bool decodeDeviceBlocks(const CopyItem& item, const GroupSet& group_set, std::vector<BlockIdxType>& blocks);
 };
 

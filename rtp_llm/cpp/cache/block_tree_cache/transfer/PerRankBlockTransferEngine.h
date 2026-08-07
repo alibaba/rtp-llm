@@ -7,12 +7,11 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceDiskTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
-
-class DeviceHostTransferExecutor;
-class HostDiskTransferExecutor;
 
 class PerRankBlockTransferEngine {
 public:
@@ -20,16 +19,13 @@ public:
                                         DeviceHostCopyOptions    device_host_options             = {},
                                         size_t                   device_disk_staging_block_count = 4);
     PerRankBlockTransferEngine() = delete;
-    virtual ~PerRankBlockTransferEngine();
+    virtual ~PerRankBlockTransferEngine() = default;
 
     // Currently executes synchronously on the calling thread and returns a non-null completed context.
     virtual std::shared_ptr<AsyncContext> submit(const TransferDescriptor& desc);
 
 private:
     TransferStatus execute(const TransferDescriptor& desc);
-    TransferStatus validateRequest(const TransferDescriptor& desc, const GroupSet*& group_set) const;
-    TransferStatus validateDeviceBlocks(const TransferDescriptor& desc, const GroupSet& group_set) const;
-
     static HostBufferView resolveHostView(const GroupSet& group_set, BlockIdxType host_block);
 
     std::vector<GroupSetPtr> group_sets_;

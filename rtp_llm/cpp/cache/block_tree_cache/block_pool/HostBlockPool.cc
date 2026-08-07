@@ -3,7 +3,6 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <sstream>
 
 #include <sys/mman.h>
@@ -92,37 +91,8 @@ bool HostBlockPool::init() {
 
     // block 0's slot is allocated as backing but is never handed out by malloc().
     const size_t total_bytes = cfg.physical_block_count * cfg.stride_bytes;
-    const size_t alloc_bytes = total_bytes + cfg.alignment;
-    auto         cpu         = torch::empty({static_cast<int64_t>(alloc_bytes)},
-                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-
-    bool pinned = false;
-    if (cfg.enable_pinned) {
-        try {
-            backing_ = cpu.pin_memory();
-            pinned   = backing_.is_pinned();
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING(
-                "pin host block pool memory failed, fallback to pageable CPU memory, pool_name=%s error=%s",
-                cfg.pool_name.c_str(),
-                e.what());
-        }
-        if (!pinned) {
-            RTP_LLM_LOG_WARNING("host block pool pin_memory unavailable, fallback to pageable CPU memory, pool_name=%s",
-                                cfg.pool_name.c_str());
-            backing_ = cpu;
-        }
-    } else {
-        backing_ = cpu;
-    }
-
-    pinned_                 = pinned;
-    const auto raw_base     = reinterpret_cast<uintptr_t>(backing_.data_ptr());
-    const auto aligned_base = (raw_base + cfg.alignment - 1) / cfg.alignment * cfg.alignment;
-    base_ptr_               = reinterpret_cast<void*>(aligned_base);
-
-    markHostBlockPoolDontDump(cfg.pool_name.c_str(), base_ptr_, total_bytes);
-
+    backing_.emplace(total_bytes, cfg.alignment, cfg.enable_pinned, cfg.pool_name);
+    markHostBlockPoolDontDump(cfg.pool_name.c_str(), backing_->data(), total_bytes);
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("backing selected: pool_name=%s payload_bytes=%zu stride_bytes=%zu "
                      "physical_block_count=%zu total_size=%zu bytes total_size_mb=%.2f is_pinned=%d ptr=%p",
@@ -132,22 +102,22 @@ bool HostBlockPool::init() {
                      cfg.physical_block_count,
                      total_bytes,
                      static_cast<double>(total_bytes) / kBytesPerMB,
-                     pinned_,
-                     base_ptr_);
+                     backing_->isPinned(),
+                     backing_->data());
 
     markInitialized();
     return true;
 }
 
 bool HostBlockPool::isPinned() const {
-    return pinned_;
+    return backing_.has_value() && backing_->isPinned();
 }
 
 HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK(validBlock(block));
     const auto& cfg  = config();
-    void*       addr = static_cast<uint8_t*>(base_ptr_) + static_cast<size_t>(block) * cfg.stride_bytes;
+    void*       addr = backing_->data() + static_cast<size_t>(block) * cfg.stride_bytes;
     return HostBlockBuffer{block, addr, cfg.payload_bytes, cfg.stride_bytes};
 }
 
@@ -166,7 +136,7 @@ size_t HostBlockPool::blockSizeBytes() const {
 std::string HostBlockPool::debugString() const {
     std::ostringstream oss;
     oss << "HostBlockPool{" << IBlockPool::debugString() << ", payload_bytes=" << payloadBytes()
-        << ", stride_bytes=" << strideBytes() << ", pinned=" << pinned_ << "}";
+        << ", stride_bytes=" << strideBytes() << ", pinned=" << isPinned() << "}";
     return oss.str();
 }
 
