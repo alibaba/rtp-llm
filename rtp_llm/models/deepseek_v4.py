@@ -700,7 +700,8 @@ def _v4_draft_shared_weights(hidden_size: int, head_stage: int) -> List[WeightMo
         # Drafts load alongside the main model in the same process; keep the
         # lm_head copy in bf16 to halve the per-process footprint (the FP32
         # cast happens lazily on the rare standalone test path). Production
-        # routes or aliases the framework lm_head onto the target's tensor.
+        # routes or aliases the framework lm_head onto the target's tensor —
+        # for alias-declared names the loader skips materializing this copy.
         AtomicWeight(
             W.lm_head,
             [CkptWeightInfo("head.weight", identity)],

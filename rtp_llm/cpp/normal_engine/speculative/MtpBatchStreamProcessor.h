@@ -78,11 +78,11 @@ public:
                                  const torch::Tensor& committed_ends,
                                  TensorHolder&        host_holder);
 
-    // Round-head propose input from per-stream state (anchor = last accepted
-    // token, committed_end = committed length). New PD streams and steady
-    // streams take the same path.
-    // Round-head stream state, derived once per decode round and consumed by
-    // both the propose and verify input builders below.
+    // Round-head stream state (anchor = last accepted token, committed_end =
+    // committed length - 1), derived once per decode round and consumed by
+    // both the propose and verify input builders below; new PD streams and
+    // steady streams take the same path. Consumers must treat both tensors as
+    // immutable — propose and verify alias this one storage.
     struct DSparkRoundHead {
         torch::Tensor anchors;
         torch::Tensor committed_ends;

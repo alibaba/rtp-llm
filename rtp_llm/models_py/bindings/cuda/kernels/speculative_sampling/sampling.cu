@@ -222,9 +222,10 @@ DeviceSamplingFromProb(uint32_t                                                 
 // materialized draft_probs, so the row is synthesized instead of loaded.
 template<uint32_t VEC_SIZE, typename VecT, typename IdType>
 __device__ __forceinline__ void synthesizePointMassProbVec(VecT& p_vec, IdType draft_id, uint32_t base_token_id) {
+    using ElemT = std::remove_reference_t<decltype(p_vec[0])>;
 #pragma unroll
     for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-        p_vec[j] = base_token_id + j == static_cast<uint32_t>(draft_id) ? 1 : 0;
+        p_vec[j] = base_token_id + j == static_cast<uint32_t>(draft_id) ? ElemT(1) : ElemT(0);
     }
 }
 

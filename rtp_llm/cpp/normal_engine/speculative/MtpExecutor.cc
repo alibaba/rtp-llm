@@ -514,13 +514,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 vocab_size_);
         // The draft rides the standard prefill-CP split for its commit calls.
         // Its fixed-width decode-phase blocks (propose, tail commit) must stay
-        // unsplit, which PD separation guarantees (decode roles run with
-        // prefill CP off). A colocated engine would CP-split those blocks —
-        // and its sharded-CP ring geometry would differ between commit and
-        // propose — so reject the combination outright.
+        // unsplit, so an enabled split is only legal on a pure prefill role:
+        // colocated engines would CP-split the decode-phase blocks (and a
+        // sharded-CP ring would flip geometry between commit and propose),
+        // and a decode role with an enabled split method is a misconfiguration
+        // (decode roles describe imported CP layout via PREFILL_CP, which is
+        // not an enabled split).
         RTP_LLM_CHECK_WITH_INFO(!(params.parallelism_config.prefill_cp_config.is_enabled()
-                                  && role_type_ == RoleType::PDFUSION),
-                                "dspark with prefill context parallel requires PD-separated roles");
+                                  && role_type_ != RoleType::PREFILL),
+                                "dspark with an enabled prefill-CP split requires the PREFILL role");
     }
 
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
@@ -808,7 +810,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     const bool    cp_enabled = parallelism_config_.prefill_cp_config.is_enabled();
     torch::Tensor saved_combo_tokens;
     torch::Tensor saved_input_lengths;
-    if (cp_enabled) {
+    // Only rank 0 restores; non-root ranks get the restored view from the
+    // second tpSync, so skip the snapshot copies there.
+    if (cp_enabled && isTpRank0()) {
         saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
         saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
     }
@@ -1185,7 +1189,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // DSpARK round head: the proposal for THIS round is produced here, from
     // the draft ring as of the previous round's commit. The propose input
-    // (anchor = last accepted token, committed_end = committed length) is
+    // (anchor = last accepted token, committed_end = committed length - 1) is
     // exactly the state the verify input reads, so a freshly handed-over PD
     // stream needs no special case — its first proposal is produced on its
     // first decode round. The prefill worker no longer proposes at all.
