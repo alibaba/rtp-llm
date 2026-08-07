@@ -150,6 +150,20 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     )
                 )
 
+    def test_bert_and_multimodal_signals_fall_back_to_full_batch(self) -> None:
+        for signal in ("bert_ids", "text_mask", "features", "locs", "extra"):
+            with self.subTest(signal=signal):
+                model = CacheStoreForwardModel()
+                result = run_scenario(model, f"micro_batch_fallback_{signal}")
+
+                self.assertEqual(model.forward_calls, 0)
+                self.assertEqual(model.micro_batch_calls, 1)
+                # Fake attention preparation records the full input-length tensor for
+                # every forward call. A regular two-way micro-batch plan records
+                # [2, 4] and [2], so two full-batch records verify the fallback path.
+                self.assertEqual(model.seen_input_lengths, [[2, 4, 2], [2, 4, 2]])
+                self.assertEqual(len(result["records"]), 3)
+
     def test_context_parallel_publishes_original_lengths_not_local_chunk(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "cp_actual_lengths")
