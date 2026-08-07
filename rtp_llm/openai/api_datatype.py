@@ -98,6 +98,9 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[List[ToolCall]] = None
     partial: Optional[bool] = False
     tool_call_id: Optional[str] = None
+    # K3 KVV dynamic tools: tool definitions embedded in a message
+    # (typically the system message) instead of the request-level field.
+    tools: Optional[List[Dict[str, Any]]] = None
 
 
 # NOTE: according to openai api definition, `function_call` is deprecated, and replaced by `tool_calls`.
@@ -226,16 +229,30 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_tool_choice(self) -> "ChatCompletionRequest":
-        if self.tool_choice == "required" and not self.tools:
+        message_tools = [
+            tool for message in self.messages or [] for tool in (message.tools or [])
+        ]
+
+        def _tool_name(tool: Dict[str, Any]) -> Optional[str]:
+            function = tool.get("function")
+            if isinstance(function, dict):
+                return function.get("name")
+            return None
+
+        has_tools = bool(self.tools) or bool(message_tools)
+        if self.tool_choice == "required" and not has_tools:
             raise ValueError("tool_choice='required' requires non-empty tools")
 
         name = get_tool_choice_function_name(self.tool_choice)
         if name is None:
             return self
 
-        if not self.tools:
+        if not has_tools:
             raise ValueError("tool_choice function requires non-empty tools")
-        tool_names = {tool.function.name for tool in self.tools}
+        tool_names = {tool.function.name for tool in self.tools or []}
+        tool_names.update(
+            tool_name for tool in message_tools if (tool_name := _tool_name(tool))
+        )
         if name not in tool_names:
             raise ValueError(f"tool_choice function {name!r} is not in tools")
         return self

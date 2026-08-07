@@ -95,6 +95,18 @@ py_test(
 )
 
 py_test(
+    name = "exception_http_status_test",
+    srcs = [
+        "exception_http_status_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

@@ -1,11 +1,19 @@
+import json
 import logging
+import re
+import uuid
 from typing import Any, Dict, List, Optional
 
 from typing_extensions import override
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.openai.api_datatype import ChatCompletionRequest, DeltaMessage
+from rtp_llm.openai.api_datatype import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    FinisheReason,
+    FunctionCall,
+    ToolCall,
+)
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
@@ -23,6 +31,10 @@ class _KimiK3StreamStatus(StreamStatus):
         self.xtml_pending = ""
         self.in_reasoning = not request.disable_thinking()
         self.response_closed = False
+        # XTML tools channel state (emitted after <|close|>response<|sep|>)
+        self.tools_pending = ""
+        self.in_tools = False
+        self.tool_calls_seen = 0
 
 
 class KimiK3Renderer(CustomChatRenderer):
@@ -38,6 +50,23 @@ class KimiK3Renderer(CustomChatRenderer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.add_extra_stop_words(["<|end_of_msg|>"])
+
+    _TOOLS_OPEN = "<|open|>tools<|sep|>"
+    _TOOLS_CLOSE = "<|close|>tools<|sep|>"
+    _XTML_CALL_RE = re.compile(
+        r"<\|open\|>call tool=\"(?P<tool>[^\"]*)\" index=\"(?P<index>\d+)\"<\|sep\|>"
+        r"(?P<body>.*?)<\|close\|>call<\|sep\|>",
+        re.S,
+    )
+    _XTML_JSON_RE = re.compile(
+        r"<\|open\|>json(?: type=\"[^\"]*\")?<\|sep\|>(?P<body>.*?)<\|close\|>json<\|sep\|>",
+        re.S,
+    )
+    _XTML_ARG_RE = re.compile(
+        r"<\|open\|>argument key=\"(?P<key>[^\"]*)\" type=\"(?P<type>[^\"]*)\"<\|sep\|>"
+        r"(?P<body>.*?)<\|close\|>argument<\|sep\|>",
+        re.S,
+    )
 
     @staticmethod
     def _split_marker_prefix(text: str, marker: str) -> tuple[str, str]:
@@ -62,16 +91,21 @@ class KimiK3Renderer(CustomChatRenderer):
             <|close|>think<|sep|><|open|>response<|sep|>
 
         Both thinking and non-thinking modes finish the visible channel with
-        ``<|close|>response<|sep|>``. ``<|end_of_msg|>`` is removed by the
-        generic stop path, but the other XTML tokens are ordinary generated
-        tokens. Parse the exact channel boundaries here so they never leak
-        into OpenAI ``content`` and the reasoning text is exposed through
-        ``reasoning_content``. Partial markers are buffered across streaming
-        chunks.
+        ``<|close|>response<|sep|>``. Tool calls follow in a separate
+        ``<|open|>tools<|sep|> ... <|close|>tools<|sep|>`` channel.
+        ``<|end_of_msg|>`` is removed by the generic stop path, but the
+        other XTML tokens are ordinary generated tokens. Parse the exact
+        channel boundaries here so they never leak into OpenAI ``content``,
+        the reasoning text is exposed through ``reasoning_content``, and the
+        tools channel is surfaced as ``tool_calls``. Partial markers are
+        buffered across streaming chunks.
         """
 
         if status.response_closed:
-            return DeltaMessage(reasoning_content="", content="")
+            tool_calls = cls._parse_tools_delta(status, text, flush)
+            return DeltaMessage(
+                reasoning_content="", content="", tool_calls=tool_calls
+            )
 
         think_to_response = "<|close|>think<|sep|><|open|>response<|sep|>"
         response_closure = "<|close|>response<|sep|>"
@@ -79,6 +113,7 @@ class KimiK3Renderer(CustomChatRenderer):
         status.xtml_pending = ""
         reasoning = ""
         content = ""
+        tool_calls: Optional[List[ToolCall]] = None
 
         if status.in_reasoning:
             transition_at = combined.find(think_to_response)
@@ -98,6 +133,8 @@ class KimiK3Renderer(CustomChatRenderer):
         if closure_at >= 0:
             content = combined[:closure_at]
             status.response_closed = True
+            remainder = combined[closure_at + len(response_closure) :]
+            tool_calls = cls._parse_tools_delta(status, remainder, flush)
         elif flush:
             content = combined
         else:
@@ -105,7 +142,93 @@ class KimiK3Renderer(CustomChatRenderer):
                 combined, response_closure
             )
 
-        return DeltaMessage(reasoning_content=reasoning, content=content)
+        return DeltaMessage(
+            reasoning_content=reasoning, content=content, tool_calls=tool_calls
+        )
+
+    @classmethod
+    def _parse_tools_delta(
+        cls, status: _KimiK3StreamStatus, text: str, flush: bool = False
+    ) -> Optional[List[ToolCall]]:
+        """Buffer the XTML tools channel and emit complete tool calls.
+
+        Tool call blocks are small, so buffer until the channel closes (or
+        the stream flushes) and parse the whole block at once.
+        """
+
+        status.tools_pending += text
+        buf = status.tools_pending
+
+        if not status.in_tools:
+            open_at = buf.find(cls._TOOLS_OPEN)
+            if open_at < 0:
+                if flush:
+                    # Stream ended without a tools channel; drop leftovers
+                    # (e.g. stray channel tokens must not surface as content).
+                    status.tools_pending = ""
+                return None
+            status.in_tools = True
+            buf = buf[open_at + len(cls._TOOLS_OPEN) :]
+
+        close_at = buf.find(cls._TOOLS_CLOSE)
+        if close_at < 0 and not flush:
+            status.tools_pending = buf
+            return None
+        block = buf[:close_at] if close_at >= 0 else buf
+        status.tools_pending = (
+            buf[close_at + len(cls._TOOLS_CLOSE) :] if close_at >= 0 else ""
+        )
+
+        calls = cls._parse_tools_block(block)
+        if calls:
+            status.tool_calls_seen += len(calls)
+        return calls or None
+
+    @staticmethod
+    def _unescape_attr(value: str) -> str:
+        # Mirror of the tokenizer's _escape_attr_value
+        return value.replace("&quot;", '"').replace("&amp;", "&")
+
+    @staticmethod
+    def _coerce_argument(value_type: str, body: str) -> Any:
+        if value_type in ("number", "boolean", "null", "object", "array"):
+            try:
+                return json.loads(body)
+            except ValueError:
+                return body
+        return body
+
+    @classmethod
+    def _parse_tools_block(cls, block: str) -> List[ToolCall]:
+        calls: List[ToolCall] = []
+        for match in cls._XTML_CALL_RE.finditer(block):
+            name = cls._unescape_attr(match.group("tool"))
+            body = match.group("body")
+            json_match = cls._XTML_JSON_RE.search(body)
+            if json_match:
+                try:
+                    arguments = json.loads(json_match.group("body"))
+                except ValueError:
+                    arguments = {}
+            else:
+                arguments = {}
+                for arg_match in cls._XTML_ARG_RE.finditer(body):
+                    key = cls._unescape_attr(arg_match.group("key"))
+                    arguments[key] = cls._coerce_argument(
+                        arg_match.group("type"), arg_match.group("body")
+                    )
+            calls.append(
+                ToolCall(
+                    index=int(match.group("index")) - 1,
+                    id=f"call_{uuid.uuid4().hex[:24]}",
+                    type="function",
+                    function=FunctionCall(
+                        name=name,
+                        arguments=json.dumps(arguments, ensure_ascii=False),
+                    ),
+                )
+            )
+        return calls
 
     @override
     async def _create_status_list(
@@ -139,6 +262,13 @@ class KimiK3Renderer(CustomChatRenderer):
                 delta.output_str,
                 flush=status.finish_reason is not None,
             )
+            # The engine only knows stop/length; report tool_calls when the
+            # tools channel produced at least one call.
+            if (
+                status.finish_reason == FinisheReason.stop
+                and status.tool_calls_seen > 0
+            ):
+                status.finish_reason = FinisheReason.tool_calls
         return delta
 
     @override
@@ -175,15 +305,31 @@ class KimiK3Renderer(CustomChatRenderer):
 
     @staticmethod
     def _tools(request_dict: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-        tools = request_dict.get("tools")
-        if tools:
-            return tools
-        functions = request_dict.get("functions")
-        if functions:
-            return [
-                {"type": "function", "function": function} for function in functions
-            ]
-        return None
+        merged: List[Dict[str, Any]] = []
+        seen = set()
+
+        def _extend(tools: List[Dict[str, Any]]) -> None:
+            for tool in tools:
+                key = json.dumps(tool, sort_keys=True, ensure_ascii=False)
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(tool)
+
+        if request_dict.get("tools"):
+            _extend(request_dict["tools"])
+        elif request_dict.get("functions"):
+            _extend(
+                [
+                    {"type": "function", "function": function}
+                    for function in request_dict["functions"]
+                ]
+            )
+        # KVV dynamic tools arrive embedded in messages (usually the system
+        # message) instead of the request-level tools field.
+        for message in request_dict.get("messages") or []:
+            if message.get("tools"):
+                _extend(message["tools"])
+        return merged or None
 
     @staticmethod
     def _template_kwargs(
@@ -241,6 +387,12 @@ class KimiK3Renderer(CustomChatRenderer):
         messages = request_dict["messages"]
         self._ensure_text_only(messages)
         tools = self._tools(request_dict)
+        # The message-level tools key is an RTP extension; the tokenizer
+        # template only understands the merged tools parameter.
+        messages = [
+            {key: value for key, value in message.items() if key != "tools"}
+            for message in messages
+        ]
         template_kwargs = self._template_kwargs(request, request_dict)
 
         input_ids = self.tokenizer.apply_chat_template(
@@ -270,15 +422,9 @@ class KimiK3Renderer(CustomChatRenderer):
     def apply_chat_completion_constraints(
         self, request: ChatCompletionRequest, generate_config: GenerateConfig
     ) -> None:
-        del generate_config
-        tool_choice = request.tool_choice
-        if tool_choice is None or tool_choice in ("auto", "none", "required"):
-            return
-        raise FtRuntimeException(
-            ExceptionType.INVALID_PARAMS,
-            "Kimi K3 currently supports tool_choice='auto', 'none', or "
-            "'required'; named tool_choice is not implemented",
-        )
+        del request, generate_config
+        # tool_choice (auto/none/required/named) is forwarded to the
+        # tokenizer template through _template_kwargs; nothing to reject.
 
 
 register_renderer("kimi_k3", KimiK3Renderer)
