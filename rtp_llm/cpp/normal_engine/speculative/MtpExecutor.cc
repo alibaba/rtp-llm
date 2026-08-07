@@ -834,45 +834,34 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // target model sample
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
-        if (model_input.is_fake_stream) {
-            // CP mutates the target input to its rank-local zigzag view even
-            // for graph/warmup streams. Restore the global geometry on root;
-            // the following tpSync publishes it to every draft rank.
-            if (cp_enabled) {
-                model_input.combo_tokens  = saved_combo_tokens;
-                model_input.input_lengths = saved_input_lengths;
-            }
-            if (is_dspark_) {
-                maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
-                batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
-            } else {
-                model_input.last_hidden_states = model_output.all_hidden_states;
-            }
-        } else {
+        if (!model_input.is_fake_stream) {
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
             sampler_output = std::move(sampler_->forward(sampler_input));
-            // Restore the full combo_tokens / input_lengths before the MTP
-            // shift logic — under CP both were mutated to rank-local by the
-            // target forward's handleInputs and the shift formula assumes a
-            // contiguous full sequence (offset += input_length, last token
-            // overwrite at offset+input_length-1).
-            if (cp_enabled) {
-                model_input.combo_tokens  = saved_combo_tokens;
-                model_input.input_lengths = saved_input_lengths;
-            }
-            if (is_dspark_) {
-                // Same shared-MTP-buffer reload as MTP: under CP the buffer
-                // holds the rank-local zigzag rows; the draft commit projects
-                // them locally and all-gathers the projected KV (Python side)
-                // instead of gathering the wide feature rows here.
-                maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
-                batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
-            } else {
-                batch_stream_processor_->updatePrefillPostDraftModelInput(
-                    model_input, model_output, sampler_output, buffer_holder_);
-            }
+        }
+        // Restore the full combo_tokens / input_lengths — under CP both were
+        // mutated to rank-local by the target forward's handleInputs. The MTP
+        // shift formula (offset += input_length, last token overwrite at
+        // offset+input_length-1) and the dspark commit validation both assume
+        // the contiguous full sequence; the tpSync below then publishes the
+        // restored view to every draft rank (fake/warmup streams included).
+        if (cp_enabled) {
+            model_input.combo_tokens  = saved_combo_tokens;
+            model_input.input_lengths = saved_input_lengths;
+        }
+        if (is_dspark_) {
+            // Same shared-MTP-buffer reload as MTP: under CP the buffer
+            // holds the rank-local zigzag rows; the draft commit projects
+            // them locally and all-gathers the projected KV (Python side)
+            // instead of gathering the wide feature rows here.
+            maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
+            batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
+        } else if (model_input.is_fake_stream) {
+            model_input.last_hidden_states = model_output.all_hidden_states;
+        } else {
+            batch_stream_processor_->updatePrefillPostDraftModelInput(
+                model_input, model_output, sampler_output, buffer_holder_);
         }
     }
 
@@ -1200,7 +1189,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // exactly the state the verify input reads, so a freshly handed-over PD
     // stream needs no special case — its first proposal is produced on its
     // first decode round. The prefill worker no longer proposes at all.
-    torch::Tensor dspark_round_proposals;
+    torch::Tensor                            dspark_round_proposals;
+    MtpBatchStreamProcessor::DSparkRoundHead dspark_round_head;
+    if (is_dspark_ && isTpRank0()) {
+        // Derived once per round; the propose and verify builders below both
+        // consume this same state.
+        dspark_round_head = batch_stream_processor_->buildDSparkRoundHead(stream_groups, model_input, buffer_holder_);
+    }
     if (is_dspark_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dspark_round_head_propose)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1209,7 +1204,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // see the untouched target-side gather output.
         GptModelInputs propose_input = model_input;
         if (isTpRank0()) {
-            batch_stream_processor_->buildDSparkProposeInputFromStreams(stream_groups, propose_input, buffer_holder_);
+            batch_stream_processor_->buildDSparkProposeInputFromStreams(dspark_round_head, propose_input, buffer_holder_);
             ensureModelInputsOnCuda(propose_input, "decode.dspark_round_head_propose");
         }
         tpSyncModelInputs(propose_input, parallelism_config_);
@@ -1240,7 +1235,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (isTpRank0()) {
             if (is_dspark_) {
                 batch_stream_processor_->prepareDSparkVerifyModelInput(
-                    stream_groups, model_input, dspark_round_proposals, buffer_holder_);
+                    dspark_round_head, model_input, dspark_round_proposals, buffer_holder_);
             } else if (propose_step_ == 1) {
                 batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input, buffer_holder_);
             } else {

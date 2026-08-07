@@ -81,14 +81,24 @@ public:
     // Round-head propose input from per-stream state (anchor = last accepted
     // token, committed_end = committed length). New PD streams and steady
     // streams take the same path.
-    void buildDSparkProposeInputFromStreams(const StreamGroups& stream_groups,
-                                            GptModelInputs&     model_input,
-                                            TensorHolder&       host_holder);
+    // Round-head stream state, derived once per decode round and consumed by
+    // both the propose and verify input builders below.
+    struct DSparkRoundHead {
+        torch::Tensor anchors;
+        torch::Tensor committed_ends;
+    };
+    DSparkRoundHead buildDSparkRoundHead(const StreamGroups&   stream_groups,
+                                         const GptModelInputs& model_input,
+                                         TensorHolder&         host_holder) const;
 
-    void prepareDSparkVerifyModelInput(const StreamGroups&  stream_groups,
-                                       GptModelInputs&      model_input,
-                                       const torch::Tensor& proposals,
-                                       TensorHolder&        host_holder);
+    void buildDSparkProposeInputFromStreams(const DSparkRoundHead& round_head,
+                                            GptModelInputs&        model_input,
+                                            TensorHolder&          host_holder);
+
+    void prepareDSparkVerifyModelInput(const DSparkRoundHead& round_head,
+                                       GptModelInputs&        model_input,
+                                       const torch::Tensor&   proposals,
+                                       TensorHolder&          host_holder);
 
     void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                            const torch::Tensor& target_features,

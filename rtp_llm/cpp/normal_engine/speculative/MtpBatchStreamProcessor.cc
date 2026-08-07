@@ -802,28 +802,35 @@ void MtpBatchStreamProcessor::buildDSparkProposeInput(GptModelInputs&      model
     model_input.lm_output_indexes  = dsparkDraftLmIndexes(batch_size);
 }
 
-void MtpBatchStreamProcessor::buildDSparkProposeInputFromStreams(const StreamGroups& stream_groups,
-                                                                 GptModelInputs&     model_input,
-                                                                 TensorHolder&       host_holder) {
-    const int64_t batch_size = static_cast<int64_t>(stream_groups.size());
-    if (batch_size == 0) {
-        return;
+MtpBatchStreamProcessor::DSparkRoundHead MtpBatchStreamProcessor::buildDSparkRoundHead(
+    const StreamGroups& stream_groups, const GptModelInputs& model_input, TensorHolder& host_holder) const {
+    if (stream_groups.size() == 0) {
+        return {};
     }
     // A freshly handed-over PD stream carries its first generated token and
     // prompt length in the same fields, so new and old streams take one
     // identical path here.
     auto [anchors, committed_ends] = dsparkRoundHeadState(stream_groups, model_input, host_holder);
-    buildDSparkProposeInput(model_input, anchors, committed_ends, host_holder);
+    return {std::move(anchors), std::move(committed_ends)};
 }
 
-void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups&  stream_groups,
-                                                            GptModelInputs&      model_input,
-                                                            const torch::Tensor& proposals,
-                                                            TensorHolder&        host_holder) {
-    const int64_t batch_size = static_cast<int64_t>(stream_groups.size());
-    if (batch_size == 0) {
+void MtpBatchStreamProcessor::buildDSparkProposeInputFromStreams(const DSparkRoundHead& round_head,
+                                                                 GptModelInputs&        model_input,
+                                                                 TensorHolder&          host_holder) {
+    if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
         return;
     }
+    buildDSparkProposeInput(model_input, round_head.anchors, round_head.committed_ends, host_holder);
+}
+
+void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const DSparkRoundHead& round_head,
+                                                            GptModelInputs&        model_input,
+                                                            const torch::Tensor&   proposals,
+                                                            TensorHolder&          host_holder) {
+    if (!round_head.anchors.defined() || round_head.anchors.numel() == 0) {
+        return;
+    }
+    const int64_t batch_size = round_head.anchors.numel();
 
     RTP_LLM_CHECK_WITH_INFO(proposals.defined() && proposals.dim() == 2 && proposals.size(0) == batch_size
                                 && proposals.size(1) == propose_step_,
@@ -831,10 +838,9 @@ void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& 
                             batch_size,
                             propose_step_);
 
-    auto [anchors, committed_ends] = dsparkRoundHeadState(stream_groups, model_input, host_holder);
-    auto anchor_col                = anchors.reshape({batch_size, 1});
-    auto verify                    = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
-    model_input.prefix_lengths     = committed_ends;
+    auto anchor_col            = round_head.anchors.reshape({batch_size, 1});
+    auto verify                = torch::cat({anchor_col, proposals.to(torch::kInt32)}, 1).reshape({-1});
+    model_input.prefix_lengths = round_head.committed_ends;
     setVerifyPairInputs(model_input, std::move(verify), batch_size, propose_step_ + 1, host_holder);
 }
 
