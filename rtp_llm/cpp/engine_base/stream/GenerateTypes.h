@@ -141,6 +141,13 @@ class GenerateOutputs {
 public:
     std::vector<GenerateOutput> generate_outputs;
     int64_t                     request_id;
+    bool                        frontend_metric_only = false;
+    std::optional<int64_t>      frontend_context_token_num;
+    std::optional<int64_t>      frontend_context_token_num_with_cache;
+    std::optional<int64_t>      frontend_context_execute_time_us;
+    std::optional<int64_t>      frontend_context_execute_time_with_cache_us;
+    std::optional<int64_t>      frontend_generate_token_num;
+    std::optional<int64_t>      frontend_generate_execute_time_us;
 };
 
 enum class StreamState {

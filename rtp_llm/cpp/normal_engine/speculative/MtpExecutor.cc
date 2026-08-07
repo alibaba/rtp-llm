@@ -1803,6 +1803,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tps_execute_time_us = model_forward_us;
     }
     stream_groups.addContextExecuteTimeUs(tps_execute_time_us);
+    stream_groups.addFrontendContextExecuteMetrics(tps_execute_time_us);
 
     // collect metrics
     if (metrics_reporter_) {
@@ -2380,13 +2381,19 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // the same single-slot runner.
     finishEarlyMtpTargetLogprobsFinalize(early_target_logprobs_finalize_state, target_logprobs);
 
-    if (metrics_reporter_) {
+    if (metrics_reporter_ || stream_groups.needFrontendMetricStreaming()) {
         collectDecodeMetrics(stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector);
     }
 
     const int64_t decode_execute_time_us       = autil::TimeUtility::currentTimeInMicroSeconds() - decode_start_time_us;
     metrics_collector.generate_execute_time_us = decode_execute_time_us;
+    const int64_t engine_generate_token_num    = metrics_collector.sp_engine_collector.total_accepted_token_num;
     stream_groups.addGenerateExecuteTimeUs(decode_execute_time_us);
+    if (engine_generate_token_num > 0) {
+        // Keep the private frontend cumulative counters on the exact same
+        // one-step-delayed accepted-token/time pair used by rtp_llm_generate_tps.
+        stream_groups.addFrontendGenerateExecuteMetrics(decode_execute_time_us, engine_generate_token_num);
+    }
 
     return dispatchDecodeOutput(stream_groups,
                                 streams,
@@ -3111,10 +3118,12 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         schedule_time_us = process_start_time_us;
     }
     MtpMetricsCollector metrics_collector;
-    auto                tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
+    const bool          has_real_stream =
+        std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return !stream->isFakeStream(); });
+    auto tps_active_guard =
+        tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && has_real_stream);
     auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
+        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && has_real_stream);
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;

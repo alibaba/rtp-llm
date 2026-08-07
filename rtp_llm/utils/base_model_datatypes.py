@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 import torch
 
@@ -50,6 +50,9 @@ class GenerateInput:
     )  # Batch group ID for force batch grouping, -1 means not set
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     frontend_metric_tags: Dict[str, str] = field(default_factory=dict, repr=False)
+    frontend_metric_observer: Optional[Callable[[Any, int], None]] = field(
+        default=None, repr=False, compare=False
+    )
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
 
     class Config:
@@ -104,7 +107,6 @@ class AuxInfo:
     context_execute_time_us: int = 0
     context_execute_time_with_cache_us: int = 0
     generate_execute_time_us: int = 0
-
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 
@@ -136,6 +138,28 @@ class GenerateOutput:
 @dataclass
 class GenerateOutputs:
     generate_outputs: List[GenerateOutput] = field(default_factory=list)
+    # Internal transport marker. Unlike AuxInfo fields, this wrapper-level
+    # value is consumed by BackendRPCServerVisitor and is never serialized in
+    # an outward inference response.
+    frontend_metric_only: bool = field(default=False, repr=False, compare=False)
+    frontend_context_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_token_num_with_cache: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_execute_time_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_execute_time_with_cache_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_generate_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_generate_execute_time_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass

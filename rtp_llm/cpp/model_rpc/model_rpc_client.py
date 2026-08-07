@@ -167,6 +167,9 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.normalized_hidden_states
     )
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
+    generate_config_pb.frontend_metric_streaming = (
+        input_py.generate_config.frontend_metric_streaming
+    )
     generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(
@@ -360,7 +363,39 @@ def trans_output(
             )
         return output_tensor.narrow(0, 0, count)
 
-    outputs_py = GenerateOutputs()
+    outputs_py = GenerateOutputs(
+        frontend_metric_only=bool(outputs_pb.frontend_metric_only),
+        frontend_context_token_num=(
+            int(outputs_pb.frontend_context_token_num.value)
+            if outputs_pb.HasField("frontend_context_token_num")
+            else None
+        ),
+        frontend_context_token_num_with_cache=(
+            int(outputs_pb.frontend_context_token_num_with_cache.value)
+            if outputs_pb.HasField("frontend_context_token_num_with_cache")
+            else None
+        ),
+        frontend_context_execute_time_us=(
+            int(outputs_pb.frontend_context_execute_time_us.value)
+            if outputs_pb.HasField("frontend_context_execute_time_us")
+            else None
+        ),
+        frontend_context_execute_time_with_cache_us=(
+            int(outputs_pb.frontend_context_execute_time_with_cache_us.value)
+            if outputs_pb.HasField("frontend_context_execute_time_with_cache_us")
+            else None
+        ),
+        frontend_generate_token_num=(
+            int(outputs_pb.frontend_generate_token_num.value)
+            if outputs_pb.HasField("frontend_generate_token_num")
+            else None
+        ),
+        frontend_generate_execute_time_us=(
+            int(outputs_pb.frontend_generate_execute_time_us.value)
+            if outputs_pb.HasField("frontend_generate_execute_time_us")
+            else None
+        ),
+    )
     input_token_ids = input_py.token_ids.reshape(1, -1)
 
     # 遍历每个 beam/output

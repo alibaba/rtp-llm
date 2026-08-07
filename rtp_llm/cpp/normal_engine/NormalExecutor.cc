@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -249,10 +250,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
-    auto                           tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    const bool                     has_real_stream =
+        std::any_of(streams.begin(), streams.end(), [](const auto& stream) { return !stream->isFakeStream(); });
+    auto tps_active_guard =
+        tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && has_real_stream);
     auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && has_real_stream);
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -350,7 +353,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
+    if (tp_rank_ > 0 || warm_up_ || !has_real_stream) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
         if (profile_step_finish_) {
@@ -405,6 +408,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         stream_groups.addContextExecuteTimeUs(tps_execute_time_us);
         stream_groups.addGenerateExecuteTimeUs(tps_execute_time_us);
+        stream_groups.addFrontendContextExecuteMetrics(tps_execute_time_us);
+        stream_groups.addFrontendGenerateExecuteMetrics(tps_execute_time_us,
+                                                        static_cast<int64_t>(stream_groups.totalDecodeBatchSize()));
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
         // REBASE CONFLICT CONTEXT(704f3c147): source branch closed the profiler
@@ -427,6 +433,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         stream_groups.addContextExecuteTimeUs(tps_execute_time_us);
         stream_groups.addGenerateExecuteTimeUs(tps_execute_time_us);
+        stream_groups.addFrontendContextExecuteMetrics(tps_execute_time_us);
+        stream_groups.addFrontendGenerateExecuteMetrics(tps_execute_time_us,
+                                                        static_cast<int64_t>(stream_groups.totalDecodeBatchSize()));
 
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};

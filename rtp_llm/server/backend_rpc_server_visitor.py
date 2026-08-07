@@ -485,14 +485,15 @@ class BackendRPCServerVisitor:
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support batched input",
             )
-        # speculative decoding does not support num_return_sequences > 1 or num_beams > 1
+        # speculative decoding does not support multiple returns or any fixed/
+        # variable beam-search schedule.
         if (
             input.generate_config.num_return_sequences > 1
-            or input.generate_config.num_beams > 1
+            or input.generate_config.has_num_beams()
         ):
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
-                "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",
+                "speculative decoding does not support num_return_sequences > 1 or beam search",
             )
         # speculative decoding does not support return_all_probs
         if input.generate_config.return_all_probs:
@@ -641,6 +642,18 @@ class BackendRPCServerVisitor:
                     )
                 )
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
+
+            def observe_backend_output(output: Any, output_attempt: int) -> None:
+                observer = getattr(input, "frontend_metric_observer", None)
+                if observer is None:
+                    return
+                try:
+                    observer(output, output_attempt)
+                except Exception:
+                    # Metrics are best-effort and must never change inference
+                    # response or retry behavior.
+                    logging.exception("failed to observe raw backend frontend metrics")
+
             while True:
                 pending_stop_prefix: dict[int, List[int]] = {}
                 yielded_output = False
@@ -648,6 +661,9 @@ class BackendRPCServerVisitor:
                     stream = await route_and_enqueue(attempt)
                     if is_streaming:
                         async for output in stream:
+                            observe_backend_output(output, attempt)
+                            if bool(getattr(output, "frontend_metric_only", False)):
+                                continue
                             yielded_output = True
                             if strip_stop_ids:
                                 output = self.strip_frontend_stop_word_ids(
@@ -657,6 +673,9 @@ class BackendRPCServerVisitor:
                     else:
                         buffered_outputs = []
                         async for output in stream:
+                            observe_backend_output(output, attempt)
+                            if bool(getattr(output, "frontend_metric_only", False)):
+                                continue
                             if strip_stop_ids:
                                 output = self.strip_frontend_stop_word_ids(
                                     output, strip_stop_ids, pending_stop_prefix

@@ -168,6 +168,36 @@ public:
             });
     }
 
+    void addFrontendContextExecuteMetrics(int64_t execute_time_us) const {
+        auto owner = frontendMetricOwner(context_streams_);
+        if (owner != nullptr) {
+            owner->addFrontendContextExecuteMetrics(execute_time_us,
+                                                    static_cast<int64_t>(contextExecuteTokenSize()),
+                                                    static_cast<int64_t>(contextExecuteTokenSizeWithCache()));
+        }
+    }
+
+    void addFrontendGenerateExecuteMetrics(int64_t execute_time_us, int64_t generate_token_num) const {
+        auto owner = frontendMetricOwner(decode_streams_);
+        if (owner != nullptr) {
+            owner->addFrontendGenerateExecuteMetrics(execute_time_us, generate_token_num);
+        }
+    }
+
+    bool needFrontendMetricStreaming() const {
+        for (const auto& stream : context_streams_) {
+            if (stream->generateConfig()->frontend_metric_streaming) {
+                return true;
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            if (stream->generateConfig()->frontend_metric_streaming) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool needReturnAllProbs() const {
         for (auto& stream : context_streams_) {
             if (stream->getReturnAllProbs()) {
@@ -286,6 +316,15 @@ public:
     }
 
 private:
+    static GenerateStreamPtr frontendMetricOwner(const std::list<GenerateStreamPtr>& streams) {
+        for (const auto& stream : streams) {
+            if (stream->generateConfig()->frontend_metric_streaming) {
+                return stream;
+            }
+        }
+        return nullptr;
+    }
+
     template<typename WeightFn, typename AddFn>
     static void addAllocatedExecuteTime(const std::list<GenerateStreamPtr>& streams,
                                         int64_t                             execute_time_us,

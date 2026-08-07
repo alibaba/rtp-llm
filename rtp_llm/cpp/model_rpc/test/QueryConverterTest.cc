@@ -69,6 +69,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     generate_config_pb->mutable_task_id()->set_value("8");
     generate_config_pb->set_calculate_loss(1);
     generate_config_pb->set_return_hidden_states(true);
+    generate_config_pb->set_frontend_metric_streaming(true);
     for (int i = 0; i < 2; ++i) {
         auto* stop_words = generate_config_pb->mutable_stop_words_list()->add_rows();
         for (int j = 0; j < 3; ++j) {
@@ -99,6 +100,7 @@ TEST_F(QueryConverterTest, testTransInput) {
     ASSERT_EQ(generate_config->task_id.value(), "8");
     ASSERT_EQ(generate_config->calculate_loss, 1);
     ASSERT_TRUE(generate_config->return_hidden_states);
+    ASSERT_TRUE(generate_config->frontend_metric_streaming);
     ASSERT_FALSE(generate_config->return_logits);
     ASSERT_EQ(generate_config->stop_words_list.size(), 2);
     vector<int> stop_words_1{0, 1, 2};
@@ -115,20 +117,27 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
     GenerateOutputs outputs;
     GenerateOutput  res;
-    res.output_ids                                  = output_token_ids;
-    res.finished                                    = true;
-    res.aux_info.cost_time_us                       = 1000;
-    res.aux_info.iter_count                         = 9;
-    res.aux_info.input_len                          = 8;
-    res.aux_info.output_len                         = 7;
-    res.aux_info.speculative_verify_rounds          = 3;
-    res.aux_info.speculative_accepted_token_num     = 9;
-    res.aux_info.speculative_proposed_draft_tokens  = 12;
-    res.aux_info.context_execute_time_us            = 100;
-    res.aux_info.generate_execute_time_us           = 200;
-    res.aux_info.context_execute_time_with_cache_us = 80;
-    auto hidden_states_tensor                       = torch::empty({3, 2}, torch::kFloat32);
-    auto hidden_states_data                         = hidden_states_tensor.data_ptr<float>();
+    res.output_ids                                      = output_token_ids;
+    res.finished                                        = true;
+    res.aux_info.cost_time_us                           = 1000;
+    res.aux_info.iter_count                             = 9;
+    res.aux_info.input_len                              = 8;
+    res.aux_info.output_len                             = 7;
+    res.aux_info.speculative_verify_rounds              = 3;
+    res.aux_info.speculative_accepted_token_num         = 9;
+    res.aux_info.speculative_proposed_draft_tokens      = 12;
+    res.aux_info.context_execute_time_us                = 100;
+    res.aux_info.generate_execute_time_us               = 200;
+    res.aux_info.context_execute_time_with_cache_us     = 80;
+    outputs.frontend_metric_only                        = true;
+    outputs.frontend_context_token_num                  = 11;
+    outputs.frontend_context_token_num_with_cache       = 13;
+    outputs.frontend_context_execute_time_us            = 101;
+    outputs.frontend_context_execute_time_with_cache_us = 81;
+    outputs.frontend_generate_token_num                 = 17;
+    outputs.frontend_generate_execute_time_us           = 201;
+    auto hidden_states_tensor                           = torch::empty({3, 2}, torch::kFloat32);
+    auto hidden_states_data                             = hidden_states_tensor.data_ptr<float>();
     for (int i = 0; i < 6; ++i) {
         hidden_states_data[i] = i;
     }
@@ -150,6 +159,19 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(aux_info_pb.context_execute_time_us(), 100);
     EXPECT_EQ(aux_info_pb.generate_execute_time_us(), 200);
     EXPECT_EQ(aux_info_pb.context_execute_time_with_cache_us(), 80);
+    EXPECT_TRUE(outputs_pb.frontend_metric_only());
+    ASSERT_TRUE(outputs_pb.has_frontend_context_token_num());
+    EXPECT_EQ(outputs_pb.frontend_context_token_num().value(), 11);
+    ASSERT_TRUE(outputs_pb.has_frontend_context_token_num_with_cache());
+    EXPECT_EQ(outputs_pb.frontend_context_token_num_with_cache().value(), 13);
+    ASSERT_TRUE(outputs_pb.has_frontend_context_execute_time_us());
+    EXPECT_EQ(outputs_pb.frontend_context_execute_time_us().value(), 101);
+    ASSERT_TRUE(outputs_pb.has_frontend_context_execute_time_with_cache_us());
+    EXPECT_EQ(outputs_pb.frontend_context_execute_time_with_cache_us().value(), 81);
+    ASSERT_TRUE(outputs_pb.has_frontend_generate_token_num());
+    EXPECT_EQ(outputs_pb.frontend_generate_token_num().value(), 17);
+    ASSERT_TRUE(outputs_pb.has_frontend_generate_execute_time_us());
+    EXPECT_EQ(outputs_pb.frontend_generate_execute_time_us().value(), 201);
     auto output_ids_pb = output_pb.output_ids();
     ASSERT_EQ(output_ids_pb.data_type(), TensorPB_DataType::TensorPB_DataType_INT32);
     ASSERT_EQ(output_ids_pb.shape_size(), 3);

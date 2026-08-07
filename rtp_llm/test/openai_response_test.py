@@ -661,6 +661,92 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         self.model_config.vocab_size = 1024
         self.model_config.special_tokens = SpecialTokens()
 
+    async def test_backend_frames_project_aux_before_renderer_buffering(self):
+        outputs = []
+        for index, execute_time_us in enumerate((100, 300), start=1):
+            outputs.append(
+                GenerateOutputs(
+                    frontend_context_token_num=3,
+                    frontend_context_token_num_with_cache=4,
+                    frontend_context_execute_time_us=50,
+                    frontend_context_execute_time_with_cache_us=40,
+                    frontend_generate_token_num=index,
+                    frontend_generate_execute_time_us=execute_time_us,
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([[20 + index]], dtype=torch.int32),
+                            finished=index == 2,
+                            aux_info=AuxInfo(
+                                input_len=3,
+                                output_len=index,
+                                reuse_len=1,
+                                generate_execute_time_us=execute_time_us,
+                            ),
+                        )
+                    ],
+                )
+            )
+
+        observed = []
+        observer = custom_renderer._make_frontend_metric_observer(observed.append)
+        for output in outputs:
+            observer(output, 2)
+
+        self.assertEqual(
+            [100, 300],
+            [item["aux_info"][0].generate_execute_time_us for item in observed],
+        )
+        self.assertEqual(
+            [1, 1], [item["_frontend_output_batch_size"] for item in observed]
+        )
+        self.assertEqual(
+            [2, 2], [item["_frontend_metric_attempt"] for item in observed]
+        )
+        self.assertEqual([3, 3], [item["context_token_num"] for item in observed])
+        self.assertEqual(
+            [100, 300], [item["generate_execute_time_us"] for item in observed]
+        )
+
+    async def test_internal_frontend_metric_config_is_not_serialized(self):
+        generate_config = GenerateConfig(frontend_metric_streaming=True)
+
+        self.assertTrue(generate_config.frontend_metric_streaming)
+        self.assertNotIn("frontend_metric_streaming", generate_config.model_dump())
+
+    async def test_frontend_metric_backend_copy_forces_aux_without_mutating_request(
+        self,
+    ):
+        request_config = GenerateConfig(aux_info=False, is_streaming=False)
+
+        backend_config = custom_renderer._make_frontend_metric_generate_config(
+            request_config,
+            True,
+        )
+
+        self.assertFalse(request_config.aux_info)
+        self.assertFalse(request_config.frontend_metric_streaming)
+        self.assertTrue(backend_config.aux_info)
+        self.assertTrue(backend_config.frontend_metric_streaming)
+        self.assertFalse(backend_config.is_streaming)
+
+    async def test_backend_metric_projector_passes_failure_to_visitor_boundary(self):
+        expected = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([[21]], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(output_len=1),
+                )
+            ]
+        )
+
+        def failing_observer(_response):
+            raise RuntimeError("metric observer failure")
+
+        observer = custom_renderer._make_frontend_metric_observer(failing_observer)
+        with self.assertRaisesRegex(RuntimeError, "metric observer failure"):
+            observer(expected, 0)
+
     async def test_compact_logprobs_mtp_stop_has_no_leak_or_duplicate(self):
         renderer = create_compact_logprob_renderer([[3, 4]])
         request = ChatCompletionRequest(

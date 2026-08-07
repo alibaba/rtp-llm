@@ -3,7 +3,17 @@ import logging
 import queue
 import threading
 from dataclasses import asdict
-from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    AsyncGenerator,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import torch
 
@@ -463,20 +473,60 @@ class Pipeline(object):
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         request_headers = normalize_request_headers(kwargs.pop("headers", None))
+        frontend_metric_observer: Optional[Callable[[Any], None]] = kwargs.pop(
+            "frontend_metric_observer", None
+        )
+        frontend_metric_unit_id = int(kwargs.pop("frontend_metric_unit_id", 0))
+        frontend_metric_side_channel = frontend_metric_observer is not None
+
+        # Preserve the public streaming/retry contract while asking the backend
+        # for AuxInfo-only frames used by the frontend TPS accumulator.
+        backend_generate_config = generate_config
+        if frontend_metric_side_channel:
+            backend_generate_config = generate_config.model_copy(
+                update={"frontend_metric_streaming": True, "aux_info": True},
+                deep=True,
+            )
+        context_batch_size = (
+            1
+            if generate_config.has_num_beams()
+            else max(generate_config.num_return_sequences, 1)
+        )
 
         token_ids = torch.tensor(token_ids, dtype=torch.int)
+
+        raw_metric_observer = None
+        if frontend_metric_observer is not None:
+
+            def raw_metric_observer(output: GenerateOutputs, attempt: int) -> None:
+                frontend_metric_observer(
+                    {
+                        "aux_info": [item.aux_info for item in output.generate_outputs],
+                        "_frontend_metric_unit_id": frontend_metric_unit_id,
+                        "_frontend_metric_attempt": attempt,
+                        "_frontend_context_batch_size": context_batch_size,
+                        "_frontend_output_batch_size": len(output.generate_outputs),
+                        "context_token_num": output.frontend_context_token_num,
+                        "context_token_num_with_cache": output.frontend_context_token_num_with_cache,
+                        "context_execute_time_us": output.frontend_context_execute_time_us,
+                        "context_execute_time_with_cache_us": output.frontend_context_execute_time_with_cache_us,
+                        "generate_token_num": output.frontend_generate_token_num,
+                        "generate_execute_time_us": output.frontend_generate_execute_time_us,
+                    }
+                )
 
         input = GenerateInput(
             request_id=request_id,
             token_ids=token_ids,
             mm_inputs=mm_inputs,
-            generate_config=generate_config,
+            generate_config=backend_generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
             batch_group_size=kwargs.get("batch_group_size", 1),
             batch_group_id=kwargs.get("batch_group_id", -1),
             headers=request_headers,
             frontend_metric_tags=dict(kwargs.get("frontend_metric_tags", {})),
+            frontend_metric_observer=raw_metric_observer,
         )
 
         stop_word_strs = generate_config.stop_words_str

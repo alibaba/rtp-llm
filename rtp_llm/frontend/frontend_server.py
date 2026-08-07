@@ -229,6 +229,15 @@ class FrontendServer(object):
             response.aux_info = None
 
     @staticmethod
+    def _client_exception_payload(
+        request: Dict[str, Any], exception_json: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        payload = dict(exception_json)
+        if not FrontendServer._request_aux_info_enabled(request):
+            FrontendServer._hide_aux_info(payload)
+        return payload
+
+    @staticmethod
     def _request_disables_speculative(request: Dict[str, Any]) -> bool:
         if "force_disable_sp_run" in request:
             return bool(request["force_disable_sp_run"])
@@ -350,8 +359,9 @@ class FrontendServer(object):
                     "error_code": str(format_e.get("error_code_str", -1)),
                 },
             )
+            client_error = self._client_exception_payload(request, format_e)
             yield response_data_prefix + json.dumps(
-                format_e, ensure_ascii=False
+                client_error, ensure_ascii=False
             ) + "\r\n\r\n"
         finally:
             self._global_controller.decrement()
@@ -375,7 +385,7 @@ class FrontendServer(object):
         except Exception as e:
             return self._handle_exception(req, e)
 
-        def generate_call():
+        def generate_call(_request_metrics: FrontendRequestMetricState):
             assert self._frontend_worker is not None
             metric_tags = {
                 "rank_id": self.rank_id,
@@ -387,10 +397,12 @@ class FrontendServer(object):
                     **generation_req,
                     headers=request_headers,
                     frontend_metric_tags=metric_tags,
+                    frontend_metric_observer=_request_metrics.observe_tps,
                 )
             return self._frontend_worker.inference(
                 **generation_req,
                 frontend_metric_tags=metric_tags,
+                frontend_metric_observer=_request_metrics.observe_tps,
             )
 
         try:
@@ -408,7 +420,9 @@ class FrontendServer(object):
         self,
         req: Dict[str, Any],
         raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        generate_call: Callable[
+            [FrontendRequestMetricState], CompleteResponseAsyncGenerator
+        ],
     ):
         try:
             rep = await self._infer_impl(req, raw_request, generate_call)
@@ -429,7 +443,7 @@ class FrontendServer(object):
 
         internal_request = request.model_copy(update={"aux_info": True})
 
-        def generate_call():
+        def generate_call(request_metrics: FrontendRequestMetricState):
             assert self._openai_endpoint != None
             response = self._openai_endpoint.chat_completion(
                 request_id,
@@ -440,6 +454,7 @@ class FrontendServer(object):
                     "server_id": self.server_id,
                     "source": str(getattr(request, "source", "unknown")),
                 },
+                frontend_metric_observer=request_metrics.observe_tps,
             )
             assert isinstance(
                 response, CompleteResponseAsyncGenerator
@@ -495,12 +510,16 @@ class FrontendServer(object):
                 },
             )
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        rep = ORJSONResponse(
+            self._client_exception_payload(request, exception_json), status_code=500
+        )
         return rep
 
     async def _call_generate_with_report(
         self,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        generate_call: Callable[
+            [FrontendRequestMetricState], CompleteResponseAsyncGenerator
+        ],
         request_metrics: FrontendRequestMetricState,
         expose_aux_info: bool,
     ):
@@ -565,7 +584,7 @@ class FrontendServer(object):
 
         assert self._frontend_worker is not None
         start_time = current_time_ms()
-        response_generator = generate_call()
+        response_generator = generate_call(request_metrics)
         return CompleteResponseAsyncGenerator(
             __gen_response_with_report(start_time, response_generator),
             response_generator._collect_complete_response_func,
@@ -588,7 +607,9 @@ class FrontendServer(object):
         self,
         req: Dict[Any, Any],
         raw_request: RawRequest,
-        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        generate_call: Callable[
+            [FrontendRequestMetricState], CompleteResponseAsyncGenerator
+        ],
     ):
         assert self._frontend_worker is not None
         kmonitor.report(

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import unittest
 from types import SimpleNamespace
@@ -6,11 +7,12 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.master_client import FlexlbResponse
-from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
 
 class _FakeTokenIds:
@@ -35,6 +37,7 @@ class _FakeInput:
 
     def __init__(self, is_streaming=False):
         self.generate_config = _FakeGenerateConfig(is_streaming=is_streaming)
+        self.frontend_metric_observer = None
 
 
 class _FakeHostService:
@@ -182,6 +185,19 @@ class BackendRPCServerVisitorFrontendStopIdsTest(unittest.TestCase):
         self.assertEqual(second.output_ids.tolist(), [[]])
 
 
+class BackendRPCServerVisitorSpeculativeValidationTest(unittest.TestCase):
+    def test_variable_beam_schedule_is_rejected_for_speculative_decode(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.sp_config = SimpleNamespace(model_type="mtp")
+        input = SimpleNamespace(
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            generate_config=GenerateConfig(variable_num_beams=[1, 2]),
+        )
+
+        with self.assertRaisesRegex(FtRuntimeException, "beam search"):
+            visitor.check_sp_supported(input)
+
+
 class _RetryingModelRpcClient:
     def __init__(self):
         self.attempts = 0
@@ -217,6 +233,38 @@ class _AlwaysFailingModelRpcClient:
         raise self.error
 
 
+class _MetricRetryingModelRpcClient:
+    def __init__(self, first_metric_observed):
+        self.first_metric_observed = first_metric_observed
+        self.attempts = 0
+
+    @staticmethod
+    def metric_output(output_len):
+        return GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    aux_info=AuxInfo(
+                        output_len=output_len,
+                        generate_execute_time_us=output_len * 10_000,
+                    )
+                )
+            ],
+            frontend_metric_only=True,
+        )
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        attempt = self.attempts
+        yield self.metric_output(attempt)
+        if attempt == 1:
+            # The visitor must run the observer as soon as it receives the
+            # side-channel frame, not after the non-streaming RPC completes.
+            if not self.first_metric_observed.is_set():
+                raise AssertionError("metric side-channel was buffered")
+            raise RuntimeError("StatusCode.UNAVAILABLE recvmsg:Connection timed out")
+        yield "successful-output"
+
+
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -239,6 +287,41 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outputs, ["successful-output"])
         self.assertEqual(client.attempts, 2)
+
+    async def test_metric_side_channel_is_observed_live_and_retry_is_segmented(self):
+        first_metric_observed = asyncio.Event()
+        client = _MetricRetryingModelRpcClient(first_metric_observed)
+        visitor = self._visitor(client)
+        input = _FakeInput(is_streaming=False)
+        observed_attempts = []
+
+        def observe(_output, attempt):
+            observed_attempts.append(attempt)
+            if attempt == 0:
+                first_metric_observed.set()
+
+        input.frontend_metric_observer = observe
+        stream = await visitor.enqueue(input)
+        outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
+        self.assertEqual(observed_attempts, [0, 1, 1])
+        self.assertEqual(client.attempts, 2)
+
+    async def test_metric_observer_failure_does_not_change_response(self):
+        client = _SuccessfulModelRpcClient(["successful-output"])
+        visitor = self._visitor(client)
+        input = _FakeInput(is_streaming=False)
+
+        def fail_observer(_output, _attempt):
+            raise RuntimeError("metric observer failure")
+
+        input.frontend_metric_observer = fail_observer
+        with self.assertLogs(level="ERROR"):
+            stream = await visitor.enqueue(input)
+            outputs = [output async for output in stream]
+
+        self.assertEqual(outputs, ["successful-output"])
 
     async def test_non_streaming_replays_successful_outputs_in_order(self):
         client = _SuccessfulModelRpcClient(["first-output", "second-output"])

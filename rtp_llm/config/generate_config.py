@@ -168,6 +168,9 @@ class GenerateConfig(BaseModel):
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None
     is_streaming: bool = False
+    # Internal backend side-channel: emit AuxInfo-only progress frames for
+    # frontend TPS accounting without changing public streaming semantics.
+    frontend_metric_streaming: bool = Field(default=False, exclude=True)
 
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None

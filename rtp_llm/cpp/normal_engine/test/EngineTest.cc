@@ -114,6 +114,56 @@ TEST_F(NormalEngineTest, testSimple) {
         auto output2 = stream->nextOutput();
         ASSERT_TRUE(!output2.ok());
     }
+
+    // test non-streaming query with AuxInfo-only frontend metric progress
+    {
+        std::shared_ptr<GenerateInput> query              = make_shared<GenerateInput>();
+        query->input_ids                                  = torch::tensor({1, 2, 3, 4, 5, 6, 7}, torch::kInt32);
+        query->generate_config                            = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens            = 5;
+        query->generate_config->is_streaming              = false;
+        query->generate_config->frontend_metric_streaming = true;
+
+        shared_ptr<GenerateStream> stream = engine->enqueue(query);
+        ASSERT_TRUE(stream != nullptr);
+
+        for (int output_len = 1; output_len < 5; ++output_len) {
+            auto metric_output = stream->nextOutput();
+            ASSERT_TRUE(metric_output.ok());
+            ASSERT_TRUE(metric_output.value().frontend_metric_only);
+            const auto& generated = metric_output.value().generate_outputs[0];
+            ASSERT_FALSE(generated.output_ids.defined());
+            ASSERT_EQ(generated.aux_info.output_len, output_len);
+            ASSERT_EQ(generated.aux_info.step_output_len, 1);
+            ASSERT_TRUE(metric_output.value().frontend_context_token_num.has_value());
+            ASSERT_EQ(metric_output.value().frontend_context_token_num.value(), 7);
+            ASSERT_TRUE(metric_output.value().frontend_context_token_num_with_cache.has_value());
+            ASSERT_EQ(metric_output.value().frontend_context_token_num_with_cache.value(), 7);
+            ASSERT_TRUE(metric_output.value().frontend_context_execute_time_us.has_value());
+            ASSERT_TRUE(metric_output.value().frontend_context_execute_time_with_cache_us.has_value());
+            ASSERT_TRUE(metric_output.value().frontend_generate_token_num.has_value());
+            ASSERT_EQ(metric_output.value().frontend_generate_token_num.value(), output_len - 1);
+            ASSERT_TRUE(metric_output.value().frontend_generate_execute_time_us.has_value());
+            if (output_len > 1) {
+                ASSERT_GT(metric_output.value().frontend_generate_execute_time_us.value(), 0);
+            }
+        }
+
+        auto final_output = stream->nextOutput();
+        ASSERT_TRUE(final_output.ok());
+        ASSERT_FALSE(final_output.value().frontend_metric_only);
+        const auto& generated = final_output.value().generate_outputs[0];
+        ASSERT_TRUE(generated.output_ids.defined());
+        ASSERT_EQ(generated.output_ids.numel(), 5);
+        ASSERT_EQ(generated.aux_info.output_len, 5);
+        ASSERT_TRUE(final_output.value().frontend_generate_token_num.has_value());
+        ASSERT_EQ(final_output.value().frontend_generate_token_num.value(), 4);
+        ASSERT_TRUE(final_output.value().frontend_generate_execute_time_us.has_value());
+        ASSERT_GT(final_output.value().frontend_generate_execute_time_us.value(), 0);
+
+        auto exhausted = stream->nextOutput();
+        ASSERT_FALSE(exhausted.ok());
+    }
 }
 
 TEST_F(NormalEngineTest, testSystemPrompt) {

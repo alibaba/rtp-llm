@@ -530,25 +530,66 @@ def _make_generate_input(
     invocation_metadata: Optional[Any],
     request_headers: Optional[dict[str, str]] = None,
     frontend_metric_tags: Optional[dict[str, str]] = None,
+    frontend_metric_observer: Optional[Callable[[Any, int], None]] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
     trace_id = str(
         getattr(generate_config, "trace_id", "") or extract_trace_id(headers) or ""
     )
+    backend_generate_config = generate_config
+    if frontend_metric_observer is not None:
+        backend_generate_config = generate_config.model_copy(
+            update={"frontend_metric_streaming": True, "aux_info": True},
+            deep=True,
+        )
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
         mm_inputs=[],
-        generate_config=generate_config,
+        generate_config=backend_generate_config,
         headers=headers,
         frontend_metric_tags=dict(frontend_metric_tags or {}),
+        frontend_metric_observer=frontend_metric_observer,
         request_info=RequestInfo(
             trace_id=trace_id,
             request_id=extract_correlation_request_id(headers) or trace_id,
             source_role="dash",
         ),
     )
+
+
+def _make_frontend_metric_observer(
+    metric_state: Any,
+    generate_config: GenerateConfig,
+    unit_id: int,
+) -> Optional[Callable[[Any, int], None]]:
+    if metric_state is None:
+        return None
+    context_batch_size = (
+        1
+        if generate_config.has_num_beams()
+        else max(int(generate_config.num_return_sequences), 1)
+    )
+
+    def observe(output: Any, attempt: int) -> None:
+        metric_state.observe_tps(
+            {
+                "aux_info": [item.aux_info for item in output.generate_outputs],
+                "_frontend_metric_unit_id": unit_id,
+                "_frontend_metric_attempt": attempt,
+                "_frontend_context_batch_size": context_batch_size,
+                "_frontend_output_batch_size": len(output.generate_outputs),
+                "context_token_num": output.frontend_context_token_num,
+                "context_token_num_with_cache": output.frontend_context_token_num_with_cache,
+                "context_execute_time_us": output.frontend_context_execute_time_us,
+                "context_execute_time_with_cache_us": output.frontend_context_execute_time_with_cache_us,
+                "generate_token_num": output.frontend_generate_token_num,
+                "generate_execute_time_us": output.frontend_generate_execute_time_us,
+            }
+        )
+
+    return observe
 
 
 async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
@@ -775,6 +816,11 @@ async def iter_real_model_stream_infer(
             invocation_metadata=invocation_metadata,
             request_headers=other.request_headers,
             frontend_metric_tags=frontend_metric_tags,
+            frontend_metric_observer=_make_frontend_metric_observer(
+                getattr(access_agg, "frontend_metric_state", None),
+                generate_config,
+                0,
+            ),
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -1216,6 +1262,11 @@ async def iter_real_model_stream_infer(
                 invocation_metadata=invocation_metadata,
                 request_headers=other.request_headers,
                 frontend_metric_tags=frontend_metric_tags,
+                frontend_metric_observer=_make_frontend_metric_observer(
+                    getattr(access_agg, "frontend_metric_state", None),
+                    phase2_config,
+                    1,
+                ),
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",

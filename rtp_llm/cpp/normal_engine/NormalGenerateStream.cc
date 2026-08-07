@@ -8,7 +8,8 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
         checkTimeout();
         generate_outputs_queue_.waitNotEmpty();
     }
-    if (hasError()) {
+    if (hasError() && !hasPendingFrontendMetricOutput()) {
+        setPendingFrontendMetricTerminalError(false);
         return statusInfo();
     }
     if (generate_outputs_queue_.isEmpty()) {
@@ -18,17 +19,45 @@ ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
             return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
         }
     }
-    return generate_outputs_queue_.getAndPopFront();
+    auto output = generate_outputs_queue_.getAndPopFront();
+    if (output.frontend_metric_only) {
+        auto latest_metric_output = takeLatestFrontendMetricOutput(std::move(output));
+        // LocalRpcServer keeps polling only while isActive() || hasOutput().
+        // Preserve one follow-up iteration after draining a metric marker so
+        // the terminal error is returned instead of being mistaken for OK.
+        if (hasError()) {
+            setPendingFrontendMetricTerminalError(true);
+        }
+        return latest_metric_output;
+    }
+    return output;
 }
 
 bool NormalGenerateStream::hasOutput() {
-    return !generate_outputs_queue_.isEmpty();
+    if (!generate_outputs_queue_.isEmpty()) {
+        return true;
+    }
+    std::lock_guard<std::mutex> lock(frontend_metric_output_mutex_);
+    return frontend_metric_terminal_error_pending_;
+}
+
+void NormalGenerateStream::fillFrontendMetricCounters(GenerateOutputs& generate_results) {
+    if (!generate_input_->generate_config->frontend_metric_streaming) {
+        return;
+    }
+    generate_results.frontend_context_token_num                  = frontend_context_token_num_;
+    generate_results.frontend_context_token_num_with_cache       = frontend_context_token_num_with_cache_;
+    generate_results.frontend_context_execute_time_us            = frontend_context_execute_time_us_;
+    generate_results.frontend_context_execute_time_with_cache_us = frontend_context_execute_time_with_cache_us_;
+    generate_results.frontend_generate_token_num                 = frontend_generate_token_num_;
+    generate_results.frontend_generate_execute_time_us           = frontend_generate_execute_time_us_;
 }
 
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+    fillFrontendMetricCounters(generate_results);
 
     for (int i = 0; i < nextBatchSize(); i++) {
         GenerateOutput generate_output;
@@ -126,10 +155,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.wait_time_us             = wait_time_us_;
             // Match rtp_llm_input_token_length and the cache-hit denominator:
             // input length includes any materialized prefix tokens.
-            generate_output.aux_info.input_len  = generate_input_->inputLength();
-            generate_output.aux_info.prefix_len = generate_input_->prefix_length;
-            // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-            generate_output.aux_info.output_len                         = seqLength() - generate_input_->inputLength();
+            generate_output.aux_info.input_len                          = generate_input_->inputLength();
+            generate_output.aux_info.prefix_len                         = generate_input_->prefix_length;
+            generate_output.aux_info.output_len                         = subGenerateOutputLength(i);
             generate_output.aux_info.step_output_len                    = output_len;
             generate_output.aux_info.reuse_len                          = initial_reuse_length_;
             generate_output.aux_info.pd_sep                             = queryPdSep();
@@ -179,6 +207,39 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     return generate_results;
 }
 
+GenerateOutputs NormalGenerateStream::prepareFrontendMetricOutput() {
+    const size_t    step_output_len = seqLength() - last_frontend_metric_output_pos_;
+    GenerateOutputs generate_results;
+    generate_results.request_id           = request_id_;
+    generate_results.frontend_metric_only = true;
+    fillFrontendMetricCounters(generate_results);
+
+    for (int i = 0; i < nextBatchSize(); ++i) {
+        GenerateOutput generate_output;
+        generate_output.finished = false;
+        if (generate_input_->generate_config->aux_info) {
+            generate_output.aux_info.iter_count   = iter_count_;
+            generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            generate_output.aux_info.first_token_cost_time_us           = complete_token_ids_->firstTokenLatencyUs();
+            generate_output.aux_info.wait_time_us                       = wait_time_us_;
+            generate_output.aux_info.input_len                          = generate_input_->inputLength();
+            generate_output.aux_info.prefix_len                         = generate_input_->prefix_length;
+            generate_output.aux_info.output_len                         = subGenerateOutputLength(i);
+            generate_output.aux_info.step_output_len                    = step_output_len;
+            generate_output.aux_info.reuse_len                          = initial_reuse_length_;
+            generate_output.aux_info.pd_sep                             = queryPdSep();
+            generate_output.aux_info.speculative_verify_rounds          = speculative_verify_rounds_;
+            generate_output.aux_info.speculative_accepted_token_num     = speculative_accepted_token_num_;
+            generate_output.aux_info.speculative_proposed_draft_tokens  = speculative_proposed_draft_tokens_;
+            generate_output.aux_info.context_execute_time_us            = context_execute_time_us_;
+            generate_output.aux_info.context_execute_time_with_cache_us = context_execute_time_with_cache_us_;
+            generate_output.aux_info.generate_execute_time_us           = generate_execute_time_us_;
+        }
+        generate_results.generate_outputs.emplace_back(std::move(generate_output));
+    }
+    return generate_results;
+}
+
 void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_results) {
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
         /* No matter if the queue is full for any reason,
@@ -187,6 +248,45 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
     }
+}
+
+void NormalGenerateStream::enqueueLatestFrontendMetricOutput(GenerateOutputs&& generate_results) {
+    std::lock_guard<std::mutex> lock(frontend_metric_output_mutex_);
+    latest_frontend_metric_output_ = std::move(generate_results);
+    if (frontend_metric_marker_pending_) {
+        return;
+    }
+
+    // The queue carries only one lightweight marker. The cumulative metric
+    // payload lives in latest_frontend_metric_output_ and is overwritten on
+    // every step, so a slow consumer receives the newest snapshot without
+    // metric frames ever exhausting the business output queue.
+    GenerateOutputs marker;
+    marker.request_id           = request_id_;
+    marker.frontend_metric_only = true;
+    if (generate_outputs_queue_.tryPush(marker)) {
+        frontend_metric_marker_pending_ = true;
+    }
+}
+
+bool NormalGenerateStream::hasPendingFrontendMetricOutput() {
+    std::lock_guard<std::mutex> lock(frontend_metric_output_mutex_);
+    return frontend_metric_marker_pending_;
+}
+
+void NormalGenerateStream::setPendingFrontendMetricTerminalError(bool pending) {
+    std::lock_guard<std::mutex> lock(frontend_metric_output_mutex_);
+    frontend_metric_terminal_error_pending_ = pending;
+}
+
+GenerateOutputs NormalGenerateStream::takeLatestFrontendMetricOutput(GenerateOutputs&& marker) {
+    std::lock_guard<std::mutex> lock(frontend_metric_output_mutex_);
+    if (latest_frontend_metric_output_.has_value()) {
+        marker = std::move(latest_frontend_metric_output_.value());
+        latest_frontend_metric_output_.reset();
+    }
+    frontend_metric_marker_pending_ = false;
+    return marker;
 }
 
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
@@ -264,8 +364,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         }
     }
 
-    bool pd_sep_first_token = queryPdSep();
-    bool need_update        = pd_sep_first_token || isStreaming() || finished_;
+    bool pd_sep_first_token     = queryPdSep();
+    bool frontend_metric_update = generate_input_->generate_config->frontend_metric_streaming && !isStreaming()
+                                  && !finished_ && !pd_sep_first_token;
+    if (frontend_metric_update && seqLength() - last_frontend_metric_output_pos_ > 0) {
+        enqueueLatestFrontendMetricOutput(prepareFrontendMetricOutput());
+        last_frontend_metric_output_pos_ = seqLength();
+    }
+
+    bool need_update = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
         return;
     }
@@ -281,6 +388,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    last_output_pos_ = seqLength();
+    last_output_pos_                 = seqLength();
+    last_frontend_metric_output_pos_ = last_output_pos_;
 }
 };  // namespace rtp_llm

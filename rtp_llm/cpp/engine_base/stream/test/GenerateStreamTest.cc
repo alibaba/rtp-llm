@@ -98,6 +98,116 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, testAuxInfoKeepsIndependentReturnSequenceLengths) {
+    auto config                  = std::make_shared<GenerateConfig>();
+    config->aux_info             = true;
+    config->ignore_eos           = true;
+    config->is_streaming         = false;
+    config->num_return_sequences = 2;
+    config->stop_words_list      = {{7}};
+    auto stream                  = GenerateStreamBuilder().createContextStream({1, 2}, config);
+
+    // The first sequence finishes one step before the second. The sampler
+    // continues to append padding/EOS tokens to finished rows, but their
+    // request-level output length must remain frozen at the finish point.
+    stream->update({torch::tensor({{7}, {8}}, torch::kInt32), 1});
+    ASSERT_FALSE(stream->hasOutput());
+    stream->update({torch::tensor({{0}, {7}}, torch::kInt32), 1});
+
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 2);
+    const auto& first  = output.value().generate_outputs[0];
+    const auto& second = output.value().generate_outputs[1];
+    EXPECT_TRUE(first.finished);
+    EXPECT_TRUE(second.finished);
+    EXPECT_EQ(first.output_ids.numel(), 2);
+    EXPECT_EQ(second.output_ids.numel(), 2);
+    EXPECT_EQ(first.aux_info.output_len, 1);
+    EXPECT_EQ(second.aux_info.output_len, 2);
+    EXPECT_EQ(first.aux_info.output_len + second.aux_info.output_len, 3);
+}
+
+TEST_F(GenerateStreamTest, testSlowNonStreamingMetricConsumerDoesNotFillBusinessOutputQueue) {
+    constexpr int kOutputLength       = 1100;
+    auto          config              = std::make_shared<GenerateConfig>();
+    config->aux_info                  = true;
+    config->ignore_eos                = true;
+    config->is_streaming              = false;
+    config->frontend_metric_streaming = true;
+    config->max_new_tokens            = kOutputLength;
+    auto stream                       = GenerateStreamBuilder().createContextStream({1}, config);
+
+    // Do not consume while generating more frames than the business queue's
+    // capacity. Metric-only cumulative snapshots must coalesce instead of
+    // terminating the otherwise valid non-streaming request.
+    for (int i = 0; i < kOutputLength; ++i) {
+        stream->addFrontendGenerateExecuteMetrics(/*execute_time_us=*/10, /*generate_token_num=*/1);
+        stream->update({torch::tensor({{2}}, torch::kInt32), 1});
+    }
+
+    ASSERT_FALSE(stream->hasError());
+    ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+
+    auto metric_output = stream->nextOutput();
+    ASSERT_TRUE(metric_output.ok());
+    EXPECT_TRUE(metric_output.value().frontend_metric_only);
+    ASSERT_TRUE(metric_output.value().frontend_generate_token_num.has_value());
+    EXPECT_EQ(metric_output.value().frontend_generate_token_num.value(), kOutputLength - 1);
+
+    auto final_output = stream->nextOutput();
+    ASSERT_TRUE(final_output.ok());
+    EXPECT_FALSE(final_output.value().frontend_metric_only);
+    ASSERT_EQ(final_output.value().generate_outputs.size(), 1);
+    EXPECT_EQ(final_output.value().generate_outputs[0].output_ids.numel(), kOutputLength);
+    EXPECT_EQ(final_output.value().generate_outputs[0].aux_info.output_len, kOutputLength);
+    ASSERT_TRUE(final_output.value().frontend_generate_token_num.has_value());
+    EXPECT_EQ(final_output.value().frontend_generate_token_num.value(), kOutputLength);
+    ASSERT_TRUE(final_output.value().frontend_generate_execute_time_us.has_value());
+    EXPECT_EQ(final_output.value().frontend_generate_execute_time_us.value(), kOutputLength * 10);
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(GenerateStreamTest, testCancelledNonStreamingRequestDrainsLatestMetricBeforeError) {
+    constexpr int kExecutedSteps      = 5;
+    auto          config              = std::make_shared<GenerateConfig>();
+    config->aux_info                  = true;
+    config->ignore_eos                = true;
+    config->is_streaming              = false;
+    config->frontend_metric_streaming = true;
+    config->max_new_tokens            = 100;
+    auto stream                       = GenerateStreamBuilder().createContextStream({1}, config);
+
+    for (int i = 0; i < kExecutedSteps; ++i) {
+        stream->addFrontendGenerateExecuteMetrics(/*execute_time_us=*/10, /*generate_token_num=*/1);
+        stream->update({torch::tensor({{2}}, torch::kInt32), 1});
+    }
+    stream->reportError(ErrorCode::CANCELLED, "cancelled by test");
+
+    // Mirror LocalRpcServer's real polling condition. It must consume the
+    // latest cumulative snapshot and then iterate once more to expose the
+    // terminal error instead of returning grpc::Status::OK.
+    int       metric_output_count = 0;
+    ErrorCode terminal_error      = ErrorCode::NONE_ERROR;
+    while (stream->isActive() || stream->hasOutput()) {
+        auto output = stream->nextOutput();
+        if (!output.ok()) {
+            terminal_error = output.status().code();
+            break;
+        }
+        ++metric_output_count;
+        EXPECT_TRUE(output.value().frontend_metric_only);
+        ASSERT_TRUE(output.value().frontend_generate_token_num.has_value());
+        EXPECT_EQ(output.value().frontend_generate_token_num.value(), kExecutedSteps);
+        ASSERT_TRUE(output.value().frontend_generate_execute_time_us.has_value());
+        EXPECT_EQ(output.value().frontend_generate_execute_time_us.value(), kExecutedSteps * 10);
+    }
+
+    EXPECT_EQ(metric_output_count, 1);
+    EXPECT_EQ(terminal_error, ErrorCode::CANCELLED);
+    EXPECT_FALSE(stream->hasOutput());
+}
+
 TEST_F(GenerateStreamTest, testLogprobsHistoryUsesBoundedGeometricGrowth) {
     auto generate_config             = std::make_shared<GenerateConfig>();
     generate_config->return_logprobs = true;

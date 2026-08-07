@@ -20,6 +20,7 @@ sys.modules["rtp_llm.ops.comm.nccl_op"] = mock_nccl_op
 import logging
 import os
 import unittest
+from dataclasses import asdict
 from typing import AsyncGenerator
 from unittest import TestCase, main
 
@@ -126,6 +127,50 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_frontend_metric_envelope_stays_out_of_public_aux_info(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(aux_info=True),
+        )
+        outputs_pb = GenerateOutputsPB()
+        outputs_pb.frontend_metric_only = True
+        outputs_pb.frontend_context_token_num.value = 11
+        outputs_pb.frontend_context_token_num_with_cache.value = 13
+        outputs_pb.frontend_context_execute_time_us.value = 101
+        outputs_pb.frontend_context_execute_time_with_cache_us.value = 81
+        outputs_pb.frontend_generate_token_num.value = 17
+        outputs_pb.frontend_generate_execute_time_us.value = 201
+        outputs_pb.flatten_output.finished.append(False)
+        outputs_pb.flatten_output.aux_info.add().output_len = 4
+
+        output = trans_output(input_py, outputs_pb, StreamState())
+
+        self.assertTrue(output.frontend_metric_only)
+        self.assertEqual(output.frontend_context_token_num, 11)
+        self.assertEqual(output.frontend_context_token_num_with_cache, 13)
+        self.assertEqual(output.frontend_context_execute_time_us, 101)
+        self.assertEqual(output.frontend_context_execute_time_with_cache_us, 81)
+        self.assertEqual(output.frontend_generate_token_num, 17)
+        self.assertEqual(output.frontend_generate_execute_time_us, 201)
+        self.assertNotIn(
+            "frontend_metric_only",
+            asdict(output.generate_outputs[0].aux_info),
+        )
+        self.assertNotIn(
+            "frontend_generate_token_num",
+            asdict(output.generate_outputs[0].aux_info),
+        )
+        self.assertNotIn(
+            "frontend_context_token_num",
+            asdict(output.generate_outputs[0].aux_info),
+        )
+        self.assertNotIn(
+            "frontend_generate_execute_time_us",
+            asdict(output.generate_outputs[0].aux_info),
+        )
 
     @unittest.skip("need fix")
     def test_generate_stream(self):

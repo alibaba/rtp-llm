@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -32,8 +33,10 @@ class FakeFrontendWorker(object):
 
     def __init__(self):
         self.backend_rpc_server_visitor = self.FakeBackendRpcServerVisitor()
+        self.last_inference_kwargs = {}
 
     def inference(self, prompt: str, *args: Any, **kwargs: Any):
+        self.last_inference_kwargs = kwargs
         response_generator = self._inference(prompt, *args, **kwargs)
         return CompleteResponseAsyncGenerator(
             response_generator, CompleteResponseAsyncGenerator.get_last_value
@@ -86,6 +89,13 @@ class FrontendServerTest(TestCase):
         self.assertEqual(
             res.body.decode("utf-8"), '{"res":"hello"}', res.body.decode("utf-8")
         )
+        self.assertTrue(
+            callable(
+                self.frontend_server._frontend_worker.last_inference_kwargs[
+                    "frontend_metric_observer"
+                ]
+            )
+        )
         res = loop.run_until_complete(
             self._async_run(req='{"prompt": "hello"}', raw_request=FakeRawRequest())
         )
@@ -118,6 +128,52 @@ class FrontendServerTest(TestCase):
         response = FakeAuxResponse(aux_info={"input_len": 10})
         FrontendServer._hide_aux_info(response)
         self.assertEqual(response.aux_info, {})
+
+    def test_internal_aux_info_is_hidden_from_nonstream_error_response(self):
+        error = RuntimeError("backend failed")
+        error.aux_info = {"input_len": 10}
+
+        response = self.frontend_server._handle_exception(
+            {
+                "aux_info": False,
+                "source": "test",
+                request_id_field_name: 1,
+            },
+            error,
+        )
+
+        payload = json.loads(response.body)
+        self.assertNotIn("aux_info", payload)
+
+    def test_internal_aux_info_is_hidden_from_stream_error_response(self):
+        async def failing_stream():
+            error = RuntimeError("stream backend failed")
+            error.aux_info = {"input_len": 10}
+            raise error
+            yield FakePipelinResponse(res="unreachable")
+
+        async def collect_error_chunks():
+            self.frontend_server._global_controller.increment()
+            response = CompleteResponseAsyncGenerator(
+                failing_stream(), CompleteResponseAsyncGenerator.get_last_value
+            )
+            return [
+                chunk
+                async for chunk in self.frontend_server.stream_response(
+                    {
+                        "stream": True,
+                        "aux_info": False,
+                        "source": "test",
+                        request_id_field_name: 1,
+                    },
+                    response,
+                )
+            ]
+
+        chunks = asyncio.run(collect_error_chunks())
+        self.assertEqual(len(chunks), 1)
+        payload = json.loads(chunks[0].removeprefix("data: ").strip())
+        self.assertNotIn("aux_info", payload)
 
     def test_request_can_disable_speculative_metrics(self):
         self.assertTrue(

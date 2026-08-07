@@ -19,12 +19,13 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import DashScParameterError, OtherParams, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    _make_frontend_metric_observer,
     _slice_generate_output_token_span,
     build_think_runtime,
     iter_real_model_stream_infer,
@@ -2485,9 +2486,14 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             sink.values(GaugeMetrics.FRONTEND_NONCACHE_INPUT_TOKEN_TPS_METRIC),
             [600.0],
         )
+        # Match rtp_llm_generate_tps for MTP: accepted tokens / decode time.
         self.assertEqual(
             sink.values(GaugeMetrics.FRONTEND_OUTPUT_TOKEN_TPS_METRIC),
-            [100.0],
+            [150.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_NONCACHE_OUTPUT_TOKEN_TPS_METRIC),
+            [150.0],
         )
         self.assertEqual(
             sink.values(GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC),
@@ -2548,6 +2554,61 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 "source": "dash_sc",
                 "protocol": "dash_sc_grpc",
             },
+        )
+        self.assertTrue(
+            visitor.last_generate_input.generate_config.frontend_metric_streaming
+        )
+        self.assertTrue(visitor.last_generate_input.generate_config.aux_info)
+        self.assertIsNotNone(visitor.last_generate_input.frontend_metric_observer)
+
+    async def test_raw_metric_projector_counts_all_return_sequences(self) -> None:
+        sink = _MetricSink()
+        metrics = FrontendRequestMetrics(sink)
+        state = metrics.begin(
+            rank_id="2",
+            server_id="3",
+            source="dash_sc",
+            streaming=True,
+            speculative_steps=0,
+        )
+        config = GenerateConfig(num_return_sequences=2, is_streaming=True)
+        observer = _make_frontend_metric_observer(state, config, 0)
+        self.assertIsNotNone(observer)
+        repeated_aux = AuxInfo(
+            input_len=10,
+            output_len=11,
+            reuse_len=4,
+            context_execute_time_us=10_000,
+            context_execute_time_with_cache_us=5_000,
+            generate_execute_time_us=40_000,
+        )
+        output = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(aux_info=repeated_aux),
+                GenerateOutput(aux_info=repeated_aux),
+            ],
+            frontend_context_token_num=12,
+            frontend_context_token_num_with_cache=20,
+            frontend_context_execute_time_us=10_000,
+            frontend_context_execute_time_with_cache_us=5_000,
+            frontend_generate_token_num=20,
+            frontend_generate_execute_time_us=40_000,
+        )
+
+        observer(output, 0)
+        state.finish()
+
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_INPUT_TOKEN_TPS_METRIC),
+            [4000.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_NONCACHE_INPUT_TOKEN_TPS_METRIC),
+            [1200.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_OUTPUT_TOKEN_TPS_METRIC),
+            [500.0],
         )
 
     async def test_timeout_request_sets_dashscope_partial_response_metadata(

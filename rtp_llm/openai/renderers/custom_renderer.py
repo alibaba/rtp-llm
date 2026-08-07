@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -68,6 +68,43 @@ def _merge_choice_logprob_tensors(
         merged_tensors.append(torch.cat(chunks, dim=0) if chunks else None)
 
     return merged_tensors[0], merged_tensors[1], merged_tensors[2]
+
+
+def _make_frontend_metric_observer(
+    observer: Callable[[Any], None],
+    context_batch_size: int = 1,
+) -> Callable[[GenerateOutputs, int], None]:
+    """Build the visitor-local raw AuxInfo projector used for TPS windows."""
+
+    def observe(output: GenerateOutputs, attempt: int) -> None:
+        observer(
+            {
+                "aux_info": [item.aux_info for item in output.generate_outputs],
+                "_frontend_context_batch_size": context_batch_size,
+                "_frontend_output_batch_size": len(output.generate_outputs),
+                "_frontend_metric_attempt": attempt,
+                "context_token_num": output.frontend_context_token_num,
+                "context_token_num_with_cache": output.frontend_context_token_num_with_cache,
+                "context_execute_time_us": output.frontend_context_execute_time_us,
+                "context_execute_time_with_cache_us": output.frontend_context_execute_time_with_cache_us,
+                "generate_token_num": output.frontend_generate_token_num,
+                "generate_execute_time_us": output.frontend_generate_execute_time_us,
+            }
+        )
+
+    return observe
+
+
+def _make_frontend_metric_generate_config(
+    generate_config: GenerateConfig,
+    enabled: bool,
+) -> GenerateConfig:
+    if not enabled:
+        return generate_config
+    return generate_config.model_copy(
+        update={"frontend_metric_streaming": True, "aux_info": True},
+        deep=True,
+    )
 
 
 def _get_think_config(generate_env_config):
@@ -450,21 +487,42 @@ class CustomChatRenderer:
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
         frontend_metric_tags: Optional[Dict[str, str]] = None,
+        frontend_metric_observer: Optional[Callable[[Any], None]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
+        # Ask the backend for AuxInfo-only progress frames while preserving the
+        # public is_streaming flag, retry behavior, and renderer semantics.
+        backend_generate_config = _make_frontend_metric_generate_config(
+            generate_config,
+            frontend_metric_observer is not None,
+        )
+
+        raw_metric_observer = None
+        if frontend_metric_observer is not None:
+            context_batch_size = (
+                1
+                if generate_config.has_num_beams()
+                else max(generate_config.num_return_sequences, 1)
+            )
+            raw_metric_observer = _make_frontend_metric_observer(
+                frontend_metric_observer,
+                context_batch_size,
+            )
+
         output_generator: AsyncGenerator[GenerateOutputs, None] = (
             await backend_rpc_server_visitor.enqueue(
                 GenerateInput(
                     request_id=request_id,
                     token_ids=input_id_tensor,
                     mm_inputs=mm_inputs,
-                    generate_config=generate_config,
+                    generate_config=backend_generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
                     headers=normalize_request_headers(headers),
                     frontend_metric_tags=dict(frontend_metric_tags or {}),
+                    frontend_metric_observer=raw_metric_observer,
                 )
             )
         )
