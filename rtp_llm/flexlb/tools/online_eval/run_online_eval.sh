@@ -63,6 +63,9 @@ LOOP="${LOOP:-0}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
 LOAD_CLIENT_START_DELAY_SECONDS="${LOAD_CLIENT_START_DELAY_SECONDS:-10}"
+# Warm up FlexLB before applying load so JIT/connections are hot and not
+# counted in stats. Overridable via env; 0 disables warmup.
+FLEXLB_WARMUP_SECONDS="${FLEXLB_WARMUP_SECONDS:-10}"
 CLIENT_PACING_LAG_P99_LIMIT_MS="${CLIENT_PACING_LAG_P99_LIMIT_MS:-100}"
 SLO_BATCH_ANALYSIS="${SLO_BATCH_ANALYSIS:-1}"
 SLO_BATCH_DRAIN_SECONDS="${SLO_BATCH_DRAIN_SECONDS:-0}"
@@ -180,24 +183,42 @@ PY
 }
 
 assert_ports_free() {
+  # SO_REUSEADDR lets a check socket bind against a port still in TIME_WAIT
+  # (no process listening, but kernel-held) — the common state right after a
+  # previous run is killed. Without it socket.bind() gives a false failure.
+  # Poll up to 5s for ports to drain; each check binds with SO_REUSEADDR so
+  # TIME_WAIT ports pass immediately.
   python3 - "$@" <<'PY'
 import socket
 import sys
+import time
 
-sockets = []
-try:
+max_wait = 5.0
+interval = 0.5
+deadline = time.monotonic() + max_wait
+last_errors = {}
+
+while True:
+    last_errors.clear()
+    ok = True
     for raw_port in sys.argv[1:]:
         port = int(raw_port)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(("0.0.0.0", port))
         except OSError as exc:
-            print(f"required port {port} is not available: {exc}", file=sys.stderr)
-            sys.exit(1)
-        sockets.append(sock)
-finally:
-    for sock in sockets:
-        sock.close()
+            ok = False
+            last_errors[port] = exc
+        finally:
+            sock.close()
+    if ok:
+        sys.exit(0)
+    if time.monotonic() >= deadline:
+        for port, exc in last_errors.items():
+            print(f"required port {port} is not available after {max_wait:.0f}s: {exc}", file=sys.stderr)
+        sys.exit(1)
+    time.sleep(interval)
 PY
 }
 
@@ -533,7 +554,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     exit 1
   fi
   wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
-  if [[ "${FLEXLB_WARMUP_SECONDS:-0}" -gt 0 ]]; then
+  if [[ "${FLEXLB_WARMUP_SECONDS:-10}" -gt 0 ]]; then
     echo "Warming up FlexLB for ${FLEXLB_WARMUP_SECONDS}s before starting load..."
     sleep "${FLEXLB_WARMUP_SECONDS}"
   fi
