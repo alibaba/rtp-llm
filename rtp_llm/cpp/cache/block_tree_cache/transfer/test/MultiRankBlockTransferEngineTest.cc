@@ -639,7 +639,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
     ASSERT_FALSE(before.empty());
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
 
-    cache->setTierWatermark(Tier::HOST, 0.01, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
@@ -701,7 +701,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
     releaseDeviceBlocksAndNotify(*cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
 
-    cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
@@ -757,7 +757,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
     releaseDeviceBlocksAndNotify(*cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
 
-    cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
@@ -810,7 +810,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
     ASSERT_FALSE(before.empty());
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
 
-    cache->setTierWatermark(Tier::HOST, 0.01, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 

@@ -143,6 +143,10 @@ struct FMHAConfig {
     std::string to_string() const;
 };
 
+constexpr double kDefaultDeviceWatermarkRatio = 0.9;
+constexpr double kDefaultHostWatermarkRatio   = 0.9;
+constexpr double kDefaultDiskWatermarkRatio   = 0.9;
+
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;
     std::string                             multi_task_prompt     = "";
@@ -185,6 +189,9 @@ struct KVCacheConfig {
     std::string device_eviction_policy            = "lru";
     std::string host_eviction_policy              = "lru";
     std::string disk_eviction_policy              = "fifo";
+    double      device_watermark_ratio            = kDefaultDeviceWatermarkRatio;
+    double      host_watermark_ratio              = kDefaultHostWatermarkRatio;
+    double      disk_watermark_ratio              = kDefaultDiskWatermarkRatio;
     int64_t     device_cache_min_free_blocks       = 0;
     int         load_cache_retry_times             = 1;  // Maximum retry attempts for load cache transfer failures
 

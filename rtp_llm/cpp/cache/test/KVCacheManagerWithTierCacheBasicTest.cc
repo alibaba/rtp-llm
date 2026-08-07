@@ -399,9 +399,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     }
     const auto ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(ratio.has_value());
-    cache->setTierWatermark(Tier::DEVICE, *ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     cache->waitForPendingTasks();
     auto lower = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(lower.has_value());
@@ -465,9 +465,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     }
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(device_ratio.has_value());
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     cache->waitForPendingTasks();
 
     auto host_path = snapshotPathResources(*cache, seed.cache_keys);

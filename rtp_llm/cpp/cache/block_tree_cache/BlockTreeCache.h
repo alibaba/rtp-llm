@@ -4,7 +4,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
@@ -52,16 +51,11 @@ struct BlockTreeCacheConfig {
 
     // ---- Per-tier watermark ----
     struct TierWatermark {
-        double ratio{0.0};   // watermark ratio (0.0 = disabled)
-        size_t capacity{0};  // total block count (used for legacy DEVICE mode only)
+        double ratio{0.0};  // watermark ratio (0.0 = disabled)
     };
     TierWatermark watermark_device;
     TierWatermark watermark_host;
     TierWatermark watermark_disk;
-
-    // Absolute device headroom. Applied after request references are released;
-    // unlike ratio watermarks this maps directly to device_cache_min_free_blocks.
-    size_t device_min_free_blocks{0};
 
     // ---- Reverse (leaf) cascade eviction control ----
     // When true, evicting any group set on a leaf node cascades to all other
@@ -170,23 +164,6 @@ public:
         metrics_reporter_.setMetricsReporter(metrics_reporter);
     }
 
-    // ---- Configuration mutators (for runtime adjustment) ----
-    void setTierWatermark(Tier tier, double ratio, size_t capacity) {
-        switch (tier) {
-            case Tier::DEVICE:
-                config_.watermark_device = {ratio, capacity};
-                break;
-            case Tier::HOST:
-                config_.watermark_host = {ratio, capacity};
-                break;
-            case Tier::DISK:
-                config_.watermark_disk = {ratio, capacity};
-                break;
-            default:
-                break;
-        }
-    }
-
     // Accessors
     BlockTree* tree() const {
         return tree_.get();
@@ -223,8 +200,6 @@ private:
     void checkWatermark();
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
-    void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits);
-    void settleInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits) noexcept;
 
     BlockTreeCacheConfig                     config_;
     std::unique_ptr<BlockTree>               tree_;
@@ -235,12 +210,9 @@ private:
     mutable std::mutex                       mutex_;
     BlockTreeEvictor                         evictor_;
     bool                                     initialized_{false};
-    // Protected by mutex_. Credits remain reserved from async queue acceptance
-    // until the matching plan completes or rolls back.
-    std::unordered_map<DeviceBlockPoolPtr, size_t> in_flight_device_release_credits_;
-    int64_t                                        mutation_version_{0};
-    BlockTreeLoader                                loader_;
-    BlockTreeStorer                                storer_;
+    int64_t                                  mutation_version_{0};
+    BlockTreeLoader                          loader_;
+    BlockTreeStorer                          storer_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

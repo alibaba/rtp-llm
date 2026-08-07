@@ -825,15 +825,14 @@ TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingRe
     submitBlockReleases(cache, releases);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAndCascadeCreditsOnce) {
+TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingReleasesAcrossGroupSets) {
     const auto config    = makeSharedBackingCascadeConfig();
     auto       allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.memory_cache_size_mb         = 1;
-    kv_cache_config.device_cache_min_free_blocks = 4;
-    auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
@@ -850,6 +849,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
     auto scripted_copy =
         std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(cache->groupSets());
     block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
+    block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.6);
 
     std::vector<std::vector<BlockIdxType>> request_blocks;
     for (CacheKeyType key : {800, 801, 802}) {
@@ -864,14 +864,13 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
 
     cache->waitForPendingTasks();
 
-    // One physical deficit is shared by both logical adapters. A FULL+LINEAR
-    // cascade contributes two releases, then one forward-only LINEAR plan
-    // supplies the remaining credit without over-evicting.
-    EXPECT_EQ(scripted_copy->submitCount(), 3u);
-    EXPECT_EQ(backing->freeBlocksNum(), 4u);
+    // One FULL+LINEAR plan contributes two physical releases. Both GroupSets
+    // share the pending count for their common backing pool.
+    EXPECT_EQ(scripted_copy->submitCount(), 2u);
+    EXPECT_EQ(backing->freeBlocksNum(), 3u);
     EXPECT_LT(backing->freeBlocksNum(), backing->totalBlocksNum());
     const auto descriptors = scripted_copy->descriptors();
-    ASSERT_EQ(descriptors.size(), 3u);
+    ASSERT_EQ(descriptors.size(), 2u);
     std::vector<int> submitted_groups;
     for (const auto& descriptor : descriptors) {
         ASSERT_EQ(descriptor.source_tier, Tier::DEVICE);
@@ -880,7 +879,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
         submitted_groups.push_back(descriptor.group_set_id);
     }
     EXPECT_EQ(std::count(submitted_groups.begin(), submitted_groups.end(), 0), 1);
-    EXPECT_EQ(std::count(submitted_groups.begin(), submitted_groups.end(), 1), 2);
+    EXPECT_EQ(std::count(submitted_groups.begin(), submitted_groups.end(), 1), 1);
 
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
@@ -892,10 +891,9 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.memory_cache_size_mb         = 1;
-    kv_cache_config.device_cache_min_free_blocks = 7;
-    auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
@@ -907,6 +905,7 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/810);
     auto       backing = allocator->cacheGroups().front()->blockPool();
     ASSERT_EQ(backing->freeBlocksNum(), 6u);
+    block_tree_cache_test::BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.01);
     BlockReleaseBatch releases;
     releaseInsertedRequestBlocks(allocator, blocks, releases);
     submitBlockReleases(cache, releases);
@@ -925,6 +924,34 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
 
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
     cache->waitForPendingTasks();
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DeviceMinFreeDoesNotTriggerBlockTreeWatermarkEviction) {
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.memory_cache_size_mb         = 1;
+    kv_cache_config.device_cache_min_free_blocks = 7;
+    auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
+    ASSERT_NE(cache, nullptr);
+    allocator->attachBlockTreeCache(cache);
+
+    auto scripted_copy =
+        std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(cache->groupSets());
+    block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
+
+    const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/811);
+    auto       backing = allocator->cacheGroups().front()->blockPool();
+    ASSERT_EQ(backing->freeBlocksNum(), 6u);
+    BlockReleaseBatch releases;
+    releaseInsertedRequestBlocks(allocator, blocks, releases);
+    submitBlockReleases(cache, releases);
+    cache->waitForPendingTasks();
+
+    EXPECT_EQ(scripted_copy->submitCount(), 0u);
+    EXPECT_EQ(backing->freeBlocksNum(), 6u);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, IncompatibleGroupsKeepSeparateGroupSetResources) {
@@ -1357,7 +1384,7 @@ TEST_F(BlockTreeCacheFactoryTest, AppliesDefaultTierWatermarks) {
         auto allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
         auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
         ASSERT_NE(cache, nullptr);
-        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, 0.9);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, kDefaultDeviceWatermarkRatio);
         EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.0);
         EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.0);
     }
@@ -1369,8 +1396,8 @@ TEST_F(BlockTreeCacheFactoryTest, AppliesDefaultTierWatermarks) {
         kv_cache_config.memory_cache_size_mb = 1;
         auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
-        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, 0.9);
-        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.9);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, kDefaultDeviceWatermarkRatio);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, kDefaultHostWatermarkRatio);
         EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.0);
     }
 
@@ -1387,9 +1414,50 @@ TEST_F(BlockTreeCacheFactoryTest, AppliesDefaultTierWatermarks) {
         kv_cache_config.memory_cache_disk_buffered_io = true;
         auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
         ASSERT_NE(cache, nullptr);
-        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, 0.9);
-        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.9);
-        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.9);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, kDefaultDeviceWatermarkRatio);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, kDefaultHostWatermarkRatio);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, kDefaultDiskWatermarkRatio);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, AppliesConfiguredTierWatermarks) {
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_watermark_config");
+    KVCacheConfig                            kv_cache_config;
+    kv_cache_config.enable_memory_cache           = true;
+    kv_cache_config.memory_cache_size_mb          = 1;
+    kv_cache_config.enable_disk_cache             = true;
+    kv_cache_config.memory_cache_disk_size_mb     = 1;
+    kv_cache_config.memory_cache_disk_paths       = disk_dir.path;
+    kv_cache_config.memory_cache_disk_buffered_io = true;
+    kv_cache_config.device_watermark_ratio        = 0.7;
+    kv_cache_config.host_watermark_ratio          = 0.8;
+    kv_cache_config.disk_watermark_ratio          = 0.85;
+
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+    ASSERT_NE(cache, nullptr);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, 0.7);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.8);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.85);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RejectsInvalidTierWatermarks) {
+    using RatioField = double KVCacheConfig::*;
+    const std::vector<std::pair<const char*, RatioField>> ratio_fields = {
+        {"device", &KVCacheConfig::device_watermark_ratio},
+        {"host", &KVCacheConfig::host_watermark_ratio},
+        {"disk", &KVCacheConfig::disk_watermark_ratio},
+    };
+
+    const auto config = makeSingleConfig();
+    for (const auto& [tier, ratio_field] : ratio_fields) {
+        SCOPED_TRACE(tier);
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.*ratio_field = 1.1;
+        expectFactoryRejects(config, allocator, kv_cache_config);
     }
 }
 

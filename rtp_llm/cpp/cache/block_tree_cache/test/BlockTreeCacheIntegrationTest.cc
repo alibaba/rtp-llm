@@ -297,9 +297,9 @@ std::vector<BlockIdxType> allocatedBlocksSnapshot(const IBlockPool& pool) {
 }
 
 void runSingleMaintenance(FullSWAEnvironment& environment, Tier tier, double ratio) {
-    environment.cache->setTierWatermark(tier, ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment.cache, tier, ratio);
     environment.runMaintenance();
-    environment.cache->setTierWatermark(tier, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment.cache, tier, 0.0);
 }
 
 BlockTreeMatchResult makePartialReadyDeviceContext(FullSWAEnvironment& environment) {
@@ -328,11 +328,11 @@ public:
         ASSERT_EQ(cache.task_pool_->pending_tasks_.load(), 0);
         {
             std::lock_guard<std::mutex> lock(cache.mutex_);
-            cache.setTierWatermark(Tier::HOST, 0.0, 0);
-            cache.setTierWatermark(Tier::DISK, 0.0, 0);
-            cache.setTierWatermark(Tier::DEVICE, ratio, 0);
+            cache.config_.watermark_host.ratio   = 0.0;
+            cache.config_.watermark_disk.ratio   = 0.0;
+            cache.config_.watermark_device.ratio = ratio;
             cache.checkWatermark();
-            cache.setTierWatermark(Tier::DEVICE, 0.0, 0);
+            cache.config_.watermark_device.ratio = 0.0;
         }
         cache.waitForPendingTasks();
         EXPECT_EQ(cache.task_pool_->pending_tasks_.load(), 0);
@@ -382,7 +382,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     host_context.reset();
 
     scripted_copy->enqueue(/*success=*/false);
-    cache->setTierWatermark(Tier::HOST, 0.01, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
@@ -406,7 +406,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(snapshot_after_failure.keys, snapshot_before.keys);
 
     scripted_copy->clear();
-    cache->setTierWatermark(Tier::HOST, 0.01, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
@@ -435,7 +435,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     disk_context.reset();
     EXPECT_EQ(scripted_copy->submitCount(), 1u);
 
-    cache->setTierWatermark(Tier::HOST, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     cache.reset();
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
@@ -984,9 +984,9 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
             device_sources.emplace_back(environment->device_pools[pool_id], blocks.front());
         }
 
-        environment->cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.01);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
-        environment->cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);
         const bool d2h_copy_entered = pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout);
         if (!d2h_copy_entered) {
             pausable_copy->release();  // never leave a paused engine blocking teardown

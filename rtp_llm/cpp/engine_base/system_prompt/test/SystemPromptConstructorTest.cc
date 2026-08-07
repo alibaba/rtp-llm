@@ -164,7 +164,7 @@ TEST_F(SystemPromptConstructorTest, testNormalEngineResolvesAbsoluteDeviceReserv
     EXPECT_EQ(engine->kv_cache_config.device_cache_min_free_blocks, 9);
     ASSERT_NE(engine->resourceContext().cache_manager, nullptr);
     ASSERT_NE(engine->resourceContext().cache_manager->blockTreeCache(), nullptr);
-    EXPECT_EQ(engine->resourceContext().cache_manager->blockTreeCache()->config().device_min_free_blocks, 9u);
+    EXPECT_EQ(engine->resourceContext().cache_manager->reserveBlocksNum(), 9u);
 }
 
 TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBeforeSystemPromptExecution) {

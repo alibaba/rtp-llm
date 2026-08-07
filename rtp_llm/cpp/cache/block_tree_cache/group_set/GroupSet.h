@@ -1,6 +1,5 @@
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
@@ -77,62 +76,6 @@ public:
     void      unmapDeviceBlocksFromTreeNode(const MultiNodeResource& resource);
     TreeNode* findTreeNodeByDeviceBlock(size_t member_group_id, BlockIdxType block_id) const;
     bool      areBlockToNodeMapsEmpty() const;
-
-    bool anyDevicePoolExceedsRatio(double ratio) const {
-        for (const auto& pool : device_pools_) {
-            size_t capacity  = pool->totalBlocksNum();
-            size_t used      = capacity - pool->freeBlocksNum();
-            size_t threshold = static_cast<size_t>(capacity * ratio);
-            if (used > threshold) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    size_t devicePoolMaxExcess(double ratio) const {
-        size_t max_excess = 0;
-        for (const auto& pool : device_pools_) {
-            size_t capacity  = pool->totalBlocksNum();
-            size_t used      = capacity - pool->freeBlocksNum();
-            size_t threshold = static_cast<size_t>(capacity * ratio);
-            if (used > threshold) {
-                max_excess = std::max(max_excess, used - threshold);
-            }
-        }
-        return max_excess;
-    }
-
-    // A tree-node eviction releases one block from every physical device pool
-    // in this group set. Return the exact number of node evictions needed
-    // so every pool retains at least min_free_blocks (clamped to its capacity).
-    size_t devicePoolMaxExcessForMinFree(size_t min_free_blocks) const {
-        size_t max_excess = 0;
-        for (const auto& pool : device_pools_) {
-            const size_t capacity  = pool->totalBlocksNum();
-            const size_t used      = capacity - pool->freeBlocksNum();
-            const size_t min_free  = std::min(min_free_blocks, capacity);
-            const size_t threshold = capacity - min_free;
-            if (used > threshold) {
-                max_excess = std::max(max_excess, used - threshold);
-            }
-        }
-        return max_excess;
-    }
-
-    // Host/Disk pool usage queries for watermark checking
-    size_t hostPoolUsed() const {
-        return host_pool_ ? (host_pool_->totalBlocksNum() - host_pool_->freeBlocksNum()) : 0;
-    }
-    size_t hostPoolCapacity() const {
-        return host_pool_ ? host_pool_->totalBlocksNum() : 0;
-    }
-    size_t diskPoolUsed() const {
-        return disk_pool_ ? (disk_pool_->totalBlocksNum() - disk_pool_->freeBlocksNum()) : 0;
-    }
-    size_t diskPoolCapacity() const {
-        return disk_pool_ ? disk_pool_->totalBlocksNum() : 0;
-    }
 
     void              referenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const;
     void              unreferenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const;

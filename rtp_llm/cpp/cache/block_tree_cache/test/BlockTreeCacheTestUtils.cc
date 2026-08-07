@@ -433,6 +433,32 @@ void BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(
     cache.transfer_dispatcher_->per_rank_engine_ = std::move(per_rank_transfer_engine);
 }
 
+void BlockTreeCacheTestPeer::setTierWatermarkForTest(BlockTreeCache& cache, Tier tier, double ratio) {
+    std::lock_guard<std::mutex> lock(cache.mutex_);
+    switch (tier) {
+        case Tier::DEVICE:
+            cache.config_.watermark_device.ratio = ratio;
+            break;
+        case Tier::HOST:
+            cache.config_.watermark_host.ratio = ratio;
+            break;
+        case Tier::DISK:
+            cache.config_.watermark_disk.ratio = ratio;
+            break;
+        default:
+            break;
+    }
+}
+
+size_t BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(const BlockTreeCache& cache) {
+    std::lock_guard<std::mutex> lock(cache.evictor_.pending_release_mutex_);
+    size_t                      pending = 0;
+    for (const auto& [_, count] : cache.evictor_.pending_release_counts_) {
+        pending += count;
+    }
+    return pending;
+}
+
 void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
     cache.checkWatermark();
@@ -770,7 +796,7 @@ void FullSWAEnvironment::releaseMatch(BlockTreeMatchResult& result) {
 
 void FullSWAEnvironment::setTierWatermark(Tier tier, double ratio) {
     for (Tier candidate : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
-        cache->setTierWatermark(candidate, candidate == tier ? ratio : 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, candidate, candidate == tier ? ratio : 0.0);
     }
 }
 

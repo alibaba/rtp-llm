@@ -429,6 +429,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("device_eviction_policy", &KVCacheConfig::device_eviction_policy)
         .def_readwrite("host_eviction_policy", &KVCacheConfig::host_eviction_policy)
         .def_readwrite("disk_eviction_policy", &KVCacheConfig::disk_eviction_policy)
+        .def_readwrite("device_watermark_ratio", &KVCacheConfig::device_watermark_ratio)
+        .def_readwrite("host_watermark_ratio", &KVCacheConfig::host_watermark_ratio)
+        .def_readwrite("disk_watermark_ratio", &KVCacheConfig::disk_watermark_ratio)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
         .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
         // Remote connector configuration fields
@@ -515,10 +518,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_reverse_eviction,
                                       self.device_eviction_policy,
                                       self.host_eviction_policy,
-                                      self.disk_eviction_policy);
+                                      self.disk_eviction_policy,
+                                      self.device_watermark_ratio,
+                                      self.host_watermark_ratio,
+                                      self.disk_watermark_ratio);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 55 && t.size() != 56 && t.size() != 60)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 55 && t.size() != 56 && t.size() != 60
+                    && t.size() != 63)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -589,6 +596,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.device_eviction_policy  = t[57].cast<std::string>();
                         c.host_eviction_policy    = t[58].cast<std::string>();
                         c.disk_eviction_policy    = t[59].cast<std::string>();
+                    }
+                    if (t.size() >= 63) {
+                        c.device_watermark_ratio = t[60].cast<double>();
+                        c.host_watermark_ratio   = t[61].cast<double>();
+                        c.disk_watermark_ratio   = t[62].cast<double>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

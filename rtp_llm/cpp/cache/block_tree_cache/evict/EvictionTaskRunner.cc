@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <exception>
 #include <optional>
-#include <set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
@@ -41,8 +40,6 @@ EvictionTaskRunner::EvictionTaskRunner(ExecuteTransferFn               execute_t
                                        int                             memory_timeout_ms,
                                        int                             disk_timeout_ms,
                                        IsTierEnabledFn                 is_tier_enabled,
-                                       CreditsFn                       reserve_credits,
-                                       CreditsFn                       settle_credits,
                                        SettledFn                       settled,
                                        RemoteWriteFn                   remote_write):
     execute_transfer_(std::move(execute_transfer)),
@@ -54,17 +51,10 @@ EvictionTaskRunner::EvictionTaskRunner(ExecuteTransferFn               execute_t
     memory_timeout_ms_(memory_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
     is_tier_enabled_(std::move(is_tier_enabled)),
-    reserve_credits_(std::move(reserve_credits)),
-    settle_credits_(std::move(settle_credits)),
     settled_(std::move(settled)),
     remote_write_(std::move(remote_write)) {}
 
-bool EvictionTaskRunner::submitLocked(BlockTreeEvictor&                   evictor,
-                                      TransferDescriptor&                 eviction_desc,
-                                      std::vector<EvictionReleaseCredit>* release_credits) {
-    if (release_credits != nullptr) {
-        release_credits->clear();
-    }
+bool EvictionTaskRunner::submitLocked(BlockTreeEvictor& evictor, TransferDescriptor& eviction_desc) {
     if (!isCanonicalEvictionTarget(eviction_desc.source_tier, eviction_desc.target_tier)) {
         RTP_LLM_LOG_WARNING("rejecting eviction move with non-canonical target: source=%s target=%s group_set=%zu",
                             tierName(eviction_desc.source_tier),
@@ -81,7 +71,6 @@ bool EvictionTaskRunner::submitLocked(BlockTreeEvictor&                   evicto
         return false;
     }
 
-    std::vector<EvictionReleaseCredit> accepted_release_credits = collectReleaseCredits(*plan);
     if (!plan->needsCopy()) {
         BlockTreeEvictor::CopyResultSet results;
         results.primary_success = true;
@@ -89,69 +78,21 @@ bool EvictionTaskRunner::submitLocked(BlockTreeEvictor&                   evicto
         evictor.complete(*plan, results);
         metrics_reporter_->reportEvictionFinished(*plan, results, group_sets_);
         settled_(true, false);
-        if (release_credits != nullptr) {
-            *release_credits = std::move(accepted_release_credits);
-        }
         return true;
     }
 
-    auto       plan_ptr                  = std::make_shared<BlockTreeEvictor::EvictionPlan>(std::move(*plan));
-    auto       in_flight_release_credits = accepted_release_credits;
-    const bool submitted                 = task_pool_->submit(
-        [this, &evictor, plan_ptr, in_flight_release_credits = std::move(in_flight_release_credits)]() {
-            runTask(evictor, *plan_ptr, in_flight_release_credits);
-        });
+    auto plan_ptr = std::make_shared<BlockTreeEvictor::EvictionPlan>(std::move(*plan));
+    evictor.reservePendingReleases(*plan_ptr);
+    const bool submitted = task_pool_->submit([this, &evictor, plan_ptr]() { runTask(evictor, *plan_ptr); });
     if (!submitted) {
+        evictor.settlePendingReleases(*plan_ptr);
         evictor.rollbackPreparedPlan(*plan_ptr);
         return false;
-    }
-    reserve_credits_(accepted_release_credits);
-    if (release_credits != nullptr) {
-        *release_credits = std::move(accepted_release_credits);
     }
     return true;
 }
 
-std::vector<EvictionReleaseCredit>
-EvictionTaskRunner::collectReleaseCredits(const BlockTreeEvictor::EvictionPlan& plan) const {
-    std::vector<EvictionReleaseCredit>                  release_credits;
-    std::set<std::pair<DeviceBlockPool*, BlockIdxType>> accepted_physical_releases;
-    auto                                                collect = [&](const TransferDescriptor& desc) {
-        if (desc.source_tier != Tier::DEVICE) {
-            return;
-        }
-        const size_t group_set_id = desc.group_set_id;
-        RTP_LLM_CHECK_WITH_INFO(group_set_id < group_sets_.size(),
-                                "eviction plan has invalid group_set_id=%zu group_set_count=%zu",
-                                group_set_id,
-                                group_sets_.size());
-        const auto& pools = group_sets_[group_set_id]->devicePools();
-        RTP_LLM_CHECK_WITH_INFO(desc.source_blocks.size() == pools.size(),
-                                "eviction plan DEVICE width mismatch: group_set_id=%zu expected=%zu actual=%zu",
-                                group_set_id,
-                                pools.size(),
-                                desc.source_blocks.size());
-        for (size_t i = 0; i < pools.size(); ++i) {
-            const auto& pool = pools[i];
-            if (!isNullBlockIdx(desc.source_blocks[i])
-                && accepted_physical_releases.emplace(pool.get(), desc.source_blocks[i]).second) {
-                release_credits.push_back({pool, desc.source_blocks[i]});
-            }
-        }
-    };
-    collect(plan.primary_desc);
-    for (const TransferDescriptor& cascade_desc : plan.cascade_descs) {
-        collect(cascade_desc);
-    }
-    for (const TransferDescriptor& dependent_desc : plan.dependent_prune_descs) {
-        collect(dependent_desc);
-    }
-    return release_credits;
-}
-
-void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evictor,
-                                 const BlockTreeEvictor::EvictionPlan&     plan,
-                                 const std::vector<EvictionReleaseCredit>& release_credits) {
+void EvictionTaskRunner::runTask(BlockTreeEvictor& evictor, const BlockTreeEvictor::EvictionPlan& plan) {
     const Tier    source_tier          = plan.primary_desc.source_tier;
     const Tier    target_tier          = plan.primary_desc.target_tier;
     const size_t  transfer_block_count = plan.cascade_descs.size() + 1;
@@ -164,7 +105,6 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evict
     auto finalization_action = [this,
                                 &evictor,
                                 &plan,
-                                &release_credits,
                                 &copy_results,
                                 source_tier,
                                 target_tier,
@@ -193,17 +133,11 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evict
                                                   transfer_success,
                                                   transfer_bytes);
 
-        bool credit_settlement_attempted = false;
-        auto credit_settlement_action    = [this, &release_credits, &credit_settlement_attempted]() noexcept {
-            if (credit_settlement_attempted) {
-                return;
-            }
-            credit_settlement_attempted = true;
-            std::lock_guard<std::mutex> lock(*mutex_);
-            settle_credits_(release_credits);
+        auto pending_release_settlement_action = [&evictor, &plan]() noexcept {
+            evictor.settlePendingReleases(plan);
         };
-        block_tree_cache_detail::ScopeRollback<decltype(credit_settlement_action)> credit_settlement_guard(
-            std::move(credit_settlement_action));
+        block_tree_cache_detail::ScopeRollback<decltype(pending_release_settlement_action)>
+            pending_release_settlement_guard(std::move(pending_release_settlement_action));
 
         bool       completion_succeeded = false;
         bool       plan_terminalized    = false;
@@ -234,8 +168,7 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evict
                 plan_terminalized = true;
             }
 
-            credit_settlement_attempted = true;
-            settle_credits_(release_credits);
+            pending_release_settlement_guard.run();
 
             const bool mutated = plan_terminalized && completion_succeeded
                                  && (copy_results.primary_success
@@ -254,8 +187,6 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evict
             RTP_LLM_LOG_ERROR("eviction terminalization lock/follow-up failed with unknown exception");
         }
         metrics_reporter_->reportEvictionFinished(plan, copy_results, group_sets_);
-
-        credit_settlement_guard.run();
 
         if (plan_terminalized && completion_succeeded && copy_ok && remote_group_set_id.has_value()) {
             try {

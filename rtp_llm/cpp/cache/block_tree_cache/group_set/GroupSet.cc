@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
+#include <algorithm>
+
 namespace rtp_llm {
 
 GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,

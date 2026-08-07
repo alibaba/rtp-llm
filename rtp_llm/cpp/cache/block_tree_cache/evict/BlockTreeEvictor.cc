@@ -29,8 +29,6 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    int                            memory_timeout_ms,
                                    int                            disk_timeout_ms,
                                    IsTierEnabledFn                is_tier_enabled,
-                                   CreditsFn                      reserve_credits,
-                                   CreditsFn                      settle_credits,
                                    SettledFn                      settled,
                                    RemoteWriteFn                  remote_write):
     tree_(tree),
@@ -43,13 +41,20 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                                       memory_timeout_ms,
                                                       disk_timeout_ms,
                                                       std::move(is_tier_enabled),
-                                                      std::move(reserve_credits),
-                                                      std::move(settle_credits),
                                                       std::move(settled),
                                                       std::move(remote_write))),
     enable_reverse_eviction_(enable_reverse_eviction) {}
 
-BlockTreeEvictor::~BlockTreeEvictor() = default;
+BlockTreeEvictor::~BlockTreeEvictor() {
+    std::lock_guard<std::mutex> lock(pending_release_mutex_);
+    for (const auto& [pool, count] : pending_release_counts_) {
+        RTP_LLM_CHECK_WITH_INFO(count == 0,
+                                "pending eviction releases remain: pool=%s address=%p count=%zu",
+                                pool ? pool->poolName().c_str() : "<null>",
+                                static_cast<void*>(pool),
+                                count);
+    }
+}
 
 EvictionTaskRunner& BlockTreeEvictor::taskRunner() {
     return *task_runner_;
@@ -59,9 +64,8 @@ const EvictionTaskRunner& BlockTreeEvictor::taskRunner() const {
     return *task_runner_;
 }
 
-bool BlockTreeEvictor::submitLocked(TransferDescriptor&                 eviction_desc,
-                                    std::vector<EvictionReleaseCredit>* release_credits) {
-    return task_runner_->submitLocked(*this, eviction_desc, release_credits);
+bool BlockTreeEvictor::submitLocked(TransferDescriptor& eviction_desc) {
+    return task_runner_->submitLocked(*this, eviction_desc);
 }
 
 void BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy) {
@@ -363,8 +367,60 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
     return chooseVictimInGroupSet(*group_set, tier);
 }
 
-size_t BlockTreeEvictor::watermarkExcess(const GroupSet& group_set, Tier tier, double watermark_ratio) const {
-    return watermark_ratio <= 0.0 ? 0 : computeGroupSetExcess(group_set, tier, watermark_ratio);
+void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, double watermark_ratio) {
+    for (const GroupSetPtr& group_set : tree_->groupSets()) {
+        size_t excess = computeGroupSetExcess(*group_set, tier, watermark_ratio);
+        while (excess > 0) {
+            auto victim = chooseVictim(group_set->groupSetId(), tier);
+            if (!victim.has_value() || !submitLocked(*victim)) {
+                break;
+            }
+            excess = std::min(excess - 1, computeGroupSetExcess(*group_set, tier, watermark_ratio));
+        }
+    }
+}
+
+void BlockTreeEvictor::reservePendingReleases(const EvictionPlan& plan) {
+    updatePendingReleases(plan, true);
+}
+
+void BlockTreeEvictor::settlePendingReleases(const EvictionPlan& plan) {
+    updatePendingReleases(plan, false);
+}
+
+void BlockTreeEvictor::updatePendingReleases(const EvictionPlan& plan, bool reserve) {
+    std::lock_guard<std::mutex> lock(pending_release_mutex_);
+    auto update_block = [this, reserve](IBlockPool* pool, BlockIdxType block) {
+        if (reserve) {
+            ++pending_release_counts_[pool];
+            return;
+        }
+        const auto   it            = pending_release_counts_.find(pool);
+        const size_t pending_count = it == pending_release_counts_.end() ? 0 : it->second;
+        RTP_LLM_CHECK_WITH_INFO(pool != nullptr && pending_count > 0,
+                                "invalid pending eviction release settlement: pool=%s address=%p block=%d pending=%zu",
+                                pool ? pool->poolName().c_str() : "<null>",
+                                static_cast<void*>(pool),
+                                block,
+                                pending_count);
+        --it->second;
+    };
+    auto update_desc = [this, &update_block](const TransferDescriptor& desc) {
+        const GroupSetPtr& group_set = tree_->groupSets()[desc.group_set_id];
+        if (desc.source_tier == Tier::DEVICE) {
+            const auto& pools = group_set->devicePools();
+            for (size_t i = 0; i < pools.size(); ++i) {
+                update_block(pools[i].get(), desc.source_blocks[i]);
+            }
+        } else if (desc.source_tier == Tier::HOST) {
+            update_block(group_set->hostPool().get(), desc.source_blocks.front());
+        }
+    };
+
+    update_desc(plan.primary_desc);
+    for (const TransferDescriptor& cascade_desc : plan.cascade_descs) {
+        update_desc(cascade_desc);
+    }
 }
 
 // ---- Migration pipeline (begin -> copy -> finish) ----
@@ -895,17 +951,54 @@ std::vector<size_t> BlockTreeEvictor::selectCascadeGroupSets(const TreeNode* nod
     return result;
 }
 
+size_t BlockTreeEvictor::poolWatermarkExcess(IBlockPool* pool, double ratio) const {
+    size_t used          = pool->usedBlocksNum();
+    size_t pending_count = 0;
+    {
+        std::lock_guard<std::mutex> lock(pending_release_mutex_);
+        const auto                  pending = pending_release_counts_.find(pool);
+        if (pending != pending_release_counts_.end()) {
+            pending_count = pending->second;
+        }
+    }
+    if (pending_count > 0) {
+        RTP_LLM_CHECK_WITH_INFO(pending_count <= used,
+                                "pending eviction releases exceed used blocks: "
+                                "pool=%s address=%p pending=%zu used=%zu total=%zu ratio=%f",
+                                pool->poolName().c_str(),
+                                static_cast<void*>(pool),
+                                pending_count,
+                                used,
+                                pool->totalBlocksNum(),
+                                ratio);
+        used -= pending_count;
+    }
+    const size_t threshold = static_cast<size_t>(pool->totalBlocksNum() * ratio);
+    return used > threshold ? used - threshold : 0;
+}
+
 size_t BlockTreeEvictor::computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const {
+    RTP_LLM_CHECK_WITH_INFO(ratio > 0.0,
+                            "watermark ratio must be positive: group_set=%zu tier=%s ratio=%f",
+                            group_set.groupSetId(),
+                            tierName(tier),
+                            ratio);
     if (tier == Tier::DEVICE) {
-        return group_set.devicePoolMaxExcess(ratio);
+        size_t excess = 0;
+        for (const DeviceBlockPoolPtr& pool : group_set.devicePools()) {
+            excess = std::max(excess, poolWatermarkExcess(pool.get(), ratio));
+        }
+        return excess;
     }
-    size_t capacity = (tier == Tier::HOST) ? group_set.hostPoolCapacity() : group_set.diskPoolCapacity();
-    if (capacity == 0) {
-        return 0;
+    if (tier == Tier::HOST) {
+        const auto pool = group_set.hostPool();
+        return pool ? poolWatermarkExcess(pool.get(), ratio) : 0;
     }
-    size_t used      = (tier == Tier::HOST) ? group_set.hostPoolUsed() : group_set.diskPoolUsed();
-    size_t threshold = static_cast<size_t>(capacity * ratio);
-    return (used > threshold) ? (used - threshold) : 0;
+    if (tier == Tier::DISK) {
+        const auto pool = group_set.diskPool();
+        return pool ? poolWatermarkExcess(pool.get(), ratio) : 0;
+    }
+    return 0;
 }
 
 }  // namespace rtp_llm

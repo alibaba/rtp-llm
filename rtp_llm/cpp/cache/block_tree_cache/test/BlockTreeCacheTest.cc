@@ -816,7 +816,7 @@ TEST_F(BlockTreeCacheTest, ConcurrentMatchInsertSameAndForkedPrefixes) {
     }
 }
 
-TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesCreditsBeforePendingTaskCompletion) {
+TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTaskCompletion) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -855,24 +855,23 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesCreditsBeforePendingTas
         ASSERT_EQ(source_refs_before.back(), 1u);
     }
 
-    environment->cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
     ASSERT_GT(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
     barrier->waitUntilEntered();
 
-    {
-        std::lock_guard<std::mutex> lock(environment->cache->mutex_);
-        EXPECT_FALSE(environment->cache->in_flight_device_release_credits_.empty());
-        environment->cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
-    }
+    EXPECT_GT(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
+    const int    pending_tasks = BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache);
+    const size_t submit_count  = per_rank_transfer_engine->submitCount();
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), pending_tasks);
+    EXPECT_EQ(per_rank_transfer_engine->submitCount(), submit_count);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);
     barrier->release();
     environment->cache->waitForPendingTasks();
 
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
-    {
-        std::lock_guard<std::mutex> lock(environment->cache->mutex_);
-        EXPECT_TRUE(environment->cache->in_flight_device_release_credits_.empty());
-    }
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     for (size_t pool_id = 0; pool_id < environment->device_pools.size(); ++pool_id) {
         EXPECT_EQ(environment->device_pools[pool_id]->freeBlocksNum(), source_free_before[pool_id]);
@@ -880,6 +879,32 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesCreditsBeforePendingTas
     }
 
     EXPECT_NO_THROW(environment->cache.reset());
+}
+
+TEST(BlockTreeCacheFinalizationTest, EvictionQueueRejectionSettlesPendingReleasesAndRestoresSource) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length          = 1;
+    options.usable_device_blocks = 4;
+    options.usable_host_blocks   = 4;
+    auto environment             = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.01);
+
+    BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*environment->cache);
+    ASSERT_TRUE(rejection_guard.armed());
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
+
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+    ASSERT_TRUE(rejection_guard.restore());
 }
 
 TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {

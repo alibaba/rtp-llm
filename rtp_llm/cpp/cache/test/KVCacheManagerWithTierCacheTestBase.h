@@ -1266,9 +1266,9 @@ protected:
         ASSERT_EQ(cache->isDiskCacheEnabled(), GetParam() == TierLayout::HOST_DISK);
         ASSERT_NO_FATAL_FAILURE(expectDsv4TierTopology(manager_, cache_config_, GetParam()));
 
-        cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
-        cache->setTierWatermark(Tier::HOST, 0.0, 0);
-        cache->setTierWatermark(Tier::DISK, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
         transfer_engine_ = std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, transfer_engine_);
     }
@@ -1306,9 +1306,9 @@ protected:
                 target_used_before.push_back(target_pool->usedBlocksNum());
             }
             const size_t submits_before = engine->submitCount();
-            cache->setTierWatermark(source_tier, *ratio, 0);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, source_tier, *ratio);
             BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-            cache->setTierWatermark(source_tier, 0.0, 0);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, source_tier, 0.0);
             ASSERT_TRUE(waitForPendingTasksDoneFor(
                 *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
                 << "source=" << tierName(source_tier) << " target=" << tierName(target_tier) << " round=" << round
@@ -1498,9 +1498,9 @@ protected:
         }
         const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
         ASSERT_TRUE(device_ratio.has_value());
-        cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         cache->waitForPendingTasks();
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
@@ -1523,9 +1523,9 @@ protected:
             }
             const auto host_ratio = oneUsedBlockWatermarkRatio(host_pools);
             ASSERT_TRUE(host_ratio.has_value());
-            cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
             BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-            cache->setTierWatermark(Tier::HOST, 0.0, 0);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
             cache->waitForPendingTasks();
         } else if (failure_source == LoadFailureSource::MIXED) {
             ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, /*group_set_id=*/0, Tier::HOST));
@@ -1767,9 +1767,9 @@ protected:
         }
         const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
         ASSERT_TRUE(device_ratio.has_value());
-        cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -1782,9 +1782,9 @@ protected:
             }
             const auto host_ratio = oneUsedBlockWatermarkRatio(host_pools);
             ASSERT_TRUE(host_ratio.has_value());
-            cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
             BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-            cache->setTierWatermark(Tier::HOST, 0.0, 0);
+            BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
             ASSERT_TRUE(waitForPendingTasksDoneFor(
                 *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
                 << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)

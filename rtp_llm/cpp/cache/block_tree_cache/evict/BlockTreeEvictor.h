@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -22,11 +23,6 @@ class BlockTreeCacheMetricsReporter;
 class BlockTreeTaskPool;
 class EvictionTaskRunner;
 
-struct EvictionReleaseCredit {
-    DeviceBlockPoolPtr pool;
-    BlockIdxType       block{NULL_BLOCK_IDX};
-};
-
 // Aggregated candidate counts across all group sets, one number per tier.
 struct CandidateStats {
     size_t device_candidates{0};
@@ -41,7 +37,6 @@ class BlockTreeEvictor {
 public:
     using ExecuteTransferFn = std::function<bool(const TransferDescriptor&)>;
     using IsTierEnabledFn   = std::function<bool(Tier)>;
-    using CreditsFn         = std::function<void(const std::vector<EvictionReleaseCredit>&)>;
     using SettledFn         = std::function<void(bool tree_data_mutated, bool check_watermark)>;
     using RemoteWriteFn     = std::function<void(CacheKeyType cache_key, size_t group_set_id)>;
 
@@ -87,8 +82,6 @@ public:
                      int                            memory_timeout_ms,
                      int                            disk_timeout_ms,
                      IsTierEnabledFn                is_tier_enabled,
-                     CreditsFn                      reserve_credits,
-                     CreditsFn                      settle_credits,
                      SettledFn                      settled,
                      RemoteWriteFn                  remote_write);
     ~BlockTreeEvictor();
@@ -112,9 +105,9 @@ public:
     // Selection, prepare, finish, and rollback mutate tree/group-set/pool/heap state
     // and must run under BlockTreeCache's mutex. Task execution is lock-free.
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier);
-    size_t watermarkExcess(const GroupSet& group_set, Tier tier, double watermark_ratio) const;
+    void                              scheduleWatermarkEvictionsLocked(Tier tier, double watermark_ratio);
     std::optional<EvictionPlan>       buildPlan(TransferDescriptor eviction_desc);
-    bool submitLocked(TransferDescriptor& eviction_desc, std::vector<EvictionReleaseCredit>* release_credits = nullptr);
+    bool                              submitLocked(TransferDescriptor& eviction_desc);
     void complete(const EvictionPlan& plan, const CopyResultSet& results);
     void rollbackPreparedPlan(const EvictionPlan& plan);
     // Discard a detached operation's source without publishing its target.
@@ -132,6 +125,8 @@ public:
     void onTierEntered(TreeNode* node, size_t group_set_id, Tier tier);
 
 private:
+    friend class EvictionTaskRunner;
+
     struct FullPruneClosure {
         std::vector<TransferDescriptor>           dependent_descs;
         std::vector<std::pair<TreeNode*, size_t>> detached_resources;
@@ -169,6 +164,10 @@ private:
     void                finalizeEviction(TreeNode* node);
     void                finalizeFullPrune(const EvictionPlan& plan);
     void                eraseNodeFromAllHeaps(TreeNode* node);
+    void                reservePendingReleases(const EvictionPlan& plan);
+    void                settlePendingReleases(const EvictionPlan& plan);
+    void                updatePendingReleases(const EvictionPlan& plan, bool reserve);
+    size_t              poolWatermarkExcess(IBlockPool* pool, double ratio) const;
     size_t              computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const;
 
     BlockTree*                          tree_;
@@ -176,7 +175,9 @@ private:
     bool                                enable_reverse_eviction_{false};
 
     // Heap ownership: vector index is the declared group_set_id.
-    std::vector<GroupSetTierHeaps> heaps_;
+    std::vector<GroupSetTierHeaps>          heaps_;
+    mutable std::mutex                      pending_release_mutex_;
+    std::unordered_map<IBlockPool*, size_t> pending_release_counts_;
     // Process-local logical clocks (read/written only under the cache mutex).
     uint64_t access_seq_{0};
     uint64_t admission_seq_{0};

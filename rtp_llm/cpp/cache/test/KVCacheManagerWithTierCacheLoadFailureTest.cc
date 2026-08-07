@@ -78,9 +78,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
     }
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(device_ratio.has_value());
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     cache->waitForPendingTasks();
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 

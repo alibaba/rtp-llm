@@ -149,6 +149,9 @@ std::string KVCacheConfig::to_string() const {
         << "device_eviction_policy: " << device_eviction_policy << "\n"
         << "host_eviction_policy: " << host_eviction_policy << "\n"
         << "disk_eviction_policy: " << disk_eviction_policy << "\n"
+        << "device_watermark_ratio: " << device_watermark_ratio << "\n"
+        << "host_watermark_ratio: " << host_watermark_ratio << "\n"
+        << "disk_watermark_ratio: " << disk_watermark_ratio << "\n"
         << "device_cache_min_free_blocks: " << device_cache_min_free_blocks << "\n"
         << "load_cache_retry_times: " << load_cache_retry_times << "\n";
     return oss.str();

@@ -429,7 +429,7 @@ TEST(BlockTreeStorerTest, StoreDerivedEvictionIsDrainedByWaitForPendingTasks) {
                                                 /*device_cache_on=*/false,
                                                 /*host_cache_on=*/true,
                                                 /*disk_cache_on=*/true);
-    env.cache->setTierWatermark(Tier::HOST, 0.01, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*env.cache, Tier::HOST, 0.01);
 
     MultiNodeBlocks request_holder = allocateDeviceBlocksForTest(*env.groups[0], 1, BlockRefType::REQUEST);
     ASSERT_EQ(request_holder.size(), 1u);

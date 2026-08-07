@@ -70,9 +70,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
 
     ASSERT_TRUE(pausable_engine->armPause());
     ScopedTransferRelease demotion_release(pausable_engine);
-    cache->setTierWatermark(Tier::DEVICE, one_block_excess_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, one_block_excess_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     const bool demotion_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
     if (!demotion_entered) {
@@ -310,9 +310,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
 
     ASSERT_TRUE(pausable_engine->armPause());
     ScopedTransferRelease device_demotion_release(pausable_engine);
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     const bool device_demotion_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
     if (!device_demotion_entered) {
@@ -382,9 +382,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
 
     ASSERT_TRUE(pausable_engine->armPause());
     ScopedTransferRelease host_demotion_release(pausable_engine);
-    cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::HOST, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     const bool host_demotion_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
     if (!host_demotion_entered) {
@@ -588,9 +588,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         recording_engine->enqueueResult(/*success=*/false);
     }
     const size_t failed_submit_count = recording_engine->submitCount();
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -642,9 +642,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     manager_->free(FreeInfo{hit_resource, hit_tokens});
 
     recording_engine->clearScriptedResults();
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -678,9 +678,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         for (size_t index = 0; index < cache->groupSets().size() * 4; ++index) {
             recording_engine->enqueueResult(/*success=*/false);
         }
-        cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::HOST, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -766,9 +766,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         }
         manager_->free(FreeInfo{host_hit_resource, host_hit_tokens});
 
-        cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -785,9 +785,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
             EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
         }
-        cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::HOST, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         ASSERT_TRUE(waitForPendingTasksDoneFor(
             *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
             << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -859,16 +859,16 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     ASSERT_TRUE(ratio.has_value());
     ASSERT_TRUE(engine->armPause());
     ScopedTransferRelease release(engine);
-    cache->setTierWatermark(Tier::DEVICE, *ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     const size_t pending_tasks = static_cast<size_t>(BlockTreeCacheTestPeer::pendingTasksForTest(*cache));
     const size_t worker_count  = static_cast<size_t>(cache->config().task_pool_size);
     const size_t expected_entered_count = std::min(pending_tasks, worker_count);
     ASSERT_GT(expected_entered_count, 0u);
     ASSERT_TRUE(engine->waitUntilEnteredCountFor(
         expected_entered_count, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
-    auto       demoting = snapshotPathResources(*cache, seed.cache_keys);
+    auto demoting = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(demoting.has_value());
     ASSERT_EQ(demoting->size(), 1u);
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -911,9 +911,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
             << "the miss request must not reference the DEMOTING source";
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
     }
-    cache->setTierWatermark(Tier::DEVICE, *ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_tasks);
     engine->release();
     cache->waitForPendingTasks();

@@ -721,7 +721,7 @@ TEST(FullPruneTest, WatermarkSelectsAndCommitsEachClosureSequentially) {
     ASSERT_GE(used_blocks, 2u);
     const double watermark_ratio =
         (static_cast<double>(used_blocks - 2) + 0.5) / environment.device_pool->totalBlocksNum();
-    environment.cache->setTierWatermark(Tier::DEVICE, watermark_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment.cache, Tier::DEVICE, watermark_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment.cache);
 
     const auto remaining_path = environment.cache->tree()->findNode({100, 200, 300, 400, 500});
@@ -755,7 +755,7 @@ TEST(FullPruneTest, HostPruneRemovesDeviceDescendant) {
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200, 300}, resources));
 
     const double watermark_ratio = 0.5 / static_cast<double>(host_pool->totalBlocksNum());
-    cache->setTierWatermark(Tier::HOST, watermark_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, watermark_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
 
     EXPECT_EQ(cache->tree()->findNode({100, 200, 300}).size(), 1u);

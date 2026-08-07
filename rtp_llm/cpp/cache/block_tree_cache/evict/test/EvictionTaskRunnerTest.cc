@@ -21,8 +21,6 @@ protected:
                                   0,
                                   0,
                                   [](Tier) { return true; },
-                                  [](const std::vector<EvictionReleaseCredit>&) {},
-                                  [](const std::vector<EvictionReleaseCredit>&) {},
                                   [](bool, bool) {},
                                   [](CacheKeyType, size_t) {});
     }

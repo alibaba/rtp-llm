@@ -213,8 +213,6 @@ public:
             0,
             0,
             [](Tier) { return true; },
-            [](const std::vector<EvictionReleaseCredit>&) {},
-            [](const std::vector<EvictionReleaseCredit>&) {},
             [](bool, bool) {},
             [](CacheKeyType, size_t) {});
     }
@@ -463,6 +461,112 @@ protected:
     std::unique_ptr<BlockTreeEvictor> evictor_;
     size_t                            transfer_calls_{0};
 };
+
+TEST_F(BlockTreeEvictorTest, PendingReleasesFollowAsyncPlanSourcePools) {
+    auto host_pool = makePageableHostPool(2);
+    auto disk_pool = makeTestDiskPool(2, "pending_release_plan_disk");
+    ASSERT_NE(host_pool, nullptr);
+    ASSERT_NE(disk_pool, nullptr);
+    resetGroup(host_pool, disk_pool);
+
+    auto verify_tier = [this](Tier source_tier, Tier target_tier, IBlockPool* pool, BlockIdxType block) {
+        BlockTreeEvictor::EvictionPlan plan;
+        plan.primary_desc.group_set_id  = 0;
+        plan.primary_desc.source_tier   = source_tier;
+        plan.primary_desc.target_tier   = target_tier;
+        plan.primary_desc.source_blocks = {block};
+
+        evictor_->reservePendingReleases(plan);
+        ASSERT_EQ(evictor_->pending_release_counts_.at(pool), 1u);
+        evictor_->settlePendingReleases(plan);
+        EXPECT_EQ(evictor_->pending_release_counts_.at(pool), 0u);
+    };
+
+    verify_tier(Tier::DEVICE, Tier::HOST, device_pool_.get(), 7);
+    verify_tier(Tier::HOST, Tier::DISK, host_pool.get(), 8);
+}
+
+TEST_F(BlockTreeEvictorTest, PendingReleasesCountEveryDeviceMemberBlock) {
+    auto policy   = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto topology = block_transfer_engine_test::makeTestTopology(
+        {block_transfer_engine_test::makeTestGroupBase(policy, {0}, 16),
+         block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
+    group_ =
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool_, device_pool_}, nullptr, nullptr);
+    group_->initialize(0, std::move(topology), {0, 1});
+    groups_  = {group_};
+    tree_    = std::make_unique<BlockTree>(groups_);
+    evictor_ = evictor_runtime_.make(tree_.get(), BlockTreeEvictor::ExecuteTransferFn{}, false);
+    initEvictor(*evictor_);
+
+    BlockTreeEvictor::EvictionPlan plan;
+    plan.primary_desc.group_set_id  = 0;
+    plan.primary_desc.source_tier   = Tier::DEVICE;
+    plan.primary_desc.target_tier   = Tier::HOST;
+    plan.primary_desc.source_blocks = {7, 8};
+
+    evictor_->reservePendingReleases(plan);
+    EXPECT_EQ(evictor_->pending_release_counts_.at(device_pool_.get()), 2u);
+    evictor_->settlePendingReleases(plan);
+    EXPECT_EQ(evictor_->pending_release_counts_.at(device_pool_.get()), 0u);
+}
+
+TEST_F(BlockTreeEvictorTest, SettlePendingReleasesReportsPoolAndBlock) {
+    constexpr BlockIdxType block = 17;
+    BlockTreeEvictor::EvictionPlan plan;
+    plan.primary_desc.group_set_id  = 0;
+    plan.primary_desc.source_tier   = Tier::DEVICE;
+    plan.primary_desc.target_tier   = Tier::HOST;
+    plan.primary_desc.source_blocks = {block};
+
+    try {
+        evictor_->settlePendingReleases(plan);
+        FAIL() << "settling an unreserved pending release should fail";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("pool=" + device_pool_->poolName()), std::string::npos);
+        EXPECT_NE(message.find("block=17"), std::string::npos);
+        EXPECT_NE(message.find("pending=0"), std::string::npos);
+    }
+}
+
+TEST_F(BlockTreeEvictorTest, PoolWatermarkExcessRejectsPendingReleasesAboveUsedBlocks) {
+    ASSERT_EQ(device_pool_->usedBlocksNum(), 0u);
+    {
+        std::lock_guard<std::mutex> lock(evictor_->pending_release_mutex_);
+        evictor_->pending_release_counts_[device_pool_.get()] = 1;
+    }
+
+    std::string error_message;
+    try {
+        (void)evictor_->poolWatermarkExcess(device_pool_.get(), 0.5);
+    } catch (const std::runtime_error& error) {
+        error_message = error.what();
+    }
+    {
+        std::lock_guard<std::mutex> lock(evictor_->pending_release_mutex_);
+        evictor_->pending_release_counts_.clear();
+    }
+
+    ASSERT_FALSE(error_message.empty()) << "pending releases above used blocks should fail";
+    EXPECT_NE(error_message.find("pool=" + device_pool_->poolName()), std::string::npos);
+    EXPECT_NE(error_message.find("pending=1"), std::string::npos);
+    EXPECT_NE(error_message.find("used=0"), std::string::npos);
+}
+
+TEST_F(BlockTreeEvictorTest, ComputeGroupSetExcessRejectsNonPositiveRatio) {
+    for (double ratio : {0.0, -0.1}) {
+        try {
+            (void)evictor_->computeGroupSetExcess(*group_, Tier::DEVICE, ratio);
+            FAIL() << "non-positive watermark ratio should fail: " << ratio;
+        } catch (const std::runtime_error& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("group_set=0"), std::string::npos);
+            EXPECT_NE(message.find("tier=DEVICE"), std::string::npos);
+            EXPECT_NE(message.find("ratio="), std::string::npos);
+        }
+    }
+}
 
 TEST(BlockTreeEvictorCascadeTest, ForwardCascadeAlwaysFollowsGroupPriority) {
     auto               groups = makeCascadeGroups();

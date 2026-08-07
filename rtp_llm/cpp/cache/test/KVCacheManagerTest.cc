@@ -1362,7 +1362,7 @@ TEST_F(KVCacheManagerTest, DSV4AllocationPressureEvictsCachedResources) {
     // Keep this test focused on allocation-pressure eviction. Watermark eviction
     // is covered by BlockTreeCache tests and would otherwise prune while A-B are
     // inserted, before the pool-exhaustion path under test is reached.
-    manager->blockTreeCache()->setTierWatermark(Tier::DEVICE, /*ratio=*/0.0, /*capacity=*/0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*manager->blockTreeCache(), Tier::DEVICE, 0.0);
 
     const int    spb         = static_cast<int>(manager_config.seq_size_per_block);
     const int    seq_len     = 3 * spb;

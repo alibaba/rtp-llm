@@ -38,9 +38,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
     }
 
     const size_t submits_before_full_host = transfer_engine_->submitCount();
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     cache->waitForPendingTasks();
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     EXPECT_EQ(transfer_engine_->submitCount(), submits_before_full_host);
@@ -58,9 +58,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
         EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->usedBlocksNum(), 0u);
     }
 
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     cache->waitForPendingTasks();
     auto host_path = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(host_path.has_value());
@@ -90,9 +90,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
         const auto host_ratio = oneUsedBlockWatermarkRatio(host_pools);
         ASSERT_TRUE(host_ratio.has_value());
         const size_t submits_before_full_disk = transfer_engine_->submitCount();
-        cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::HOST, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         cache->waitForPendingTasks();
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         EXPECT_EQ(transfer_engine_->submitCount(), submits_before_full_disk);
@@ -113,9 +113,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
             EXPECT_EQ(cache->groupSets()[group_set_id]->diskPool()->usedBlocksNum(), 0u);
         }
 
-        cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::HOST, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         cache->waitForPendingTasks();
         auto disk_path = snapshotPathResources(*cache, seed.cache_keys);
         ASSERT_TRUE(disk_path.has_value());
@@ -201,9 +201,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(device_ratio.has_value());
     const size_t submits_before_full_host = transfer_engine_->submitCount();
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -230,9 +230,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     const auto host_ratio = blockExcessWatermarkRatio(host_pools, /*excess_blocks=*/1);
     ASSERT_TRUE(host_ratio.has_value());
     const size_t submits_before_host_delete = transfer_engine_->submitCount();
-    cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::HOST, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -257,9 +257,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     }
 
     const size_t submits_before_retry = transfer_engine_->submitCount();
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -367,9 +367,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     const auto host_ratio = oneUsedBlockWatermarkRatio(host_pools);
     ASSERT_TRUE(host_ratio.has_value());
     const size_t submits_before_full_disk = transfer_engine_->submitCount();
-    cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::HOST, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -394,9 +394,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     const auto disk_ratio = blockExcessWatermarkRatio(disk_pools, /*excess_blocks=*/1);
     ASSERT_TRUE(disk_ratio.has_value());
     const size_t submits_before_disk_delete = transfer_engine_->submitCount();
-    cache->setTierWatermark(Tier::DISK, *disk_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, *disk_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DISK, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)
@@ -421,9 +421,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     }
 
     const size_t submits_before_retry = transfer_engine_->submitCount();
-    cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::HOST, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     ASSERT_TRUE(
         waitForPendingTasksDoneFor(*cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)))
         << "pending=" << BlockTreeCacheTestPeer::pendingTasksForTest(*cache)

@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -37,12 +36,6 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
         config_.memory_cache_sync_timeout_ms,
         config_.memory_cache_disk_sync_timeout_ms,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
-        [this](const std::vector<EvictionReleaseCredit>& credits) {
-            reserveInFlightDeviceReleaseCreditsLocked(credits);
-        },
-        [this](const std::vector<EvictionReleaseCredit>& credits) {
-            settleInFlightDeviceReleaseCreditsLocked(credits);
-        },
         [this](bool tree_data_mutated, bool check_watermark) {
             onWorkflowSettledLocked(tree_data_mutated, check_watermark);
         },
@@ -116,13 +109,6 @@ BlockTreeCache::~BlockTreeCache() {
         storer_.stopAdmissionLocked();
     }
     task_pool_->waitForIdle();
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        RTP_LLM_CHECK_WITH_INFO(
-            in_flight_device_release_credits_.empty(),
-            "BlockTreeCache: in-flight DEVICE release credits remain after pending tasks drained: %zu",
-            in_flight_device_release_credits_.size());
-    }
     task_pool_->shutdown();
     RTP_LLM_LOG_INFO("destroyed");
 }
@@ -334,29 +320,6 @@ bool BlockTreeCache::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
     return loader_.cancelLoadLocked(context);
 }
 
-void BlockTreeCache::reserveInFlightDeviceReleaseCreditsLocked(
-    const std::vector<EvictionReleaseCredit>& release_credits) {
-    for (const EvictionReleaseCredit& credit : release_credits) {
-        if (credit.pool != nullptr) {
-            ++in_flight_device_release_credits_[credit.pool];
-        }
-    }
-}
-
-void BlockTreeCache::settleInFlightDeviceReleaseCreditsLocked(
-    const std::vector<EvictionReleaseCredit>& release_credits) noexcept {
-    for (const EvictionReleaseCredit& credit : release_credits) {
-        const auto it = in_flight_device_release_credits_.find(credit.pool);
-        RTP_LLM_CHECK_WITH_INFO(it != in_flight_device_release_credits_.end() && it->second > 0,
-                                "missing in-flight DEVICE release credit while settling pool=%p block=%d",
-                                static_cast<void*>(credit.pool.get()),
-                                credit.block);
-        if (--it->second == 0) {
-            in_flight_device_release_credits_.erase(it);
-        }
-    }
-}
-
 void BlockTreeCache::onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark) {
     if (tree_data_mutated) {
         ++mutation_version_;
@@ -367,120 +330,12 @@ void BlockTreeCache::onWorkflowSettledLocked(bool tree_data_mutated, bool check_
 }
 
 void BlockTreeCache::checkWatermark() {
-    if (config_.enable_device_cache && config_.device_min_free_blocks > 0) {
-        struct PoolDeficit {
-            DeviceBlockPoolPtr pool;
-            size_t             deficit{0};
-            size_t             accepted_credits{0};
-        };
-        std::vector<PoolDeficit>                     pool_deficits;
-        std::unordered_map<DeviceBlockPool*, size_t> pool_indices;
-        for (const auto& group_set : tree_->groupSets()) {
-            for (const auto& pool : group_set->devicePools()) {
-                if (pool_indices.count(pool.get()) != 0) {
-                    continue;
-                }
-                const size_t capacity     = pool->totalBlocksNum();
-                const size_t min_free     = std::min(config_.device_min_free_blocks, capacity);
-                const size_t free_blocks  = pool->freeBlocksNum();
-                const size_t deficit      = free_blocks < min_free ? min_free - free_blocks : 0;
-                const auto   in_flight_it = in_flight_device_release_credits_.find(pool);
-                const size_t in_flight_credits =
-                    in_flight_it == in_flight_device_release_credits_.end() ? 0 : in_flight_it->second;
-                pool_indices.emplace(pool.get(), pool_deficits.size());
-                pool_deficits.push_back({pool, deficit, in_flight_credits});
-            }
-        }
-
-        auto has_uncovered_deficit = [&]() {
-            return std::any_of(pool_deficits.begin(), pool_deficits.end(), [](const PoolDeficit& state) {
-                return state.accepted_credits < state.deficit;
-            });
-        };
-        auto group_set_has_uncovered_deficit = [&](const GroupSetPtr& group_set) {
-            for (const auto& pool : group_set->devicePools()) {
-                const auto it = pool_indices.find(pool.get());
-                if (it != pool_indices.end()) {
-                    const auto& state = pool_deficits[it->second];
-                    if (state.accepted_credits < state.deficit) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        };
-
-        std::vector<bool> unavailable(tree_->groupSets().size(), false);
-        while (has_uncovered_deficit()) {
-            bool round_progress = false;
-            for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
-                const auto& group_set = tree_->groupSets()[group_set_id];
-                if (unavailable[group_set_id] || !group_set_has_uncovered_deficit(group_set)) {
-                    continue;
-                }
-                auto eviction_desc = evictor_.chooseVictim(group_set_id, Tier::DEVICE);
-                if (!eviction_desc.has_value()) {
-                    unavailable[group_set_id] = true;
-                    continue;
-                }
-                std::vector<EvictionReleaseCredit> release_credits;
-                if (!evictor_.submitLocked(*eviction_desc, &release_credits)) {
-                    unavailable[group_set_id] = true;
-                    continue;
-                }
-                bool credited_uncovered_pool = false;
-                for (const EvictionReleaseCredit& credit : release_credits) {
-                    const auto it = pool_indices.find(credit.pool.get());
-                    if (it == pool_indices.end()) {
-                        continue;
-                    }
-                    auto& state = pool_deficits[it->second];
-                    if (state.accepted_credits < state.deficit) {
-                        ++state.accepted_credits;
-                        credited_uncovered_pool = true;
-                    }
-                }
-                if (credited_uncovered_pool) {
-                    round_progress = true;
-                } else {
-                    unavailable[group_set_id] = true;
-                }
-            }
-            if (!round_progress) {
-                break;
-            }
-        }
-    }
-
-    for (auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
-        if (tier == Tier::DEVICE && config_.device_min_free_blocks > 0) {
+    for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        const auto watermark = config_.watermarkForTier(tier);
+        if (!config_.isTierEnabled(tier) || watermark.ratio <= 0.0) {
             continue;
         }
-        auto wm = config_.watermarkForTier(tier);
-        if (wm.ratio <= 0.0 || !config_.isTierEnabled(tier))
-            continue;
-
-        for (auto& group_set : tree_->groupSets()) {
-            size_t excess = evictor_.watermarkExcess(*group_set, tier, wm.ratio);
-            if (excess == 0) {
-                continue;
-            }
-            RTP_LLM_LOG_INFO("tier=%s group_set[%zu] excess=%zu (ratio=%.2f), evicting",
-                             tierName(tier),
-                             group_set->groupSetId(),
-                             excess,
-                             wm.ratio);
-
-            while (excess > 0) {
-                auto eviction_desc = evictor_.chooseVictim(group_set->groupSetId(), tier);
-                if (!eviction_desc.has_value() || !evictor_.submitLocked(*eviction_desc)) {
-                    break;
-                }
-                // Async demotion is counted as one accepted victim; synchronous
-                // FULL prune may reduce the actual excess by an entire closure.
-                excess = std::min(excess - 1, evictor_.watermarkExcess(*group_set, tier, wm.ratio));
-            }
-        }
+        evictor_.scheduleWatermarkEvictionsLocked(tier, watermark.ratio);
     }
 }
 

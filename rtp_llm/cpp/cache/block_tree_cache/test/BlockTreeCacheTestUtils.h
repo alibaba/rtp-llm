@@ -148,6 +148,8 @@ public:
 
     static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
                                                      PerRankBlockTransferEnginePtr per_rank_transfer_engine);
+    static void   setTierWatermarkForTest(BlockTreeCache& cache, Tier tier, double ratio);
+    static size_t pendingEvictionReleasesForTest(const BlockTreeCache& cache);
     static void runMaintenanceForTest(BlockTreeCache& cache);
     static void beginStoreShutdownForTest(BlockTreeCache& cache);
     static bool demoteOneForGroupSetForTest(BlockTreeCache&     cache,

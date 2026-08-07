@@ -30,10 +30,6 @@ namespace {
 
 constexpr size_t kPoolAlignment = 4096;
 
-constexpr double kDefaultDeviceWatermarkRatio = 0.9;
-constexpr double kDefaultHostWatermarkRatio   = 0.9;
-constexpr double kDefaultDiskWatermarkRatio   = 0.9;
-
 std::optional<EvictionPolicy> parseEvictionPolicy(const std::string& value) {
     std::string normalized = value;
     std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
@@ -49,6 +45,10 @@ std::optional<EvictionPolicy> parseEvictionPolicy(const std::string& value) {
         return EvictionPolicy::FIFO;
     }
     return std::nullopt;
+}
+
+bool validWatermarkRatio(double ratio) {
+    return ratio >= 0.0 && ratio <= 1.0;
 }
 
 size_t alignUp(size_t value, size_t alignment) {
@@ -324,6 +324,15 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                           kv_cache_config.disk_eviction_policy.c_str());
         return nullptr;
     }
+    if (!validWatermarkRatio(kv_cache_config.device_watermark_ratio)
+        || !validWatermarkRatio(kv_cache_config.host_watermark_ratio)
+        || !validWatermarkRatio(kv_cache_config.disk_watermark_ratio)) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: watermark ratio must be in [0, 1], device=%f host=%f disk=%f",
+                          kv_cache_config.device_watermark_ratio,
+                          kv_cache_config.host_watermark_ratio,
+                          kv_cache_config.disk_watermark_ratio);
+        return nullptr;
+    }
 
     const int group_count = cache_config.groupNums();
     if (group_count <= 0) {
@@ -468,17 +477,14 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.device_eviction_policy  = *device_eviction_policy;
     config.host_eviction_policy    = *host_eviction_policy;
     config.disk_eviction_policy    = *disk_eviction_policy;
-    config.device_min_free_blocks  = kv_cache_config.device_cache_min_free_blocks > 0 ?
-                                         static_cast<size_t>(kv_cache_config.device_cache_min_free_blocks) :
-                                         0;
     if (config.enable_device_cache) {
-        config.watermark_device = {kDefaultDeviceWatermarkRatio, 0};
+        config.watermark_device.ratio = kv_cache_config.device_watermark_ratio;
     }
     if (host_enabled) {
-        config.watermark_host = {kDefaultHostWatermarkRatio, 0};
+        config.watermark_host.ratio = kv_cache_config.host_watermark_ratio;
     }
     if (disk_enabled) {
-        config.watermark_disk = {kDefaultDiskWatermarkRatio, 0};
+        config.watermark_disk.ratio = kv_cache_config.disk_watermark_ratio;
     }
     config.memory_cache_size_mb          = kv_cache_config.memory_cache_size_mb;
     config.memory_cache_disk_size_mb     = kv_cache_config.memory_cache_disk_size_mb;

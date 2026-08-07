@@ -77,9 +77,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     }
     const auto device_ratio = oneUsedBlockWatermarkRatio(device_pools);
     ASSERT_TRUE(device_ratio.has_value());
-    cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     cache->waitForPendingTasks();
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
@@ -127,9 +127,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     }
     const auto host_ratio = oneUsedBlockWatermarkRatio(host_pools);
     ASSERT_TRUE(host_ratio.has_value());
-    cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::HOST, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
     cache->waitForPendingTasks();
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
@@ -318,9 +318,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     // pass. Re-running the same target ratio catches up only the still-excess
     // FULL pools; pools already at the target submit nothing.
     for (int pass = 0; pass < 2; ++pass) {
-        cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         cache->waitForPendingTasks();
     }
     auto staged = snapshotPathResources(*cache, seed.cache_keys);
@@ -383,9 +383,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
 
     const auto return_path_one_ratio = blockExcessWatermarkRatio(device_pools, /*excess_blocks=*/1);
     ASSERT_TRUE(return_path_one_ratio.has_value());
-    cache->setTierWatermark(Tier::DEVICE, *return_path_one_ratio, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *return_path_one_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-    cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+    BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
     cache->waitForPendingTasks();
 
     staged = snapshotPathResources(*cache, seed.cache_keys);
@@ -580,9 +580,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     size_t remaining_device = countTreeResourcesAtTier(*cache, Tier::DEVICE);
     ASSERT_EQ(remaining_device, static_cast<size_t>(logical_blocks) * cache->groupSets().size());
     for (int round = 0; round < logical_blocks && remaining_device > 0; ++round) {
-        cache->setTierWatermark(Tier::DEVICE, *device_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         cache->waitForPendingTasks();
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         const size_t next = countTreeResourcesAtTier(*cache, Tier::DEVICE);
@@ -605,9 +605,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     ASSERT_TRUE(host_ratio.has_value());
     size_t remaining_host = countTreeResourcesAtTier(*cache, Tier::HOST);
     for (int round = 0; round < logical_blocks && remaining_host > 0; ++round) {
-        cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        cache->setTierWatermark(Tier::HOST, 0.0, 0);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
         cache->waitForPendingTasks();
         EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
         const size_t next = countTreeResourcesAtTier(*cache, Tier::HOST);
