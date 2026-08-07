@@ -68,9 +68,10 @@ void BlockTree::releaseNode(TreeNode* node) {
 }
 
 TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
-    auto node       = std::make_unique<TreeNode>();
-    node->cache_key = key;
-    node->parent    = parent;
+    auto node        = std::make_unique<TreeNode>();
+    node->cache_key  = key;
+    node->parent     = parent;
+    node->index      = node_pool_.size();
     node->group_set_resources.resize(group_sets_.size());
     auto* raw = node.get();
     node_pool_.push_back(std::move(node));
@@ -255,38 +256,30 @@ bool BlockTree::isRemovable(TreeNode* node) const {
                           [](const GroupSetResource& resource) { return resource.is_removable(); });
 }
 
-TreeNode* BlockTree::detachNode(TreeNode* node) {
-    TreeNode* parent = node->parent;
+void BlockTree::removeNode(TreeNode* node) {
     RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
 
-    parent->children.erase(node->cache_key);
-    node->parent = nullptr;
-    return parent;
-}
-
-void BlockTree::eraseDetachedNodes(const std::unordered_set<TreeNode*>& detached_nodes) {
-    if (detached_nodes.empty()) {
-        return;
+    node->parent->children.erase(node->cache_key);
+    const size_t index      = node->index;
+    const size_t last_index = node_pool_.size() - 1;
+    if (index != last_index) {
+        std::swap(node_pool_[index], node_pool_[last_index]);
+        node_pool_[index]->index = index;
     }
-    node_pool_.erase(std::remove_if(node_pool_.begin(),
-                                    node_pool_.end(),
-                                    [&detached_nodes](const std::unique_ptr<TreeNode>& node) {
-                                        return detached_nodes.count(node.get()) != 0;
-                                    }),
-                     node_pool_.end());
+    node_pool_.pop_back();
 }
 
 TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
-    TreeNode*                     current = node;
-    std::unordered_set<TreeNode*> detached_nodes;
+    TreeNode* current       = node;
+    size_t    removed_count = 0;
     while (isRemovable(current)) {
-        TreeNode* detached = current;
-        current            = detachNode(current);
-        detached_nodes.insert(detached);
+        TreeNode* parent = current->parent;
+        removeNode(current);
+        current = parent;
+        ++removed_count;
     }
-    if (!detached_nodes.empty()) {
-        eraseDetachedNodes(detached_nodes);
-        RTP_LLM_LOG_DEBUG("removed %zu nodes", detached_nodes.size());
+    if (removed_count != 0) {
+        RTP_LLM_LOG_DEBUG("removed %zu nodes", removed_count);
     }
     return current;
 }

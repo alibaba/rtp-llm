@@ -58,7 +58,7 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType& cache_key
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
-                      tree_->nodes().size());
+                      tree_->size());
     return result;
 }
 

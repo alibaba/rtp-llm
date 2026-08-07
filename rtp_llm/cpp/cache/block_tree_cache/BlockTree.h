@@ -1,8 +1,8 @@
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -53,8 +53,8 @@ public:
     size_t                       reusableGroupCount() const {
         return reusable_group_locations_.size();
     }
-    const std::vector<std::unique_ptr<TreeNode>>& nodes() const {
-        return node_pool_;
+    size_t size() const {
+        return node_pool_.size();
     }
 
 private:
@@ -64,15 +64,14 @@ private:
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool enable_hard_stop);
 
-    TreeNode* detachNode(TreeNode* node);
-    void      eraseDetachedNodes(const std::unordered_set<TreeNode*>& detached_nodes);
+    void      removeNode(TreeNode* node);
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
     void      releaseNode(TreeNode* node);
 
-    std::vector<GroupSetPtr>               group_sets_;
-    ReusableGroupLocations                 reusable_group_locations_;
-    std::unique_ptr<TreeNode>              root_;
-    std::vector<std::unique_ptr<TreeNode>> node_pool_;
+    std::vector<GroupSetPtr>              group_sets_;
+    ReusableGroupLocations                reusable_group_locations_;
+    std::unique_ptr<TreeNode>             root_;
+    std::deque<std::unique_ptr<TreeNode>> node_pool_;
 };
 
 }  // namespace rtp_llm

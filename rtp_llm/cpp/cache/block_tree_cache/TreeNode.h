@@ -11,6 +11,7 @@ namespace rtp_llm {
 
 struct TreeNode {
     CacheKeyType                                cache_key{0};
+    size_t                                      index{0};
     std::vector<int>                            token_ids;
     std::unordered_map<CacheKeyType, TreeNode*> children;
     TreeNode*                                   parent{nullptr};

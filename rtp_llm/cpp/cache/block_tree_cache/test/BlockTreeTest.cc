@@ -106,7 +106,7 @@ TEST(BlockTreeTest, InsertSinglePath) {
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
     EXPECT_EQ(leaf->group_set_resources[0].device_blocks[0], 44);  // start_block + 2
-    EXPECT_EQ(tree.nodes().size(), 3u);                            // 3 nodes created (not counting root)
+    EXPECT_EQ(tree.size(), 3u);  // 3 nodes created (not counting root)
 
     // Verify tree structure and per-node resources
     auto* root = tree.root();
@@ -132,7 +132,7 @@ TEST(BlockTreeTest, InsertForkPath) {
     // Insert root → 100 → 500 (fork at 100)
     tree.insertNode({100, 500}, make2DResources(1, 2, 20));
 
-    EXPECT_EQ(tree.nodes().size(), 5u);  // 100, 200, 300, 400, 500
+    EXPECT_EQ(tree.size(), 5u);  // 100, 200, 300, 400, 500
 
     auto* root = tree.root();
     auto* n100 = root->children.at(100);
@@ -203,13 +203,13 @@ TEST(BlockTreeTest, RemoveLeafNode) {
     auto      resources = make2DResources(1, 3, 42);
     resources.back()[0].device_blocks.clear();
     tree.insertNode({100, 200, 300}, resources);
-    EXPECT_EQ(tree.nodes().size(), 3u);
+    EXPECT_EQ(tree.size(), 3u);
 
     auto result = tree.findNode({100, 200, 300});
     ASSERT_FALSE(result.empty());
     TreeNode* surviving_ancestor = tree.removeNodeAndEmptyAncestors(result.back());
     EXPECT_EQ(surviving_ancestor->cache_key, 200);
-    EXPECT_EQ(tree.nodes().size(), 2u);
+    EXPECT_EQ(tree.size(), 2u);
 
     auto result2 = tree.findNode({100, 200, 300});
     EXPECT_EQ(result2.size(), 2u);
@@ -232,11 +232,30 @@ TEST(BlockTreeTest, IsRemovableRequiresLeafWithRemovableGroupResources) {
 TEST(BlockTreeTest, RemoveNodeAndEmptyAncestors) {
     BlockTree tree(makeGroupSets(1));
     TreeNode* leaf = insertAndGetNode(tree, {100, 200, 300}, makeEmpty2DResources(3));
-    EXPECT_EQ(tree.nodes().size(), 3u);
+    EXPECT_EQ(tree.size(), 3u);
 
     TreeNode* surviving_ancestor = tree.removeNodeAndEmptyAncestors(leaf);
     EXPECT_EQ(surviving_ancestor, tree.root());
-    EXPECT_EQ(tree.nodes().size(), 0u);
+    EXPECT_EQ(tree.size(), 0u);
+}
+
+TEST(BlockTreeTest, RemovingNonTailNodeUpdatesMovedNodeIndex) {
+    BlockTree tree(makeGroupSets(1));
+    TreeNode* node200 = insertAndGetNode(tree, {100, 200}, makeEmpty2DResources(2));
+    TreeNode* node300 = insertAndGetNode(tree, {100, 300}, makeEmpty2DResources(2));
+    TreeNode* node100 = node200->parent;
+
+    ASSERT_NE(node100, nullptr);
+    ASSERT_EQ(node100, node300->parent);
+    EXPECT_EQ(node100->index, 0u);
+    EXPECT_EQ(node200->index, 1u);
+    EXPECT_EQ(node300->index, 2u);
+
+    EXPECT_EQ(tree.removeNodeAndEmptyAncestors(node200), node100);
+
+    EXPECT_EQ(tree.size(), 2u);
+    EXPECT_EQ(node300->index, 1u);
+    EXPECT_EQ(node100->children.at(300), node300);
 }
 
 TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtData) {
@@ -251,7 +270,7 @@ TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtData) {
     auto result = tree.findNode({100});
     ASSERT_FALSE(result.empty());
     EXPECT_EQ(surviving_ancestor, result.back());
-    EXPECT_EQ(tree.nodes().size(), 1u);
+    EXPECT_EQ(tree.size(), 1u);
     auto check = tree.findNode({100});
     EXPECT_EQ(check.size(), 1u);
 }
@@ -268,17 +287,17 @@ TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsReturnsFirstSurvivorAfterPruning)
     ASSERT_FALSE(node100.empty());
     EXPECT_EQ(surviving_ancestor, node100.back());
     EXPECT_EQ(surviving_ancestor->cache_key, 100);
-    EXPECT_EQ(tree.nodes().size(), 1u);
+    EXPECT_EQ(tree.size(), 1u);
 }
 
 TEST(BlockTreeTest, RepeatedInsertDoesNotDuplicate) {
     BlockTree tree(makeGroupSets(1));
     tree.insertNode({100, 200}, make2DResources(1, 2, 1));
-    EXPECT_EQ(tree.nodes().size(), 2u);
+    EXPECT_EQ(tree.size(), 2u);
 
     // Insert same path again — should reuse existing nodes
     tree.insertNode({100, 200}, make2DResources(1, 2, 50));
-    EXPECT_EQ(tree.nodes().size(), 2u);
+    EXPECT_EQ(tree.size(), 2u);
 
     // After Bug 3 fix: existing nodes are NOT overwritten.
     // Only newly created nodes get group_set_resources assigned.
@@ -293,7 +312,7 @@ TEST(BlockTreeTest, InsertEmptyKeys) {
     EXPECT_TRUE(result.inserted_nodes.empty());
     EXPECT_TRUE(result.adopted_nodes.empty());
     EXPECT_EQ(result.accepted_resource_count, 0u);
-    EXPECT_EQ(tree.nodes().size(), 0u);
+    EXPECT_EQ(tree.size(), 0u);
 }
 
 TEST(BlockTreeTest, MultipleGroupSets) {
@@ -537,7 +556,7 @@ TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtBusyEmptyNode) {
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
 
     EXPECT_EQ(tree.removeNodeAndEmptyAncestors(node), node);
-    EXPECT_EQ(tree.nodes().size(), 1u);
+    EXPECT_EQ(tree.size(), 1u);
     EXPECT_EQ(node->parent, tree.root());
 }
 

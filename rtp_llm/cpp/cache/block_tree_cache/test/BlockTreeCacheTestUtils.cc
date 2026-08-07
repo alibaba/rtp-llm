@@ -426,7 +426,7 @@ void BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(
         ADD_FAILURE() << "test PerRankBlockTransferEngine must not be null";
         return;
     }
-    if (cache.task_pool_->pending_tasks_.load() != 0 || cache.tree_->nodes().size() != 0) {
+    if (cache.task_pool_->pending_tasks_.load() != 0 || cache.tree_->size() != 0) {
         ADD_FAILURE() << "test PerRankBlockTransferEngine must be installed before any cache work starts";
         return;
     }

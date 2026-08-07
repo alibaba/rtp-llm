@@ -450,12 +450,12 @@ TEST_F(BlockTreeCacheTest, InsertFailsFastForNonIdleOrMultiTierResource) {
     resources[0][0].device_blocks  = {10};
     resources[0][0].transfer_state = GroupSetTransferState::DEMOTING;
     EXPECT_THROW(cache_->insert({100}, resources, Tier::DEVICE), std::runtime_error);
-    EXPECT_EQ(cache_->tree()->nodes().size(), 0u);
+    EXPECT_EQ(cache_->tree()->size(), 0u);
 
     resources[0][0].transfer_state = GroupSetTransferState::IDLE;
     resources[0][0].host_block     = 7;
     EXPECT_THROW(cache_->insert({100}, resources, Tier::DEVICE), std::runtime_error);
-    EXPECT_EQ(cache_->tree()->nodes().size(), 0u);
+    EXPECT_EQ(cache_->tree()->size(), 0u);
 }
 
 TEST_F(BlockTreeCacheTest, DuplicateInsertDoesNotCreateNodes) {
@@ -1038,7 +1038,7 @@ TEST_F(BlockTreeCacheTest, DuplicateInsert_FillsExistingEmptyGroupAndAddsOneCach
     std::vector<std::vector<GroupSetResource>> empty_resources(1, std::vector<GroupSetResource>(1));
     empty_resources[0][0].device_blocks = {NULL_BLOCK_IDX};
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, empty_resources));
-    TreeNode* existing_node = cache->tree()->nodes().front().get();
+    TreeNode* existing_node = cache->tree()->root()->children.at(100);
     ASSERT_NE(existing_node, nullptr);
 
     MultiNodeBlocks request_blocks = allocateDeviceBlocksForTest(*full, 1, BlockRefType::REQUEST);
@@ -1088,7 +1088,7 @@ TEST_F(BlockTreeCacheTest, InsertFailsFastForPartialMultiPoolGroupWithoutAddingC
     std::vector<std::vector<GroupSetResource>> partial_resources(1, std::vector<GroupSetResource>(1));
     partial_resources[0][0].device_blocks = {block0, NULL_BLOCK_IDX};
     EXPECT_THROW(cache->insert({100}, partial_resources, Tier::DEVICE), std::runtime_error);
-    EXPECT_EQ(cache->tree()->nodes().size(), 0u);
+    EXPECT_EQ(cache->tree()->size(), 0u);
     EXPECT_EQ(pool0->refCount(block0), 1u);
     EXPECT_EQ(pool1->refCount(block1), 1u);
 

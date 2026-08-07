@@ -453,9 +453,23 @@ inline void expectPoolSnapshotsEq(const std::vector<PoolSnapshot>& expected, con
     }
 }
 
+inline std::vector<const TreeNode*> collectTreeNodes(const BlockTreeCache& cache) {
+    std::vector<const TreeNode*> nodes;
+    nodes.reserve(cache.tree()->size());
+    for (const auto& [_, child] : cache.tree()->root()->children) {
+        nodes.push_back(child);
+    }
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        for (const auto& [_, child] : nodes[i]->children) {
+            nodes.push_back(child);
+        }
+    }
+    return nodes;
+}
+
 inline size_t countTreeResourcesAtTier(const BlockTreeCache& cache, Tier tier) {
     size_t count = 0;
-    for (const auto& node : cache.tree()->nodes()) {
+    for (const TreeNode* node : collectTreeNodes(cache)) {
         for (size_t group_set_id = 0; group_set_id < node->group_set_resources.size(); ++group_set_id) {
             const auto& resource = node->group_set_resources[group_set_id];
             if (!resource.is_empty() && resource.getTopTier() == tier) {
@@ -500,7 +514,7 @@ inline BlockIdxType lowerBlockForTier(const GroupSetResource& resource, Tier tie
 }
 
 inline void expectAllTreeResourcesIdleAtDevice(const BlockTreeCache& cache) {
-    for (const auto& node : cache.tree()->nodes()) {
+    for (const TreeNode* node : collectTreeNodes(cache)) {
         ASSERT_EQ(node->group_set_resources.size(), cache.groupSets().size());
         for (size_t group_set_id = 0; group_set_id < node->group_set_resources.size(); ++group_set_id) {
             const auto& resource = node->group_set_resources[group_set_id];

@@ -181,7 +181,7 @@ BlockIndicesType BlockTreeCache::matchedBlocksForGroup(size_t                   
 CacheStats BlockTreeCache::getStats() const {
     std::lock_guard<std::mutex> lock(mutex_);
     CacheStats                  stats;
-    stats.tree_node_count           = tree_->nodes().size();
+    stats.tree_node_count           = tree_->size();
     const CandidateStats candidates = evictor_.candidateStats();
     stats.device_heap_total_size    = candidates.device_candidates;
     stats.host_heap_total_size      = candidates.host_candidates;
@@ -212,7 +212,7 @@ BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
     }
 
     std::vector<const TreeNode*> pending;
-    pending.reserve(tree_->nodes().size());
+    pending.reserve(tree_->size());
     for (const auto& [cache_key, child] : tree_->root()->children) {
         (void)cache_key;
         if (child) {

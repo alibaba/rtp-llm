@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <string>
-#include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
@@ -881,19 +880,16 @@ void BlockTreeEvictor::eraseNodeFromAllHeaps(TreeNode* node) {
 
 void BlockTreeEvictor::finalizeFullPrune(const EvictionPlan& plan) {
     TreeNode* const boundary_node = plan.primary_desc.node->parent;
-    std::unordered_set<TreeNode*> detached_nodes;
 
     for (TreeNode* node : plan.full_prune_nodes_bottom_up) {
         if (tree_->isRemovable(node)) {
             eraseNodeFromAllHeaps(node);
-            tree_->detachNode(node);
-            detached_nodes.insert(node);
+            tree_->removeNode(node);
         } else {
             onTopologyChanged(node);
         }
     }
 
-    tree_->eraseDetachedNodes(detached_nodes);
     TreeNode* survivor = tree_->removeNodeAndEmptyAncestors(boundary_node);
     if (survivor != tree_->root()) {
         onTopologyChanged(survivor);
