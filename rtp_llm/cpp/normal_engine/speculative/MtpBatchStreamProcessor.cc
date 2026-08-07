@@ -162,26 +162,32 @@ std::pair<torch::Tensor, torch::Tensor> dsparkRoundHeadState(const StreamGroups&
                                                              TensorHolder&         host_holder) {
     const int64_t              batch_size = static_cast<int64_t>(stream_groups.size());
     std::vector<torch::Tensor> anchors;
-    std::vector<torch::Tensor> next_seq_lengths;
+    std::vector<torch::Tensor> committed_end_parts;
     anchors.reserve(batch_size);
-    next_seq_lengths.reserve(batch_size);
-    bool have_all_next_seq_lengths = true;
+    committed_end_parts.reserve(batch_size);
+    // Both arms are per-stream, mirroring the anchors: a fresh stream
+    // (proposal-less PD handoff, no device state yet) has no bookkeeping
+    // worker in flight, so its host sequence length is safe; steady streams
+    // must use the device value, which under stream-async can be ahead of
+    // the host copy. A batch-wide host fallback would shift the steady
+    // streams' geometry backwards whenever one fresh stream joins the batch.
+    torch::Tensor host_seq_lens;
+    int64_t       idx = 0;
     for (const auto& stream : stream_groups.allStreams()) {
         anchors.push_back(toCudaInt32(dsparkNewestToken(stream), host_holder).reshape({1}));
         const auto& next_seq_len = stream->getNextSeqLenGpu();
         if (next_seq_len.defined() && next_seq_len.is_cuda()) {
-            next_seq_lengths.push_back(next_seq_len.reshape({1}));
+            committed_end_parts.push_back((next_seq_len.reshape({1}) - 1).to(torch::kInt32));
         } else {
-            have_all_next_seq_lengths = false;
+            if (!host_seq_lens.defined()) {
+                host_seq_lens = toCudaInt32(model_input.sequence_lengths, host_holder);
+            }
+            committed_end_parts.push_back(host_seq_lens.narrow(0, idx, 1));
         }
+        ++idx;
     }
-    auto          anchors_cat = torch::cat(anchors, 0);
-    torch::Tensor committed_ends;
-    if (have_all_next_seq_lengths && static_cast<int64_t>(next_seq_lengths.size()) == batch_size) {
-        committed_ends = (torch::cat(next_seq_lengths, 0) - 1).to(torch::kInt32);
-    } else {
-        committed_ends = toCudaInt32(model_input.sequence_lengths, host_holder).clone();
-    }
+    auto anchors_cat    = torch::cat(anchors, 0);
+    auto committed_ends = torch::cat(committed_end_parts, 0);
     return {std::move(anchors_cat), std::move(committed_ends)};
 }
 
