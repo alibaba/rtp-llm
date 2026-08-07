@@ -37,8 +37,8 @@ class AnalyzeSloBatchTest(unittest.TestCase):
             (run / "mock_engine.log").write_text(
                 "java_mock_stats enqueue_rpcs=2 enqueued_requests=39 status_rpcs=4 cache_rpcs=4 "
                 "prefill_batches=2 avg_batch_size=19.50 max_batch_size=31 "
-                "avg_batch_ms=500.00 max_batch_ms=520 prefill_pending=3 "
-                "max_prefill_pending=2 decode_running=0\n",
+                "avg_batch_ms=500.00 max_batch_ms=520 prefill_waiting=3 prefill_running=1 "
+                "max_prefill_waiting=2 decode_waiting=0 decode_running=0\n",
                 encoding="utf-8",
             )
             (run / "load_client" / "summary.json").write_text(
@@ -77,7 +77,7 @@ class AnalyzeSloBatchTest(unittest.TestCase):
             self.assertEqual(500, result["config"]["predict_threshold_ms"])
             self.assertEqual(160, result["config"]["fixed_wait_ms"])
             self.assertEqual(31, result["mock"]["last"]["max_batch_size"])
-            self.assertEqual(3, result["mock"]["max_observed_prefill_pending"])
+            self.assertEqual(3, result["mock"]["max_observed_prefill_waiting"])
 
     def test_uses_prometheus_dispatch_counter_as_authoritative_count(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
