@@ -72,7 +72,12 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     // rerank use a different input contract and intentionally do not need it.
     model_.reset(new PyWrappedModel(model_init_params, params.py_model, true));
 
-    init_position_ids(model_config_.max_seq_len);
+    int64_t position_embedding_rows = 0;
+    if (params.gpt_weights.position_encoding && params.gpt_weights.position_encoding->kernel.defined()
+        && params.gpt_weights.position_encoding->kernel.dim() > 0) {
+        position_embedding_rows = params.gpt_weights.position_encoding->kernel.size(0);
+    }
+    init_position_ids(positionEmbeddingRowLimit(model_config_.max_seq_len, position_embedding_rows));
     std::vector<std::string> handler_args;
     {
         py::gil_scoped_acquire acquire;
@@ -128,10 +133,7 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     int* merged_token_type_ids        = model_input.combo_tokens_type_ids.data_ptr<int>();
     int  token_idx                    = 0;
     int  batch_idx                    = 0;
-    int  position_bias                = 0;
-    if (model_config_.position_ids_style == 1) {
-        position_bias = model_config_.special_tokens.pad_token_id + 1;
-    }
+    int  position_bias = positionIdBias(model_config_.position_ids_style, model_config_.special_tokens.pad_token_id);
 
     std::vector<torch::Tensor> gathered_mm_features;
     std::vector<int>           new_locs;
@@ -156,6 +158,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                 new_locs.push_back(mm_locs_data[i] + token_idx);
             }
             const auto text_token_mask = mm_feature.value().text_tokens_mask;
+            if (!text_token_mask.defined() || !text_token_mask.device().is_cpu()
+                || text_token_mask.scalar_type() != torch::kInt32 || text_token_mask.dim() != 1
+                || !text_token_mask.is_contiguous()) {
+                return absl::InvalidArgumentError("stream [" + std::to_string(stream->streamId())
+                                                  + "] text_tokens_mask must be a contiguous CPU int32 1D tensor");
+            }
             RETURN_IF_STATUS_ERROR(validateTextTokensMaskLength(stream->streamId(),
                                                                 text_token_mask.data_ptr<int>(),
                                                                 static_cast<int>(text_token_mask.numel()),
@@ -178,27 +186,22 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         // kernel still reads the token-type table for masked rows before those
         // rows are replaced by projected features, so normalize only masked
         // rows to a safe table index and preserve all text-row validation.
-        normalizeMaskedTokenTypeIds(
-            merged_token_type_ids + token_idx, merged_text_mask.data() + token_idx, length, length);
-        RETURN_IF_STATUS_ERROR(validateEmbeddingIdRanges(stream->streamId(),
-                                                         merged_tokens + token_idx,
-                                                         merged_token_type_ids + token_idx,
-                                                         merged_text_mask.data() + token_idx,
-                                                         length,
-                                                         length,
-                                                         input_vocab_size,
-                                                         type_vocab_size));
+        RETURN_IF_STATUS_ERROR(normalizeAndValidateEmbeddingIds(stream->streamId(),
+                                                                merged_tokens + token_idx,
+                                                                merged_token_type_ids + token_idx,
+                                                                merged_text_mask.data() + token_idx,
+                                                                length,
+                                                                length,
+                                                                input_vocab_size,
+                                                                type_vocab_size));
         memcpy(input_lengths + (int)batch_idx,
                stream->embeddingInput()->input_lengths.data_ptr(),
                stream->batchSize() * sizeof(int32_t));
         int length_idx = 0;
         for (int i = 0; i < batchSize; i++) {
             int seqLen = stream->embeddingInput()->input_lengths.data_ptr<int32_t>()[i];
-            RTP_LLM_CHECK_WITH_INFO(seqLen + position_bias <= (int)max_position_ids_tensor_.size(0),
-                                    "seqlen(%d) + position_bias(%d) exceed max_position_length(%d)",
-                                    int(seqLen),
-                                    int(position_bias),
-                                    (int)max_position_ids_tensor_.size(0));
+            RETURN_IF_STATUS_ERROR(validatePositionIdRange(
+                stream->streamId(), seqLen, position_bias, static_cast<int>(max_position_ids_tensor_.size(0))));
             memcpy(merged_positon_ids + token_idx + length_idx,
                    max_position_ids_tensor_.data_ptr<int32_t>() + position_bias,
                    seqLen * sizeof(int32_t));

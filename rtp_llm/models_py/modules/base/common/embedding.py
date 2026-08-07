@@ -39,11 +39,14 @@ class Embedding(nn.Module):
         token_types: Optional[torch.Tensor] = None,
         text_tokens_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Run generic lookup; a mask may include unused trailing capacity."""
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
         output = torch.empty(
             (tokens, hidden_size), dtype=self.weight.dtype, device=input.device
         )
+        # The generic op currently ignores position_ids and token_types; they
+        # remain compatibility parameters. Bert consumes its IDs in EmbeddingBert.
         rtp_llm_ops.embedding(
             output, input, self.weight.data, position_ids, token_types, text_tokens_mask
         )
@@ -80,7 +83,9 @@ class EmbeddingBert(nn.Module):
         combo_tokens_type_ids: torch.Tensor,
         token_type_embedding: torch.Tensor,
         input_embedding_scalar: float,
+        text_tokens_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Run Bert lookup; a nonempty mask must match the active token count."""
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
         output = torch.empty(
@@ -96,6 +101,7 @@ class EmbeddingBert(nn.Module):
             combo_tokens_type_ids,
             token_type_embedding,
             input_embedding_scalar,
+            text_tokens_mask,
         )
 
         if self.tp_size > 1:
