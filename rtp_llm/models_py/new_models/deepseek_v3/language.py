@@ -97,7 +97,7 @@ class MlaRuntimeLayoutMixin:
         for layer in self.layers:
             indexer = layer.self_attn.indexer
             if indexer is not None:
-                indexer.indexer_op.cos_sin_cache = cos_sin_cache
+                indexer.bind_rope_cache(cos_sin_cache)
         if self._mla_kernel_layout is not None:
             # The runtime layout is a lightweight non-Module view, so refresh
             # all of its tensor references after a post-initialize migration.
@@ -119,7 +119,12 @@ class MlaRuntimeLayoutMixin:
         if not ok:
             return ok
         self._ensure_mla_kernel_layout()
-        if not self._keep_mla_checkpoint_weights:
+        if self._keep_mla_checkpoint_weights:
+            logger.info(
+                "Keeping DeepSeek MLA checkpoint-only weights for debugging; "
+                "GPU memory usage will be higher"
+            )
+        else:
             for layer in self.layers:
                 layer.self_attn.release_checkpoint_only_weights()
         return ok
@@ -804,12 +809,7 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         def _track(it):
             nonlocal has_lm_head
             for name, tensor in it:
-                if (
-                    name == "lm_head.weight"
-                    or name.startswith("lm_head.")
-                    or name == "model.lm_head.weight"
-                    or name.startswith("model.lm_head.")
-                ):
+                if name.startswith(("lm_head.", "model.lm_head.")):
                     has_lm_head = True
                 yield name, tensor
 
@@ -828,9 +828,9 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         model_config: Any,
         load_config: Any,
     ):
-        parallelism_config = getattr(load_config, "parallelism_config", None)
-        fmha_config = getattr(load_config, "fmha_config", None)
-        device_resource_config = getattr(load_config, "device_resource_config", None)
+        parallelism_config = load_config.parallelism_config
+        fmha_config = load_config.fmha_config
+        device_resource_config = load_config.device_resource_config
 
         super().__init__(
             config=model_config,
@@ -861,12 +861,8 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
 
         # --- RoPE cache: read config.json directly for full rope fields ---
-        device = torch.device(getattr(load_config, "device", "cuda"))
-        cos_sin_cache = build_rope_cache(
-            config_json if config_json else cfg,
-            cfg["max_seq_len"],
-            device,
-        )
+        device = torch.device(load_config.device)
+        cos_sin_cache = build_rope_cache(config_json, cfg["max_seq_len"], device)
         self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
 
         # --- Embedding ---

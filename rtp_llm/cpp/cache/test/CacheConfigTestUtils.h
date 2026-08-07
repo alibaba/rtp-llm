@@ -157,7 +157,6 @@ inline CacheConfig makeSimpleMlaCacheConfig(int               layer_num,
     config.kv_scale_stride_bytes = kv_scale_stride_bytes == 0 ? spec->scale_block_size_bytes() : kv_scale_stride_bytes;
     config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
     const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));

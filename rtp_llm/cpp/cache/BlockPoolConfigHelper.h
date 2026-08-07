@@ -67,17 +67,19 @@ public:
                                     "MTP module %zu has no cache group containing layers",
                                     i);
             const auto& mtp_spec = mtp_sub_config->specForGroup(real_mtp_gid);
-            // CacheConfig is the canonical physical-layout source. This is
-            // especially important for sparse MLA, whose indexer cache lives
-            // in the scale pool and is not represented by the logical spec.
-            const auto mtp_scale_stride_bytes = mtp_sub_config->kv_scale_stride_bytes;
-            // MTP block size may differ from the main model. Use the real
-            // MTP group that owns a layer; target-aligned placeholder groups
-            // must not affect the sub-model memory layout.
+            // The selected group owns the physical KV stride, including any
+            // hybrid padding. Sparse MLA is the exception for scale storage:
+            // its indexer cache is not represented by MLAKVCacheSpec (whose
+            // scale size is zero), so SingleConfigCreator records that
+            // physical stride on CacheConfig instead.
+            const auto         mtp_kv_stride_bytes    = mtp_sub_config->kvBlockStrideBytesForGroup(real_mtp_gid);
+            const auto         mtp_scale_stride_bytes = mtp_sub_config->is_sparse ?
+                                                            mtp_sub_config->kv_scale_stride_bytes :
+                                                            mtp_sub_config->kvScaleStrideBytesForGroup(real_mtp_gid);
             MemoryLayoutConfig mtp_layout =
                 createMemoryLayoutConfig(false,
                                          mtp_layer_num,
-                                         mtp_spec->block_size_bytes(),
+                                         mtp_kv_stride_bytes,
                                          mtp_scale_stride_bytes,
                                          mtp_spec,
                                          *mtp_sub_config,

@@ -32,6 +32,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["KEEP_MLA_CHECKPOINT_WEIGHTS"] = "1"
 
         sys.argv = ["prog"]
 
@@ -62,6 +63,7 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
+        self.assertTrue(py_env_configs.load_config.keep_mla_checkpoint_weights)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -87,6 +89,8 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--warm_up",
             "0",
+            "--keep_mla_checkpoint_weights",
+            "True",
             "--cache_store_rdma_io_thread_count",
             "4",
             "--cache_store_rdma_worker_thread_count",
@@ -124,6 +128,7 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
+        self.assertTrue(py_env_configs.load_config.keep_mla_checkpoint_weights)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 

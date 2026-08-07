@@ -41,10 +41,6 @@ def _copy_checked(target: torch.Tensor, source: torch.Tensor, label: str) -> Non
 
 class LinearBase(RtpModule):
 
-    # FP8 per-block (DeepSeek-style) quantization block size, used when
-    # TP-slicing / shard-merging `weight_scale_inv` block grids.
-    _FP8_BLOCK = 128
-
     def __init__(
         self,
         input_size: int,
@@ -140,12 +136,9 @@ class LinearBase(RtpModule):
         if name == "weight":
             self._main_weight_loaded = True
 
-    def _fp8_scale_block_size(self) -> tuple[int, int]:
-        return self.quant_config.fp8_block_size
-
     def fp8_scale_block_size(self) -> tuple[int, int]:
         """Public validated FP8 block layout for derived runtime weights."""
-        return self._fp8_scale_block_size()
+        return self.quant_config.fp8_block_size
 
     @staticmethod
     def _ceil_div(x: int, y: int) -> int:
@@ -232,7 +225,7 @@ class ColumnParallelLinear(LinearBase):
                     tensor = self._split_weight(tensor, dim=0)
             elif param_name == "weight_scale_inv":
                 if self.tp_size > 1:
-                    block_n, _ = self._fp8_scale_block_size()
+                    block_n, _ = self.fp8_scale_block_size()
                     start_row = self.tp_rank * self.output_size_per_partition
                     if (
                         start_row % block_n != 0
@@ -365,7 +358,7 @@ class RowParallelLinear(LinearBase):
                     tensor = self._split_weight(tensor, dim=-1)
             elif param_name == "weight_scale_inv":
                 if self.tp_size > 1:
-                    _, block_k = self._fp8_scale_block_size()
+                    _, block_k = self.fp8_scale_block_size()
                     start_column = self.tp_rank * self.input_size_per_partition
                     if (
                         start_column % block_k != 0
@@ -485,7 +478,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
                 if shard_id < 0:
                     if param_name == "weight_scale_inv" and tensor.shape != param.shape:
-                        block_n, _ = self._fp8_scale_block_size()
+                        block_n, _ = self.fp8_scale_block_size()
                         global_shard_rows = shard_size * self.tp_size
                         if global_shard_rows % block_n or shard_size % block_n:
                             raise ValueError(
@@ -544,7 +537,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     # shard (gate/up) ships its own grid; place this shard's
                     # block-rows at its block offset. shard_size is in weight
                     # rows, so convert through the quant config's N block.
-                    block_n, _ = self._fp8_scale_block_size()
+                    block_n, _ = self.fp8_scale_block_size()
                     start_row = self.tp_rank * shard_size
                     if start_row % block_n != 0 or shard_size % block_n != 0:
                         raise ValueError(
@@ -964,7 +957,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                         )
                         self._record_fused_parameter_loaded(param_name)
                     elif param_name == "weight_scale_inv":
-                        block_n, _ = self._fp8_scale_block_size()
+                        block_n, _ = self.fp8_scale_block_size()
                         q_rows = self.num_heads * self.head_dim
                         kv_rows = self.num_kv_heads * self.head_dim
                         if q_rows % block_n or kv_rows % block_n:
@@ -1064,7 +1057,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             # FP8 per-block grid for this q/k/v shard: TP-slice along the
             # output(head)-block dim, then place at the shard's block offset
             # in the merged [total_blocks, in_blocks] grid.
-            block_n, _ = self._fp8_scale_block_size()
+            block_n, _ = self.fp8_scale_block_size()
             rank = self.tp_rank if qkv_key == "q" else self.kv_head_rank
             self._ensure_parameter_shard_not_loaded(param_name, qkv_key)
             if self.tp_size > 1:

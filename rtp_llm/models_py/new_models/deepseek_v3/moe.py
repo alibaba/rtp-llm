@@ -137,6 +137,8 @@ def _select_deepseek_topk(
         scores = torch.softmax(router_logits_fp32, dim=-1)
     elif scoring_func == ScoringFunc.SIGMOID:
         scores = torch.sigmoid(router_logits_fp32)
+    else:
+        raise ValueError(f"unsupported DeepSeek scoring_func={scoring_func!r}")
 
     candidate_scores = scores
     if group_limited:
@@ -268,6 +270,8 @@ class DeepSeekV32MoEBlock(RtpModule):
 
     Mirrors GenericMoeLayer.forward: routing → FusedMoe → (optional) shared expert.
     """
+
+    _reference_router_warning_emitted = False
 
     def __init__(
         self,
@@ -405,13 +409,15 @@ class DeepSeekV32MoEBlock(RtpModule):
         self._use_fast_group_topk = (
             correction_bias
             and device_type == DeviceType.Cuda
+            and n_group <= 32
+            and top_k <= 32
             and not (top_k == 1 and has_moe_norm)
         )
         self.group_topk = GroupTopK() if self._use_fast_group_topk else None
         if (
             not self._use_fast_select_topk
             and not self._use_fast_group_topk
-            and layer_idx == 0
+            and not type(self)._reference_router_warning_emitted
         ):
             logger.warning(
                 "DeepSeek layer %d uses reference PyTorch MoE routing "
@@ -426,6 +432,7 @@ class DeepSeekV32MoEBlock(RtpModule):
                 routed_scaling_factor,
                 has_moe_norm,
             )
+            type(self)._reference_router_warning_emitted = True
         if fake_balance_expert:
             if parallelism_config is None:
                 raise ValueError(

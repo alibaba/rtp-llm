@@ -28,7 +28,7 @@ def h20_oss_suites():
             smoke_test(
                 name="h20_deepseek_v32_mtp_newloader",
                 task_info="data/model/deepseek_v32_4layers/v32_fp8_q_r_h20.json",
-                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --reserver_runtime_mem_mb 20000 --tp_size 1 --world_size 1 --dp_size 1 --fp8_kv_cache 1 --sp_type mtp --sp_model_type deepseek-v3-mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V3.2-Exp-MTP --sp_act_type BF16 --sp_min_token_match 2 --sp_max_token_match 2",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --reserver_runtime_mem_mb 20000 --tp_size 1 --world_size 1 --dp_size 1 --fp8_kv_cache 1 --sp_type mtp --sp_model_type deepseek-v3-mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V3.2-Exp-MTP --sp_act_type BF16",
                 envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "ACCL_LOW_LATENCY_OPTIMIZE=1"],
                 gpu_type=["H20"],
             ),

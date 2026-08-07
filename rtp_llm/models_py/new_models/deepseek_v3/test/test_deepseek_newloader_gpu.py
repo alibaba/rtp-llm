@@ -6,34 +6,24 @@ not repeat the CPU loader/configuration suite.
 
 import unittest
 
+# Bazel puts the main script's directory on sys.path. Keep this deliberate
+# sibling import: the fully qualified path executes deepseek_v3/__init__.py
+# before the shared test module initializes its imports, which makes the ROCm
+# lane eagerly import CUDA-only flashinfer modules and fail during collection.
 from test_deepseek_newloader import DeepSeekNewloaderTest as _SharedTests
 
 
 class DeepSeekNewloaderGpuTest(unittest.TestCase):
-    test_moe_cuda_noaux_router_matches_reference = (
-        _SharedTests._gpu_moe_cuda_noaux_router_matches_reference
-    )
-    test_moe_cuda_fast_select_topk_matches_reference = (
-        _SharedTests._gpu_moe_cuda_fast_select_topk_matches_reference
-    )
-    test_moe_rocm_noaux_reference_router_matches_expected = (
-        _SharedTests._gpu_moe_rocm_noaux_reference_router_matches_expected
-    )
-    test_mla_online_fp8_uses_models_py_quantizer = (
-        _SharedTests._gpu_mla_online_fp8_uses_models_py_quantizer
-    )
-    test_mla_online_fp8_rocm_keeps_exact_bf16_kv_b_views = (
-        _SharedTests._gpu_mla_online_fp8_rocm_keeps_exact_bf16_kv_b_views
-    )
-    test_mla_online_fused_fp8_projection_matches_bf16_reference = (
-        _SharedTests._gpu_mla_online_fused_fp8_projection_matches_bf16_reference
-    )
-    test_mla_online_fp8_kc_vc_use_bf16_checkpoint_source = (
-        _SharedTests._gpu_mla_online_fp8_kc_vc_use_bf16_checkpoint_source
-    )
-    test_mla_prequantized_fp8_kernel_views_execute_numerically = (
-        _SharedTests._gpu_mla_prequantized_fp8_kernel_views_execute_numerically
-    )
+    pass
+
+
+for _name in dir(_SharedTests):
+    if _name.startswith("_gpu_"):
+        setattr(
+            DeepSeekNewloaderGpuTest,
+            _name.replace("_gpu_", "test_", 1),
+            getattr(_SharedTests, _name),
+        )
 
 
 del _SharedTests

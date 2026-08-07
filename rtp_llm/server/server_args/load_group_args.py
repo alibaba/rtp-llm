@@ -24,9 +24,12 @@ def init_load_group_args(parser, load_config, model_args):
     )
     load_group.add_argument(
         "--keep_mla_checkpoint_weights",
-        env_name="RTP_LLM_KEEP_MLA_CHECKPOINT_WEIGHTS",
+        env_name="KEEP_MLA_CHECKPOINT_WEIGHTS",
         bind_to=(load_config, "keep_mla_checkpoint_weights"),
         type=str2bool,
         default=False,
-        help="保留已转换为运行时布局的 MLA checkpoint 权重，用于调试",
+        help=(
+            "仅对 DeepSeek MLA newloader 生效：保留已转换为运行时布局的 "
+            "checkpoint 权重。会增加显存占用并减少 KV cache 可用块，仅用于调试"
+        ),
     )

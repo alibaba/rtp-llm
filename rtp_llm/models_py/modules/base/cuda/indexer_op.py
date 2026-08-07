@@ -99,16 +99,24 @@ class IndexerOp(nn.Module):
         self.index_head_dim = index_head_dim
         self.index_topk = index_topk
         self.rope_head_dim = rope_head_dim
-        if cos_sin_cache is not None and cos_sin_cache.dtype != torch.float32:
-            raise TypeError(
-                "IndexerOp cos_sin_cache must use torch.float32, got "
-                f"{cos_sin_cache.dtype}"
-            )
-        self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
+        self.register_buffer("cos_sin_cache", None, persistent=False)
+        if cos_sin_cache is not None:
+            self.bind_rope_cache(cos_sin_cache)
         self.blocksize = blocksize
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+
+    def bind_rope_cache(self, cos_sin_cache: torch.Tensor) -> None:
+        """Bind the canonical FP32 RoPE cache tracked by the owning model."""
+        if not isinstance(cos_sin_cache, torch.Tensor):
+            raise TypeError("IndexerOp cos_sin_cache must be a torch.Tensor")
+        if cos_sin_cache.dtype != torch.float32:
+            raise TypeError(
+                "IndexerOp cos_sin_cache must use torch.float32, got "
+                f"{cos_sin_cache.dtype}"
+            )
+        self.cos_sin_cache = cos_sin_cache
 
     def _apply(self, fn, recurse: bool = True):
         source_cos_sin_cache = self.cos_sin_cache

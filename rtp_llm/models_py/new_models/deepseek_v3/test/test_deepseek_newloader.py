@@ -16,6 +16,7 @@ from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.deepseek_v3.attention import (
     DeepSeekV32MlaAttention,
+    _CudaRuntimeFusedFp8Linear,
     _kernel_fp8_weight_and_scale,
     _linear_weight_bf16,
     _prepare_fused_fp8_runtime_weight,
@@ -1184,24 +1185,37 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             dict(indexer.indexer_op.named_buffers())["cos_sin_cache"],
             indexer.indexer_op.cos_sin_cache,
         )
+        rebound_cache = cache + 0.25
+        indexer.bind_rope_cache(rebound_cache)
+        self.assertIs(indexer.indexer_op.cos_sin_cache, rebound_cache)
+        with self.assertRaisesRegex(TypeError, "must use torch.float32"):
+            indexer.bind_rope_cache(rebound_cache.to(torch.bfloat16))
         indexer.indexer_op.to(dtype=torch.bfloat16)
         self.assertEqual(indexer.indexer_op.cos_sin_cache.dtype, torch.float32)
         torch.testing.assert_close(
             indexer.indexer_op.cos_sin_cache,
-            cache,
+            rebound_cache,
             rtol=0,
             atol=0,
         )
 
     def test_model_dtype_migration_preserves_shared_fp32_rope_cache(self):
         cache = torch.linspace(-0.97, 0.91, 16, dtype=torch.float32).reshape(4, 4)
+
         # A plain consumer isolates the top-level alias-restoration contract;
         # the real CUDA IndexerOp's standalone _apply behavior is covered by
         # test_sparse_indexer_rope_cache_is_a_device_tracked_buffer above.
-        indexer_op = torch.nn.Module()
-        indexer_op.register_buffer("cos_sin_cache", cache, persistent=False)
-        indexer = torch.nn.Module()
-        indexer.indexer_op = indexer_op
+        class CacheConsumer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("cos_sin_cache", cache, persistent=False)
+
+            def bind_rope_cache(self, rope_cache):
+                if rope_cache.dtype != torch.float32:
+                    raise TypeError("RoPE cache must remain FP32")
+                self.cos_sin_cache = rope_cache
+
+        indexer = CacheConsumer()
         attention = torch.nn.Module()
         attention.indexer = indexer
         layer = torch.nn.Module()
@@ -1217,7 +1231,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         owner = CacheOwner().to(dtype=torch.bfloat16)
         self.assertEqual(owner.cos_sin_cache.dtype, torch.float32)
         self.assertIs(
-            owner.layers[0].self_attn.indexer.indexer_op.cos_sin_cache,
+            owner.layers[0].self_attn.indexer.cos_sin_cache,
             owner.cos_sin_cache,
         )
         torch.testing.assert_close(owner.cos_sin_cache, cache, rtol=0, atol=0)
@@ -1436,6 +1450,36 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     torch.bfloat16
                 )
                 self.assertTrue(torch.equal(_linear_weight_bf16(linear), expected))
+
+    def test_mla_fused_fp8_runtime_uses_configured_input_group_size(self):
+        runtime = _CudaRuntimeFusedFp8Linear(
+            torch.ones(4, 4),
+            torch.ones(2, 1),
+            (2, 4),
+        )
+        quantized = torch.zeros(1, 4)
+        input_scales = torch.ones(1, 1)
+        quantizer = mock.Mock(return_value=(quantized, input_scales))
+
+        def fake_gemm(_a, _b, output, **_kwargs):
+            output.zero_()
+
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.attention."
+                "_resolve_sgl_per_token_group_quant",
+                return_value=quantizer,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.attention."
+                "_resolve_fp8_gemm_nt",
+                return_value=fake_gemm,
+            ),
+        ):
+            output = runtime(torch.ones(1, 4))
+
+        self.assertEqual(tuple(output.shape), (1, 4))
+        self.assertEqual(quantizer.call_args.kwargs["group_size"], 4)
 
     def test_mla_kernel_fp8_layout_preserves_ue8m0_contract(self):
         weight = torch.arange(24, dtype=torch.float32).reshape(6, 4)
@@ -1787,6 +1831,48 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 topk_group=1,
                 topk_method="noaux_tc",
                 has_moe_norm=True,
+                correction_bias=True,
+            )
+        self.assertFalse(block._use_fast_group_topk)
+        self.assertIsNone(block.group_topk)
+        group_topk.assert_not_called()
+
+    def test_noaux_router_exceeding_warp_capacity_uses_reference_path(self):
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.Cuda,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.GroupTopK"
+            ) as group_topk,
+            torch.device("cpu"),
+        ):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=8,
+                moe_intermediate_size=4,
+                num_experts=64,
+                top_k=2,
+                layer_idx=3,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=_router_model_config(
+                    expert_num=64,
+                    moe_n_group=64,
+                    moe_topk_group=2,
+                ),
+                parallelism_config=_single_rank_parallelism_config(),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=1,
+                routed_scaling_factor=1.0,
+                n_group=64,
+                topk_group=2,
+                topk_method="noaux_tc",
                 correction_bias=True,
             )
         self.assertFalse(block._use_fast_group_topk)

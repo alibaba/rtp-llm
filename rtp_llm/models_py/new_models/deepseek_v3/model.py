@@ -138,6 +138,9 @@ class DeepSeekV32Indexer(RtpModule):
             is_neox_style=is_neox_style,
         )
 
+    def bind_rope_cache(self, cos_sin_cache: torch.Tensor) -> None:
+        self.indexer_op.bind_rope_cache(cos_sin_cache)
+
     def _prefill_cp_enabled(self) -> bool:
         if self.parallelism_config is None:
             return False

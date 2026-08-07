@@ -25,6 +25,16 @@ CacheConfig makeSparseMlaConfig(uint32_t layer_num,
                                     kernel_tokens_per_block);
 }
 
+template<typename Fn>
+void expectRuntimeErrorContains(Fn&& fn, const std::string& expected) {
+    try {
+        fn();
+        FAIL() << "expected std::runtime_error containing: " << expected;
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find(expected), std::string::npos) << error.what();
+    }
+}
+
 TEST(BlockPoolConfigHelperTest, MTPSparseIndexerUsesProposeTopologyAndScaleStride) {
     auto score_config   = makeSparseMlaConfig(/*layer_num=*/2,
                                             /*block_num=*/4,
@@ -119,6 +129,9 @@ TEST(BlockPoolConfigHelperTest, MTPSelectsRealGroupAndAccumulatesMultipleOffsets
                              {{}, {0, 1}},
                              {CacheGroupType::FULL, CacheGroupType::FULL},
                              {"placeholder", "default"});
+    const size_t placeholder_kv_stride = 256;
+    const size_t real_kv_stride        = 192;
+    second->setGroupBlockLayout({4, 4}, {placeholder_kv_stride, real_kv_stride}, {0, 64});
 
     score_config.mtp_sub_configs = {first, second};
     const auto pool_config       = BlockPoolConfigHelper::createConfig(score_config);
@@ -129,35 +142,68 @@ TEST(BlockPoolConfigHelperTest, MTPSelectsRealGroupAndAccumulatesMultipleOffsets
     EXPECT_EQ(first_layout.kv_cache_offset_bytes, 768u);
     EXPECT_EQ(first_layout.kv_scale_offset_bytes, 1024u);
     EXPECT_EQ(second_layout.kv_cache_offset_bytes, 1536u);
-    EXPECT_EQ(second_layout.kv_block_stride_bytes, real_spec->block_size_bytes());
+    EXPECT_GT(placeholder_kv_stride, real_kv_stride);
+    EXPECT_NE(real_kv_stride, real_spec->block_size_bytes());
+    EXPECT_EQ(second_layout.kv_block_stride_bytes, real_kv_stride);
     EXPECT_EQ(second_layout.local_head_num_kv, 1u);
     EXPECT_EQ(second_layout.layer_num, 2u);
     EXPECT_EQ(second_layout.seq_size_per_block, 8u);
     EXPECT_EQ(second_layout.kernel_blocks_per_kv_block, 4u);
-    EXPECT_EQ(second_layout.kv_block_pool_size_bytes, 2u * 4u * 128u);
-    EXPECT_EQ(second_layout.kv_scale_offset_bytes, 2560u);
+    EXPECT_EQ(second_layout.kv_block_pool_size_bytes, 2u * 4u * 192u);
+    EXPECT_EQ(second_layout.kv_scale_offset_bytes, 3072u);
     EXPECT_EQ(second_layout.kv_scale_pool_size_bytes, 2u * 4u * 64u);
-    EXPECT_EQ(pool_config.total_size_bytes, 3072u);
+    EXPECT_EQ(pool_config.total_size_bytes, 3584u);
 }
 
 TEST(BlockPoolConfigHelperTest, RejectsNullMTPSubConfig) {
     auto score_config = makeSparseMlaConfig(2, 4, 4, 4, 32);
     score_config.mtp_sub_configs.push_back(nullptr);
-    EXPECT_THROW(BlockPoolConfigHelper::createConfig(score_config), std::runtime_error);
+    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); }, "is null");
 }
 
 TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutGroups) {
     auto score_config            = makeSparseMlaConfig(2, 4, 4, 4, 32);
     auto empty                   = std::make_shared<CacheConfig>();
     score_config.mtp_sub_configs = {empty};
-    EXPECT_THROW(BlockPoolConfigHelper::createConfig(score_config), std::runtime_error);
+    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
+                               "cache groups must not be empty");
 }
 
 TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithMismatchedBlockNum) {
     auto score_config            = makeSparseMlaConfig(2, 4, 4, 4, 32);
     auto mismatched              = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 3, 4, 2, 128));
     score_config.mtp_sub_configs = {mismatched};
-    EXPECT_THROW(BlockPoolConfigHelper::createConfig(score_config), std::runtime_error);
+    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
+                               "must match main block_num");
+}
+
+TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutLayerOwningGroup) {
+    auto score_config = makeSparseMlaConfig(2, 4, 4, 4, 32);
+    auto no_layers    = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 4, 4, 2, 128));
+    no_layers->setLayerIdsForGroup(0, {});
+    score_config.mtp_sub_configs = {no_layers};
+    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
+                               "no cache group containing layers");
+}
+
+TEST(BlockPoolConfigHelperTest, MTPWithoutScaleKeepsContiguousOffsets) {
+    auto score_config            = makeSparseMlaConfig(2, 4, 4, 4, 32);
+    auto no_scale                = std::make_shared<CacheConfig>(makeSimpleMlaCacheConfig(
+        /*layer_num=*/1,
+        /*block_num=*/4,
+        /*tokens_per_block=*/4,
+        DataType::TYPE_BF16,
+        /*sparse=*/false));
+    score_config.mtp_sub_configs = {no_scale};
+
+    const auto pool_config = BlockPoolConfigHelper::createConfig(score_config);
+    ASSERT_EQ(pool_config.memory_layouts.size(), 2u);
+    const auto& mtp_layout = pool_config.memory_layouts[1];
+    EXPECT_FALSE(mtp_layout.hasScale());
+    EXPECT_EQ(mtp_layout.kv_cache_offset_bytes, 768u);
+    EXPECT_EQ(mtp_layout.kv_block_pool_size_bytes, 1u * 4u * 64u);
+    EXPECT_EQ(mtp_layout.kv_scale_offset_bytes, mtp_layout.kv_cache_offset_bytes + mtp_layout.kv_block_pool_size_bytes);
+    EXPECT_EQ(pool_config.total_size_bytes, 1024u);
 }
 
 }  // namespace

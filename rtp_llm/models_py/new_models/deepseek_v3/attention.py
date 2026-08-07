@@ -41,12 +41,20 @@ from rtp_llm.utils.model_weight import W
 class _CudaRuntimeFusedFp8Linear(nn.Module):
     """CUDA-only fused view over independently loaded FP8 projections."""
 
-    def __init__(self, weight: torch.Tensor, weight_scale: torch.Tensor):
+    def __init__(
+        self,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        block_size: tuple[int, int],
+    ):
         super().__init__()
+        if len(block_size) != 2 or any(size <= 0 for size in block_size):
+            raise ValueError(f"invalid FP8 block size {block_size!r}")
         self.register_buffer("weight", weight.contiguous(), persistent=False)
         self.register_buffer(
             "weight_scale", weight_scale.contiguous(), persistent=False
         )
+        self.block_size = block_size
         self._fp8_logical_output_size = weight.shape[0]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -54,7 +62,7 @@ class _CudaRuntimeFusedFp8Linear(nn.Module):
         scale_ue8m0 = self.weight_scale.dtype == torch.int32
         qinput, input_scales = _resolve_sgl_per_token_group_quant()(
             input_2d,
-            group_size=128,
+            group_size=self.block_size[1],
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
@@ -87,7 +95,7 @@ def _rounded_fp8_values(weight: torch.Tensor) -> torch.Tensor:
 def _dequant_fp8_to_bf16(
     weight: torch.Tensor,
     scale: torch.Tensor,
-    block_size: tuple[int, int] = (128, 128),
+    block_size: tuple[int, int],
 ) -> torch.Tensor:
     """Dequantize per-tensor, per-channel, or per-block FP8 to BF16."""
     n, k = weight.shape
@@ -451,6 +459,7 @@ class DeepSeekV32MlaAttention(RtpModule):
             self._fused_qkv_a_runtime = _CudaRuntimeFusedFp8Linear(
                 fused_a_weight,
                 fused_a_scale,
+                self.q_a_proj.fp8_scale_block_size(),
             )
             self._fused_qkv_a_w = fused_a_weight
         else:
@@ -475,7 +484,9 @@ class DeepSeekV32MlaAttention(RtpModule):
                     fused_a_weight, fused_a_scale
                 )
                 self._fused_qkv_a_runtime = _CudaRuntimeFusedFp8Linear(
-                    fused_a_weight, fused_a_scale
+                    fused_a_weight,
+                    fused_a_scale,
+                    self.q_a_proj.fp8_scale_block_size(),
                 )
                 self._fused_qkv_a_w = fused_a_weight
             else:
@@ -626,6 +637,8 @@ class DeepSeekV32MlaAttention(RtpModule):
             if self._fused_qkv_a_runtime is not None:
                 fused_qkv_a = self._fused_qkv_a_runtime(hidden_states)
             else:
+                if self._fused_qkv_a_w is None:
+                    raise RuntimeError("process_weights_after_loading() must run first")
                 fused_qkv_a = torch.nn.functional.linear(
                     hidden_states, self._fused_qkv_a_w
                 )

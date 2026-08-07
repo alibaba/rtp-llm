@@ -58,6 +58,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: Optional[DeviceResourceConfig],
         force_cpu_load_weights: bool = False,
+        keep_mla_checkpoint_weights: bool = False,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -84,6 +85,7 @@ class BaseModel(object):
         self.merge_lora = merge_lora
         self.device_resource_config = device_resource_config
         self.force_cpu_load_weights = force_cpu_load_weights
+        self.keep_mla_checkpoint_weights = keep_mla_checkpoint_weights
         self.weight = None
         self.weight_manager = None
 
@@ -271,10 +273,8 @@ class BaseModel(object):
             merge_lora=merge_lora,
             device_resource_config=device_resource_config,
             force_cpu_load_weights=force_cpu_load_weights,
+            keep_mla_checkpoint_weights=keep_mla_checkpoint_weights,
         )
-        if not isinstance(keep_mla_checkpoint_weights, bool):
-            raise TypeError("keep_mla_checkpoint_weights must be a bool")
-        model.keep_mla_checkpoint_weights = keep_mla_checkpoint_weights
 
         import os
 
