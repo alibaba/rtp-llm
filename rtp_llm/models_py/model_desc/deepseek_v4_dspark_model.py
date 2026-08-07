@@ -38,7 +38,8 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
-from rtp_llm.models_py.modules.dsv4.cp import build_cp_context
+from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
+from rtp_llm.models_py.modules.dsv4.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
@@ -385,14 +386,14 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 f"DSpark layer {layer_idx} is not SWA-only: "
                 f"compress_ratio={attn.compress_ratio}"
             )
-        previous_cache = attn._kv_cache
-        previous_tables = attn._block_tables_by_type
-        previous_cp_ctx = attn._cp_ctx
-        attn._kv_cache = self.kv_cache
-        attn._block_tables_by_type = {int(SWA_KV): block_table}
-        if attn._cp_ctx is None and self._active_dspark_commit_cp_ctx is not None:
-            attn._cp_ctx = self._active_dspark_commit_cp_ctx
-        try:
+        cp_override = (
+            self._active_dspark_commit_cp_ctx
+            if attn._cp_ctx is None and self._active_dspark_commit_cp_ctx is not None
+            else BIND_KEEP
+        )
+        with bind_attn_cache(
+            attn, self.kv_cache, {int(SWA_KV): block_table}, cp_ctx=cp_override
+        ):
             attn._ensure_freqs_cis_bound()
             entries_per_block = int(attn._swa_entries_per_block())
             pool = attn._pool_view_3d_fp8(SWA_KV)
@@ -401,10 +402,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     f"DSpark layer {layer_idx} has no FP8 SWA paged pool"
                 )
             yield attn, entries_per_block, pool
-        finally:
-            attn._kv_cache = previous_cache
-            attn._block_tables_by_type = previous_tables
-            attn._cp_ctx = previous_cp_ctx
 
     def _commit_layer_features(
         self,
@@ -536,17 +533,15 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 starts, lengths, committed_ends, row_count, inputs
             )
         device = committed_ends.device
-        prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
-        position_offset: Any = 0
-        if prefix is not None and int(prefix.numel()) > 0:
-            position_offset = prefix.to(device=device, dtype=torch.long)
-        cp_ctx = build_cp_context(
+        cp_ctx = build_cp_context_for_forward(
             cp_info,
             self.tp_size,
             self.tp_rank,
             row_count,
             device,
-            position_offset=position_offset,
+            prefix_lengths=optional_tensor(
+                getattr(attention_inputs, "prefix_lengths", None)
+            ),
             kv_cache_sharded=self._dspark_kv_cache_sharded,
         )
         if not getattr(self, "_dspark_cp_commit_logged", False):
@@ -722,35 +717,28 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         tokens_per_block: int,
         graph_metadata: Any,
     ) -> torch.Tensor:
-        batch_size, gamma = query_ids.shape
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
+        # The hyper-connection choreography lives in Block.forward_decode;
+        # only the attention call is substituted with the non-causal
+        # fixed-block variant.
         for layer_idx, layer in enumerate(self.v4.layers):
-            residual = hidden
-            x_pre, post, comb = layer.attn_hc.pre(hidden)
-            x_pre = layer.attn_norm(
-                x_pre.reshape(batch_size * gamma, int(self._v4_args.dim))
-            ).view(batch_size, gamma, int(self._v4_args.dim))
-            attention_output = self._forward_dspark_attention(
-                layer_idx,
-                x_pre,
-                query_positions,
-                prefix_lengths,
-                active_requests,
-                block_table,
-                tokens_per_block,
-                graph_metadata,
+            hidden = layer.forward_decode(
+                hidden,
+                attn_metadata=None,
+                input_ids=query_ids,
+                attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
+                    layer_idx,
+                    x_pre,
+                    query_positions,
+                    prefix_lengths,
+                    active_requests,
+                    block_table,
+                    tokens_per_block,
+                    graph_metadata,
+                ),
             )
-            hidden = layer.attn_hc.post(attention_output, residual, post, comb)
-
-            residual = hidden
-            x_pre, post, comb = layer.ffn_hc.pre(hidden)
-            x_pre = layer.ffn_norm(
-                x_pre.reshape(batch_size * gamma, int(self._v4_args.dim))
-            ).view(batch_size, gamma, int(self._v4_args.dim))
-            ffn_output = layer.ffn(x_pre, query_ids)
-            hidden = layer.ffn_hc.post(ffn_output, residual, post, comb)
 
         return hidden
 

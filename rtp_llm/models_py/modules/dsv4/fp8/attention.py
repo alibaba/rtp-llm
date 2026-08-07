@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import threading
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 # P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
@@ -320,6 +320,32 @@ _DSV4_FP8_KV_ENTRY_BYTES = 584
 
 # Call sites whose first byte-sliced (CP-RR) SWA cache write has been logged.
 _SWA_CP_RR_LOGGED_SITES: set = set()
+
+# Sentinel for bind_attn_cache: leave the corresponding attribute untouched.
+BIND_KEEP = object()
+
+
+@contextmanager
+def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_KEEP):
+    """Temporarily bind a kv-cache / block-table (and optionally a CP context)
+    view onto ``attn``, restoring the previous binding on exit.  ``None`` for
+    the cache/table arguments keeps the current binding; pass ``cp_ctx`` only
+    when it should be replaced."""
+    prev_kv = attn._kv_cache
+    prev_bt = attn._block_tables_by_type
+    prev_cp = attn._cp_ctx
+    if kv_cache is not None:
+        attn._kv_cache = kv_cache
+    if block_tables_by_type is not None:
+        attn._block_tables_by_type = block_tables_by_type
+    if cp_ctx is not BIND_KEEP:
+        attn._cp_ctx = cp_ctx
+    try:
+        yield attn
+    finally:
+        attn._kv_cache = prev_kv
+        attn._block_tables_by_type = prev_bt
+        attn._cp_ctx = prev_cp
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
@@ -2046,21 +2072,12 @@ class AttentionFP8(nn.Module):
         come from ``attn_metadata.pool_block_tables`` — stashed onto
         ``self._block_tables_by_type`` here so Compressor / Indexer pool
         context resolution shares one code path with prefill."""
-        prev_kv = self._kv_cache
-        prev_bt = self._block_tables_by_type
-        if kv_cache is not None:
-            self._kv_cache = kv_cache
-        if attn_metadata.pool_block_tables is not None:
-            self._block_tables_by_type = attn_metadata.pool_block_tables
-        try:
+        with bind_attn_cache(self, kv_cache, attn_metadata.pool_block_tables):
             self._set_compressor_pool_context()
             try:
                 return self._forward_decode_body(x, attn_metadata)
             finally:
                 self._clear_compressor_pool_context()
-        finally:
-            self._kv_cache = prev_kv
-            self._block_tables_by_type = prev_bt
 
     def _forward_decode_body(
         self,

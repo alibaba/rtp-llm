@@ -103,7 +103,7 @@ from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
-    build_cp_context,
+    build_cp_context_for_forward,
     cp_gather_last_by_request,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
@@ -331,20 +331,13 @@ def forward_layers(
     cp_rank = getattr(v4, "_cp_rank", 0)
     cp_ctx = None
     if cp_info is not None and cp_size > 1:
-        T_local = int(input_ids.size(0))
-        prefix_offsets = 0
-        prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
-        if prefix_lengths is not None and prefix_lengths.numel() > 0:
-            prefix_offsets = prefix_lengths.to(
-                device=input_ids.device, dtype=torch.long
-            )
-        cp_ctx = build_cp_context(
+        cp_ctx = build_cp_context_for_forward(
             cp_info,
             cp_size,
             cp_rank,
-            T_local,
+            int(input_ids.size(0)),
             input_ids.device,
-            position_offset=prefix_offsets,
+            prefix_lengths=getattr(attn_inputs, "prefix_lengths", None),
             kv_cache_sharded=bool(getattr(v4, "_kv_cache_sharded", False)),
         )
     v4._propagate_cp_ctx(cp_ctx)

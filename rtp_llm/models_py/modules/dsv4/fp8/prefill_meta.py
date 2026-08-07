@@ -80,13 +80,9 @@ def build_and_propagate_prefill_meta_fp8(
             r = int(attn.compress_ratio)
             if r in meta_by_ratio:
                 continue
-            prev_kv = attn._kv_cache
-            prev_bt = attn._block_tables_by_type
-            if kv_cache is not None:
-                attn._kv_cache = kv_cache
-            if block_tables_by_type is not None:
-                attn._block_tables_by_type = block_tables_by_type
-            try:
+            from rtp_llm.models_py.modules.dsv4.fp8.attention import bind_attn_cache
+
+            with bind_attn_cache(attn, kv_cache, block_tables_by_type):
                 with record_function_range(f"dsv4.fp8.prefill_meta.ratio_{r}"):
                     meta_by_ratio[r] = attn._build_shared_prefill_meta(
                         x_first_layer,
@@ -100,9 +96,6 @@ def build_and_propagate_prefill_meta_fp8(
                         req_id_per_token=req_id_per_token,
                         max_seqlen_q=max_seqlen_q,
                     )._replace(workspace=workspace)
-            finally:
-                attn._kv_cache = prev_kv
-                attn._block_tables_by_type = prev_bt
 
     with record_function_range("dsv4.fp8.prefill_meta.propagate"):
         for layer in v4.layers:

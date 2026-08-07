@@ -136,7 +136,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         )
 
         with patch.object(
-            dspark_model_module, "build_cp_context", return_value=cp_ctx
+            dspark_model_module, "build_cp_context_for_forward", return_value=cp_ctx
         ) as build_mock:
             req, positions = model.map_commit_rows(
                 starts, lengths, committed_ends, row_count=2, inputs=cp_inputs
