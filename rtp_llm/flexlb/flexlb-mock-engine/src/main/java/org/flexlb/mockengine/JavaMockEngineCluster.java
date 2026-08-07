@@ -92,12 +92,24 @@ public final class JavaMockEngineCluster {
         }
 
         scheduler.scheduleAtFixedRate(() -> {
-            int prefillPending = services.values().stream()
+            // Symmetric P/D four-state queue metrics. Units: prefill_waiting /
+            // decode_waiting count queued REQUESTS (not yet running);
+            // prefill_running counts running BATCHES (a batch may hold several
+            // requests); decode_running counts running requests. The old
+            // prefill_pending (pendingRequests = waiting + running mixed) was
+            // misleading and is gone.
+            int prefillWaiting = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                    .mapToInt(service -> service.pendingRequests.get()).sum();
-            int maxPrefillPending = services.values().stream()
+                    .mapToInt(service -> service.waitingPrefillRequests.get()).sum();
+            int maxPrefillWaiting = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                    .mapToInt(service -> service.pendingRequests.get()).max().orElse(0);
+                    .mapToInt(service -> service.waitingPrefillRequests.get()).max().orElse(0);
+            int prefillRunning = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                    .mapToInt(service -> service.activePrefillBatches.get()).sum();
+            int decodeWaiting = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .mapToInt(FastRpcService::decodePendingQueueSize).sum();
             int decodeRunning = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
                     .mapToInt(service -> service.activeDecodeRequests.get()).sum();
@@ -112,14 +124,16 @@ public final class JavaMockEngineCluster {
             System.out.printf(
                     "java_mock_stats enqueue_rpcs=%d enqueued_requests=%d status_rpcs=%d cache_rpcs=%d "
                             + "prefill_batches=%d avg_batch_size=%.2f max_batch_size=%d "
-                            + "avg_batch_ms=%.2f max_batch_ms=%d prefill_pending=%d "
-                            + "max_prefill_pending=%d decode_running=%d heap_used_mb=%d heap_max_mb=%d "
+                            + "avg_batch_ms=%.2f max_batch_ms=%d prefill_waiting=%d prefill_running=%d "
+                            + "max_prefill_waiting=%d decode_waiting=%d decode_running=%d "
+                            + "heap_used_mb=%d heap_max_mb=%d "
                             + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d%n",
                     stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
                     stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
                     prefillBatches, avgBatchSize, stats.maxPrefillBatchSize.get(),
                     avgBatchMs, stats.maxPrefillBatchExecutionMs.get(),
-                    prefillPending, maxPrefillPending, decodeRunning, heapUsedMb, heapMaxMb,
+                    prefillWaiting, prefillRunning, maxPrefillWaiting, decodeWaiting, decodeRunning,
+                    heapUsedMb, heapMaxMb,
                     stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum());
         },
                 5, 5, TimeUnit.SECONDS);
@@ -472,17 +486,47 @@ public final class JavaMockEngineCluster {
             Runnable process = () -> {
                 for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                     List<MockPerformanceModel.RequestShape> shapes = new ArrayList<>(slot.getRequestsCount());
+                    // Phase 1: register per-request state the completion callback
+                    // depends on (responseQueues/requestStates) BEFORE admission so
+                    // an immediately-admitted batch can never complete against a
+                    // missing response queue.
+                    for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
+                        long requestId = input.getInput().getRequestId();
+                        shapes.add(performance.shape(input.getInput(), cache));
+                        responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
+                        requestStates.put(requestId, "running");
+                    }
+                    // Phase 2: admission. false = prefill waiting-queue cap hit
+                    // (batch-level backpressure, independent of the request-level
+                    // queue_depth_limit fault-injection gate checked at the RPC
+                    // entry above). Roll back phase-1 state so rejected requests
+                    // leave no residue (no pendingRequests/waitingPrefillRequests/
+                    // runningTasks were claimed — the cap check rejects before any
+                    // counter is touched).
+                    if (!schedulePrefillCompletion(shapes, request.getBatchId(), slot.getDpRank())) {
+                        String message = String.format(
+                                "prefill waiting queue full (backpressure): waiting=%d cap=%d",
+                                prefillPendingQueueSize(), performance.maxWaitingPrefillBatches());
+                        for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
+                            long requestId = input.getInput().getRequestId();
+                            responseQueues.remove(requestId);
+                            requestStates.put(requestId, "rejected");
+                            response.addErrorsBuilder()
+                                    .setRequestId(requestId)
+                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                            .setErrorMessage(message)
+                                            .build());
+                        }
+                        continue;
+                    }
+                    // Phase 3: success bookkeeping (only admitted requests count).
                     for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
                         stats.enqueuedRequests.increment();
                         acceptedCount.incrementAndGet();
                         long requestId = input.getInput().getRequestId();
                         response.addSuccessesBuilder().setRequestId(requestId);
-                        shapes.add(performance.shape(input.getInput(), cache));
-                        responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
-                        requestStates.put(requestId, "running");
                         recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
                     }
-                    schedulePrefillCompletion(shapes, request.getBatchId(), slot.getDpRank());
                 }
                 observer.onNext(response.build());
                 observer.onCompleted();
@@ -588,7 +632,18 @@ public final class JavaMockEngineCluster {
                     return;
                 }
             } else {
-                schedulePrefillCompletion(List.of(shape), -1, 0);
+                if (!schedulePrefillCompletion(List.of(shape), -1, 0)) {
+                    // Backpressure: prefill waiting-queue cap hit — reject so the
+                    // caller perceives prefill overload (mirrors the decode
+                    // rejection above). Clean up the per-request state set up
+                    // above; the cap check rejects before claiming any counter.
+                    responseQueues.remove(requestId);
+                    requestStates.put(requestId, "rejected");
+                    observer.onError(new RuntimeException(String.format(
+                            "prefill waiting queue full (backpressure): waiting=%d cap=%d",
+                            prefillPendingQueueSize(), performance.maxWaitingPrefillBatches())));
+                    return;
+                }
             }
 
             // Use a separate executor for blocking poll to avoid starving the
@@ -730,11 +785,31 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        private void schedulePrefillCompletion(List<MockPerformanceModel.RequestShape> shapes,
-                                               long batchId,
-                                               int dpRank) {
+        /**
+         * Admission point for a prefill batch. Returns true when the batch was
+         * admitted (running slot reserved or parked in the pending queue); false
+         * when the waiting-queue cap is reached (backpressure) — in that case
+         * nothing was claimed (no pendingRequests/waitingPrefillRequests/
+         * runningTasks residue) and the caller must reject the batch's requests.
+         *
+         * <p>The cap (performance JSON {@code prefill.max_waiting_batches},
+         * default 4, <= 0 = unbounded) bounds QUEUED batches only — running
+         * batches never count toward it. Derivation: batches run FIFO, so the
+         * k-th queued batch starts after k × batch_ms; with SLO ≈ 1000 ms and
+         * ~150 ms prefill execution the wait budget is ~850 ms, and n = 4 keeps
+         * the deepest wait at 600 ms (750 ms total, ~25% headroom). Rule of
+         * thumb: n ≈ SLO_ms / batch_ms − 1.
+         *
+         * <p>Independent of the fault-injection {@code queue_depth_limit} gate in
+         * enqueueBatch: that one is request-level (pendingRequests, waiting +
+         * running) at the RPC entry, this one is batch-level on the pure waiting
+         * queue; both stack.
+         */
+        private boolean schedulePrefillCompletion(List<MockPerformanceModel.RequestShape> shapes,
+                                                  long batchId,
+                                                  int dpRank) {
             if (shapes.isEmpty()) {
-                return;
+                return true;
             }
             // Hard gate on maxPrefillConcurrency (change 2): a batch is either admitted
             // immediately (occupies a concurrency slot) or parked in the pending
@@ -751,6 +826,11 @@ public final class JavaMockEngineCluster {
                                         EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
                     }
                 } else {
+                    int cap = performance.maxWaitingPrefillBatches();
+                    if (cap > 0 && prefillPendingQueue.size() >= cap) {
+                        // Waiting-queue cap hit — reject before claiming anything.
+                        return false;
+                    }
                     prefillPendingQueue.addLast(new PrefillPendingBatch(shapes, batchId, dpRank));
                     waitingPrefillRequests.addAndGet(shapes.size());
                     pendingRequests.addAndGet(shapes.size());
@@ -759,10 +839,11 @@ public final class JavaMockEngineCluster {
                                 task(shape, batchId, dpRank,
                                         EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
                     }
-                    return;
+                    return true;
                 }
             }
             runPrefillBatch(shapes, batchId, dpRank);
+            return true;
         }
 
         /**
@@ -1065,6 +1146,13 @@ public final class JavaMockEngineCluster {
         private int decodePendingQueueSize() {
             synchronized (decodeQueueLock) {
                 return decodePendingQueue.size();
+            }
+        }
+
+        /** Snapshot size of the prefill pending queue in BATCHES (cap accounting unit). */
+        private int prefillPendingQueueSize() {
+            synchronized (prefillQueueLock) {
+                return prefillPendingQueue.size();
             }
         }
 
@@ -1383,6 +1471,11 @@ public final class JavaMockEngineCluster {
             // which is always 0 for decode engines.
             snap.put("waiting", roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                     ? decodePendingQueueSize() : waitingPrefillRequests.get());
+            // Queued prefill batches (same unit as prefill.max_waiting_batches, for
+            // cap observation). Requests-vs-batches: "waiting" above counts requests.
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                snap.put("prefill_waiting_batches", prefillPendingQueueSize());
+            }
             snap.put("accepted", acceptedCount.get());
             snap.put("completed", completedCount.get());
             snap.put("cache_keys", cache.snapshotKeys().size());

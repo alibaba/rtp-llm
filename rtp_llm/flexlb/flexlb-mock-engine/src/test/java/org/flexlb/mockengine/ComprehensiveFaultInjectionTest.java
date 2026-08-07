@@ -777,7 +777,10 @@ class ComprehensiveFaultInjectionTest {
                 "block_size", 1024,
                 "sleep_scale", 1.0,
                 "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
+                // Fault-injection scenarios (e.g. enqueue_delay) intentionally pile
+                // up queued batches beyond the default waiting-queue cap (4);
+                // disable the cap so only the injected fault is under test.
+                "prefill", Map.of("scale", 1.0, "max_waiting_batches", 0),
                 "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MAPPER.writeValue(master.toFile(), Map.of(
                 "zone_process_setting", Map.of(
