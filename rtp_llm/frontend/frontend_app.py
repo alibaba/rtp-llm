@@ -14,6 +14,8 @@ from fastapi import Body, FastAPI, HTTPException
 from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi import status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, StreamingResponse
@@ -47,6 +49,14 @@ FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
 DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
 PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
+
+
+async def request_validation_exception_handler_400(
+    request: Request, exc: RequestValidationError
+):
+    response = await request_validation_exception_handler(request, exc)
+    response.status_code = status.HTTP_400_BAD_REQUEST
+    return response
 
 
 def _startup_timeout_s() -> float:
@@ -430,6 +440,9 @@ class FrontendApp(object):
             )
         ]
         app = FastAPI(middleware=middleware)
+        app.add_exception_handler(
+            RequestValidationError, request_validation_exception_handler_400
+        )
 
         @app.on_event("startup")
         async def startup():

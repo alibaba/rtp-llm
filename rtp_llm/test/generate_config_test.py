@@ -99,7 +99,10 @@ class GenerateConfigTest(TestCase):
             messages=[],
             response_format={
                 "type": "json_schema",
-                "json_schema": {"schema": {"type": "object"}},
+                "json_schema": {
+                    "name": "object_response",
+                    "schema": {"type": "object"},
+                },
             },
         )
         config = GenerateConfig()

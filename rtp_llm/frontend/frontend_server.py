@@ -11,6 +11,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import http_status_for
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -336,7 +337,7 @@ class FrontendServer(object):
             assert self._openai_endpoint != None
             return self._openai_endpoint.chat_render(request)
         except Exception as e:
-            return ORJSONResponse(format_exception(e), status_code=500)
+            return ORJSONResponse(format_exception(e), status_code=http_status_for(e))
 
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
@@ -367,7 +368,7 @@ class FrontendServer(object):
                 },
             )
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        rep = ORJSONResponse(exception_json, status_code=http_status_for(e))
         return rep
 
     async def _call_generate_with_report(

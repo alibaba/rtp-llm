@@ -5,7 +5,7 @@ import typing
 import libth_transformer_config
 import torch
 
-__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json']
+__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'build_xgrammar_tokenizer_info_json', 'build_xgrammar_tokenizer_info_json_from_vocab']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -49,4 +49,6 @@ class TypedOutput:
     def t(self, arg1: torch.Tensor) -> None:
         ...
 def build_xgrammar_tokenizer_info_json(vocab: dict[str, int], backend_tokenizer_str: str, vocab_size: int, stop_token_ids: list[int]) -> str:
+    ...
+def build_xgrammar_tokenizer_info_json_from_vocab(vocab: dict[str, int], vocab_type: int, vocab_size: int, stop_token_ids: list[int], add_prefix_space: bool = False) -> str:
     ...

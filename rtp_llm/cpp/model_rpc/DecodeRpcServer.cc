@@ -285,7 +285,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         }
         error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
         RTP_LLM_LOG_ERROR(error_msg);
-        decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
+        decode_context.error_status = serializeErrorMsg(decode_context.request_key,
+                                                        ErrorInfo(stream_error.code(), error_msg));
         return;
     }
 

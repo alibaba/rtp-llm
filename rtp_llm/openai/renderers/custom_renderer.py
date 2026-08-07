@@ -1522,6 +1522,7 @@ class CustomChatRenderer:
                                     content=content or None,
                                     reasoning_content=reasoning_content or None,
                                     function_call=choice.delta.function_call or None,
+                                    tool_calls=choice.delta.tool_calls or None,
                                 ),
                                 finish_reason=choice.finish_reason,
                                 logprobs=choice.logprobs,
@@ -1554,6 +1555,12 @@ class CustomChatRenderer:
                         response.choices[i].delta.function_call
                         or all_choices[i].message.function_call
                     )
+                    if response.choices[i].delta.tool_calls:
+                        if all_choices[i].message.tool_calls is None:
+                            all_choices[i].message.tool_calls = []
+                        all_choices[i].message.tool_calls.extend(
+                            response.choices[i].delta.tool_calls
+                        )
                     all_choices[i].finish_reason = (
                         response.choices[i].finish_reason
                         or all_choices[i].finish_reason
