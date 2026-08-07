@@ -435,9 +435,7 @@ def forward_decode(
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
             return PyModelOutputs(
-                torch.zeros(
-                    (0, v4_args.dim), dtype=torch.bfloat16, device=param_dev
-                )
+                torch.zeros((0, v4_args.dim), dtype=torch.bfloat16, device=param_dev)
             )
 
     B = meta.batch_size

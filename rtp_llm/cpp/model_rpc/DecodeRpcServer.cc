@@ -249,14 +249,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
 
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
-        // A DSpark seeding handoff carries no proposal (commit-only prefill);
-        // the decode round head produces the first one, so the stream enters
-        // the engine exactly like a steady decode stream. MTP/Eagle always
-        // send target+draft tokens.
-        if (propose_tokens.size() >= 2) {
-            generate_stream->setReuseLength(generate_stream->seqLength() - 1);
-            generate_stream->setSpEditRun(false);
-            generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
+        // A DSpARK seeding handoff carries no proposal (commit-only prefill);
+        // the decode round head produces the first one. Traditional MTP/Eagle
+        // retain their target+draft handoff contract.
+        RTP_LLM_CHECK_WITH_INFO(engine_->isDSpark() ? propose_tokens.empty() : propose_tokens.size() >= 2,
+                                "decode rpc speculative handoff has invalid proposal count=%zu for dspark=%d",
+                                propose_tokens.size(),
+                                static_cast<int>(engine_->isDSpark()));
+        generate_stream->initSpeculativeHandoffPositions();
+        if (!propose_tokens.empty()) {
             generate_stream->setContainProposeToken(true);
             generate_stream->setProposeToken(propose_tokens);
 
@@ -264,7 +265,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             sp_output_buffer->propose_step = propose_step;
             sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
                                                     torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
-            memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
+            memcpy(
+                sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
             auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
             auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
@@ -790,7 +792,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return group_tokens > 0
                && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
     };
-    auto blockPositionsForLoad = [&](size_t            block_num,
+    auto blockPositionsForLoad = [&](size_t             block_num,
                                      const CacheConfig& cfg,
                                      bool               cfg_use_hybrid,
                                      CacheGroupType     group_type,
@@ -818,8 +820,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         const size_t cp_size        = static_cast<size_t>(load_context.prefill_cp_size);
         const size_t compact_blocks = (block_num + cp_size - 1) / cp_size;
         const size_t reuse_blocks   = static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0));
-        const size_t start          = cfg_use_hybrid ? (compact_blocks > 2 ? compact_blocks - 2 : 0) :
-                                                       std::min(reuse_blocks, compact_blocks);
+        const size_t start =
+            cfg_use_hybrid ? (compact_blocks > 2 ? compact_blocks - 2 : 0) : std::min(reuse_blocks, compact_blocks);
         block_pos_list.reserve(compact_blocks - start);
         for (size_t compact_pos = start; compact_pos < compact_blocks; ++compact_pos) {
             block_pos_list.push_back(std::min((compact_pos + 1) * cp_size - 1, block_num - 1));
@@ -827,11 +829,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         return block_pos_list;
     };
     auto cacheKeyIndexForBlock = [&](const CacheConfig& cfg,
-                                     KVCacheRegionName region_name,
-                                     size_t            gid,
-                                     size_t            block_pos,
-                                     size_t            cache_key_count,
-                                     size_t&           cache_key_index) {
+                                     KVCacheRegionName  region_name,
+                                     size_t             gid,
+                                     size_t             block_pos,
+                                     size_t             cache_key_count,
+                                     size_t&            cache_key_index) {
         if (cache_key_count == 0) {
             return false;
         }
@@ -891,8 +893,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         continue;
                     }
                     size_t cache_key_index = 0;
-                    if (!cacheKeyIndexForBlock(
-                            cache_config, region_name, gid, block_pos, load_context.cache_keys.size(), cache_key_index)) {
+                    if (!cacheKeyIndexForBlock(cache_config,
+                                               region_name,
+                                               gid,
+                                               block_pos,
+                                               load_context.cache_keys.size(),
+                                               cache_key_index)) {
                         continue;
                     }
                     auto cache_key = makeCacheKey(
@@ -1015,9 +1021,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 region_name = mtp_cache_cfg.group_region_names[gid];
                             }
                             CacheGroupType group_type     = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            auto block_pos_list =
-                                blockPositionsForLoad(
-                                    block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
+                            auto           block_pos_list = blockPositionsForLoad(
+                                block_num, mtp_cache_cfg, mtp_use_hybrid, group_type, region_name, gid);
 
                             if (!shouldLoadGroupFromPeer(group_type, region_name, i)) {
                                 continue;

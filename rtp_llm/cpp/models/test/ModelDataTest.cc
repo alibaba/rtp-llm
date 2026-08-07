@@ -84,34 +84,12 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
     EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t1.data_ptr());
 }
 
-TEST_F(ModelDataTest, testDSparkDraftBypassesPrefillContextParallel) {
+TEST_F(ModelDataTest, testDSparkDraftBypassesGenericPrefillContextParallel) {
     // The target keeps ordinary prefill CP enabled, while the DSpARK draft
     // keeps the complete B*gamma non-causal query block on every rank.
-    EXPECT_TRUE(
-        PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/true, /*bypass=*/false));
-    EXPECT_FALSE(
-        PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/true, /*bypass=*/true));
-    EXPECT_FALSE(
-        PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/false, /*bypass=*/false));
-}
-
-TEST_F(ModelDataTest, testDSparkCacheStoreLengthsParticipateInTpSyncMetadata) {
-    GptModelInputs inputs;
-    inputs.cache_store_input_lengths  = torch::zeros({2}, torch::kInt32);
-    inputs.cache_store_prefix_lengths = torch::zeros({3}, torch::kInt32);
-
-    auto cpu_metadata = getCacheStoreTensorSyncMetadata(inputs);
-    EXPECT_EQ(cpu_metadata.input_lengths_count, 2);
-    EXPECT_EQ(cpu_metadata.prefix_lengths_count, 3);
-    EXPECT_EQ(cpu_metadata.device_bits, 0);
-
-    inputs.cache_store_input_lengths  = inputs.cache_store_input_lengths.cuda();
-    inputs.cache_store_prefix_lengths = inputs.cache_store_prefix_lengths.cuda();
-    auto cuda_metadata                = getCacheStoreTensorSyncMetadata(inputs);
-    EXPECT_EQ(cuda_metadata.input_lengths_count, 2);
-    EXPECT_EQ(cuda_metadata.prefix_lengths_count, 3);
-    EXPECT_NE(cuda_metadata.device_bits & kDeviceBitCacheStoreInputLengths, 0);
-    EXPECT_NE(cuda_metadata.device_bits & kDeviceBitCacheStorePrefixLengths, 0);
+    EXPECT_TRUE(PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/true, /*bypass=*/false));
+    EXPECT_FALSE(PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/true, /*bypass=*/true));
+    EXPECT_FALSE(PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/false, /*bypass=*/false));
 }
 
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
@@ -129,14 +107,14 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     EXPECT_EQ(wire_hints.scalar_type(), torch::kInt64);
     EXPECT_EQ(wire_hints.data_ptr<int64_t>()[GptModelInputIndex::mtpHiddenStates], 3221225472LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{262144, 12288}));
 
     inputs.last_hidden_states = backing.expand({1048576, 12288});
     shape_hints               = getModelInputShapeHints(inputs);
     EXPECT_EQ(shape_hints[GptModelInputIndex::mtpHiddenStates], 12884901888LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 

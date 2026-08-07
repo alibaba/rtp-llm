@@ -28,9 +28,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
     def test_gen_num_per_cycle_three_is_accepted_without_checkpoint_width(self):
         sp_config, target_config, draft_config = self._configs(gamma=3)
 
-        ModelFactory._setup_dspark_configs(
-            sp_config, target_config, draft_config
-        )
+        ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
         self.assertEqual(sp_config.sp_dspark_mask_token_id, 128799)
         self.assertEqual(target_config.capture_aux_hidden_layer_ids, [40, 41, 42])
@@ -39,9 +37,7 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
         sp_config, target_config, draft_config = self._configs(gamma=0)
 
         with self.assertRaisesRegex(ValueError, "positive gen_num_per_cycle"):
-            ModelFactory._setup_dspark_configs(
-                sp_config, target_config, draft_config
-            )
+            ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
 
 if __name__ == "__main__":

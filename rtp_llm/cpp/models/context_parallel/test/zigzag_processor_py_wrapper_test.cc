@@ -1,8 +1,6 @@
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
-#include <algorithm>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/extension.h>
@@ -22,8 +20,6 @@ public:
     using ZigZagProcessor::generateQKVRestoreIndices;
     using ZigZagProcessor::generateQKVPaddingMask;
     using ZigZagProcessor::computeLocalLastHidden;
-    using ZigZagProcessor::buildGatherToOutputIndices;
-    using ZigZagProcessor::restoreGatheredChunk;
 };
 
 // Wrapper for ZigZagProcessor::plan that returns a tuple
@@ -110,37 +106,6 @@ torch::Tensor zigzagComputeLocalLastHidden(const torch::Tensor& hidden_chunk,
     return processor.computeLocalLastHidden(hidden_chunk.contiguous().clone(), inputs, cp_params).cpu().clone();
 }
 
-torch::Tensor zigzagRestoreRankChunks(const torch::Tensor& rank_chunks,
-                                      const torch::Tensor& restore_indices,
-                                      const torch::Tensor& padding_mask,
-                                      int64_t              chunk_rows) {
-    RTP_LLM_CHECK_WITH_INFO(rank_chunks.dim() == 3,
-                            "rank_chunks must be [cp_size, local_tokens, hidden], got dim=%ld",
-                            rank_chunks.dim());
-    RTP_LLM_CHECK_WITH_INFO(chunk_rows > 0, "chunk_rows must be positive, got %ld", chunk_rows);
-    const int     cp_size          = rank_chunks.size(0);
-    const int64_t local_token_num  = rank_chunks.size(1);
-    const int64_t hidden_size      = rank_chunks.size(2);
-    const int64_t num_valid_tokens = torch::nonzero(padding_mask).size(0);
-
-    auto gather_to_output = ZigZagProcessorTestWrapper::buildGatherToOutputIndices(
-        restore_indices, padding_mask, num_valid_tokens);
-    auto restored_padded = torch::empty({restore_indices.numel(), hidden_size}, rank_chunks.options());
-
-    for (int64_t chunk_offset = 0; chunk_offset < local_token_num; chunk_offset += chunk_rows) {
-        const int64_t current_chunk_rows = std::min(chunk_rows, local_token_num - chunk_offset);
-        auto gathered_chunk =
-            rank_chunks.narrow(1, chunk_offset, current_chunk_rows).contiguous().reshape({-1, hidden_size});
-        ZigZagProcessorTestWrapper::restoreGatheredChunk(restored_padded,
-                                                         gathered_chunk,
-                                                         gather_to_output,
-                                                         local_token_num,
-                                                         chunk_offset,
-                                                         cp_size);
-    }
-    return restored_padded.narrow(0, 0, num_valid_tokens).clone();
-}
-
 PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
     m.def("context_parallel_load_balance_split",
           &zigzagProcessorPlanWrapper,
@@ -185,14 +150,6 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("cp_rank"),
           py::arg("cp_size"),
           "This rank's contribution to the CP gather-last-hidden (sum across ranks == gathered last hidden)");
-
-    m.def("restore_rank_chunks",
-          &zigzagRestoreRankChunks,
-          py::arg("rank_chunks"),
-          py::arg("restore_indices"),
-          py::arg("padding_mask"),
-          py::arg("chunk_rows"),
-          "Restore rank-major chunks incrementally without a full gathered intermediate");
 }
 
 }  // namespace unittest

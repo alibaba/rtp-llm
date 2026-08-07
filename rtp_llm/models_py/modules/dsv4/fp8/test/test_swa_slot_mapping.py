@@ -477,6 +477,7 @@ class SwaSlotMappingTest(unittest.TestCase):
             def __init__(self) -> None:
                 self._kv_cache = None
                 self._block_tables_by_type = {}
+                self._cp_ctx = None
                 self.freqs_cis = torch.zeros(
                     (512, 2), dtype=torch.float32, device=self_device
                 )
@@ -486,8 +487,11 @@ class SwaSlotMappingTest(unittest.TestCase):
             def _ensure_freqs_cis_bound(self) -> None:
                 pass
 
-            def _pool_entries_per_block(self, _region: int) -> int:
+            def _swa_entries_per_block(self) -> int:
                 return 134
+
+            def _swa_cp_byte_sliced(self) -> bool:
+                return False
 
             def _pool_view_3d_fp8(self, _region: int) -> torch.Tensor:
                 return torch.zeros((5, 134, 1), dtype=torch.uint8, device=self_device)
@@ -499,6 +503,7 @@ class SwaSlotMappingTest(unittest.TestCase):
         model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
         model._gen_num_per_cycle = 1
         model._v4_args = SimpleNamespace(window_size=128, dim=4, vocab_size=17)
+        model._active_dspark_commit_cp_ctx = None
         attention = FakeAttention()
         model.v4 = SimpleNamespace(layers=[SimpleNamespace(attn=attention)])
         model.kv_cache = object()
@@ -510,7 +515,7 @@ class SwaSlotMappingTest(unittest.TestCase):
         context_positions = torch.arange(
             context_rows, dtype=torch.int32, device=self.device
         )
-        prefix_lengths = torch.tensor(
+        committed_ends = torch.tensor(
             [context_rows], dtype=torch.int32, device=self.device
         )
 
@@ -529,24 +534,19 @@ class SwaSlotMappingTest(unittest.TestCase):
             ) as cache_writer,
         ):
             with self.assertRaises(StopAfterContextWrite):
-                model._forward_dspark_attention(
+                model._commit_layer_features(
                     layer_idx=0,
-                    x=torch.zeros((1, 1, 4), dtype=torch.bfloat16, device=self.device),
-                    query_positions=torch.tensor(
-                        [[context_rows]], dtype=torch.long, device=self.device
-                    ),
                     main_x=torch.zeros(
                         (context_rows, 4), dtype=torch.bfloat16, device=self.device
                     ),
                     context_req_ids=context_req_ids,
                     context_positions=context_positions,
-                    prefix_lengths=prefix_lengths,
-                    active_requests=torch.tensor([True], device=self.device),
+                    committed_ends=committed_ends,
                     block_table=torch.tensor(
                         [[3, 4]], dtype=torch.int32, device=self.device
                     ),
                     tokens_per_block=256,
-                    graph_metadata=SimpleNamespace(sched_meta_cache={}),
+                    batch_size=1,
                 )
 
         slots = cache_writer.call_args.kwargs["slot_mapping"]

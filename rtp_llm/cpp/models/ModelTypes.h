@@ -56,7 +56,8 @@ struct GptModelInitParams {
     // DSv4 head-channel residual multiplier. Default 1 (no expansion).
     // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
     // is the contract between target and draft for MTP — see
-    // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
+    // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
+    // input_hiddens.
     int64_t hc_mult = 1;
 };
 
@@ -100,16 +101,16 @@ using GptModelInputShapeHints = std::array<int64_t, GptModelInputIndex::gptModel
 // Bit positions for `tensorDeviceMap`. Only fields that participate in the
 // MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
 enum GptModelInputDeviceBit : uint32_t {
-    kDeviceBitComboTokens      = 1u << 0,
-    kDeviceBitInputLengths     = 1u << 1,
-    kDeviceBitSequenceLengths  = 1u << 2,
-    kDeviceBitPrefixLengths    = 1u << 3,
-    kDeviceBitLmOutputIndexes  = 1u << 4,
+    kDeviceBitComboTokens     = 1u << 0,
+    kDeviceBitInputLengths    = 1u << 1,
+    kDeviceBitSequenceLengths = 1u << 2,
+    kDeviceBitPrefixLengths   = 1u << 3,
+    kDeviceBitLmOutputIndexes = 1u << 4,
 };
 
-GptModelInputShapeHints       getModelInputShapeHints(const GptModelInputs& inputs);
-torch::Tensor                 makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
-std::array<int64_t, 2>        decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
+GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
+torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
+std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 

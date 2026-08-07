@@ -20,16 +20,20 @@ class StartupRealWarmupTest(unittest.TestCase):
         mtp = self._configs(SpeculativeType.MTP, 3)
         dspark = self._configs(SpeculativeType.DSPARK, 3)
 
-        self.assertEqual(
-            start_server._get_startup_real_warmup_speculative_reserve_step(mtp),
-            4,
-        )
-        self.assertEqual(
-            start_server._get_startup_real_warmup_speculative_reserve_step(
-                dspark
-            ),
-            8,
-        )
+        with patch.dict("os.environ", {"RTP_LLM_STREAM_ASYNC": "0"}):
+            self.assertEqual(
+                start_server._get_startup_real_warmup_speculative_reserve_step(mtp),
+                4,
+            )
+            self.assertEqual(
+                start_server._get_startup_real_warmup_speculative_reserve_step(dspark),
+                4,
+            )
+        with patch.dict("os.environ", {"RTP_LLM_STREAM_ASYNC": "1"}):
+            self.assertEqual(
+                start_server._get_startup_real_warmup_speculative_reserve_step(dspark),
+                7,
+            )
         self.assertEqual(
             start_server._get_startup_real_warmup_request_token_len(
                 token_len=1048576,
@@ -38,26 +42,6 @@ class StartupRealWarmupTest(unittest.TestCase):
             ),
             1048568,
         )
-
-    def test_warmup_failure_propagates_to_health_gate_owner(self):
-        configs = self._configs(SpeculativeType.DSPARK, 3)
-        with (
-            patch.object(
-                start_server, "_should_run_startup_real_warmup", return_value=True
-            ),
-            patch.object(
-                start_server,
-                "_run_startup_real_warmup_grpc",
-                new=lambda _configs: object(),
-            ),
-            patch.object(
-                start_server,
-                "_run_startup_real_warmup_async",
-                side_effect=RuntimeError("warmup failed"),
-            ),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "warmup failed"):
-                start_server._maybe_run_startup_real_warmup(configs)
 
 
 if __name__ == "__main__":

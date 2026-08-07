@@ -667,9 +667,7 @@ class DeepSeekV4Model(GptModelBase):
         finally:
             torch.set_default_dtype(prev_dtype)
         if self._captures_aux_hidden:
-            self.v4.set_aux_hidden_capture_layer_ids(
-                self._capture_aux_hidden_layer_ids
-            )
+            self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
 
         # Recompute RoPE cache on real device (precompute_freqs_cis under
         # meta context yields zeros; we need real values).
@@ -743,10 +741,7 @@ class DeepSeekV4Model(GptModelBase):
                 _run_triton_warmup_launch_with_retry,
             )
 
-            if (
-                len(self.v4.layers) > 2
-                and self.v4.layers[2].attn.indexer is not None
-            ):
+            if len(self.v4.layers) > 2 and self.v4.layers[2].attn.indexer is not None:
                 _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
                 _H = int(_idx.n_heads)
                 _D = int(_idx.head_dim)

@@ -335,7 +335,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    auto start_time_us = currentTimeUs();
+    auto start_time_us         = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {
@@ -421,33 +421,28 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
             {context_position_ids.data_ptr<int32_t>(),
              context_position_ids.data_ptr<int32_t>() + context_position_ids.numel()});
     }
-    if (engine_->isMTPEagle()) {
+    if (engine_->isMTPEagle() && !engine_->isDSpark()) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
                                 "mtp remote generate propose token should not be empty");
     }
-    // DSpark seeding is commit-only: the handoff carries no proposal, and the
-    // decode round head produces the first one. The stream's legacy
-    // {target_token, -1} propose pair is bookkeeping noise — send nothing.
-    if (maga_init_params_.sp_config.type != SP_TYPE_DSPARK) {
-        generate_request.mutable_propose_token_ids()->CopyFrom(
-            {stream->getProposeToken().begin(), stream->getProposeToken().end()});
+    generate_request.mutable_propose_token_ids()->CopyFrom(
+        {stream->getProposeToken().begin(), stream->getProposeToken().end()});
 
-        auto sp_output_buffer = stream->getSPOutputBuffer();
+    auto sp_output_buffer = stream->getSPOutputBuffer();
 
-        if (sp_output_buffer) {
-            auto all_probs_cpu = sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() :
-                                                                         sp_output_buffer->all_probs;
-            torch::Tensor hidden_states_cpu;
-            if (!sp_output_buffer->hidden_states.defined()) {
-                // dummy hidden states, so datatype is not important
-                hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
-            } else {
-                hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
-                                                                                sp_output_buffer->hidden_states;
-            }
-            QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
-            QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
+    if (sp_output_buffer && !engine_->isDSpark()) {
+        auto all_probs_cpu =
+            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        torch::Tensor hidden_states_cpu;
+        if (!sp_output_buffer->hidden_states.defined()) {
+            // dummy hidden states, so datatype is not important
+            hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+        } else {
+            hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
+                                                                            sp_output_buffer->hidden_states;
         }
+        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
+        QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 
     generate_request.set_stage(RemoteStage::GENERATE);

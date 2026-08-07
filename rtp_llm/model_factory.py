@@ -187,7 +187,9 @@ class ModelFactory:
                     raise RuntimeError(
                         f"speculative global weight alias {name!r} did not preserve storage identity"
                     )
-                aliased_local_bytes += owner_tensor.numel() * owner_tensor.element_size()
+                aliased_local_bytes += (
+                    owner_tensor.numel() * owner_tensor.element_size()
+                )
             if alias_names:
                 logging.info(
                     "speculative model aliases owner weights: %s; local HBM not duplicated: %.3f GiB",
@@ -491,8 +493,7 @@ class ModelFactory:
             )
 
         target_layer_ids = [
-            int(layer_id)
-            for layer_id in propose_model_config.dspark_target_layer_ids
+            int(layer_id) for layer_id in propose_model_config.dspark_target_layer_ids
         ]
         if not target_layer_ids:
             raise ValueError("dspark_target_layer_ids must not be empty")

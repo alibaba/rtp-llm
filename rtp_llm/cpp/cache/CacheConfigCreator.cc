@@ -40,7 +40,7 @@ size_t fallbackFixedPoolHbmBytes(const CacheConfig& config) {
             if (!isDsv4FixedRegion(region)) {
                 continue;
             }
-            const bool explicit_hca = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
+            const bool explicit_hca   = region == KVCacheRegionName::HCA_STATE && config.dsv4_hca_state_pool_blocks > 0;
             const bool explicit_fixed = config.dsv4_fixed_pool_blocks > 0;
             if (!explicit_hca && !explicit_fixed) {
                 bytes += config.group_block_size_bytes[gid];
@@ -154,8 +154,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                              config.fixed_pool_reserve_bytes / 1024 / 1024,
                              paged_budget / 1024 / 1024);
         }
-        const int  joint_step       = std::max(1, config.linear_step);
-        block_num = paged_budget / effectivePagedBlockBytes(config, joint_step);
+        const int joint_step = std::max(1, config.linear_step);
+        block_num            = paged_budget / effectivePagedBlockBytes(config, joint_step);
     }
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",

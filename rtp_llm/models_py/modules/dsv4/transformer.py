@@ -304,9 +304,9 @@ class V4Transformer(nn.Module):
             f"aux segment overflow: segment={segment} dim={dim} "
             f"row_width={buf.size(1)}"
         )
-        assert rows <= buf.size(0), (
-            f"_mtp_hidden_buffer overflow: T={rows} > cap={buf.size(0)}"
-        )
+        assert rows <= buf.size(
+            0
+        ), f"_mtp_hidden_buffer overflow: T={rows} > cap={buf.size(0)}"
         buf[:rows, segment * dim : (segment + 1) * dim].copy_(flat)
 
     def _note_aux_hidden_rows(self, rows: int, is_cuda_graph: bool) -> None:

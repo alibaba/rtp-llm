@@ -1,7 +1,16 @@
 import json
 import logging
 import os
-from typing import Any, Optional, Protocol, Sequence, Type, Union, cast, runtime_checkable
+from typing import (
+    Any,
+    Optional,
+    Protocol,
+    Sequence,
+    Type,
+    Union,
+    cast,
+    runtime_checkable,
+)
 
 import torch
 
@@ -292,7 +301,9 @@ class BaseModel(object):
             force_cpu_load_weights=force_cpu_load_weights,
         )
         if weight_alias_names and weight_alias_owner is None:
-            raise ValueError("weight_alias_names require an explicit weight_alias_owner")
+            raise ValueError(
+                "weight_alias_names require an explicit weight_alias_owner"
+            )
         model._weight_alias_owner = weight_alias_owner
         model._weight_alias_names = tuple(weight_alias_names)
 

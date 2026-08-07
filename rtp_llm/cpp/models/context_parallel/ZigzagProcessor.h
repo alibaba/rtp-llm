@@ -55,21 +55,6 @@ protected:
     torch::Tensor generateQKVPaddingMask(const torch::Tensor& prefill_cp_chunk_lengths,
                                          const torch::Tensor& prefill_cp_padding_lengths,
                                          int                  cp_size) override;
-
-    /// Build the inverse of prefill_qkv_restore_indice. Entry i is the output
-    /// row for rank-major gathered row i. Valid rows occupy the compact prefix;
-    /// padding rows occupy unique tail rows that are discarded after restore.
-    static torch::Tensor buildGatherToOutputIndices(const torch::Tensor& restore_indices,
-                                                    const torch::Tensor& padding_mask,
-                                                    int64_t              num_valid_tokens);
-
-    /// Scatter one rank-major all-gather chunk into its final restored rows.
-    static void restoreGatheredChunk(torch::Tensor&       restored_padded,
-                                     const torch::Tensor& gathered_chunk,
-                                     const torch::Tensor& gather_to_output_indices,
-                                     int64_t              local_token_num,
-                                     int64_t              chunk_offset,
-                                     int                  cp_size);
 };
 
 }  // namespace rtp_llm

@@ -188,7 +188,7 @@ TEST_F(FIFOSchedulerTest, testRejectInputWithoutSpeculativeReserveSpace) {
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
 }
 
-TEST_F(FIFOSchedulerTest, testRejectDSpARKTailWithoutRopeReserveSpace) {
+TEST_F(FIFOSchedulerTest, testRejectSpeculativeTailWithoutReserveSpace) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 128, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -206,27 +206,27 @@ TEST_F(FIFOSchedulerTest, testRejectDSpARKTailWithoutRopeReserveSpace) {
     FIFOScheduler       scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
-    const size_t gamma               = 3;
-    const size_t dspark_reserve_step = 3 * gamma;
-    auto         make_stream         = [&](size_t input_len) {
+    const size_t gamma        = 3;
+    const size_t reserve_step = gamma + 1;
+    auto         make_stream  = [&](size_t input_len) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids                     = torch::full({static_cast<int64_t>(input_len)}, 1, torch::kInt32);
         query->generate_config               = make_shared<GenerateConfig>();
         auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
-        stream->setReserveStep(dspark_reserve_step);
+        stream->setReserveStep(reserve_step);
         return stream;
     };
 
-    auto valid_stream = make_stream(503);
+    auto valid_stream = make_stream(508);
     ASSERT_TRUE(scheduler.enqueue(valid_stream).ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
 
-    auto invalid_stream = make_stream(504);
+    auto invalid_stream = make_stream(509);
     ASSERT_FALSE(scheduler.enqueue(invalid_stream).ok());
     ASSERT_TRUE(invalid_stream->hasError());
     ASSERT_EQ(invalid_stream->statusInfo().code(), ErrorCode::LONG_PROMPT_ERROR);
-    ASSERT_NE(invalid_stream->stopReason().find("reserve_step 9"), std::string::npos);
-    ASSERT_NE(invalid_stream->stopReason().find("allowed max input len for speculative decoding is 503"),
+    ASSERT_NE(invalid_stream->stopReason().find("reserve_step 4"), std::string::npos);
+    ASSERT_NE(invalid_stream->stopReason().find("allowed max input len for speculative decoding is 508"),
               std::string::npos);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
 }

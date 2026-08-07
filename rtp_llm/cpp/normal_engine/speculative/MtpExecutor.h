@@ -51,10 +51,6 @@ public:
         draft_model_ = std::move(model);
     }
 
-    void setBatchProcessor(std::unique_ptr<MtpBatchStreamProcessor> processor) {
-        batch_stream_processor_ = std::move(processor);
-    }
-
     void setFastTopKSampler(std::unique_ptr<speculative::FastTopKSampler> sampler) {
         fast_topk_sampler_ = std::move(sampler);
     }
@@ -84,7 +80,6 @@ protected:
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;
         int64_t total_propose_token_num = 0;
-        bool    valid                   = false;
     };
 
     bool isTpRank0() const;
@@ -107,7 +102,8 @@ protected:
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
-    GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
+    GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
+    GptModelOutputs runDraftCommitForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
                                              const torch::Tensor&                draft_tokens,
@@ -146,10 +142,6 @@ protected:
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
     // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
     // carrier. The source returns the full buffer; consumers slice as needed.
-    // Fill the DSpARK propose-call input after the commit forward. Ranks
-    // without the anchors (non-root, fake streams) build placeholder shapes
-    // for the subsequent broadcast/sync to fill.
-    torch::Tensor dsparkPointMassDraftProbs(const torch::Tensor& draft_tokens) const;
 
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                               ModelBase&      source,
@@ -201,9 +193,9 @@ private:
     size_t                                                                                     vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
+    DataType data_type_;
+    size_t   hidden_size_;
+    size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool                                             is_dspark_ = false;
@@ -237,8 +229,8 @@ private:
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
 
-    AsyncRunner                             target_verify_prepare_runner_;
-    AsyncRunner                             draft_prefill_prepare_runner_;
+    AsyncRunner target_verify_prepare_runner_;
+    AsyncRunner draft_prefill_prepare_runner_;
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
     AsyncRunner                             spec_logits_verify_async_runner_;

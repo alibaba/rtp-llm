@@ -52,10 +52,6 @@ struct StreamSpecUpdateInfo {
     // shape: [propose_step] (the per-stream slice). When defined, PDFUSION
     // path will skip D2H and consume this GPU tensor directly.
     torch::Tensor draft_token_gpu;
-    // CPU mirror of a complete fixed-width block proposal. DSpARK fills this
-    // only for PD-separated streams so the decode node receives every draft
-    // token; MTP keeps using the single legacy draft_token above.
-    torch::Tensor draft_tokens_cpu;
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
@@ -261,8 +257,8 @@ public:
     ErrorInfo    statusInfo();
     std::string  stopReason();
 
-    void        setReserveStep(size_t reserve_step);
-    size_t      reserveStep() const {
+    void   setReserveStep(size_t reserve_step);
+    size_t reserveStep() const {
         return reserve_step_;
     }
     StreamState moveToNext();
@@ -416,12 +412,17 @@ public:
         contain_propose_token_ = contain_propose_token;
     }
 
-    bool getContainProposeToken() {
-        return contain_propose_token_;
-    }
-
     void setMtpTokenIndex(int mtp_token_index) {
         mtp_token_index_ = mtp_token_index;
+    }
+
+    // Prompt-tail positions of a PD handoff: the target cache loaded from
+    // prefill covers seqLength() - 1 tokens for every speculative mode.
+    // DSpARK handoffs carry no proposal; MTP/Eagle set theirs afterwards.
+    void initSpeculativeHandoffPositions() {
+        setReuseLength(seqLength() - 1);
+        setSpEditRun(false);
+        setMtpTokenIndex(seqLength() - 1);
     }
 
     size_t getMtpTokenIndex() {
@@ -480,13 +481,6 @@ public:
 
     at::Generator getGenerator() {
         return generator_;
-    }
-
-    torch::Tensor getProposeTokens() const {
-        if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens.defined()) {
-            return propose_stream_->sp_output_buffer_->tokens;
-        }
-        return torch::Tensor();
     }
 
     void setSPOutputBuffer(SpeculativeExecutorStreamOutputPtr sp_output_buffer) {
@@ -710,15 +704,15 @@ protected:
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_ = 0;
-    bool                                  metrics_reported_ = false;
-    int64_t                               scheduler_enqueue_time_us_ = 0;
-    int64_t                               can_run_time_us_ = 0;
+    int64_t                               wait_time_us_                = 0;
+    bool                                  metrics_reported_            = false;
+    int64_t                               scheduler_enqueue_time_us_   = 0;
+    int64_t                               can_run_time_us_             = 0;
     int64_t                               loading_cache_start_time_us_ = 0;
-    int64_t                               loading_cache_done_time_us_ = 0;
-    int64_t                               first_running_time_us_ = 0;
-    int64_t                               loading_cache_latency_us_ = 0;
-    int64_t                               load_done_to_running_us_ = 0;
+    int64_t                               loading_cache_done_time_us_  = 0;
+    int64_t                               first_running_time_us_       = 0;
+    int64_t                               loading_cache_latency_us_    = 0;
+    int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;
@@ -801,10 +795,10 @@ protected:
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until
     // their corresponding async/sync publisher installs a usable state.
-    MtpAsyncDeviceState    mtp_async_state_;
-    uint64_t               mtp_async_epoch_counter_ = 0;
-    NormalAsyncDeviceState normal_async_state_;
-    uint64_t               normal_async_epoch_counter_ = 0;
+    MtpAsyncDeviceState                mtp_async_state_;
+    uint64_t                           mtp_async_epoch_counter_ = 0;
+    NormalAsyncDeviceState             normal_async_state_;
+    uint64_t                           normal_async_epoch_counter_       = 0;
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
 
     bool return_all_hidden_states_ = false;

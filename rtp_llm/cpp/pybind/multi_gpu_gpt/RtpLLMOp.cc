@@ -90,8 +90,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                  std::move(*gpt_weight),
                                                                  py::none(),
                                                                  py_eplb));
-        return std::make_unique<ProposeModelEngineInitParams>(
-            sp_type, gen_num_per_cycle, std::move(mtp_params));
+        return std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params));
     }
     if (gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
@@ -375,11 +374,6 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     grpc::ServerBuilder builder;
     const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
     auto                server_config = grpc_config.get_server_config();
-    if (server_config.find(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH) == server_config.end()) {
-        // The fixed-gamma DSpARK side channel carries [1, gamma, vocab]
-        // probabilities and can exceed gRPC's default receive limit.
-        server_config[GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH] = -1;
-    }
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);

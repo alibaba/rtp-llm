@@ -56,9 +56,7 @@ class AuxHiddenCaptureTest(unittest.TestCase):
         transformer = _capture_harness(row_width=3)
         transformer.set_aux_hidden_capture_layer_ids((2,))
 
-        transformer.capture_aux_hidden(
-            1, torch.ones(2, 4, 3, dtype=torch.float32)
-        )
+        transformer.capture_aux_hidden(1, torch.ones(2, 4, 3, dtype=torch.float32))
         self.assertTrue(torch.isnan(transformer._mtp_hidden_buffer).all())
 
     def test_row_accounting_follows_cuda_graph_contract(self) -> None:
@@ -77,9 +75,7 @@ class AuxHiddenCaptureTest(unittest.TestCase):
         transformer.set_aux_hidden_capture_layer_ids((1,))
 
         with self.assertRaises(AssertionError):
-            transformer.capture_aux_hidden(
-                1, torch.ones(4, 4, 3, dtype=torch.float32)
-            )
+            transformer.capture_aux_hidden(1, torch.ones(4, 4, 3, dtype=torch.float32))
         with self.assertRaises(AssertionError):
             transformer._note_aux_hidden_rows(4, is_cuda_graph=False)
 
@@ -88,9 +84,7 @@ class AuxHiddenCaptureTest(unittest.TestCase):
         transformer.set_aux_hidden_capture_layer_ids((1,))
 
         with self.assertRaises(AssertionError):
-            transformer.capture_aux_hidden(
-                1, torch.ones(2, 4, 3, dtype=torch.float32)
-            )
+            transformer.capture_aux_hidden(1, torch.ones(2, 4, 3, dtype=torch.float32))
 
     def test_invalid_layer_configuration_is_rejected(self) -> None:
         transformer = _capture_harness()

@@ -929,9 +929,7 @@ def build_cp_full_prefill_positions(
         req = torch.empty((0,), dtype=torch.long, device=device)
 
     zero = torch.zeros(1, dtype=torch.long, device=device)
-    cu_seq = torch.cat(
-        [zero, torch.cumsum(lengths.to(torch.long), dim=0)]
-    ).contiguous()
+    cu_seq = torch.cat([zero, torch.cumsum(lengths.to(torch.long), dim=0)]).contiguous()
     return (
         pos,
         req,
@@ -1336,12 +1334,12 @@ def cp_should_gather(cp_ctx: Optional[CPContext], start_pos: int) -> bool:
 # ---------------------------------------------------------------------------
 # DSpark commit hand-off
 # ---------------------------------------------------------------------------
-# Under sharded-CP prefill the target writes rank-local zigzag rows into the
-# shared MTP hidden buffer, and the DSpark draft commit (a separate model
-# instance in the same process) must map each local row to its request id and
-# absolute position before projecting it into the feature KV. The target's
-# prefill forward publishes its CPContext here; the draft commit takes (and
-# thereby consumes) it. One-slot, process-local, prefill-role only.
+# Under CP prefill the target writes rank-local zigzag rows into the shared MTP
+# hidden buffer, and the DSpark draft commit (a separate model instance in the
+# same process) must map each local row to its request id and absolute position
+# before projecting it into the feature KV. The target's prefill forward
+# publishes its CPContext here; the draft commit takes (and thereby consumes)
+# it. One-slot, process-local, prefill-role only.
 _dspark_commit_cp_ctx: Optional[CPContext] = None
 
 

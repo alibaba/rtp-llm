@@ -48,7 +48,6 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_0,
     identity,
-    sp_id,
     stack_,
     stack_moe_w1,
     yarn_get_mscale,
@@ -826,13 +825,6 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         return DeepSeekV4MtpWeight
 
 
-class DSparkReplicatedLmHeadWeight(AtomicWeight):
-    """Keep DSpARK's in-model sampling head complete on every CP rank."""
-
-    def _get_split_func(self):
-        return sp_id
-
-
 class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
     """Three-stage DSpARK draft weights stored under ``mtp.{i}``."""
 
@@ -856,7 +848,11 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
                 [CkptWeightInfo("embed.weight", identity)],
                 identity,
             ),
-            DSparkReplicatedLmHeadWeight(
+            # Same vocab-sharded strategy as the target owner. In production
+            # the tensor is never loaded here: the factory aliases it (with
+            # the embedding) onto the target's storage, and the loader skips
+            # alias-declared names.
+            AtomicWeight(
                 W.lm_head,
                 [CkptWeightInfo("head.weight", identity)],
                 identity,

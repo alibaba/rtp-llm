@@ -586,9 +586,7 @@ def forward_layers(
             _pre_hc_flat = h.flatten(-2)
             v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
             if v4._mtp_last_hidden_buffer is not None:
-                _last_pre_hc = _last_hidden_by_request(
-                    _pre_hc_flat, cu_seqlens, cp_ctx
-                )
+                _last_pre_hc = _last_hidden_by_request(_pre_hc_flat, cu_seqlens, cp_ctx)
                 v4._write_mtp_last_hidden_buffer(_last_pre_hc)
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].

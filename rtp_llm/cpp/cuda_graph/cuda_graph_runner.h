@@ -31,9 +31,8 @@ public:
         seq_size_per_block_(graph_params.tokens_per_block),
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
-        hc_mult_(static_cast<int>(graph_params.hc_mult)),
+        input_hidden_size_(graph_params.input_hidden_size),
         sp_steps_(graph_params.sp_steps),
-        is_dspark_draft_(graph_params.is_dspark_draft),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
@@ -54,17 +53,17 @@ public:
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d, is_dspark_draft_: %d",
+            hidden_size_: %d, input_hidden_size_: %zu, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
                          kernel_seq_size_per_block_,
                          hidden_size_,
+                         input_hidden_size_,
                          num_tokens_per_bs_,
                          is_prefill_cuda_graph_mode_,
-                         is_target_verify_,
-                         is_dspark_draft_);
+                         is_target_verify_);
     }
 
     ~CudaGraphRunner() {
@@ -134,13 +133,8 @@ private:
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
-    // DSv4 head-channel residual multiplier (≥1; defaults to 1 for non-DSv4
-    // models). input_hiddens captures with hidden_size_ * hc_mult_ so the MTP
-    // draft graph can take the target's pre-hc residual ([T, hc*dim]) as
-    // input. The post-reduce output tensor still uses hidden_size_.
-    int                     hc_mult_{1};
+    size_t                  input_hidden_size_{0};
     int                     sp_steps_{0};
-    bool                    is_dspark_draft_{false};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

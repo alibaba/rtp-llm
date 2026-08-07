@@ -309,19 +309,28 @@ class DSparkProposerMixin:
         # payload — the commit call's geometry is exactly its row layout
         # (models with a different engine-supplied layout override
         # map_commit_rows).
-        req, positions = self.map_commit_rows(
-            starts, lengths, prefix_lengths + lengths, row_count
-        )
+        try:
+            req, positions = self.map_commit_rows(
+                starts, lengths, prefix_lengths + lengths, row_count
+            )
 
-        main_x = self.combine_hidden_states(features)
-        self.commit_feature_rows(
-            main_x,
-            req,
-            positions,
-            (prefix_lengths + lengths).to(torch.int32),
-            inputs,
-        )
-        return _empty_outputs()
+            main_x = self.combine_hidden_states(features)
+            self.commit_feature_rows(
+                main_x,
+                req,
+                positions,
+                (prefix_lengths + lengths).to(torch.int32),
+                inputs,
+            )
+        finally:
+            # DSpARK implementations may use a one-shot CP handoff while
+            # mapping rows. Never let a projection/commit failure leak that
+            # context into the next eager proposal or decode commit.
+            if hasattr(self, "_active_dspark_commit_cp_ctx"):
+                self._active_dspark_commit_cp_ctx = None
+        # The generic prefill CUDA graph owns a row-aligned output buffer even
+        # though the executor only needs this call's KV-cache side effect.
+        return PyModelOutputs(main_x)
 
     def run_propose_step(
         self,

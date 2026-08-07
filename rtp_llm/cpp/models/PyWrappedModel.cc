@@ -517,8 +517,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        PyModelInputs py_model_inputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs};
-        input_list.emplace_back(std::move(py_model_inputs));
+        input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -577,26 +576,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    auto merge_optional_output = [&py_model_outputs](torch::Tensor PyModelOutputs::*field,
-                                                     const char*                    field_name) -> torch::Tensor {
-        if (!(py_model_outputs[0].*field).defined()) {
-            return torch::Tensor();
-        }
-        if (py_model_outputs.size() == 1) {
-            return (py_model_outputs[0].*field);
-        }
-        std::vector<torch::Tensor> parts;
-        parts.reserve(py_model_outputs.size());
-        for (auto& output : py_model_outputs) {
-            RTP_LLM_CHECK_WITH_INFO((output.*field).defined(), "%s must be set on every micro batch", field_name);
-            parts.emplace_back(output.*field);
-        }
-        return torch::cat(parts, 0);
-    };
-
-    auto outputs              = callForwardPostLayers(hidden_states, inputs, false);
-    outputs.draft_tokens      = merge_optional_output(&PyModelOutputs::draft_tokens, "draft_tokens");
-    return outputs;
+    return callForwardPostLayers(hidden_states, inputs, false);
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
@@ -781,11 +761,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
-        // The cloned tensor is the only hidden-state owner needed below. Drop
-        // the Python output's rank-local tensor before CP post-processing so a
-        // long-context gather/restore can reuse that storage.
-        py_model_outputs.hidden_states = torch::Tensor();
-
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
         }
@@ -799,8 +774,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // downstream Sampler::forward fail with a narrow OOB.  Detect
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
-        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        auto       attach_dspark_outputs = [&py_model_outputs](GptModelOutputs outputs) {
+        const bool has_context_request   = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        auto       attach_draft_outputs = [&py_model_outputs](GptModelOutputs outputs) {
             outputs.draft_tokens = py_model_outputs.draft_tokens;
             return outputs;
         };
@@ -812,27 +787,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return attach_dspark_outputs(std::move(outputs));
+            return attach_draft_outputs(std::move(outputs));
         }
         if (enable_prefill_cp_ && has_context_request) {
-            // When no consumer needs the full sequence hidden, gather only the
-            // last-token rows lm_head needs instead of all-gathering+restoring the
-            // full [seq, hidden] (the 14 GiB block at the 1M-prefill OOM). The
-            // gather is a small [num_lm, hidden] all-reduce-sum; see
-            // ZigZagProcessor::handleOutputsLastHidden.
-            const bool need_full_hidden = inputs.need_all_logits || inputs.need_all_hidden_states;
-            size_t     num_valid_tokens = 0;
-            if (!need_full_hidden) {
-                context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-            } else {
-                num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            }
-            if (!need_full_hidden) {
-                return attach_dspark_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
-            }
-            return attach_dspark_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
+            RTP_LLM_CHECK_WITH_INFO(!inputs.need_all_logits && !inputs.need_all_hidden_states,
+                                    "prefill context parallelism does not support returning all logits or all hidden "
+                                    "states");
+            context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
+            return attach_draft_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
         }
-        return attach_dspark_outputs(callForwardPostLayers(hidden_states, inputs, true));
+        return attach_draft_outputs(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
