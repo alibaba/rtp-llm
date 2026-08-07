@@ -109,4 +109,86 @@ TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     ASSERT_TRUE(stream->reuseCache());
 }
 
+TEST_F(GenerateStreamTest, testSpecBurstDoesNotMatchEosBeforeMinNewTokens) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createDecoderStream({9}, {0, 2, 3});
+    stream->generate_input_->generate_config->min_new_tokens = 3;
+
+    ASSERT_FALSE(stream->needFinish());
+    ASSERT_EQ(stream->seqLength(), 4);
+}
+
+TEST_F(GenerateStreamTest, testSpecBurstMatchesEosAtMinNewTokens) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createDecoderStream({9}, {1, 2, 0});
+    stream->generate_input_->generate_config->min_new_tokens = 3;
+
+    ASSERT_TRUE(stream->needFinish());
+    ASSERT_EQ(stream->seqLength(), 4);
+}
+
+TEST_F(GenerateStreamTest, testSpecBurstStopWordUsesEndPositionForMinNewTokens) {
+    auto builder = GenerateStreamBuilder();
+
+    auto early_stop = builder.createDecoderStream({9}, {1, 2, 3});
+    early_stop->generate_input_->generate_config->min_new_tokens = 3;
+    early_stop->generate_input_->generate_config->stop_words_list = {{1}};
+    ASSERT_FALSE(early_stop->needFinish());
+    ASSERT_EQ(early_stop->seqLength(), 4);
+
+    auto boundary_stop = builder.createDecoderStream({9}, {1, 2, 3});
+    boundary_stop->generate_input_->generate_config->min_new_tokens = 3;
+    boundary_stop->generate_input_->generate_config->stop_words_list = {{2, 3}};
+    ASSERT_TRUE(boundary_stop->needFinish());
+    ASSERT_EQ(boundary_stop->seqLength(), 4);
+}
+
+TEST_F(GenerateStreamTest, testEmptyAndOverlongStopWordsDoNotMatch) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createDecoderStream({9, 10}, {11});
+    stream->generate_input_->generate_config->stop_words_list = {{}, {1, 2, 3, 4}};
+
+    ASSERT_FALSE(stream->needFinish());
+    ASSERT_EQ(stream->seqLength(), 3);
+}
+
+TEST_F(GenerateStreamTest, testSpecBurstScansEosBeforeMaxLengthFinish) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createDecoderStream({9}, {1, 0, 2});
+    stream->generate_input_->generate_config->min_new_tokens = 2;
+    stream->generate_input_->generate_config->max_new_tokens = 3;
+
+    ASSERT_TRUE(stream->needFinish());
+    ASSERT_EQ(stream->seqLength(), 3);
+}
+
+TEST_F(GenerateStreamTest, testSpecBurstScansStopWordBeforeMaxLengthFinish) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createDecoderStream({9}, {1, 2, 3});
+    stream->generate_input_->generate_config->max_new_tokens  = 3;
+    stream->generate_input_->generate_config->stop_words_list = {{2}};
+
+    ASSERT_TRUE(stream->needFinish());
+    ASSERT_EQ(stream->seqLength(), 3);
+}
+
+TEST_F(GenerateStreamTest, testSpecBurstChoosesEarliestStopAcrossPatterns) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createDecoderStream({9}, {1, 2, 3});
+    stream->generate_input_->generate_config->stop_words_list = {{3}, {1}};
+
+    ASSERT_TRUE(stream->needFinish());
+    ASSERT_EQ(stream->seqLength(), 2);
+}
+
+TEST_F(GenerateStreamTest, testIgnoreEosSkipsEosAndSingletonEosStop) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createDecoderStream({9}, {0});
+    stream->generate_input_->generate_config->ignore_eos      = true;
+    stream->generate_input_->generate_config->stop_words_list = {{0}};
+
+    ASSERT_FALSE(stream->needFinish());
+    ASSERT_EQ(stream->seqLength(), 2);
+}
+
 }  // namespace rtp_llm

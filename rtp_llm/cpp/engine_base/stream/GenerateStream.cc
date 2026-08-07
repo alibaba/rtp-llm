@@ -613,7 +613,9 @@ size_t GenerateStream::maxTokenNum() const {
 }
 
 bool GenerateStream::needFinish() {
-    return seqLength() >= maxTokenNum() || needFinishBySPTokens();
+    const bool reached_max_token_num = seqLength() >= maxTokenNum();
+    const bool finished_by_sp_tokens = needFinishBySPTokens();
+    return reached_max_token_num || finished_by_sp_tokens;
 }
 
 bool GenerateStream::needFinishBySPTokens() {
@@ -641,8 +643,11 @@ void GenerateStream::matchEosToken() {
 }
 
 void GenerateStream::matchEosToken(int batch_id) {
+    const int min_check_seq_length =
+        inputLength() + generate_input_->generate_config->min_new_tokens;
     if ((!generate_input_->generate_config->ignore_eos)
-        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
+        && complete_token_ids_->matchEosToken(
+            batch_id, special_tokens_.eos_token_id, min_check_seq_length)) {
         sub_generate_status_[batch_id] = StreamState::FINISHED;
     }
 }
@@ -677,15 +682,17 @@ void GenerateStream::matchStopWordsList() {
 void GenerateStream::matchStopWordsList(int batch_id) {
     RTP_LLM_PROFILE_FUNCTION();
     // note: stop_words_list in generate_config contains stop_words_list in special_tokens
-    bool match = false;
+    const int min_check_seq_length =
+        inputLength() + generate_input_->generate_config->min_new_tokens;
+    bool      match                = false;
     for (auto& stop_words : generate_input_->generate_config->stop_words_list) {
         if (generate_input_->generate_config->ignore_eos && stop_words.size() == 1
             && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
-        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
+        if (complete_token_ids_->matchStopWordsList(
+                batch_id, stop_words, min_check_seq_length)) {
             match = true;
-            break;
         }
     }
     if (match) {
