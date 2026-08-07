@@ -94,6 +94,9 @@ class ModelFactory:
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+            keep_mla_checkpoint_weights=(
+                engine_config.load_config.keep_mla_checkpoint_weights
+            ),
         )
         return model
 
@@ -164,6 +167,9 @@ class ModelFactory:
                 merge_lora=False,  # Propose model doesn't need merge_lora
                 loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+                keep_mla_checkpoint_weights=(
+                    engine_config.load_config.keep_mla_checkpoint_weights
+                ),
             )
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)
