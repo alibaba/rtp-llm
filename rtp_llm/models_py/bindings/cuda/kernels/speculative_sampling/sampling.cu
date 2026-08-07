@@ -217,6 +217,17 @@ DeviceSamplingFromProb(uint32_t                                                 
     aggregate += aggregate_local;
 }
 
+// Fill p_vec with the draft distribution slice starting at base_token_id:
+// a one-hot at the proposed token. Point-mass proposals (dspark) carry no
+// materialized draft_probs, so the row is synthesized instead of loaded.
+template<uint32_t VEC_SIZE, typename VecT, typename IdType>
+__device__ __forceinline__ void synthesizePointMassProbVec(VecT& p_vec, IdType draft_id, uint32_t base_token_id) {
+#pragma unroll
+    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
+        p_vec[j] = base_token_id + j == static_cast<uint32_t>(draft_id) ? 1 : 0;
+    }
+}
+
 template<uint32_t             BLOCK_THREADS,
          BlockScanAlgorithm   SCAN_ALGORITHM,
          BlockReduceAlgorithm REDUCE_ALGORITHM,
@@ -324,12 +335,9 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             if (pos != num_speculative_tokens) {
                 // there is no draft_probs for the bonus token
                 if (draft_probs_point_mass) {
-                    const IdType draft_id = draft_token_ids[row_idx * num_speculative_tokens + pos];
-#pragma unroll
-                    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-                        const int token_id = (i * BLOCK_THREADS + tx) * VEC_SIZE + j;
-                        p_vec[j]           = token_id == draft_id ? DType(1) : DType(0);
-                    }
+                    synthesizePointMassProbVec<VEC_SIZE>(p_vec,
+                                                         draft_token_ids[row_idx * num_speculative_tokens + pos],
+                                                         (i * BLOCK_THREADS + tx) * VEC_SIZE);
                 } else {
                     p_vec.load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
                                + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
@@ -364,12 +372,9 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             if (pos != num_speculative_tokens) {
                 // there is no draft_probs for the bonus token
                 if (draft_probs_point_mass) {
-                    const IdType draft_id = draft_token_ids[row_idx * num_speculative_tokens + pos];
-#pragma unroll
-                    for (uint32_t j = 0; j < VEC_SIZE; ++j) {
-                        const int token_id = (i * BLOCK_THREADS + tx) * VEC_SIZE + j;
-                        p_vec[j]           = token_id == draft_id ? DType(1) : DType(0);
-                    }
+                    synthesizePointMassProbVec<VEC_SIZE>(p_vec,
+                                                         draft_token_ids[row_idx * num_speculative_tokens + pos],
+                                                         (i * BLOCK_THREADS + tx) * VEC_SIZE);
                 } else {
                     p_vec.load(draft_probs + (row_idx * num_speculative_tokens + pos) * target_vocab_size
                                + i * BLOCK_THREADS * VEC_SIZE + tx * VEC_SIZE);
