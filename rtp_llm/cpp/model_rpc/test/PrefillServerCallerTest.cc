@@ -203,6 +203,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++peer_info_call_count_;
         response->set_tp_size(peer_info_tp_size_);
+        if (peer_info_cp_size_ > 0) {
+            response->set_cp_size(peer_info_cp_size_);
+        }
         if (!peer_info_dp_addr_responses_.empty()) {
             const size_t response_index =
                 std::min<size_t>(peer_info_call_count_ - 1, peer_info_dp_addr_responses_.size() - 1);
@@ -213,9 +216,12 @@ public:
         return grpc::Status::OK;
     }
 
-    void setPeerInfoResponses(int tp_size, std::vector<std::vector<std::string>> dp_addr_responses) {
+    void setPeerInfoResponses(int                                   tp_size,
+                              std::vector<std::vector<std::string>> dp_addr_responses,
+                              int                                   cp_size = 0) {
         std::lock_guard<std::mutex> lock(mutex_);
         peer_info_tp_size_           = tp_size;
+        peer_info_cp_size_           = cp_size;
         peer_info_dp_addr_responses_ = std::move(dp_addr_responses);
         peer_info_call_count_        = 0;
     }
@@ -249,6 +255,7 @@ private:
     std::condition_variable cancel_cv_;
     GenerateInputPB         captured_request_;
     int                     peer_info_tp_size_{1};
+    int                     peer_info_cp_size_{0};
     int                     peer_info_call_count_{0};
     std::vector<std::vector<std::string>> peer_info_dp_addr_responses_;
 };
@@ -514,6 +521,7 @@ TEST_F(PrefillServerCallerTest, InvalidatePeerInfoDropsCacheAndReprobes) {
 
     auto first = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
     ASSERT_EQ(first.tp_size, 2);
+    ASSERT_EQ(first.cp_size, 1);
     ASSERT_EQ(first.dp_addrs.size(), 1);
     EXPECT_EQ(first.dp_addrs[0], "127.0.0.1:1111");
     EXPECT_EQ(server.service()->peerInfoCallCount(), 1);
@@ -530,6 +538,17 @@ TEST_F(PrefillServerCallerTest, InvalidatePeerInfoDropsCacheAndReprobes) {
     ASSERT_EQ(refreshed.dp_addrs.size(), 1);
     EXPECT_EQ(refreshed.dp_addrs[0], "127.0.0.1:2222");
     EXPECT_EQ(server.service()->peerInfoCallCount(), 2);
+}
+
+TEST_F(PrefillServerCallerTest, PeerInfoCarriesCpSizeIndependentlyFromTpSize) {
+    auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
+    service->setPeerInfoResponses(4, {{"127.0.0.1:1111"}}, /*cp_size=*/2);
+    FakePrefillRpcServer server(std::move(service));
+    ASSERT_TRUE(server.start());
+
+    auto info = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 0);
+    EXPECT_EQ(info.tp_size, 4);
+    EXPECT_EQ(info.cp_size, 2);
 }
 
 TEST_F(PrefillServerCallerTest, RpcFailureWithoutAnyChunkStaysUnsuccessful) {

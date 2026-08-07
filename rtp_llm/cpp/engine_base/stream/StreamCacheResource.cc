@@ -82,6 +82,7 @@ public:
             routing.deadline_ms     = stream->deadlineMs();
             routing.prefill_addr    = stream->prefillAddr();
             routing.prefill_tp_size = stream->getPrefillTpSize();
+            routing.prefill_cp_size = stream->getPrefillCpSize();
         }
     }
 

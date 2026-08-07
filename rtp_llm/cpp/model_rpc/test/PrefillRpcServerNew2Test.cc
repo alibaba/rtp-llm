@@ -127,6 +127,7 @@ TEST(PrefillRpcServerNew2Test, GetPeerInfoUsesPrecomputedDpGrpcAddrs) {
     PrefillRpcServerNew2 server;
     server.maga_init_params_.parallelism_config.tp_size = 2;
     server.maga_init_params_.parallelism_config.dp_size = 2;
+    server.maga_init_params_.parallelism_config.prefill_cp_config.kv_cache_sharded = true;
     server.dp_grpc_addrs_ = {"10.0.0.1:9000", "[::1]:9002"};
 
     grpc::ServerContext  context;
@@ -136,6 +137,7 @@ TEST(PrefillRpcServerNew2Test, GetPeerInfoUsesPrecomputedDpGrpcAddrs) {
     auto status = server.GetPeerInfo(&context, &request, &response);
     ASSERT_TRUE(status.ok());
     EXPECT_EQ(response.tp_size(), 2);
+    EXPECT_EQ(response.cp_size(), 2);
     EXPECT_EQ(response.dp_size(), 2);
     ASSERT_EQ(response.dp_grpc_addrs_size(), 2);
     EXPECT_EQ(response.dp_grpc_addrs(0), "10.0.0.1:9000");
@@ -158,6 +160,7 @@ TEST(PrefillRpcServerNew2Test, GetPeerInfoFallbackSkipsInvalidComputedPorts) {
 
     auto status = server.GetPeerInfo(&context, &request, &response);
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(response.cp_size(), 1);
     ASSERT_EQ(response.dp_grpc_addrs_size(), 1);
     EXPECT_TRUE(hasSuffix(response.dp_grpc_addrs(0), ":1000"));
 }

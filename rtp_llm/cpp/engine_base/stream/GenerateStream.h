@@ -538,6 +538,12 @@ public:
     void setPrefillTpSize(int prefill_tp_size) {
         prefill_tp_size_ = prefill_tp_size;
     }
+    int getPrefillCpSize() const {
+        return prefill_cp_size_;
+    }
+    void setPrefillCpSize(int prefill_cp_size) {
+        prefill_cp_size_ = prefill_cp_size;
+    }
 
 public:
     struct TimeInfo {
@@ -661,6 +667,8 @@ protected:
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
+    // Effective Prefill KV-cache CP size; independent from TP size.
+    int prefill_cp_size_ = -1;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

@@ -424,6 +424,7 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
     const auto& pdc = maga_init_params_.pd_sep_config;
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
     response->set_dp_size(static_cast<int32_t>(pc.dp_size));
+    response->set_cp_size(static_cast<int32_t>(pc.prefill_cp_config.kv_cache_sharded ? pc.tp_size : 1));
 
     if (!dp_grpc_addrs_.empty()) {
         // Preferred path: use pre-computed addresses from p2p_worker_addrs.
@@ -462,8 +463,9 @@ grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*      
         }
     }
 
-    RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, dp_size=%ld, dp_addrs=[%s]",
+    RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d, dp_size=%ld, dp_addrs=[%s]",
                      pc.tp_size,
+                     response->cp_size(),
                      pc.dp_size,
                      [&]() {
                          std::string s;

@@ -344,6 +344,8 @@ protected:
         worker_config_.transfer_backend_config.cache_store_listen_port      = 0;
         worker_config_.layer_all_num                                        = 2;
 
+        worker_config_.topology = makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0}, {1}});
+
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
         mock_sender_   = std::make_shared<MockIKVCacheSender>();
@@ -370,11 +372,7 @@ protected:
     KVCacheResourcePtr createKVCacheResource(int layer_id, int num_blocks = 2) {
         auto             resource  = std::make_shared<KVCacheResource>();
         int              layer_num = static_cast<int>(worker_config_.layer_all_num);
-        std::vector<int> layer_to_group(layer_num);
-        for (int i = 0; i < layer_num; ++i) {
-            layer_to_group[i] = i;
-        }
-        resource->initGroups(layer_num, layer_num, layer_to_group);
+        resource->initGroups(worker_config_.topology);
 
         for (int i = 0; i < layer_num; ++i) {
             if (i == layer_id) {
@@ -411,7 +409,7 @@ protected:
     }
 
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
-        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, "full");
+        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, "group" + std::to_string(layer_id));
         for (int i = 0; i < num_blocks; ++i) {
             int64_t cache_key = layer_id * 1000 + i;
             int     block_id  = i;
@@ -493,6 +491,19 @@ TEST_F(P2PConnectorWorkerTest, SendKVCache_SendRequestDeadline_AlignedWithReturn
         EXPECT_EQ(c.deadline_ms, expected_transfer_deadline)
             << "SendRequest.deadline_ms should match decode recv_task_deadline (D - return_before)";
     }
+}
+
+TEST_F(P2PConnectorWorkerTest, SendKVCache_ReadyEmptyLayersCompleteWithoutTransfer) {
+    const int64_t request_id  = 2099;
+    const int64_t deadline_ms = currentTimeMs() + 5000;
+    computed_buffers_->addBuffer(request_id, std::make_shared<LayerCacheBuffer>(0, "group0"), deadline_ms);
+    computed_buffers_->addBuffer(request_id, std::make_shared<LayerCacheBuffer>(1, "group1"), deadline_ms);
+
+    ErrorInfo result = prefill_->sendKVCache(
+        request_id, "ready-empty-layers", deadline_ms, {{"127.0.0.1", 12345}});
+    EXPECT_TRUE(result.ok());
+    EXPECT_TRUE(mock_sender_->getTransferCalls().empty());
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr);
 }
 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AllLayersTransferSuccess) {

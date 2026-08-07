@@ -560,6 +560,9 @@ message P2PConnectorBroadcastTpRequestPB {
     // Original user-request deadline. deadline_ms remains the physical
     // transfer deadline used by this broadcast and its worker operation.
     int64 request_deadline_ms = 9;
+    // True only when rank0 intentionally projected an empty CP-local block set
+    // for this worker. Ordinary empty READ requests remain malformed.
+    bool allow_empty_projection = 10;
 }
 
 // GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
@@ -572,6 +575,9 @@ message GetPeerInfoResponsePB {
     int32  tp_size                = 1;
     int32  dp_size                = 2;
     repeated string dp_grpc_addrs = 3;
+    // Effective KV-cache context-parallel size. This is 1 when TP is enabled
+    // but Prefill CP KV-cache sharding is disabled.
+    int32  cp_size                = 4;
 }
 
 message P2PConnectorBroadcastTpResponsePB {

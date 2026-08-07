@@ -602,7 +602,7 @@ bool KVCacheManager::writeP2PLayer(size_t                                model_i
     if (!p2p_connector_) {
         return false;
     }
-    if (cache_keys.empty() || cache_keys.size() != block_ids.size()) {
+    if (cache_keys.size() != block_ids.size()) {
         RTP_LLM_LOG_WARNING(
             "writeP2PLayer rejected invalid key/block pairs, request_id=%ld model_id=%zu local_layer_id=%d "
             "tag=%s keys=%zu blocks=%zu",
@@ -635,17 +635,19 @@ bool KVCacheManager::writeP2PLayer(size_t                                model_i
         return false;
     }
 
-    KVCacheResource resource;
-    resource.initGroups(config_.topologyPtr());
-    resource.setCacheKeys(cache_keys);
-    resource.mutableBlockIdsForLayer(static_cast<int>(global_layer_id), tag).assign(block_ids);
-    auto held_resource = allocator_->incrKVCacheRef(resource, cache_keys, true);
-    if (!held_resource) {
-        RTP_LLM_LOG_WARNING("writeP2PLayer failed to hold connector ref, request_id=%ld layer_id=%u tag=%s",
-                            request_id,
-                            global_layer_id,
-                            tag.c_str());
-        return false;
+    auto held_resource = std::make_shared<KVCacheResource>();
+    held_resource->initGroups(config_.topologyPtr());
+    held_resource->setCacheKeys(cache_keys);
+    held_resource->mutableBlockIdsForLayer(static_cast<int>(global_layer_id), tag).assign(block_ids);
+    if (!cache_keys.empty()) {
+        held_resource = allocator_->incrKVCacheRef(*held_resource, cache_keys, true);
+        if (!held_resource) {
+            RTP_LLM_LOG_WARNING("writeP2PLayer failed to hold connector ref, request_id=%ld layer_id=%u tag=%s",
+                                request_id,
+                                global_layer_id,
+                                tag.c_str());
+            return false;
+        }
     }
 
     return p2p_connector_->writeByLayerTag(static_cast<int>(global_layer_id),

@@ -102,6 +102,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
         std::min(request_deadline_ms, now_ms + config_.p2p_max_transfer_deadline_ms);
     const auto& prefill_addr    = routing->prefill_addr;
     const int   prefill_tp_size = routing->prefill_tp_size;
+    const int   prefill_cp_size = routing->prefill_cp_size;
 
     if (unique_key.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: unique_key is empty");
@@ -121,16 +122,50 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
         return {nullptr,
                 ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "cache topology is null")};
     }
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    if (!no_transfer) {
-        layer_cache_buffers = LayerCacheBufferUtil::convert(
-            *resource, *config_.topology, block_range.first, block_range.second, config_.cp_rank, config_.cp_size);
-    }
-    if (!no_transfer && layer_cache_buffers.empty()) {
-        RTP_LLM_LOG_WARNING("asyncRead: layer_cache_buffers is empty");
+    if (!no_transfer && prefill_cp_size != config_.cp_size) {
+        RTP_LLM_LOG_WARNING("asyncRead: source/target CP layout mismatch, prefill_cp_size=%d, decode_cp_size=%d",
+                            prefill_cp_size,
+                            config_.cp_size);
         collector->success = false;
         return {nullptr,
-                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "layer_cache_buffers is empty")};
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                          "source and target CP sizes must match")};
+    }
+    P2PBroadcastClient::RankLayerCacheBuffers rank_layer_cache_buffers;
+    if (!no_transfer) {
+        const size_t worker_num = config_.worker_grpc_addrs.size();
+        if (config_.cp_size <= 0 || worker_num == 0 || worker_num % static_cast<size_t>(config_.cp_size) != 0) {
+            RTP_LLM_LOG_WARNING(
+                "asyncRead: invalid CP layout, worker_num=%zu, cp_size=%d", worker_num, config_.cp_size);
+            collector->success = false;
+            return {nullptr,
+                    ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                              "worker count is incompatible with CP size")};
+        }
+
+        // Scheduler only runs on rank 0. Build every worker's local view here;
+        // allocator block ids are rank-synchronized before asyncRead starts.
+        rank_layer_cache_buffers.reserve(worker_num);
+        for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
+            const int cp_rank = static_cast<int>(worker_rank % static_cast<size_t>(config_.cp_size));
+            rank_layer_cache_buffers.push_back(LayerCacheBufferUtil::convert(*resource,
+                                                                             *config_.topology,
+                                                                             block_range.first,
+                                                                             block_range.second,
+                                                                             cp_rank,
+                                                                             config_.cp_size));
+        }
+    }
+    const bool all_rank_buffers_empty =
+        std::all_of(rank_layer_cache_buffers.begin(), rank_layer_cache_buffers.end(), [](const auto& buffers) {
+            return buffers.empty();
+        });
+    if (!no_transfer && all_rank_buffers_empty) {
+        RTP_LLM_LOG_WARNING("asyncRead: all rank layer_cache_buffers are empty");
+        collector->success = false;
+        return {nullptr,
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                          "all rank layer_cache_buffers are empty")};
     }
 
     auto async_context = std::make_shared<P2PConnectorAsyncReadContext>(resource,
@@ -148,7 +183,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
          unique_key,
          request_deadline_ms,
          transfer_deadline_ms,
-         layer_cache_buffers = std::move(layer_cache_buffers),
+         rank_layer_cache_buffers = std::move(rank_layer_cache_buffers),
          collector,
          async_context,
          prefill_tp_size,
@@ -164,7 +199,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
                                                         unique_key,
                                                         request_deadline_ms,
                                                         transfer_deadline_ms,
-                                                        layer_cache_buffers,
+                                                        rank_layer_cache_buffers,
                                                         collector,
                                                         start_error,
                                                         prefill_tp_size,
@@ -210,7 +245,7 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     const std::string&                                      unique_key,
     int64_t                                                 request_deadline_ms,
     int64_t                                                 transfer_deadline_ms,
-    const std::vector<std::shared_ptr<LayerCacheBuffer>>&   layer_cache_buffers,
+    const P2PBroadcastClient::RankLayerCacheBuffers&        rank_layer_cache_buffers,
     const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
     ErrorInfo&                                              out_error,
     int                                                     prefill_tp_size,
@@ -258,14 +293,14 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     if (no_transfer) {
         tp_sync_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
     } else {
-        tp_sync_result = tp_broadcast_client_->broadcast(request_id,
-                                                         layer_cache_buffers,
-                                                         {},
-                                                         unique_key,
-                                                         transfer_deadline_ms,
-                                                         P2PConnectorBroadcastType::READ,
-                                                         prefill_tp_size,
-                                                         request_deadline_ms);
+        tp_sync_result = tp_broadcast_client_->broadcastPerRank(request_id,
+                                                                rank_layer_cache_buffers,
+                                                                {},
+                                                                unique_key,
+                                                                transfer_deadline_ms,
+                                                                P2PConnectorBroadcastType::READ,
+                                                                prefill_tp_size,
+                                                                request_deadline_ms);
     }
     const int64_t broadcast_cost_us = currentTimeUs() - broadcast_start_us;
     if (broadcast_cost_us >= 100000) {

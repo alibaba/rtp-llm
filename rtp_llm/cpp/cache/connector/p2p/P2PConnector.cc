@@ -454,8 +454,20 @@ bool P2PConnector::executeRead(int64_t                                 request_i
         setP2PResponse(response, error_info);
         return false;
     };
-    if (unique_key.empty() || p2p_request.layer_blocks_size() == 0) {
-        return reject_read("READ request has empty unique_key or layer_blocks");
+    if (unique_key.empty()) {
+        return reject_read("READ request has empty unique_key");
+    }
+    if (deadline_ms <= currentTimeMs()) {
+        return reject_read("READ request deadline has expired");
+    }
+
+    const bool has_layer_blocks = p2p_request.layer_blocks_size() > 0;
+    if (!has_layer_blocks
+        && (!p2p_request.allow_empty_projection() || config_.worker_config.cp_size <= 1)) {
+        return reject_read("READ request has no layer blocks");
+    }
+    if (has_layer_blocks && p2p_request.allow_empty_projection()) {
+        return reject_read("READ request mixes layer blocks with empty-projection marker");
     }
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;

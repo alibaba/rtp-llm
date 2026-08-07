@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnector.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -23,6 +24,16 @@ namespace rtp_llm {
 namespace test {
 
 namespace {
+
+std::shared_ptr<const CacheTopology>
+makeResourceTopology(int group_num, int layer_num, const std::vector<int>& layer_to_group_id) {
+    std::vector<std::vector<int>> layer_group_ids;
+    layer_group_ids.reserve(static_cast<size_t>(layer_num));
+    for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
+        layer_group_ids.push_back({layer_to_group_id.at(static_cast<size_t>(layer_id))});
+    }
+    return makeTestCacheTopology(group_num, layer_num, layer_group_ids);
+}
 
 class TestMeta final: public Meta {
 public:
@@ -67,6 +78,9 @@ protected:
         cache_config_.block_size_bytes = 1024;
         cache_config_.dtype            = rtp_llm::TYPE_FP16;
         cache_config_.layer_to_group_id.assign(static_cast<size_t>(cache_config_.layer_all_num), 0);
+        const auto topology = makeResourceTopology(
+            /*group_num=*/1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+        cache_config_.setTopology(topology->groups(), topology->layers());
 
         kv_cache_config_.memory_cache_size_mb         = 100;
         kv_cache_config_.memory_cache_sync_timeout_ms = 1000;
@@ -349,7 +363,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenCacheKeysEmpty)
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    resource.initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     // leave cacheKeys empty to hit the early return
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -384,7 +398,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     }
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    resource.initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
@@ -414,7 +428,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenNoMatchContexts
     // and will be processed/cleaned up by the coordinator update loop if enabled.
     // Use a plain shared_ptr here to avoid custom-deleter side effects in this no-connector path.
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    resource->initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     // Don't let gmock keep a ref to `resource` until program exit.
     // gmock actions are stored as const; use a shared holder to release the ref after first call.
     auto resource_holder = std::make_shared<std::shared_ptr<KVCacheResource>>(resource);
@@ -526,7 +540,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenCacheKeysEmpty
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    resource.initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     // leave cacheKeys empty
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -548,7 +562,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenIncrKVCacheRef
 
     // Build a connector context with non-empty cache keys.
     auto ctx_resource = std::make_shared<KVCacheResource>();
-    ctx_resource->initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    ctx_resource->initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     ctx_resource->cacheKeys()    = CacheKeysType{1, 2, 3};
     auto                  rw_ctx = std::make_shared<testing::NiceMock<MockKVCacheConnectorReadWriteContext>>();
     std::shared_ptr<Meta> meta =
@@ -573,7 +587,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenMemory
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    resource.initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
@@ -612,7 +626,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenConnec
     coordinator_->allocator_  = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    resource.initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
@@ -652,7 +666,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnFusedContext_WhenNoConn
     coordinator_->allocator_ = allocator_;
 
     KVCacheResource resource;
-    resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    resource.initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     resource.cacheKeys() = CacheKeysType{1, 2, 3};
 
     auto selected_resource        = makeResourceWithAutoDecr();
@@ -762,7 +776,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_UsesConn
         cache_config_, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
 
     KVCacheResource req_resource;
-    req_resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    req_resource.initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     req_resource.cacheKeys() = CacheKeysType{11, 22, 33};
     auto resource            = makeResourceWithAutoDecr();
 
@@ -795,6 +809,9 @@ TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_Normaliz
     cache_config.cache_specs.resize(2);
     cache_config.group_types       = {CacheGroupType::FULL, CacheGroupType::FULL};
     cache_config.layer_to_group_id = {1, 0, 1};
+    const auto topology = makeResourceTopology(
+        /*group_num=*/2, cache_config.layer_all_num, cache_config.layer_to_group_id);
+    cache_config.setTopology(topology->groups(), topology->layers());
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, KVCacheConfig{}, RuntimeConfig{}, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
@@ -821,7 +838,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_Normaliz
     std::shared_ptr<KVCacheResource> held_resource;
     {
         KVCacheResource req_resource;
-        req_resource.initGroups(/*group_num=*/2, /*layer_num=*/1, /*layer_to_group_id=*/{1});
+        req_resource.initGroups(makeResourceTopology(/*group_num=*/2, /*layer_num=*/1, {1}));
         req_resource.cacheKeys() = CacheKeysType{101, 102};
         req_resource.mutableBlockIds(/*group_id=*/1).assign(BlockIndicesType{11, 12});
 
@@ -869,7 +886,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, HoldKVCacheResourceForConnector_Preserve
         }));
 
     KVCacheResource req_resource;
-    req_resource.initGroups(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id);
+    req_resource.initGroups(makeResourceTopology(1, cache_config_.layer_all_num, cache_config_.layer_to_group_id));
     req_resource.cacheKeys() = CacheKeysType{7, 8};
     req_resource.mutableBlockIds(0).assign(BlockIndicesType{3, 4});
 
