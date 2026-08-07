@@ -10,7 +10,7 @@ A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU i
 - **HTTP control**: 11 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /metrics)
 - **Inflight leak detection**: 30s periodic check with 60s grace period
 - **KV cache modeling**: LRU cache with prefix matching, pressure simulation
-- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
+- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches`, default 4, with backpressure rejection), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
 
 ## Quick Start
 
@@ -32,6 +32,7 @@ bash run_online_eval.sh
 | prefill.fixed_ms | null | Fixed prefill latency (bypasses formula) |
 | prefill.min_ms | null | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast |
 | prefill.scale | 1.0 | Prefill-specific multiplier |
+| prefill.max_waiting_batches | 4 | Cap on queued (not-running) prefill batches per engine; excess enqueues are rejected (backpressure). Rule of thumb: n ≈ SLO_ms / batch_ms − 1 (e.g. SLO 1000 ms, batch 150 ms → 4, deepest wait 600 ms + 150 ms execution leaves ~25% headroom). For 1x-scale runs where a batch takes ~330–400 ms, lower to 1–2. <= 0 disables the cap (unbounded queue) |
 | decode.scale | 1.0 | Decode-specific multiplier |
 | decode.step_ms_by_batch | [[1,1.0],...] | Per-step latency by batch size |
 | decode.per_token_ms | null | Fixed per-token decode latency (ms); when set, overrides step_ms_by_batch curve (e.g. 45.0 ≈ DeepSeek V3 ~22 tok/s) |

@@ -15,6 +15,17 @@ import java.util.concurrent.ThreadLocalRandom;
 final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /**
+     * Default cap on queued (not running) prefill batches per engine, JSON
+     * "prefill.max_waiting_batches". Derivation: prefill batches run FIFO, so the
+     * k-th queued batch waits k × batch_ms before it starts. With SLO ≈ 1000 ms
+     * and a prefill execution of ~150 ms the wait budget is SLO − execution ≈
+     * 850 ms; n = 4 bounds the deepest wait at 4 × 150 = 600 ms (750 ms total),
+     * leaving ~25% headroom. Rule of thumb: n ≈ SLO_ms / batch_ms − 1.
+     * Values <= 0 disable the cap (unbounded queue, legacy behavior).
+     */
+    static final int DEFAULT_MAX_WAITING_PREFILL_BATCHES = 4;
+
     private volatile int blockSize;
     private final double sleepScale;
     private final double prefillScale;
@@ -23,6 +34,9 @@ final class MockPerformanceModel {
     // Guards against sleep_scale making prefill unrealistically fast. Null signals
     // "absent in JSON → no floor".
     private final Double prefillMinMs;
+    // Cap on queued (not running) prefill batches from JSON "prefill.max_waiting_batches".
+    // <= 0 disables the cap; defaults to DEFAULT_MAX_WAITING_PREFILL_BATCHES when absent.
+    private final int maxWaitingPrefillBatches;
     private final PrefillTimeFormula prefillFormula;
     private final List<DecodePoint> decodePoints;
     private final double decodeScale;
@@ -43,6 +57,7 @@ final class MockPerformanceModel {
                                  double prefillScale,
                                  Double fixedPrefillMs,
                                  Double prefillMinMs,
+                                 int maxWaitingPrefillBatches,
                                  PrefillTimeFormula prefillFormula,
                                  List<DecodePoint> decodePoints,
                                  double decodeScale,
@@ -54,6 +69,7 @@ final class MockPerformanceModel {
         this.prefillScale = prefillScale;
         this.fixedPrefillMs = fixedPrefillMs;
         this.prefillMinMs = prefillMinMs;
+        this.maxWaitingPrefillBatches = maxWaitingPrefillBatches;
         this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
         this.decodeScale = decodeScale;
@@ -70,6 +86,8 @@ final class MockPerformanceModel {
         double prefillScale = prefill.path("scale").asDouble(1.0);
         Double fixedPrefillMs = prefill.has("fixed_ms") ? prefill.get("fixed_ms").asDouble() : null;
         Double prefillMinMs = prefill.has("min_ms") ? prefill.get("min_ms").asDouble() : null;
+        int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
+                .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
 
         String formulaSource = loadPrefillFormula(masterConfigFile);
         PrefillTimeFormula formula = formulaSource == null ? null : PrefillTimeFormula.parse(formulaSource);
@@ -91,8 +109,8 @@ final class MockPerformanceModel {
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         double cacheAdmissionRate = performance.path("cache_admission_rate").asDouble(1.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale, fixedPrefillMs,
-                prefillMinMs, formula, List.copyOf(points), decode.path("scale").asDouble(1.0),
-                perTokenMs, jitterPct, cacheAdmissionRate);
+                prefillMinMs, maxWaitingPrefillBatches, formula, List.copyOf(points),
+                decode.path("scale").asDouble(1.0), perTokenMs, jitterPct, cacheAdmissionRate);
     }
 
     private static String loadPrefillFormula(String masterConfigFile) throws IOException {
@@ -179,6 +197,14 @@ final class MockPerformanceModel {
     /** Python launcher {@code --block-size}: override the block size from the perf config. */
     void setBlockSize(int blockSize) {
         this.blockSize = blockSize;
+    }
+
+    /**
+     * Cap on queued (not running) prefill batches per engine
+     * (JSON "prefill.max_waiting_batches", default 4). <= 0 means unbounded.
+     */
+    int maxWaitingPrefillBatches() {
+        return maxWaitingPrefillBatches;
     }
 
     void setJitterPct(double pct) {

@@ -285,7 +285,10 @@ class HighConcurrencyStressTest {
                 "block_size", 1024,
                 "sleep_scale", 1.0,
                 "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
+                // This stress test deliberately floods each prefill engine with
+                // deep queues; disable the waiting-queue cap (default 4) to keep
+                // the original unbounded-queue behavior under test.
+                "prefill", Map.of("scale", 1.0, "max_waiting_batches", 0),
                 "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
         MAPPER.writeValue(master.toFile(), Map.of(
                 "zone_process_setting", Map.of(

@@ -4,7 +4,8 @@
   "prefill": {
     "fixed_ms": 1.0,
     "min_ms": 150.0,
-    "scale": 1.0
+    "scale": 1.0,
+    "max_waiting_batches": 4
   },
   "decode": {
     "scale": 1.0,
