@@ -12,6 +12,8 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
 def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
     model._gen_num_per_cycle = gamma
+    # __init__ is bypassed; mirror its non-CP default for the commit path.
+    model._dspark_commit_cp_ctx = None
     model._v4_args = type(
         "Args", (), {"window_size": 128, "dim": 8, "vocab_size": 17}
     )()
@@ -132,12 +134,19 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
             def __init__(self) -> None:
                 self._kv_cache = None
                 self._block_tables_by_type = {}
+                self._cp_ctx = None
                 self.freqs_cis = torch.zeros((32, 2), dtype=torch.float32)
                 self.wkv = object()
                 self.kv_norm = object()
 
             def _ensure_freqs_cis_bound(self) -> None:
                 pass
+
+            def _swa_entries_per_block(self) -> int:
+                return 134
+
+            def _swa_cp_byte_sliced(self) -> bool:
+                return False
 
             def _pool_entries_per_block(self, _region: int) -> int:
                 return 134

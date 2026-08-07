@@ -1038,9 +1038,14 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        // speculative decoding info
-        torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        // speculative decoding info. DSpark seeding is commit-only: there is
+        // no draft sample, and the round-head proposal never crosses rounds,
+        // so streams carry no draft probs.
+        torch::Tensor propose_all_probs;
+        if (!is_dspark_) {
+            propose_all_probs =
+                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        }
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_dspark_) {
@@ -1081,9 +1086,14 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
 
-        // speculative decoding info
-        torch::Tensor propose_all_probs =
-            draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        // speculative decoding info. DSpark's tail is commit-only and the
+        // round-head proposal never crosses rounds, so streams carry no
+        // draft probs.
+        torch::Tensor propose_all_probs;
+        if (!is_dspark_) {
+            propose_all_probs =
+                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+        }
 
         // This scalar read runs on the bookkeeping worker after accept_len is
         // ready, so it does not sync the main thread. Move to main thread only

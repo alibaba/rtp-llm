@@ -1099,21 +1099,21 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
 
         const auto& propose_probs_t  = tensors_holder[0];
         const auto& propose_hidden_t = tensors_holder[1];
-        RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.numel() > 0,
-                                "[mtp-grpc] propose_probs must be non-empty, stream=%ld",
-                                stream->streamId());
         if (is_dspark_) {
-            RTP_LLM_CHECK_WITH_INFO(sp_output_buffer->tokens.size(1) == static_cast<int64_t>(propose_step_ + 1),
-                                    "[dspark-grpc] token row width %ld != gamma+1 %zu for stream=%ld",
+            // Commit-only seeding: the wire row is [anchor, placeholder]
+            // (the MTP one-step shape). Proposals never cross the PD
+            // boundary — the first proposal is produced at the decode
+            // round head.
+            RTP_LLM_CHECK_WITH_INFO(sp_output_buffer->tokens.size(1) == 2,
+                                    "[dspark-grpc] token row width %ld != 2 (anchor + placeholder) for stream=%ld",
                                     sp_output_buffer->tokens.size(1),
-                                    propose_step_ + 1,
                                     stream->streamId());
-            RTP_LLM_CHECK_WITH_INFO(propose_probs_t.dim() == 3
-                                        && propose_probs_t.size(1) == static_cast<int64_t>(propose_step_),
-                                    "[dspark-grpc] draft_probs must be [1,gamma,vocab], got dim=%ld gamma=%ld",
-                                    propose_probs_t.dim(),
-                                    propose_probs_t.dim() >= 2 ? propose_probs_t.size(1) : -1);
-        } else if (propose_step_ > 1) {
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.numel() > 0,
+                                    "[mtp-grpc] propose_probs must be non-empty, stream=%ld",
+                                    stream->streamId());
+        }
+        if (!is_dspark_ && propose_step_ > 1) {
             const int64_t hidden_dim   = propose_hidden_t.defined() ? propose_hidden_t.dim() : -1;
             const int64_t hidden_numel = propose_hidden_t.defined() ? propose_hidden_t.numel() : -1;
             const bool    valid_hidden =
@@ -1126,20 +1126,32 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
                                     hidden_numel);
         }
 
-        sp_output_buffer->all_probs     = to_cuda_async(propose_probs_t);
+        // Round-head DSpARK: proposals and their point-mass q are produced on
+        // this worker at the decode round head; the handoff carries a
+        // 0-element probs sentinel (PrefillRpcServer) that must stay "none"
+        // here — verify-time q comes from the round-head device state.
+        if (is_dspark_) {
+            sp_output_buffer->all_probs = torch::Tensor();
+        } else {
+            sp_output_buffer->all_probs = to_cuda_async(propose_probs_t);
+        }
         sp_output_buffer->hidden_states = to_cuda_async(propose_hidden_t);
 
         auto       accept_len_cpu     = torch::ones({1}, pinned_i32);
         auto       accept_tokens_cpu  = torch::zeros({1, static_cast<int64_t>(propose_step_ + 1)}, pinned_i32);
+        // DSpARK device state keeps the [1, gamma] propose-token shape later
+        // rounds overwrite, but the wire carries no proposals — zero-fill
+        // instead of reading past the 2-wide wire row.
         auto       propose_tokens_cpu =
-            torch::empty({1, static_cast<int64_t>(is_dspark_ ? propose_step_ : 1)}, pinned_i32);
+            is_dspark_ ? torch::zeros({1, static_cast<int64_t>(propose_step_)}, pinned_i32) :
+                         torch::empty({1, 1}, pinned_i32);
         auto       next_seq_len_cpu   = torch::empty({1}, pinned_i32);
         auto*      token_ptr          = sp_output_buffer->tokens.data_ptr<int32_t>();
         const auto seq_length         = stream->seqLength();
         accept_tokens_cpu.data_ptr<int32_t>()[0]  = token_ptr[0];
-        std::memcpy(propose_tokens_cpu.data_ptr<int32_t>(),
-                    token_ptr + 1,
-                    static_cast<size_t>(is_dspark_ ? propose_step_ : 1) * sizeof(int32_t));
+        if (!is_dspark_) {
+            std::memcpy(propose_tokens_cpu.data_ptr<int32_t>(), token_ptr + 1, sizeof(int32_t));
+        }
         next_seq_len_cpu.data_ptr<int32_t>()[0]   = seq_length;
 
         auto accept_len_gpu     = to_cuda_async(accept_len_cpu);

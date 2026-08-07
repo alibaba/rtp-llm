@@ -425,24 +425,29 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
                                 "mtp remote generate propose token should not be empty");
     }
-    generate_request.mutable_propose_token_ids()->CopyFrom(
-        {stream->getProposeToken().begin(), stream->getProposeToken().end()});
+    // DSpark seeding is commit-only: the handoff carries no proposal, and the
+    // decode round head produces the first one. The stream's legacy
+    // {target_token, -1} propose pair is bookkeeping noise — send nothing.
+    if (maga_init_params_.sp_config.type != SP_TYPE_DSPARK) {
+        generate_request.mutable_propose_token_ids()->CopyFrom(
+            {stream->getProposeToken().begin(), stream->getProposeToken().end()});
 
-    auto sp_output_buffer = stream->getSPOutputBuffer();
+        auto sp_output_buffer = stream->getSPOutputBuffer();
 
-    if (sp_output_buffer) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
-        torch::Tensor hidden_states_cpu;
-        if (!sp_output_buffer->hidden_states.defined()) {
-            // dummy hidden states, so datatype is not important
-            hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
-        } else {
-            hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
-                                                                            sp_output_buffer->hidden_states;
+        if (sp_output_buffer) {
+            auto all_probs_cpu = sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() :
+                                                                         sp_output_buffer->all_probs;
+            torch::Tensor hidden_states_cpu;
+            if (!sp_output_buffer->hidden_states.defined()) {
+                // dummy hidden states, so datatype is not important
+                hidden_states_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+            } else {
+                hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
+                                                                                sp_output_buffer->hidden_states;
+            }
+            QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
+            QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
         }
-        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
-        QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 
     generate_request.set_stage(RemoteStage::GENERATE);
