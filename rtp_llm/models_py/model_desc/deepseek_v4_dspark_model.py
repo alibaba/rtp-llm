@@ -38,7 +38,7 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
-from rtp_llm.models_py.modules.dsv4.cp import take_dspark_commit_cp_ctx
+from rtp_llm.models_py.modules.dsv4.cp import build_cp_context
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
@@ -58,6 +58,7 @@ from rtp_llm.models_py.modules.factory.attention.common import (
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkMarkovHead,
     DSparkProposerMixin,
+    optional_tensor,
 )
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -119,14 +120,20 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self._dspark_target_layer_ids = tuple(int(v) for v in target_layer_ids)
         self._dspark_markov_rank = int(markov_rank)
         self.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+        self.tp_rank = int(getattr(parallelism_config, "tp_rank", 0) or 0)
         # Commit-side CP context. Target features remain rank-local after the
-        # target model's zigzag prefill, so draft commit gathers the projected
-        # KV for both replicated and byte-sharded prefill-CP cache layouts.
+        # target model's zigzag prefill; the commit forward goes through the
+        # standard CP handleInputs, so its row map is derived per call from
+        # the attached context_parallel_info (see map_commit_rows).
         self._dspark_commit_cp_enabled = False
         self._active_dspark_commit_cp_ctx = None
+        self._dspark_kv_cache_sharded = False
         _cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
         if _cp_cfg is not None and bool(_cp_cfg.is_enabled()) and self.tp_size > 1:
             self._dspark_commit_cp_enabled = True
+            self._dspark_kv_cache_sharded = bool(
+                getattr(_cp_cfg, "kv_cache_sharded", False)
+            )
 
         if self._gen_num_per_cycle <= 0:
             raise ValueError(
@@ -506,18 +513,52 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         lengths: torch.Tensor,
         committed_ends: torch.Tensor,
         row_count: int,
+        inputs: PyModelInputs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """CP prefill hands the commit the target's rank-local zigzag
-        rows, so their (request, position) map comes from the CPContext the
-        target prefill just published — the packed ``starts``/``lengths``
-        layout only describes the non-CP row order."""
-        if not self._dspark_commit_cp_enabled:
-            return super().map_commit_rows(starts, lengths, committed_ends, row_count)
-        cp_ctx = take_dspark_commit_cp_ctx()
-        if cp_ctx is None:
-            # Prefill CP is a one-shot handoff. Decode commits in a colocated
-            # engine have ordinary dense geometry and no pending CPContext.
-            return super().map_commit_rows(starts, lengths, committed_ends, row_count)
+        """CP prefill hands the commit the target's rank-local zigzag rows;
+        this forward went through the same standard CP handleInputs, so the
+        row -> (request, position) map is derived from the CP metadata it
+        attached — the packed ``starts``/``lengths`` layout only describes
+        the non-CP row order."""
+        attention_inputs = inputs.attention_inputs
+        cp_info = getattr(attention_inputs, "context_parallel_info", None)
+        if not self._dspark_commit_cp_enabled or cp_info is None:
+            return super().map_commit_rows(
+                starts, lengths, committed_ends, row_count, inputs
+            )
+        padding_mask = optional_tensor(
+            getattr(cp_info, "prefill_qkv_padding_mask", None)
+        )
+        if padding_mask is None or int(padding_mask.numel()) == 0:
+            # No CP-split prefill stream in this forward (e.g. a dense
+            # decode-phase commit): the packed layout applies unchanged.
+            return super().map_commit_rows(
+                starts, lengths, committed_ends, row_count, inputs
+            )
+        device = committed_ends.device
+        prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
+        position_offset: Any = 0
+        if prefix is not None and int(prefix.numel()) > 0:
+            position_offset = prefix.to(device=device, dtype=torch.long)
+        cp_ctx = build_cp_context(
+            cp_info,
+            self.tp_size,
+            self.tp_rank,
+            row_count,
+            device,
+            position_offset=position_offset,
+            kv_cache_sharded=self._dspark_kv_cache_sharded,
+        )
+        if not getattr(self, "_dspark_cp_commit_logged", False):
+            self._dspark_cp_commit_logged = True
+            logging.info(
+                "[dspark] commit row map derived from standard CP metadata "
+                "(cp_size=%d, cp_rank=%d, kv_cache_sharded=%s, rows=%d)",
+                self.tp_size,
+                self.tp_rank,
+                self._dspark_kv_cache_sharded,
+                row_count,
+            )
         positions = cp_ctx.global_positions
         if int(positions.numel()) != int(row_count):
             raise RuntimeError(
@@ -537,6 +578,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         pos32 = torch.where(valid, pos32, torch.full_like(pos32, -1))
         self._active_dspark_commit_cp_ctx = cp_ctx
         return req32.contiguous(), pos32.contiguous()
+
+    def cleanup_commit_state(self) -> None:
+        self._active_dspark_commit_cp_ctx = None
 
     def commit_feature_rows(
         self,

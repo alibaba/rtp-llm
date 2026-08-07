@@ -84,14 +84,6 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
     EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t1.data_ptr());
 }
 
-TEST_F(ModelDataTest, testDSparkDraftBypassesGenericPrefillContextParallel) {
-    // The target keeps ordinary prefill CP enabled, while the DSpARK draft
-    // keeps the complete B*gamma non-causal query block on every rank.
-    EXPECT_TRUE(PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/true, /*bypass=*/false));
-    EXPECT_FALSE(PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/true, /*bypass=*/true));
-    EXPECT_FALSE(PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/false, /*bypass=*/false));
-}
-
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     GptModelInputs inputs;
     // expand() preserves the logical DSpARK aux shape without allocating the

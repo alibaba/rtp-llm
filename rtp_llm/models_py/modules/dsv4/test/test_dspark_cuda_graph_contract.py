@@ -14,6 +14,9 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model._gen_num_per_cycle = gamma
     model._dspark_commit_cp_enabled = False
     model._active_dspark_commit_cp_ctx = None
+    model._dspark_kv_cache_sharded = False
+    model.tp_size = 2
+    model.tp_rank = 0
     model._v4_args = type(
         "Args", (), {"window_size": 128, "dim": 8, "vocab_size": 17}
     )()
@@ -109,7 +112,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertTrue(torch.equal(req, expected_req))
         self.assertTrue(torch.equal(positions, expected_positions))
 
-    def test_cp_row_map_is_consumed_for_one_commit_only(self) -> None:
+    def test_cp_row_map_derives_from_forward_cp_metadata(self) -> None:
         model = _dspark_harness(gamma=3)
         model._dspark_commit_cp_enabled = True
         starts = torch.tensor([0], dtype=torch.int32)
@@ -123,25 +126,40 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
             cp_rank=0,
             kv_cache_sharded=False,
         )
+        cp_inputs = SimpleNamespace(
+            attention_inputs=SimpleNamespace(
+                context_parallel_info=SimpleNamespace(
+                    prefill_qkv_padding_mask=torch.ones(4, dtype=torch.bool)
+                ),
+                prefix_lengths=torch.tensor([10], dtype=torch.int32),
+            )
+        )
 
         with patch.object(
-            dspark_model_module, "take_dspark_commit_cp_ctx", return_value=cp_ctx
-        ):
+            dspark_model_module, "build_cp_context", return_value=cp_ctx
+        ) as build_mock:
             req, positions = model.map_commit_rows(
-                starts, lengths, committed_ends, row_count=2
+                starts, lengths, committed_ends, row_count=2, inputs=cp_inputs
             )
 
         self.assertEqual(req.tolist(), [0, 0])
         self.assertEqual(positions.tolist(), [10, 13])
         self.assertIs(model._active_dspark_commit_cp_ctx, cp_ctx)
+        # The ctx is derived from THIS forward's metadata, sized by its rows.
+        self.assertEqual(build_mock.call_args.args[3], 2)
 
+        # A dense forward (no CP-split prefill stream) uses the packed layout
+        # even on a CP-enabled engine.
         model._active_dspark_commit_cp_ctx = None
-        with patch.object(
-            dspark_model_module, "take_dspark_commit_cp_ctx", return_value=None
-        ):
-            req, positions = model.map_commit_rows(
-                starts, lengths, committed_ends, row_count=4
+        dense_inputs = SimpleNamespace(
+            attention_inputs=SimpleNamespace(
+                context_parallel_info=None,
+                prefix_lengths=torch.tensor([10], dtype=torch.int32),
             )
+        )
+        req, positions = model.map_commit_rows(
+            starts, lengths, committed_ends, row_count=4, inputs=dense_inputs
+        )
 
         self.assertEqual(req.tolist(), [0, 0, 0, 0])
         self.assertEqual(positions.tolist(), [10, 11, 12, 13])

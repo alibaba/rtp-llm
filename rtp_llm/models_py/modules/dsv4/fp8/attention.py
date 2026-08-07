@@ -13,6 +13,7 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import json
+import logging
 import os
 import threading
 from contextlib import suppress
@@ -316,6 +317,9 @@ def _build_suffix_cp_sliced_slot_mapping(
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 _DSV4_FP8_KV_ENTRY_BYTES = 584
+
+# Call sites whose first byte-sliced (CP-RR) SWA cache write has been logged.
+_SWA_CP_RR_LOGGED_SITES: set = set()
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
@@ -1315,6 +1319,19 @@ class AttentionFP8(nn.Module):
             return None
         raw = self._pool_raw_u8(SWA_KV)
         assert raw is not None, "byte-sliced FP8 SWA pool unavailable"
+        # One INFO per call site so smoke logs positively confirm which paths
+        # engaged the CP-RR (byte-sliced) SWA cache layout.
+        if validation_site not in _SWA_CP_RR_LOGGED_SITES:
+            _SWA_CP_RR_LOGGED_SITES.add(validation_site)
+            cp_ctx = getattr(self, "_cp_ctx", None)
+            logging.info(
+                "[dsv4-cp-rr] byte-sliced SWA cache path engaged at %s "
+                "(cp_size=%s, cp_rank=%s, entries_per_block=%d)",
+                validation_site,
+                getattr(cp_ctx, "cp_size", None),
+                getattr(cp_ctx, "cp_rank", None),
+                int(full_entries_per_block),
+            )
         return build_cp_byte_sliced_slot_compaction(
             slot_mapping,
             full_entries_per_block=full_entries_per_block,

@@ -105,7 +105,6 @@ from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context,
     cp_gather_last_by_request,
-    publish_dspark_commit_cp_ctx,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
@@ -390,10 +389,6 @@ def forward_layers(
 
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     capture_aux = bool(capture_ids)
-    if capture_aux and cp_ctx is not None:
-        # The DSpark draft commit that follows this forward receives the
-        # rank-local aux rows; hand it the row -> (request, position) map.
-        publish_dspark_commit_cp_ctx(cp_ctx)
 
     prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
     use_prefill_fast_path = _prefill_fast_path_enabled(

@@ -198,13 +198,20 @@ class DSparkProposerMixin:
         lengths: torch.Tensor,
         committed_ends: torch.Tensor,
         row_count: int,
+        inputs: PyModelInputs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Map each committed feature row to ``(request id, absolute
         position)``.  The default assumes the rows are the request-major
         packed layout described by ``starts``/``lengths``; models whose
         engine supplies a different row layout (e.g. rank-local rows under
-        sharded-CP prefill) override this hook."""
+        prefill CP) override this hook and derive the layout from the CP
+        metadata on ``inputs.attention_inputs``."""
         return map_context_rows(starts, lengths, committed_ends, row_count)
+
+    def cleanup_commit_state(self) -> None:
+        """Reset any per-call state a ``map_commit_rows`` override staged for
+        ``commit_feature_rows``.  Called from ``run_commit_step``'s ``finally``
+        so a projection/commit failure never leaks state into the next call."""
 
     def forward_query_block(
         self,
@@ -304,6 +311,23 @@ class DSparkProposerMixin:
         lengths = input_lengths[:batch_size].to(device=device, dtype=torch.long)
         starts = lengths.cumsum(0) - lengths
 
+        # Under prefill CP the framework rewrites input_lengths to rank-local
+        # chunk lengths; committed ends are global sequence positions, so read
+        # the pre-split lengths back off the CP metadata when present.  (For
+        # dense forwards the metadata is absent or equals input_lengths.)
+        committed_lengths = lengths
+        cp_info = getattr(attention_inputs, "context_parallel_info", None)
+        global_lengths = (
+            optional_tensor(getattr(cp_info, "prefill_actual_input_lengths_cpu", None))
+            if cp_info is not None
+            else None
+        )
+        if global_lengths is not None and int(global_lengths.numel()) >= batch_size:
+            committed_lengths = global_lengths[:batch_size].to(
+                device=device, dtype=torch.long
+            )
+        committed_ends = prefix_lengths + committed_lengths
+
         # Row windows are the plain prefix sum of the standard input_lengths;
         # positions continue each request's committed prefix. All rows are
         # payload — the commit call's geometry is exactly its row layout
@@ -311,7 +335,7 @@ class DSparkProposerMixin:
         # map_commit_rows).
         try:
             req, positions = self.map_commit_rows(
-                starts, lengths, prefix_lengths + lengths, row_count
+                starts, lengths, committed_ends, row_count, inputs
             )
 
             main_x = self.combine_hidden_states(features)
@@ -319,15 +343,11 @@ class DSparkProposerMixin:
                 main_x,
                 req,
                 positions,
-                (prefix_lengths + lengths).to(torch.int32),
+                committed_ends.to(torch.int32),
                 inputs,
             )
         finally:
-            # DSpARK implementations may use a one-shot CP handoff while
-            # mapping rows. Never let a projection/commit failure leak that
-            # context into the next eager proposal or decode commit.
-            if hasattr(self, "_active_dspark_commit_cp_ctx"):
-                self._active_dspark_commit_cp_ctx = None
+            self.cleanup_commit_state()
         # The generic prefill CUDA graph owns a row-aligned output buffer even
         # though the executor only needs this call's KV-cache side effect.
         return PyModelOutputs(main_x)

@@ -744,6 +744,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_target_verify,
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state_.current_real_graph_bs);
+            if (is_dspark_draft_ && !dspark_graph_dispatch_logged_) {
+                dspark_graph_dispatch_logged_ = true;
+                RTP_LLM_LOG_INFO("[dspark] draft %s forward replayed %s CUDA graph (graph_bs=%d)",
+                                 input_hiddens.numel() > 0 ? "commit" : "propose",
+                                 py_model_inputs.attention_inputs.is_prefill ? "prefill" : "decode",
+                                 graph_state_.current_real_graph_bs);
+            }
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
@@ -752,6 +759,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
+            if (is_dspark_draft_ && !dspark_eager_dispatch_logged_) {
+                dspark_eager_dispatch_logged_ = true;
+                RTP_LLM_LOG_INFO("[dspark] draft %s forward ran eager (is_prefill=%d)",
+                                 input_hiddens.numel() > 0 ? "commit" : "propose",
+                                 py_model_inputs.attention_inputs.is_prefill);
+            }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);

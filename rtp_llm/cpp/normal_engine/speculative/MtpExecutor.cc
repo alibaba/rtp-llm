@@ -512,6 +512,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 "dspark requires identical draft/target vocabularies, got %zu and %zu",
                                 draft_vocab_size_,
                                 vocab_size_);
+        // The draft rides the standard prefill-CP split for its commit calls.
+        // Its fixed-width decode-phase blocks (propose, tail commit) must stay
+        // unsplit, which PD separation guarantees (decode roles run with
+        // prefill CP off). A colocated engine would CP-split those blocks —
+        // and its sharded-CP ring geometry would differ between commit and
+        // propose — so reject the combination outright.
+        RTP_LLM_CHECK_WITH_INFO(!(params.parallelism_config.prefill_cp_config.is_enabled()
+                                  && role_type_ == RoleType::PDFUSION),
+                                "dspark with prefill context parallel requires PD-separated roles");
     }
 
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
