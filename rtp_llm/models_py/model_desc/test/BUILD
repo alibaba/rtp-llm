@@ -60,3 +60,25 @@ py_test(
     tags = ["rocm"],
     exec_properties = {'gpu': 'MI308X-ROCM7', 'gpu_count': '1'},
 )
+
+# Keep the broader Bert model integration suite on H20. The focused operator
+# contract is exercised by the CUDA target below.
+py_test(
+    name = "bert_multimodal_embedding_test",
+    srcs = ["bert_multimodal_embedding_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    timeout = "long",
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
+
+py_test(
+    name = "embedding_lookup_op_cuda_test",
+    srcs = ["embedding_lookup_op_test.py"],
+    main = "embedding_lookup_op_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
