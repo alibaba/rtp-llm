@@ -502,6 +502,50 @@ TEST_F(ExecOpsTest, testWriteCacheStoreDispatchesCpProjectedP2PLayerWithoutCache
     EXPECT_EQ(captured_blocks, (std::vector<int32_t>{11, 13}));
 }
 
+TEST_F(ExecOpsTest, testWriteCacheStorePublishesCpReadyEmptyProjection) {
+    auto inputs = makePyCacheStoreInputs(/*cache_store=*/nullptr,
+                                         /*tokens_per_block=*/4,
+                                         /*kv_stride=*/64,
+                                         /*scale_stride=*/0,
+                                         /*block_num=*/1,
+                                         /*mla_kvcache=*/true);
+    inputs.decode_entrance         = true;
+    inputs.cp_rank                 = 3;
+    inputs.cp_size                 = 4;
+    inputs.cache_keys              = {"100", "101", "102", "103"};
+    inputs.kv_cache_group_policies = {{"full", defaultCacheGroupPolicy(CacheGroupType::FULL)}};
+    inputs.tokens_per_block_by_tag = {{"full", 4}};
+
+    int call_count = 0;
+    inputs.p2p_layer_write = [&](size_t,
+                                 int,
+                                 const std::string& tag,
+                                 const std::vector<int64_t>& keys,
+                                 const std::vector<int32_t>& blocks,
+                                 int64_t,
+                                 const std::shared_ptr<torch::Event>&,
+                                 int64_t) {
+        ++call_count;
+        EXPECT_EQ(tag, "full");
+        EXPECT_TRUE(keys.empty());
+        EXPECT_TRUE(blocks.empty());
+        return true;
+    };
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({1, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 1;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "full";
+
+    auto input_lengths  = torch::tensor({1}, torch::kInt32);
+    auto prefix_lengths = torch::tensor({0}, torch::kInt32);
+    auto block_ids      = torch::tensor({{0}}, torch::kInt32);
+    ASSERT_NO_THROW(WriteCacheStoreOp(
+        input_lengths, prefix_lengths, block_ids, std::make_optional(inputs), std::make_optional(layer_cache)));
+    EXPECT_EQ(call_count, 1);
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStorePropagatesP2PLayerDispatchFailure) {
     CacheStoreAsyncWriter     async_writer(/*device_id=*/0);
     async_writer.init();

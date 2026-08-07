@@ -308,7 +308,10 @@ def update_worker_addrs(
     worker_grpc_addrs = []
     p2p_transfer_ports_by_ip = {}
     local_rank = parallelism_config.local_rank
-    for member in world_info.members:
+    # P2P rank0 builds CP-local plans by worker_grpc_addrs index. Canonicalize
+    # the address lists so index order is the world-rank order regardless of
+    # gang discovery/refresh ordering.
+    for member in sorted(world_info.members, key=lambda item: item.world_rank):
         p2p_transfer_port = (
             member.cache_store_listen_port + 1
             if member.cache_store_listen_port > 0

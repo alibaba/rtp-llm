@@ -73,6 +73,12 @@ public:
     }
     void setPrefillTpSize(int tp_size) {
         routing_ctx_.prefill_tp_size = tp_size;
+        if (routing_ctx_.prefill_cp_size <= 0) {
+            routing_ctx_.prefill_cp_size = 1;
+        }
+    }
+    void setPrefillCpSize(int cp_size) {
+        routing_ctx_.prefill_cp_size = cp_size;
     }
     void setGenerateStream(GenerateStream* stream) {
         stream_ = stream;

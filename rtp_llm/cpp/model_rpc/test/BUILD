@@ -88,3 +88,26 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "p2p_model_rpc_test",
+    srcs = [
+        "DecodeRpcServerNew2Test.cc",
+        "PrefillRpcServerNew2Test.cc",
+        "PrefillRpcServerTest.cc",
+        "PrefillServerCallerTest.cc",
+        "RpcTimeoutUtilsTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/engine_base/stream:stream",
+        "//rtp_llm/cpp/normal_engine",
+        "@havenask//aios/autil:net",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)

@@ -219,7 +219,7 @@ bool P2PConnectorWorkerPrefill::writeByLayerTag(int                             
             layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
         }
     }
-    if (layer_cache_buffer->blockIdMap().empty()) {
+    if (layer_cache_buffer->blockIdMap().empty() && !resource->cacheKeys().empty()) {
         RTP_LLM_LOG_ERROR("writeByLayerTag has no valid blocks, request_id=%ld layer_id=%d tag=%s",
                           request_id,
                           layer_id,
@@ -331,6 +331,16 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
                 continue;
             }
             sent_buffer_keys.insert(buffer_key);
+            if (layer_cache_buffer->blockIdMap().empty()) {
+                const int completed_partition_count = static_cast<int>(tp_partition_ctxs.size());
+                sent_count += completed_partition_count;
+                transfer_result->done_count.fetch_add(completed_partition_count, std::memory_order_relaxed);
+                {
+                    std::lock_guard<std::mutex> lk(transfer_result->result_mutex);
+                    transfer_result->result_cv.notify_all();
+                }
+                continue;
+            }
             sent_count += sendLayerToPartitions(
                 layer_cache_buffer,
                 tp_partition_ctxs,

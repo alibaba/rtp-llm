@@ -521,7 +521,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     }
 
     auto peer_info = prefill_server_caller_->getPrefillPeerInfo(prefill_ip, prefill_port, normalized_timeout_ms_i32);
-    if (peer_info.tp_size <= 0 || peer_info.dp_addrs.empty()) {
+    if (peer_info.tp_size <= 0 || peer_info.cp_size <= 0 || peer_info.dp_addrs.empty()) {
         RTP_LLM_LOG_WARNING("decode rpc server new2 generate failed: prefill peer info unavailable, "
                             "request_id=%ld, prefill_addr=%s:%u",
                             request_id,
@@ -530,6 +530,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
         return grpc::Status(grpc::StatusCode::INTERNAL, "prefill peer info is not available");
     }
     stream->setPrefillTpSize(peer_info.tp_size);
+    stream->setPrefillCpSize(peer_info.cp_size);
 
     std::shared_ptr<PrefillServerCallerContext> prefill_caller_ctx;
     PrefillContextGuard                         prefill_context_guard;

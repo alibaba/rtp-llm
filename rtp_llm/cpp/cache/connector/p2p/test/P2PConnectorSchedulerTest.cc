@@ -40,6 +40,7 @@ protected:
         P2PConnectorSchedulerConfig scheduler_config;
         scheduler_config.worker_grpc_addrs = tp_broadcast_addrs_;
         scheduler_config.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
+        scheduler_config.topology = test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0}, {1}});
 
         scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(scheduler_config), nullptr);
         ASSERT_TRUE(scheduler_->init());
@@ -54,11 +55,12 @@ protected:
     // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
         auto             resource = std::make_shared<KVCacheResource>();
-        std::vector<int> layer_to_group(num_layers);
+        std::vector<std::vector<int>> layer_group_ids;
+        layer_group_ids.reserve(static_cast<size_t>(num_layers));
         for (int i = 0; i < num_layers; ++i) {
-            layer_to_group[i] = i;
+            layer_group_ids.push_back({i});
         }
-        resource->initGroups(num_layers, num_layers, layer_to_group);
+        resource->initGroups(test::makeTestCacheTopology(num_layers, num_layers, layer_group_ids));
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             for (int i = 0; i < blocks_per_layer; ++i) {
@@ -80,6 +82,7 @@ protected:
         meta->setDeadlineMs(deadline_ms);
         meta->setPrefillAddr("127.0.0.1", static_cast<uint32_t>(prefill_server_->listenPort()));
         meta->setPrefillTpSize(1);
+        meta->setPrefillCpSize(1);
         return meta;
     }
 
@@ -108,12 +111,13 @@ protected:
         P2PConnectorSchedulerConfig cfg;
         cfg.worker_grpc_addrs = tp_broadcast_addrs_;
         cfg.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
+        cfg.topology = test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0}, {1}});
         cfg.p2p_transfer_not_done_resource_hold_ms = hold_ms;
         scheduler_                                 = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
         ASSERT_TRUE(scheduler_->init());
     }
 
-    void rebuildSchedulerWithLayerAttnTypes(const std::vector<CacheGroupType>& layer_attn_types) {
+    void rebuildSchedulerWithLayerAttnTypes(const std::vector<CacheGroupType>& layer_attn_types, int cp_size = 1) {
         scheduler_.reset();
         P2PConnectorSchedulerConfig cfg;
         cfg.worker_grpc_addrs = tp_broadcast_addrs_;
@@ -122,11 +126,12 @@ protected:
         for (size_t i = 0; i < layer_attn_types.size(); ++i) {
             layer_group_ids.push_back({static_cast<int>(i)});
         }
-        cfg.topology = makeTestCacheTopology(static_cast<int>(layer_attn_types.size()),
-                                             static_cast<int>(layer_attn_types.size()),
-                                             layer_group_ids,
-                                             /*kernel_blocks_per_kv_block=*/1,
-                                             layer_attn_types);
+        cfg.topology = test::makeTestCacheTopology(static_cast<int>(layer_attn_types.size()),
+                                                   static_cast<int>(layer_attn_types.size()),
+                                                   layer_group_ids,
+                                                   /*kernel_blocks_per_kv_block=*/1,
+                                                   layer_attn_types);
+        cfg.cp_size  = cp_size;
         scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
         ASSERT_TRUE(scheduler_->init());
     }
@@ -187,7 +192,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType)
     rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL, CacheGroupType::LINEAR});
 
     auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(2, 2, {0, 1}, 1, {CacheGroupType::FULL, CacheGroupType::LINEAR});
+    resource->initGroups(test::makeTestCacheTopology(
+        2, 2, {{0}, {1}}, /*kernel_blocks_per_kv_block=*/1, {CacheGroupType::FULL, CacheGroupType::LINEAR}));
     resource->mutableBlockIds(0).assign({10, 11, 12, 13});
     resource->mutableBlockIds(1).assign({NULL_BLOCK_IDX, 21, NULL_BLOCK_IDX, 25});
     resource->cacheKeys() = {1000, 1001, 1002, 1003};
@@ -462,6 +468,64 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
     }
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsEachWorkerItsRoundRobinKeys) {
+    rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL}, /*cp_size=*/2);
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(
+        test::makeTestCacheTopology(1, 1, {{0}}, /*kernel_blocks_per_kv_block=*/1, {CacheGroupType::FULL}));
+    resource->mutableBlockIds(0).assign({10, 11});
+    resource->cacheKeys() = {100, 101, 102, 103};
+    auto meta = createMockMeta(2012, "test_async_read_cp", currentTimeMs() + 5000);
+    meta->setPrefillTpSize(2);
+    meta->setPrefillCpSize(2);
+
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    ASSERT_TRUE(result.ok());
+    ASSERT_NE(result.context, nullptr);
+    waitAsyncContextDone(result.context);
+    ASSERT_TRUE(result.context->success());
+
+    const auto rank0_request = tp_broadcast_servers_[0]->service()->getLastBroadcastTpRequest();
+    const auto rank1_request = tp_broadcast_servers_[1]->service()->getLastBroadcastTpRequest();
+    ASSERT_EQ(rank0_request.layer_blocks_size(), 1);
+    ASSERT_EQ(rank1_request.layer_blocks_size(), 1);
+    ASSERT_EQ(rank0_request.layer_blocks(0).cache_keys_size(), 2);
+    ASSERT_EQ(rank1_request.layer_blocks(0).cache_keys_size(), 2);
+    EXPECT_EQ(rank0_request.layer_blocks(0).cache_keys(0), 100);
+    EXPECT_EQ(rank0_request.layer_blocks(0).cache_keys(1), 102);
+    EXPECT_EQ(rank1_request.layer_blocks(0).cache_keys(0), 101);
+    EXPECT_EQ(rank1_request.layer_blocks(0).cache_keys(1), 103);
+    ASSERT_EQ(rank0_request.layer_blocks(0).block_ids_size(), 2);
+    ASSERT_EQ(rank1_request.layer_blocks(0).block_ids_size(), 2);
+    EXPECT_EQ(rank0_request.layer_blocks(0).block_ids(0), 10);
+    EXPECT_EQ(rank0_request.layer_blocks(0).block_ids(1), 11);
+    EXPECT_EQ(rank1_request.layer_blocks(0).block_ids(0), 10);
+    EXPECT_EQ(rank1_request.layer_blocks(0).block_ids(1), 11);
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncReadCpRejectsDifferentSourceCpSize) {
+    rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL}, /*cp_size=*/2);
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(
+        test::makeTestCacheTopology(1, 1, {{0}}, /*kernel_blocks_per_kv_block=*/1, {CacheGroupType::FULL}));
+    resource->mutableBlockIds(0).assign({10});
+    resource->cacheKeys() = {100, 101};
+    auto meta = createMockMeta(2013, "test_async_read_cp_mismatch", currentTimeMs() + 5000);
+    // TP happens to match Decode, but effective KV-cache CP does not.
+    meta->setPrefillTpSize(2);
+    meta->setPrefillCpSize(1);
+
+    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.context, nullptr);
+    EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 0);
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+    }
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_NoTransferCompletesWithoutDecodeBuffers) {

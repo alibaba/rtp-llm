@@ -104,6 +104,64 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     }
 }
 
+TEST_F(P2PBroadcastClientTest, BroadcastPerRankSendsEachWorkerItsLocalBlockView) {
+    auto rank0_buffer = std::make_shared<LayerCacheBuffer>(0, "full");
+    rank0_buffer->addBlockId(100, 10);
+    auto rank1_buffer = std::make_shared<LayerCacheBuffer>(0, "full");
+    rank1_buffer->addBlockId(101, 11);
+
+    P2PBroadcastClient::RankLayerCacheBuffers rank_buffers = {{rank0_buffer}, {rank1_buffer}};
+    const int64_t deadline_ms = currentTimeMs() + 5000;
+    auto result = client_->broadcastPerRank(1010,
+                                            rank_buffers,
+                                            {},
+                                            "cp-rank-view",
+                                            deadline_ms,
+                                            P2PConnectorBroadcastType::READ);
+    ASSERT_NE(result, nullptr);
+    waitDone(result);
+    ASSERT_TRUE(result->success());
+
+    for (size_t rank = 0; rank < servers_.size(); ++rank) {
+        const auto request = servers_[rank]->service()->getLastBroadcastTpRequest();
+        ASSERT_EQ(request.layer_blocks_size(), 1);
+        ASSERT_EQ(request.layer_blocks(0).cache_keys_size(), 1);
+        EXPECT_EQ(request.layer_blocks(0).cache_keys(0), 100 + static_cast<int64_t>(rank));
+        EXPECT_EQ(request.layer_blocks(0).block_ids(0), 10 + static_cast<int32_t>(rank));
+    }
+}
+
+TEST_F(P2PBroadcastClientTest, BroadcastPerRankAllowsEmptyLocalProjection) {
+    auto rank0_buffer = std::make_shared<LayerCacheBuffer>(0, "full");
+    rank0_buffer->addBlockId(100, 10);
+
+    P2PBroadcastClient::RankLayerCacheBuffers rank_buffers = {{rank0_buffer}, {}};
+    auto result = client_->broadcastPerRank(1011,
+                                            rank_buffers,
+                                            {},
+                                            "cp-empty-rank-view",
+                                            currentTimeMs() + 5000,
+                                            P2PConnectorBroadcastType::READ);
+    ASSERT_NE(result, nullptr);
+    waitDone(result);
+    ASSERT_TRUE(result->success());
+    EXPECT_EQ(servers_[0]->service()->getLastBroadcastTpRequest().layer_blocks_size(), 1);
+    EXPECT_EQ(servers_[1]->service()->getLastBroadcastTpRequest().layer_blocks_size(), 0);
+    EXPECT_FALSE(servers_[0]->service()->getLastBroadcastTpRequest().allow_empty_projection());
+    EXPECT_TRUE(servers_[1]->service()->getLastBroadcastTpRequest().allow_empty_projection());
+}
+
+TEST_F(P2PBroadcastClientTest, BroadcastPerRankRejectsMismatchedWorkerCount) {
+    P2PBroadcastClient::RankLayerCacheBuffers rank_buffers = {{createLayerCacheBuffer(0, 1)}};
+    EXPECT_EQ(client_->broadcastPerRank(1012,
+                                        rank_buffers,
+                                        {},
+                                        "cp-invalid-rank-view",
+                                        currentTimeMs() + 5000,
+                                        P2PConnectorBroadcastType::READ),
+              nullptr);
+}
+
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_Timeout) {
     // 设置服务器延迟响应
     for (auto& server : servers_) {

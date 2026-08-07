@@ -100,6 +100,27 @@ class EngineConfigTest(TestCase):
             ],
         )
 
+    def test_update_worker_addrs_orders_workers_by_world_rank(self):
+        runtime_config = RuntimeConfig()
+        world_info = self._world_info()
+        world_info.members.reverse()
+
+        update_worker_addrs(
+            runtime_config,
+            self._parallelism_config(),
+            world_info,
+            decode_entrance=True,
+        )
+
+        self.assertEqual(
+            runtime_config.worker_grpc_addrs,
+            ["127.0.0.1:13000", "127.0.0.2:13010"],
+        )
+        self.assertEqual(
+            runtime_config.worker_addrs,
+            ["127.0.0.1:12001:13000", "127.0.0.2:12011:13010"],
+        )
+
     def test_update_worker_addrs_rejects_p2p_port_outside_worker_block(self):
         runtime_config = RuntimeConfig()
         world_info = SimpleNamespace(

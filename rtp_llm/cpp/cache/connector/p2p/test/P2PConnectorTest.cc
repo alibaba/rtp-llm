@@ -7,6 +7,7 @@
 
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -90,6 +91,9 @@ protected:
 
         config_ = P2PConnectorConfig::create(
             runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/2);
+        config_.scheduler_config.topology =
+            test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0}, {1}});
+        config_.worker_config.topology    = config_.scheduler_config.topology;
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
@@ -105,11 +109,12 @@ protected:
     // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
         auto             resource = std::make_shared<KVCacheResource>();
-        std::vector<int> layer_to_group(num_layers);
+        std::vector<std::vector<int>> layer_group_ids;
+        layer_group_ids.reserve(static_cast<size_t>(num_layers));
         for (int i = 0; i < num_layers; ++i) {
-            layer_to_group[i] = i;
+            layer_group_ids.push_back({i});
         }
-        resource->initGroups(num_layers, num_layers, layer_to_group);
+        resource->initGroups(test::makeTestCacheTopology(num_layers, num_layers, layer_group_ids));
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             for (int i = 0; i < blocks_per_layer; ++i) {
@@ -167,6 +172,7 @@ protected:
         meta->setUniqueKey(stream->uniqueKey());
         meta->setDeadlineMs(stream->deadlineMs());
         meta->setPrefillTpSize(prefill_tp_size);
+        meta->setPrefillCpSize(1);
         meta->setGenerateStream(stream);
         return meta;
     }
@@ -333,15 +339,52 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     EXPECT_NE(response.p2p_response().error_message().find("cache_keys size 2 != block_ids size 1"), std::string::npos);
 }
 
-TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasNoLayerBlocks) {
+TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestIsImplicitlyEmpty) {
     FunctionRequestPB request;
     auto* p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("empty-read");
+    p2p_request->set_deadline_ms(currentTimeMs() + 5000);
 
     FunctionResponsePB response;
     EXPECT_FALSE(connector_->executeFunction(request, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+}
+
+TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplicit) {
+    auto cp_config                  = config_;
+    cp_config.worker_config.cp_size = 2;
+    auto cp_connector = std::make_unique<P2PConnector>(cp_config, mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(cp_connector->init());
+
+    FunctionRequestPB request;
+    auto*             p2p_request = request.mutable_p2p_request();
+    p2p_request->set_type(P2PConnectorBroadcastType::READ);
+    p2p_request->set_unique_key("explicit-empty-read");
+    p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_allow_empty_projection(true);
+
+    FunctionResponsePB response;
+    EXPECT_TRUE(cp_connector->executeFunction(request, response));
+    EXPECT_EQ(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
+}
+
+TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExpired) {
+    auto cp_config                  = config_;
+    cp_config.worker_config.cp_size = 2;
+    auto cp_connector = std::make_unique<P2PConnector>(cp_config, mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(cp_connector->init());
+
+    FunctionRequestPB request;
+    auto*             p2p_request = request.mutable_p2p_request();
+    p2p_request->set_type(P2PConnectorBroadcastType::READ);
+    p2p_request->set_unique_key("expired-empty-read");
+    p2p_request->set_deadline_ms(currentTimeMs() - 1);
+    p2p_request->set_allow_empty_projection(true);
+
+    FunctionResponsePB response;
+    EXPECT_FALSE(cp_connector->executeFunction(request, response));
+    EXPECT_NE(response.p2p_response().error_message().find("deadline has expired"), std::string::npos);
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidBlockId) {
@@ -363,6 +406,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidB
     auto* p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("invalid-block-read");
+    p2p_request->set_deadline_ms(currentTimeMs() + 5000);
     auto* layer_block = p2p_request->add_layer_blocks();
     layer_block->set_layer_id(0);
     layer_block->set_cache_tag("full");
@@ -393,6 +437,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLaye
     auto* p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
     p2p_request->set_unique_key("duplicate-layer-tag-read");
+    p2p_request->set_deadline_ms(currentTimeMs() + 5000);
     for (int block_id = 1; block_id <= 2; ++block_id) {
         auto* layer_block = p2p_request->add_layer_blocks();
         layer_block->set_layer_id(0);

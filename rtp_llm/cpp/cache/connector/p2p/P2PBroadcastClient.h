@@ -15,7 +15,9 @@ namespace rtp_llm {
 /// @brief P2PBroadcastClient 在 rank0 上向所有 TP worker 广播 P2P 传输请求
 class P2PBroadcastClient {
 public:
-    using TpBroadcastResult = ::rtp_llm::BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    using TpBroadcastResult    = ::rtp_llm::BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
+    using LayerCacheBuffers    = std::vector<std::shared_ptr<LayerCacheBuffer>>;
+    using RankLayerCacheBuffers = std::vector<LayerCacheBuffers>;
 
     explicit P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
                                 int64_t                         cancel_broadcast_timeout_ms = 1000);
@@ -67,6 +69,18 @@ public:
                                       int                                                   remote_tp_size = 0,
                                       int64_t                                               request_deadline_ms = 0);
 
+    /// @brief 向每个 worker 发送与其 CP rank 对应的 KV cache block 视图
+    /// rank_layer_cache_buffers 的顺序必须与 worker_addrs 一致。
+    std::shared_ptr<Result>
+    broadcastPerRank(int64_t                                              request_id,
+                     const RankLayerCacheBuffers&                         rank_layer_cache_buffers,
+                     const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
+                     const std::string&                                   unique_key,
+                     int64_t                                              deadline_ms,
+                     P2PConnectorBroadcastType                            type,
+                     int                                                  remote_tp_size = 0,
+                     int64_t                                              request_deadline_ms = 0);
+
     /// @brief 向所有 TP worker 广播 cancel 请求
     std::shared_ptr<Result>
     cancel(const std::string& unique_key, P2PConnectorBroadcastType type, int64_t request_deadline_ms = 0);
@@ -101,6 +115,10 @@ public:
     LeaseStatusResult queryLeaseStatus(const std::string& unique_key, int64_t poll_timeout_ms);
 
 private:
+    std::shared_ptr<Result> broadcastRequests(std::vector<FunctionRequestPB> requests,
+                                              const std::string&             unique_key,
+                                              int64_t                        deadline_ms);
+
     void genBroadcastRequest(FunctionRequestPB&                                    request,
                              int64_t                                               request_id,
                              const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,

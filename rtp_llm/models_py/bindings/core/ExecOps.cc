@@ -263,16 +263,14 @@ void writeCacheToP2P(const CacheStoreInputs& param, const P2PLayerWriteCallback&
             block_ids.push_back(block_id);
         }
         if (cache_keys.empty()) {
-            // A CP rank may legitimately own no local block for this tag; that
-            // path is handled by the existing CP follow-up. In the ordinary
-            // path, silently skipping a non-empty plan leaves Prefill waiting
-            // for this topology key until the transfer deadline.
-            RTP_LLM_CHECK_WITH_INFO(param.cp_size > 1 || block_plan.empty(),
+            // A CP rank may legitimately own no local block. Publish an empty
+            // layer/tag marker below so Prefill can distinguish ready-empty
+            // from a layer that has not finished yet.
+            RTP_LLM_CHECK_WITH_INFO(param.cp_size > 1 && block_plan.empty(),
                                     "P2P layer write has no valid blocks, request_id=%ld layer_id=%d tag=%s",
                                     param.request_id.data_ptr<int64_t>()[batch_id],
                                     param.layer_id,
                                     param.tag.c_str());
-            continue;
         }
 
         const int64_t request_id = param.request_id.data_ptr<int64_t>()[batch_id];

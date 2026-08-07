@@ -53,6 +53,54 @@ P2PBroadcastClient::broadcast(int64_t                                           
         requests.push_back(std::move(request));
     }
 
+    return broadcastRequests(std::move(requests), unique_key, deadline_ms);
+}
+
+std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::broadcastPerRank(
+    int64_t                                              request_id,
+    const RankLayerCacheBuffers&                         rank_layer_cache_buffers,
+    const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
+    const std::string&                                   unique_key,
+    int64_t                                              deadline_ms,
+    P2PConnectorBroadcastType                            type,
+    int                                                  remote_tp_size,
+    int64_t                                              request_deadline_ms) {
+    const size_t worker_num = tp_broadcast_manager_->workerNum();
+    if (rank_layer_cache_buffers.size() != worker_num) {
+        RTP_LLM_LOG_WARNING("broadcastPerRank buffer count %zu does not match worker count %zu, unique_key=%s",
+                            rank_layer_cache_buffers.size(),
+                            worker_num,
+                            unique_key.c_str());
+        return nullptr;
+    }
+
+    std::vector<FunctionRequestPB> requests;
+    requests.reserve(worker_num);
+    for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
+        FunctionRequestPB request;
+        genBroadcastRequest(request,
+                            request_id,
+                            rank_layer_cache_buffers[worker_rank],
+                            decode_transfer_servers,
+                            unique_key,
+                            deadline_ms,
+                            type,
+                            remote_tp_size,
+                            request_deadline_ms);
+        if (type == P2PConnectorBroadcastType::READ && rank_layer_cache_buffers[worker_rank].empty()) {
+            request.mutable_p2p_request()->set_allow_empty_projection(true);
+        }
+        requests.push_back(std::move(request));
+    }
+
+    return broadcastRequests(std::move(requests), unique_key, deadline_ms);
+}
+
+std::shared_ptr<P2PBroadcastClient::Result>
+P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
+                                      const std::string&             unique_key,
+                                      int64_t                        deadline_ms) {
+
     // gRPC 超时：在绝对 deadline_ms 前结束（worker 侧已按 D 提前返回，余量由 p2p_read_return_before_deadline_ms 承担）
     auto timeout_ms = deadline_ms - currentTimeMs();
     if (timeout_ms <= 0) {

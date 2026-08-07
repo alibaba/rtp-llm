@@ -81,6 +81,34 @@ TEST_F(CPSlotMapperTest, LocalBlockCountFourRanks) {
     }
 }
 
+TEST_F(CPSlotMapperTest, PhysicalBlockPositionProjectsBlockRoundRobinOwner) {
+    CacheGroupPolicy policy   = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.cp_mapping         = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 0, 5, 0, 2), std::make_optional<size_t>(0));
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 1, 5, 0, 2), std::nullopt);
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 2, 5, 0, 2), std::make_optional<size_t>(1));
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 0, 5, 1, 2), std::nullopt);
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 1, 5, 1, 2), std::make_optional<size_t>(0));
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 3, 5, 1, 2), std::make_optional<size_t>(1));
+}
+
+TEST_F(CPSlotMapperTest, PhysicalBlockPositionProjectsCompactLastRankKeys) {
+    CacheGroupPolicy policy   = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.cp_mapping         = CpBlockMappingMode::COMPACT_LAST_RANK;
+
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 0, 5, 0, 2), std::nullopt);
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 1, 5, 0, 2), std::make_optional<size_t>(0));
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 3, 5, 0, 2), std::make_optional<size_t>(1));
+    EXPECT_EQ(CPSlotMapper::physicalBlockPosition(policy, 4, 5, 0, 2), std::make_optional<size_t>(2));
+}
+
+TEST_F(CPSlotMapperTest, PhysicalBlockPositionRejectsInvalidCpGeometry) {
+    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    EXPECT_THROW(CPSlotMapper::physicalBlockPosition(policy, 0, 1, 0, 0), std::invalid_argument);
+    EXPECT_THROW(CPSlotMapper::physicalBlockPosition(policy, 0, 1, 2, 2), std::invalid_argument);
+}
+
 TEST_F(CPSlotMapperTest, EffectiveSeqLenForAllocIsRankIndependent) {
     const int    block_size = 4;
     CPSlotMapper rank0(0, 2, block_size);

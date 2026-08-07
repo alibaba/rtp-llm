@@ -280,6 +280,10 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
         RTP_LLM_LOG_ERROR("getPrefillPeerInfo: invalid tp_size=%d from %s", info.tp_size, addr.c_str());
         return {};
     }
+    // Older peers do not carry cp_size. They predate CP-aware P2P transfer, so
+    // treating the missing field as the non-sharded layout preserves the
+    // existing non-CP rolling-upgrade path without guessing CP from TP.
+    info.cp_size = response.cp_size() > 0 ? response.cp_size() : 1;
 
     for (const auto& dp_addr : response.dp_grpc_addrs()) {
         info.dp_addrs.push_back(dp_addr);
@@ -288,9 +292,10 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
         info.dp_addrs.push_back(addr);
     }
 
-    RTP_LLM_LOG_INFO("getPrefillPeerInfo: prefill %s tp_size=%d, dp_addrs=[%s]",
+    RTP_LLM_LOG_INFO("getPrefillPeerInfo: prefill %s tp_size=%d, cp_size=%d, dp_addrs=[%s]",
                       addr.c_str(),
                       info.tp_size,
+                      info.cp_size,
                       [&]() {
                           std::string s;
                           for (size_t i = 0; i < info.dp_addrs.size(); ++i) {
