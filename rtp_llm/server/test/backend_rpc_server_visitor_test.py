@@ -12,10 +12,19 @@ class _FakeTokenIds:
 
 
 class _FakeGenerateConfig:
-    def __init__(self, is_streaming=False):
+    def __init__(
+        self,
+        is_streaming=False,
+        calculate_loss=0,
+        return_hidden_states=False,
+        return_all_hidden_states=False,
+    ):
         self.role_addrs = []
         self.is_streaming = is_streaming
         self.max_new_tokens = 16
+        self.calculate_loss = calculate_loss
+        self.return_hidden_states = return_hidden_states
+        self.return_all_hidden_states = return_all_hidden_states
 
     def validate(self):
         return None
@@ -27,8 +36,10 @@ class _FakeInput:
     token_ids = _FakeTokenIds()
     headers = None
 
-    def __init__(self, is_streaming=False):
-        self.generate_config = _FakeGenerateConfig(is_streaming=is_streaming)
+    def __init__(self, is_streaming=False, **generate_config_kwargs):
+        self.generate_config = _FakeGenerateConfig(
+            is_streaming=is_streaming, **generate_config_kwargs
+        )
 
 
 class _FakeHostService:
@@ -134,9 +145,32 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor.model_rpc_client = model_rpc_client
         visitor.host_service = _FakeHostService()
         visitor.pd_route_retry_on_unavailable = 3
+        visitor._prefill_cp_active = False
         visitor.fill_request_info = lambda _input: None
         visitor.check_sp_supported = lambda _input: None
         return visitor
+
+    async def test_prefill_cp_rejects_full_sequence_outputs_before_rpc(self):
+        client = _SuccessfulModelRpcClient(["unexpected-output"])
+        visitor = self._visitor(client)
+        visitor._prefill_cp_active = True
+
+        for option in ("calculate_loss", "return_all_hidden_states"):
+            request = _FakeInput(**{option: True})
+            with self.assertRaisesRegex(
+                FtRuntimeException,
+                f"prefill context parallelism does not support request option\\(s\\): {option}",
+            ) as ctx:
+                await visitor.enqueue(request)
+            self.assertEqual(ctx.exception.exception_type, ExceptionType.INVALID_PARAMS)
+
+        self.assertEqual(client.attempts, 0)
+
+    def test_prefill_cp_allows_return_hidden_states(self):
+        visitor = self._visitor(_SuccessfulModelRpcClient([]))
+        visitor._prefill_cp_active = True
+
+        visitor.check_prefill_cp_supported(_FakeInput(return_hidden_states=True))
 
     async def test_non_streaming_discards_partial_attempt_before_retry(self):
         client = _RetryingModelRpcClient()

@@ -41,8 +41,9 @@ public:
     /// hidden_states is replaced by that [num_lm, hidden] tensor, ordered to match
     /// lm_output_indexes (identical to index_select(restored_hidden, lm_output_indexes)).
     ///
-    /// Only valid when no consumer needs the full sequence hidden, i.e.
-    /// !need_all_logits && !need_all_hidden_states. See PyWrappedModel::forward.
+    /// Only valid when no consumer needs the full sequence hidden. Requests
+    /// that require all logits or all hidden states are rejected before they
+    /// enter a prefill-CP engine.
     virtual void handleOutputsLastHidden(torch::Tensor&                            hidden_states,
                                          const GptModelInputs&                     inputs,
                                          const torch_ext::PyContextParallelParams& cp_params) = 0;

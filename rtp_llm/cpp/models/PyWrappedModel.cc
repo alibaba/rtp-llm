@@ -790,9 +790,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return attach_draft_outputs(std::move(outputs));
         }
         if (enable_prefill_cp_ && has_context_request) {
-            RTP_LLM_CHECK_WITH_INFO(!inputs.need_all_logits && !inputs.need_all_hidden_states,
-                                    "prefill context parallelism does not support returning all logits or all hidden "
-                                    "states");
             context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
             return attach_draft_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
         }
