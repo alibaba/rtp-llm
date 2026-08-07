@@ -13,7 +13,6 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
     model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
     model._gen_num_per_cycle = gamma
     model._dspark_commit_cp_enabled = False
-    model._active_dspark_commit_cp_ctx = None
     model._dspark_kv_cache_sharded = False
     model.tp_size = 2
     model.tp_rank = 0
@@ -138,53 +137,32 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         with patch.object(
             dspark_model_module, "build_cp_context_for_forward", return_value=cp_ctx
         ) as build_mock:
-            req, positions = model.map_commit_rows(
+            req, positions, commit_ctx = model.map_commit_rows(
                 starts, lengths, committed_ends, row_count=2, inputs=cp_inputs
             )
 
         self.assertEqual(req.tolist(), [0, 0])
         self.assertEqual(positions.tolist(), [10, 13])
-        self.assertIs(model._active_dspark_commit_cp_ctx, cp_ctx)
+        # The derived ctx travels as a return value, never as model state.
+        self.assertIs(commit_ctx, cp_ctx)
         # The ctx is derived from THIS forward's metadata, sized by its rows.
         self.assertEqual(build_mock.call_args.args[3], 2)
 
         # A dense forward (no CP-split prefill stream) uses the packed layout
         # even on a CP-enabled engine.
-        model._active_dspark_commit_cp_ctx = None
         dense_inputs = SimpleNamespace(
             attention_inputs=SimpleNamespace(
                 context_parallel_info=None,
                 prefix_lengths=torch.tensor([10], dtype=torch.int32),
             )
         )
-        req, positions = model.map_commit_rows(
+        req, positions, commit_ctx = model.map_commit_rows(
             starts, lengths, committed_ends, row_count=4, inputs=dense_inputs
         )
 
         self.assertEqual(req.tolist(), [0, 0, 0, 0])
         self.assertEqual(positions.tolist(), [10, 11, 12, 13])
-        self.assertIsNone(model._active_dspark_commit_cp_ctx)
-
-    def test_cp_commit_context_is_cleared_on_failure(self) -> None:
-        model = _dspark_harness(gamma=3)
-        model._active_dspark_commit_cp_ctx = SimpleNamespace(cp_size=2)
-        with (
-            patch.object(
-                DeepSeekV4DSparkModel,
-                "_swa_block_table",
-                side_effect=RuntimeError("bad table"),
-            ),
-            self.assertRaisesRegex(RuntimeError, "bad table"),
-        ):
-            model.commit_feature_rows(
-                torch.zeros((1, 8)),
-                torch.tensor([0], dtype=torch.int32),
-                torch.tensor([10], dtype=torch.int32),
-                torch.tensor([11], dtype=torch.int32),
-                SimpleNamespace(attention_inputs=SimpleNamespace()),
-            )
-
-        self.assertIsNone(model._active_dspark_commit_cp_ctx)
+        self.assertIsNone(commit_ctx)
 
     def test_cuda_graph_metadata_owner_is_persistent(self) -> None:
         model = _dspark_harness()
@@ -337,9 +315,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                 attention = FakeAttention(byte_sliced)
                 model.v4 = SimpleNamespace(layers=[SimpleNamespace(attn=attention)])
                 model.kv_cache = object()
-                model._active_dspark_commit_cp_ctx = SimpleNamespace(
-                    cp_rank=1, cp_size=2
-                )
+                commit_cp_ctx = SimpleNamespace(cp_rank=1, cp_size=2)
 
                 with (
                     patch.object(
@@ -375,6 +351,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                         batch_size=1,
                         gathered_req_ids=gathered_req_ids,
                         gathered_positions=gathered_positions,
+                        cp_ctx=commit_cp_ctx,
                     )
 
                 all_gather.assert_called_once()

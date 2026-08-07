@@ -503,7 +503,7 @@ class SwaSlotMappingTest(unittest.TestCase):
         model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
         model._gen_num_per_cycle = 1
         model._v4_args = SimpleNamespace(window_size=128, dim=4, vocab_size=17)
-        model._active_dspark_commit_cp_ctx = None
+
         attention = FakeAttention()
         model.v4 = SimpleNamespace(layers=[SimpleNamespace(attn=attention)])
         model.kv_cache = object()

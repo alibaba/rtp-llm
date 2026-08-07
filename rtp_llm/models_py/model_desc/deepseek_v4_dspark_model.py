@@ -127,7 +127,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # standard CP handleInputs, so its row map is derived per call from
         # the attached context_parallel_info (see map_commit_rows).
         self._dspark_commit_cp_enabled = False
-        self._active_dspark_commit_cp_ctx = None
         self._dspark_kv_cache_sharded = False
         _cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
         if _cp_cfg is not None and bool(_cp_cfg.is_enabled()) and self.tp_size > 1:
@@ -371,7 +370,12 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # ------------------------------------------------------------------
 
     @contextmanager
-    def _swa_cache_bound(self, layer_idx: int, block_table: torch.Tensor):
+    def _swa_cache_bound(
+        self,
+        layer_idx: int,
+        block_table: torch.Tensor,
+        cp_ctx: Any = None,
+    ):
         """Temporarily point one draft layer's attention at this model's
         paged SWA cache and yield ``(attn, entries_per_block, pool)``.
 
@@ -386,13 +390,11 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 f"DSpark layer {layer_idx} is not SWA-only: "
                 f"compress_ratio={attn.compress_ratio}"
             )
-        cp_override = (
-            self._active_dspark_commit_cp_ctx
-            if attn._cp_ctx is None and self._active_dspark_commit_cp_ctx is not None
-            else BIND_KEEP
-        )
         with bind_attn_cache(
-            attn, self.kv_cache, {int(SWA_KV): block_table}, cp_ctx=cp_override
+            attn,
+            self.kv_cache,
+            {int(SWA_KV): block_table},
+            cp_ctx=cp_ctx if cp_ctx is not None else BIND_KEEP,
         ):
             attn._ensure_freqs_cis_bound()
             entries_per_block = int(attn._swa_entries_per_block())
@@ -415,6 +417,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         batch_size: int,
         gathered_req_ids: Optional[torch.Tensor] = None,
         gathered_positions: Optional[torch.Tensor] = None,
+        cp_ctx: Any = None,
     ) -> None:
         """Insert committed target features through one layer's own
         wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
@@ -427,7 +430,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         feature rows). Replicated caches write the full gathered domain on
         every rank; byte-sharded caches write only the local slice.
         """
-        with self._swa_cache_bound(layer_idx, block_table) as (
+        with self._swa_cache_bound(layer_idx, block_table, cp_ctx=cp_ctx) as (
             attn,
             entries_per_block,
             pool,
@@ -571,11 +574,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # slot mapping / FP8 writer on every rank after the gather.
         req32 = torch.where(valid, req32, torch.full_like(req32, -1))
         pos32 = torch.where(valid, pos32, torch.full_like(pos32, -1))
-        self._active_dspark_commit_cp_ctx = cp_ctx
-        return req32.contiguous(), pos32.contiguous()
-
-    def cleanup_commit_state(self) -> None:
-        self._active_dspark_commit_cp_ctx = None
+        return req32.contiguous(), pos32.contiguous(), cp_ctx
 
     def commit_feature_rows(
         self,
@@ -584,56 +583,55 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         context_positions: torch.Tensor,
         committed_ends: torch.Tensor,
         inputs: PyModelInputs,
+        commit_ctx: Any = None,
     ) -> None:
         batch_size = int(committed_ends.numel())
         if batch_size == 0 or int(main_x.shape[0]) == 0:
             return
-        try:
-            attention_inputs = inputs.attention_inputs
-            block_table = self._swa_block_table(attention_inputs, batch_size)
-            tokens_per_block = int(
-                require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
+        attention_inputs = inputs.attention_inputs
+        block_table = self._swa_block_table(attention_inputs, batch_size)
+        tokens_per_block = int(
+            require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
+        )
+        write_cache_store_impl = create_write_cache_store_impl(
+            attention_inputs, self.kv_cache
+        )
+        gathered_req_ids: Optional[torch.Tensor] = None
+        gathered_positions: Optional[torch.Tensor] = None
+        if commit_ctx is not None:
+            # Proj-then-gather: the row map is gathered once here; each
+            # layer's projected KV is gathered inside _commit_layer_features.
+            from rtp_llm.models_py.distributed.collective_torch import (
+                Group,
+                all_gather,
             )
-            write_cache_store_impl = create_write_cache_store_impl(
-                attention_inputs, self.kv_cache
-            )
-            gathered_req_ids: Optional[torch.Tensor] = None
-            gathered_positions: Optional[torch.Tensor] = None
-            if self._active_dspark_commit_cp_ctx is not None:
-                # Proj-then-gather: the row map is gathered once here; each
-                # layer's projected KV is gathered inside _commit_layer_features.
-                from rtp_llm.models_py.distributed.collective_torch import (
-                    Group,
-                    all_gather,
-                )
 
-                gathered_req_ids = all_gather(
-                    context_req_ids.contiguous(), group=Group.TP
-                )
-                gathered_positions = all_gather(
-                    context_positions.contiguous(), group=Group.TP
-                )
-            for layer_idx in range(len(self.v4.layers)):
-                self._commit_layer_features(
-                    layer_idx,
-                    main_x,
-                    context_req_ids,
-                    context_positions,
-                    committed_ends,
-                    block_table,
-                    tokens_per_block,
-                    batch_size,
-                    gathered_req_ids=gathered_req_ids,
-                    gathered_positions=gathered_positions,
-                )
-                # PD-separated prefill publishes each committed draft-layer
-                # cache from the commit call: the published range is exactly
-                # the committed rows, so proposal rows never enter the store's
-                # block plan.
-                if write_cache_store_impl is not None:
-                    write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
-        finally:
-            self._active_dspark_commit_cp_ctx = None
+            gathered_req_ids = all_gather(
+                context_req_ids.contiguous(), group=Group.TP
+            )
+            gathered_positions = all_gather(
+                context_positions.contiguous(), group=Group.TP
+            )
+        for layer_idx in range(len(self.v4.layers)):
+            self._commit_layer_features(
+                layer_idx,
+                main_x,
+                context_req_ids,
+                context_positions,
+                committed_ends,
+                block_table,
+                tokens_per_block,
+                batch_size,
+                gathered_req_ids=gathered_req_ids,
+                gathered_positions=gathered_positions,
+                cp_ctx=commit_ctx,
+            )
+            # PD-separated prefill publishes each committed draft-layer
+            # cache from the commit call: the published range is exactly
+            # the committed rows, so proposal rows never enter the store's
+            # block plan.
+            if write_cache_store_impl is not None:
+                write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
 
     def _forward_dspark_attention(
         self,

@@ -185,11 +185,14 @@ class DSparkProposerMixin:
         context_positions: torch.Tensor,
         committed_ends: torch.Tensor,
         inputs: PyModelInputs,
+        commit_ctx: Any = None,
     ) -> None:
         """Write projected feature rows ``main_x`` into every draft layer's
         KV cache (per-layer KV projection of the same rows — features are not
         propagated through the layers).  ``committed_ends`` is each request's
-        sequence length after this commit."""
+        sequence length after this commit.  ``commit_ctx`` is whatever the
+        model's ``map_commit_rows`` returned for this call (e.g. a CPContext
+        describing the row layout); it never outlives the call."""
         raise NotImplementedError
 
     def map_commit_rows(
@@ -199,19 +202,16 @@ class DSparkProposerMixin:
         committed_ends: torch.Tensor,
         row_count: int,
         inputs: PyModelInputs,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Any]:
         """Map each committed feature row to ``(request id, absolute
-        position)``.  The default assumes the rows are the request-major
-        packed layout described by ``starts``/``lengths``; models whose
-        engine supplies a different row layout (e.g. rank-local rows under
-        prefill CP) override this hook and derive the layout from the CP
-        metadata on ``inputs.attention_inputs``."""
-        return map_context_rows(starts, lengths, committed_ends, row_count)
-
-    def cleanup_commit_state(self) -> None:
-        """Reset any per-call state a ``map_commit_rows`` override staged for
-        ``commit_feature_rows``.  Called from ``run_commit_step``'s ``finally``
-        so a projection/commit failure never leaks state into the next call."""
+        position, commit_ctx)``.  The default assumes the rows are the
+        request-major packed layout described by ``starts``/``lengths``;
+        models whose engine supplies a different row layout (e.g. rank-local
+        rows under prefill CP) override this hook, derive the layout from the
+        CP metadata on ``inputs.attention_inputs``, and return the derived
+        context as the opaque third value for ``commit_feature_rows``."""
+        req, positions = map_context_rows(starts, lengths, committed_ends, row_count)
+        return req, positions, None
 
     def forward_query_block(
         self,
@@ -333,21 +333,19 @@ class DSparkProposerMixin:
         # payload — the commit call's geometry is exactly its row layout
         # (models with a different engine-supplied layout override
         # map_commit_rows).
-        try:
-            req, positions = self.map_commit_rows(
-                starts, lengths, committed_ends, row_count, inputs
-            )
+        req, positions, commit_ctx = self.map_commit_rows(
+            starts, lengths, committed_ends, row_count, inputs
+        )
 
-            main_x = self.combine_hidden_states(features)
-            self.commit_feature_rows(
-                main_x,
-                req,
-                positions,
-                committed_ends.to(torch.int32),
-                inputs,
-            )
-        finally:
-            self.cleanup_commit_state()
+        main_x = self.combine_hidden_states(features)
+        self.commit_feature_rows(
+            main_x,
+            req,
+            positions,
+            committed_ends.to(torch.int32),
+            inputs,
+            commit_ctx=commit_ctx,
+        )
         # The generic prefill CUDA graph owns a row-aligned output buffer even
         # though the executor only needs this call's KV-cache side effect.
         return PyModelOutputs(main_x)

@@ -196,7 +196,9 @@ class _CommitProposer(DSparkProposerMixin):
         self.seen_features = features
         return features
 
-    def commit_feature_rows(self, main_x, req, positions, committed_ends, inputs):
+    def commit_feature_rows(
+        self, main_x, req, positions, committed_ends, inputs, commit_ctx=None
+    ):
         self.committed = (main_x, req, positions, committed_ends)
 
 
