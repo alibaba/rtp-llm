@@ -1,0 +1,478 @@
+{
+    "model_type": "minimax_m2",
+    "model_path": "/mnt/nas1/hf/MiniMax-M2.7",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1780568959,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "The user asks: \"以英语听力方法为主题提出几个问题\". In Chinese: \"提出几个问题\" about English listening methods. So they want several questions (presumably for discussion, research, or maybe for a quiz) about English listening methods. The user wants to ask several questions about English listening methods. So we need to produce a list of questions. The user didn't specify any constraints. So we can produce a set of questions, maybe 5-10, covering topics like strategies,",
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 46,
+                    "total_tokens": 146,
+                    "completion_tokens": 100,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 100
+                    },
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 3911.4,
+                    "iter_count": 100,
+                    "prefix_len": 0,
+                    "input_len": 46,
+                    "output_len": 100,
+                    "step_output_len": 99,
+                    "first_token_cost_time": 1530.95,
+                    "wait_time": 0.0,
+                    "pd_sep": true,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 10300,
+                            "grpc_port": 10301
+                        }
+                    ],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "query": {
+                "prompt_batch": [
+                    "$prompt:s1",
+                    "$prompt:s1",
+                    "$prompt:s1"
+                ],
+                "generate_config": {
+                    "max_new_tokens": 10,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response_batch": [
+                    {
+                        "response": "</h2>\n<p>CAP theorem also called",
+                        "response_alternatives": [
+                            "</h2>\n<p>CAP theorem also known"
+                        ],
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": null,
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 5,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 10,
+                            "step_output_len": 10,
+                            "iter_count": 10,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "pd_sep": false,
+                            "softmax_probs": []
+                        }
+                    },
+                    {
+                        "response": "</h2>\n<p>CAP theorem also called",
+                        "response_alternatives": [
+                            "</h2>\n<p>CAP theorem also known"
+                        ],
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": null,
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 5,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 10,
+                            "step_output_len": 10,
+                            "iter_count": 10,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "pd_sep": false,
+                            "softmax_probs": []
+                        }
+                    },
+                    {
+                        "response": "</h2>\n<p>CAP theorem also called",
+                        "response_alternatives": [
+                            "</h2>\n<p>CAP theorem also known"
+                        ],
+                        "hidden_states": null,
+                        "logits": null,
+                        "loss": null,
+                        "input_ids": null,
+                        "output_ids": null,
+                        "aux_info": {
+                            "input_len": 5,
+                            "prefix_len": 0,
+                            "reuse_len": 0,
+                            "local_reuse_len": 0,
+                            "remote_reuse_len": 0,
+                            "memory_reuse_len": 0,
+                            "prefill_total_reuse_len": 0,
+                            "prefill_local_reuse_len": 0,
+                            "prefill_remote_reuse_len": 0,
+                            "prefill_memory_reuse_len": 0,
+                            "decode_total_reuse_len": 0,
+                            "decode_local_reuse_len": 0,
+                            "decode_remote_reuse_len": 0,
+                            "decode_memory_reuse_len": 0,
+                            "output_len": 10,
+                            "step_output_len": 10,
+                            "iter_count": 10,
+                            "cum_log_probs": [],
+                            "beam_responses": [],
+                            "pd_sep": false,
+                            "softmax_probs": []
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "_comment": "reuse_cache test: same prompt sent twice, second hit should show cached_tokens in prompt_tokens_details",
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:m2"
+                    }
+                ],
+                "max_tokens": 20,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1780568966,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "The user is asking me to improve some dialogue about death and the afterlife, focusing on three things:",
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 189,
+                    "total_tokens": 209,
+                    "completion_tokens": 20,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 20
+                    },
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 617.083,
+                    "iter_count": 20,
+                    "prefix_len": 0,
+                    "input_len": 189,
+                    "output_len": 20,
+                    "step_output_len": 19,
+                    "first_token_cost_time": 154.948,
+                    "wait_time": 0.0,
+                    "pd_sep": true,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 10300,
+                            "grpc_port": 10301
+                        }
+                    ],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "_comment": "reuse_cache test: second identical request, expect cached_tokens > 0",
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:m2"
+                    }
+                ],
+                "max_tokens": 20,
+                "temperature": 0.0,
+                "top_p": 0,
+                "top_k": 1
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1780568970,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "The user is asking me to improve some dialogue about death and the afterlife, focusing on three things:",
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
+                        },
+                        "finish_reason": "length",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 189,
+                    "total_tokens": 209,
+                    "completion_tokens": 20,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 20
+                    },
+                    "prompt_tokens_details": {
+                        "audio_tokens": null,
+                        "cached_tokens": 128
+                    }
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 610.231,
+                    "iter_count": 20,
+                    "prefix_len": 0,
+                    "input_len": 189,
+                    "output_len": 20,
+                    "step_output_len": 19,
+                    "first_token_cost_time": 161.066,
+                    "wait_time": 0.0,
+                    "pd_sep": true,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 128,
+                    "local_reuse_len": 128,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 128,
+                    "prefill_local_reuse_len": 128,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 128,
+                    "decode_local_reuse_len": 128,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 10300,
+                            "grpc_port": 10301
+                        }
+                    ],
+                    "aux_string": ""
+                },
+                "extra_outputs": null
+            }
+        },
+        {
+            "_comment": "tool_call test: stream tool invocation",
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant. You have access to the provided tools. When the user asks a question that requires real-time, location-specific, or external information that you cannot answer from your own knowledge (for example current weather), you MUST call the appropriate tool with concrete arguments instead of guessing or asking the user. Do not output any explanation before the tool call.",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "What's the current weather in San Francisco right now? Use celsius.",
+                        "partial": false
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_current_weather",
+                            "description": "Get the current weather conditions for a given city. Returns temperature, humidity and a short text description.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {
+                                        "type": "string",
+                                        "description": "The city name, e.g. 'San Francisco' or 'Beijing'."
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "enum": [
+                                            "celsius",
+                                            "fahrenheit"
+                                        ],
+                                        "description": "Temperature unit to return."
+                                    }
+                                },
+                                "required": [
+                                    "location"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "stream": true,
+                "max_tokens": 256,
+                "extra_configs": {
+                    "top_k": 1,
+                    "temperature": 0.0
+                }
+            },
+            "result": {
+                "id": "chat",
+                "object": "chat.completion.chunk",
+                "created": 1780568973,
+                "model": null,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "\n\n\n",
+                            "reasoning_content": "The user wants to know the current weather in San Francisco using celsius. I should call the get_current_weather function with location \"San Francisco\" and unit \"celsius\".\n",
+                            "function_call": null,
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_aaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_current_weather",
+                                        "arguments": "{\"location\": \"San Francisco\", \"unit\": \"celsius\"}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                        "logprobs": null
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 315,
+                    "total_tokens": 391,
+                    "completion_tokens": 76,
+                    "completion_tokens_details": {
+                        "audio_tokens": null,
+                        "reasoning_tokens": 36
+                    },
+                    "prompt_tokens_details": null
+                },
+                "debug_info": null,
+                "aux_info": null,
+                "extra_outputs": null
+            }
+        }
+    ]
+}

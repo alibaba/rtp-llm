@@ -253,6 +253,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 quant_config,
                 hw_kernel_config,
                 layer_idx,
+                qk_norm_type=config.qk_norm_type,
             )
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
