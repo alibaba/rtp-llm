@@ -9,6 +9,7 @@ load("@rtp_llm//bazel:defs.bzl", "copy_so")
 def copy_all_so():
     copy_so("@rtp_llm//:th_transformer")
     copy_so("@rtp_llm//:th_transformer_config")
+    copy_so("@rtp_llm//:th_grammar_tokenizer_info")
     copy_so("@rtp_llm//:rtp_compute_ops")
 
 def requirement(names):

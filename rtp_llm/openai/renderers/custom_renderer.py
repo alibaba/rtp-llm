@@ -11,6 +11,8 @@ import torch
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
+from rtp_llm.config.response_format import normalize_think_tag
+from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
@@ -82,12 +84,8 @@ def _get_think_config(generate_env_config):
         Tuple of (think_mode, think_start_tag, think_end_tag)
     """
     think_mode = generate_env_config.think_mode
-    think_start_tag = generate_env_config.think_start_tag.encode("utf-8").decode(
-        "unicode_escape"
-    )
-    think_end_tag = generate_env_config.think_end_tag.encode("utf-8").decode(
-        "unicode_escape"
-    )
+    think_start_tag = normalize_think_tag(generate_env_config.think_start_tag)
+    think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
     return think_mode, think_start_tag, think_end_tag
 
 
@@ -316,6 +314,7 @@ class CustomChatRenderer:
         self.think_mode, self.think_start_tag, self.think_end_tag = _get_think_config(
             generate_env_config
         )
+        self.generate_env_config = generate_env_config
 
         # Store configs for subclasses
         self.ckpt_path = ckpt_path
@@ -368,6 +367,9 @@ class CustomChatRenderer:
             extra_stop_word_ids_list=extra_stop_word_ids_list,
             extra_stop_words_list=extra_stop_words_list,
         )
+
+    def get_reasoning_format(self) -> ReasoningFormat:
+        return ReasoningFormat.from_generate_env_config(self.generate_env_config)
 
     def add_extra_stop_words(self, extra_stop_words: List[str]):
         self.extra_stop_words.extend(extra_stop_words)
@@ -1009,7 +1011,7 @@ class CustomChatRenderer:
         return [StreamStatus(request) for _ in range(n)]
 
     def in_think_mode(self, request: ChatCompletionRequest):
-        return self.think_mode
+        return request.get_enable_thinking(default=bool(self.think_mode))
 
     def should_process_think(self, request: ChatCompletionRequest):
         # 留出方法给子类重写, 避免重复的think处理

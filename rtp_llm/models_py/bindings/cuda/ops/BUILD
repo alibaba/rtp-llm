@@ -6,6 +6,12 @@ cuda_register()
 flashinfer_deps()
 flashmla_deps()
 
+cc_library(
+    name = "flashinfer_runtime",
+    deps = [":flashinfer"],
+    visibility = ["//visibility:public"],
+)
+
 config_setting(
     name = "use_accl_ep",
     values = {

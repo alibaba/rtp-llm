@@ -4,9 +4,6 @@ from typing import Any, List, Optional
 
 import aiter
 import torch
-from aiter_meta.csrc.cpp_itfs.pa_gluon_aot.pa_decode_gluon_aot import (
-    pa_decode_gluon_aot,
-)
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -912,12 +909,13 @@ def _run_triton_paged_attention(
 
     x = 16 // key_cache.element_size()
     kv_sizes = key_cache.shape
+    # K: [N, nkv, ps, hd] -> [N, nkv, hd//x, ps, x]  (shuffle layout)
     key_cache = key_cache.view(
         kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x
     )
-    value_cache = value_cache.view(
-        kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x
-    )
+    # V: [N, nkv, ps, hd] -> [N, nkv, ps//x, hd, x]  (VALUE_TRANSPOSED=True path)
+    # 5D view doesn't alter the [ps, hd] memory order, so no copy is needed.
+    value_cache = value_cache.view(kv_sizes[0], kv_sizes[1], kv_sizes[2] // x, kv_sizes[3], x)
 
     key_scale, value_scale = None, None
     if kv_scale_base is not None:
@@ -964,7 +962,7 @@ def _run_triton_paged_attention(
         dtype=output_dtype,
         device=query.device,
     )
-    exp_sums = torch.zeros(
+    exp_sums = torch.empty(
         (
             num_seqs,
             num_kv_heads,
@@ -974,18 +972,17 @@ def _run_triton_paged_attention(
         dtype=torch.float32,
         device=query.device,
     )
-    max_logits = torch.full(
+    max_logits = torch.empty(
         (
             num_seqs,
             num_kv_heads,
             max_context_partition_num,
             equivalent_query_group_size,
         ),
-        -float("inf"),
         dtype=torch.float32,
         device=query.device,
     )
-    temporary_output = torch.zeros(
+    temporary_output = torch.empty(
         (
             num_seqs,
             num_kv_heads,
@@ -1008,26 +1005,28 @@ def _run_triton_paged_attention(
     else:
         query_scale = None
 
-    pa_decode_gluon_aot(
-        output=output,
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        context_lengths=context_lengths,
-        block_tables=block_tables,
-        softmax_scale=softmax_scale,
-        query_length=query_length,
-        max_context_partition_num=max_context_partition_num,
-        context_partition_size=context_partition_size,
-        compute_type=compute_type,
-        query_scale=query_scale,
-        key_scale=key_scale,
-        value_scale=value_scale,
+    torch.ops.aiter.pa_decode_gluon(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        context_lengths,
+        block_tables,
+        softmax_scale,
+        query_length,
+        max_context_partition_num,
+        context_partition_size,
+        compute_type,
+        query_scale,
+        key_scale,
+        value_scale,
         exp_sums=exp_sums,
         max_logits=max_logits,
         temporary_output=temporary_output,
         alibi_slopes=None,
         sinks=None,
+        sliding_window=-1,
+        ps=False,
     )
     return output
 

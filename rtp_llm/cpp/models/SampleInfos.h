@@ -1,8 +1,11 @@
 #pragma once
 
+#include <optional>
+#include <vector>
 #include <torch/all.h>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 
 namespace rtp_llm {
@@ -67,11 +70,12 @@ public:
 
 struct SamplerOutput {
 public:
-    torch::Tensor token_ids;
-    torch::Tensor cum_log_probs;
-    torch::Tensor all_probs;
-    torch::Tensor beam_index;
-    torch::Tensor success;
+    torch::Tensor                         token_ids;
+    torch::Tensor                         cum_log_probs;
+    torch::Tensor                         all_probs;
+    torch::Tensor                         beam_index;
+    torch::Tensor                         success;
+    std::vector<std::optional<ErrorInfo>> processor_errors;
 };
 
 struct MergedOutput {

@@ -1,11 +1,16 @@
 #include "gtest/gtest.h"
-#include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 #include <atomic>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -79,6 +84,33 @@ private:
 
 class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
+static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride) {
+    CacheConfig config;
+    config.layer_num                 = 1;
+    config.layer_all_num             = 1;
+    config.block_num                 = 1;
+    config.seq_size_per_block        = 1;
+    config.kernel_seq_size_per_block = 1;
+    config.kv_block_stride_bytes     = kv_stride;
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->tag                = tag;
+    spec->seq_size_per_block = 1;
+
+    GroupBase group;
+    group.tag                       = tag;
+    group.spec                      = spec;
+    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids                 = {0};
+    group.block_num                 = 1;
+    group.seq_size_per_block        = 1;
+    group.kernel_seq_size_per_block = 1;
+    group.kv_block_stride_bytes     = kv_stride;
+
+    config.setTopology({std::move(group)}, {{0, {tag}}});
+    return config;
+}
+
 TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
     CacheStoreAsyncWriter writer;
 
@@ -119,16 +151,26 @@ TEST_F(CacheStoreAsyncWriterTest, InitWhileRunningThrows) {
 TEST_F(CacheStoreAsyncWriterTest, InitWaitCycle) {
     CacheStoreAsyncWriter writer;
     std::vector<int>      order;
+    std::mutex            order_mutex;
 
     writer.init();
-    writer.submit([&]() { order.push_back(1); });
-    writer.submit([&]() { order.push_back(2); });
+    writer.submit([&]() {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back(1);
+    });
+    writer.submit([&]() {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back(2);
+    });
     writer.waitAllDone();
 
     ASSERT_EQ(2u, order.size());
 
     writer.init();
-    writer.submit([&]() { order.push_back(3); });
+    writer.submit([&]() {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back(3);
+    });
     writer.waitAllDone();
 
     ASSERT_EQ(3u, order.size());
@@ -188,6 +230,22 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
 #endif
 }
 
+TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
+    auto main_config = makeWriterTestCacheConfig("main", /*kv_stride=*/16);
+    main_config.mtp_sub_configs.push_back(
+        std::make_shared<CacheConfig>(makeWriterTestCacheConfig("draft", /*kv_stride=*/32)));
+    auto cache_manager = std::make_shared<KVCacheManager>(main_config, /*warmup=*/true);
+
+    CacheStoreAsyncWriter writer(
+        /*device_id=*/-1, cache_manager, /*cache_model_id=*/7, /*mtp_cache_config_index=*/0);
+
+    EXPECT_EQ(writer.cache_manager_, cache_manager);
+    EXPECT_EQ(writer.cache_config_->tagForGroup(0), "draft");
+    EXPECT_EQ(writer.cache_model_id_, 7);
+    EXPECT_EQ(writer.cp_rank_, 0);
+    EXPECT_EQ(writer.cp_size_, 1);
+}
+
 TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
     CacheStoreAsyncWriter writer;
     writer.init();
@@ -195,6 +253,8 @@ TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
     writer.submit([]() { throw std::runtime_error("test error"); });
 
     ASSERT_THROW(writer.waitAllDone(), std::runtime_error);
+    ASSERT_EQ(0, writer.pending_count_.load());
+    ASSERT_EQ(CacheStoreAsyncWriter::State::IDLE, writer.state_);
 
     // After exception, writer should be back in IDLE and re-initializable.
     writer.init();

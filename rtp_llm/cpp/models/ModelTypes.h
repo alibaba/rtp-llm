@@ -49,6 +49,8 @@ struct GptModelInitParams {
     size_t                                       tokens_per_block        = 0;
     size_t                                       kernel_tokens_per_block = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
+    // nullopt selects the main-model cache config; otherwise selects this MTP module config.
+    std::optional<int> mtp_cache_config_index;
 };
 
 enum GptModelInputIndex : size_t {

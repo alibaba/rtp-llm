@@ -102,7 +102,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          params.model_config_.hidden_size,
          runtime_tokens_per_block,
          runtime_kernel_tokens_per_block,
-         cache_manager});
+         cache_manager,
+         is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -126,7 +127,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(
         params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
-    LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 }
 
@@ -203,8 +204,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
-        sampler_output = std::move(sampler_->forward(sampler_input));
-        RTP_LLM_LOG_DEBUG("sampler forward done");
+        sampler_output                     = std::move(sampler_->forward(sampler_input));
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     {

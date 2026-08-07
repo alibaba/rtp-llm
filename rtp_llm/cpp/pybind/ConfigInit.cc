@@ -343,9 +343,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid DashScGrpcConfig state!");
                 DashScGrpcConfig c;
                 try {
-                    py::dict client_dict = t[0].cast<py::dict>();
-                    py::dict server_dict = t[1].cast<py::dict>();
-                    int      mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
+                    py::dict           client_dict = t[0].cast<py::dict>();
+                    py::dict           server_dict = t[1].cast<py::dict>();
+                    int                mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
                     std::ostringstream oss;
                     oss << "{\"client_config\": {";
                     bool first = true;
@@ -1368,31 +1368,70 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register GrammarConfig
     py::class_<GrammarConfig>(m, "GrammarConfig")
         .def(py::init<>())
-        .def_readwrite("grammar_backend", &GrammarConfig::grammar_backend)
         .def_readwrite("constrained_json_disable_any_whitespace",
                        &GrammarConfig::constrained_json_disable_any_whitespace)
+        .def_readwrite("terminate_without_stop_token", &GrammarConfig::terminate_without_stop_token)
         .def_readwrite("num_workers", &GrammarConfig::num_workers)
         .def_readwrite("tokenizer_info_json", &GrammarConfig::tokenizer_info_json)
-        .def_readwrite("override_stop_tokens", &GrammarConfig::override_stop_tokens)
+        .def_readwrite("compiler_cache_bytes", &GrammarConfig::compiler_cache_bytes)
         .def("to_string", &GrammarConfig::to_string)
+        .def("__repr__",
+             [](const GrammarConfig& c) {
+                 std::ostringstream oss;
+                 oss << "GrammarConfig(constrained_json_disable_any_whitespace="
+                     << c.constrained_json_disable_any_whitespace
+                     << ", terminate_without_stop_token=" << c.terminate_without_stop_token
+                     << ", num_workers=" << c.num_workers << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
+                 return oss.str();
+             })
         .def(py::pickle(
             [](const GrammarConfig& self) {
-                return py::make_tuple(self.grammar_backend,
-                                      self.constrained_json_disable_any_whitespace,
+                return py::make_tuple(self.constrained_json_disable_any_whitespace,
                                       self.num_workers,
                                       self.tokenizer_info_json,
-                                      self.override_stop_tokens);
+                                      self.compiler_cache_bytes,
+                                      self.terminate_without_stop_token);
             },
             [](py::tuple t) {
-                if (t.size() != 5)
+                if (t.size() != 5 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
-                    c.grammar_backend                         = t[0].cast<std::string>();
-                    c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
-                    c.num_workers                             = t[2].cast<int>();
-                    c.tokenizer_info_json                     = t[3].cast<std::string>();
-                    c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
+                    if (py::isinstance<py::str>(t[0])) {
+                        // Legacy layout:
+                        // (grammar_backend, disable_any_whitespace, num_workers, tokenizer_info_json,
+                        //  override_stop_tokens). grammar_backend was removed; validate and discard it.
+                        static_cast<void>(t[0].cast<std::string>());
+                        c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
+                        c.num_workers                             = t[2].cast<int>();
+                        c.tokenizer_info_json                     = t[3].cast<std::string>();
+                        // override_stop_tokens was removed; validate and discard the legacy value.
+                        static_cast<void>(t[4].cast<std::vector<int32_t>>());
+                    } else {
+                        c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
+                        c.num_workers                             = t[1].cast<int>();
+                        c.tokenizer_info_json                     = t[2].cast<std::string>();
+                        if (t.size() == 6) {
+                            // Previous layout:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
+                            //  compiler_cache_bytes, terminate_without_stop_token).
+                            static_cast<void>(t[3].cast<std::vector<int32_t>>());
+                            c.compiler_cache_bytes         = t[4].cast<int64_t>();
+                            c.terminate_without_stop_token = t[5].cast<bool>();
+                        } else if (py::isinstance<py::int_>(t[3])) {
+                            // Current layout:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json,
+                            //  compiler_cache_bytes, terminate_without_stop_token).
+                            c.compiler_cache_bytes         = t[3].cast<int64_t>();
+                            c.terminate_without_stop_token = t[4].cast<bool>();
+                        } else {
+                            // Older layout without terminate_without_stop_token:
+                            // (disable_any_whitespace, num_workers, tokenizer_info_json,
+                            //  override_stop_tokens, compiler_cache_bytes).
+                            static_cast<void>(t[3].cast<std::vector<int32_t>>());
+                            c.compiler_cache_bytes = t[4].cast<int64_t>();
+                        }
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrammarConfig unpickle error: ") + e.what());
                 }

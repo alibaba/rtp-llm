@@ -106,6 +106,19 @@ cc_binary(
 )
 
 cc_binary(
+    name = "th_grammar_tokenizer_info",
+    copts = copts(),
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+    ],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/engine_base/grammar:grammar_tokenizer_info_python",
+    ],
+)
+
+cc_binary(
     name = "rtp_compute_ops",
     copts = copts(),
     linkopts = [
