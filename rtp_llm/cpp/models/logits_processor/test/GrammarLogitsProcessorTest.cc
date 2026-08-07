@@ -618,6 +618,17 @@ TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsT
     reasoning_processor->updateStatus(torch::tensor(draft_tokens, torch::kInt32).reshape({1, propose_step}),
                                       propose_step);
     EXPECT_EQ(reasoning_processor->finishedThinkOutputLen(), propose_step);
+
+    SamplerInputs inputs;
+    inputs.logits           = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask    = torch::zeros({1}, torch::kBool);
+    inputs.input_lengths    = torch::tensor({0}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({propose_step}, torch::kInt32);
+    inputs.vocab_size       = 128;
+    reasoning_processor->process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('{')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('[')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
 }
 
 TEST(LogitsProcessorFactoryTest, GrammarThinkingWithoutEndIdsReportsInvalidParams) {
