@@ -456,6 +456,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
         os.environ["GENERATION_PREFILL_CAPTURE_CONFIG"] = "64,128,256"
         os.environ["OUTPUT_DISPATCHER_WORKER_COUNT"] = "3"
+        os.environ["KEEP_MLA_CHECKPOINT_WEIGHTS"] = "1"
 
         sys.argv = ["prog"]
 
@@ -546,6 +547,7 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.load_config.loader_recycle_handles)
         # MOE_PURE_TP_PRESHARD=true explicitly enables the opt-in path.
         self.assertTrue(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertTrue(py_env_configs.load_config.keep_mla_checkpoint_weights)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
@@ -601,6 +603,8 @@ class ServerArgsSetTest(TestCase):
             "16",
             "--warm_up",
             "0",
+            "--keep_mla_checkpoint_weights",
+            "True",
             "--cache_store_rdma_io_thread_count",
             "4",
             "--cache_store_rdma_worker_thread_count",
@@ -673,6 +677,7 @@ class ServerArgsSetTest(TestCase):
         # Pins the shipped defaults: neither env nor argv sets the flags here.
         self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
         self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertTrue(py_env_configs.load_config.keep_mla_checkpoint_weights)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
