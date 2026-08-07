@@ -345,3 +345,10 @@ py_test(
     imports=[],
     exec_properties={"gpu": "H20"},
 )
+
+py_test(
+    name="kimi_k3_mm_test",
+    srcs=["kimi_k3_mm_test.py"],
+    deps=["//rtp_llm:testlib"],
+    exec_properties={"gpu": "H20"},
+)

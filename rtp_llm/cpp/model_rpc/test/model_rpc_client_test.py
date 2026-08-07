@@ -1,6 +1,7 @@
 import asyncio
 import struct
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -39,6 +40,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     TensorPB,
 )
 from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs, RequestInfo
+from rtp_llm.multimodal.multimodal_util import MMUrlType
 
 
 class FakeStub:
@@ -236,6 +238,59 @@ class ModelRpcClientTest(TestCase):
         )
         self.assertEqual(
             input_pb.request_info.request_id, "4bf92f3577b34da6a3ce929d0e0e4736"
+        )
+
+    @staticmethod
+    def _make_multimodal_input(tensor: torch.Tensor) -> SimpleNamespace:
+        """Build the pybind-compatible input needed by ``trans_input``."""
+
+        return SimpleNamespace(
+            url="https://example.com/image.png",
+            mm_type=MMUrlType.IMAGE,
+            tensor=tensor,
+            mm_preprocess_config=SimpleNamespace(
+                width=-1,
+                height=-1,
+                min_pixels=-1,
+                max_pixels=-1,
+                fps=-1,
+                min_frames=-1,
+                max_frames=-1,
+                crop_positions=[],
+                mm_timeout_ms=-1,
+            ),
+        )
+
+    def test_trans_input_preserves_uint8_multimodal_tensor(self):
+        tensor = torch.tensor([0, 1, 127, 255], dtype=torch.uint8)
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(),
+                request_id=123,
+                mm_inputs=[self._make_multimodal_input(tensor)],
+            )
+        )
+
+        tensor_pb = input_pb.multimodal_inputs[0].multimodal_tensor
+        self.assertEqual(tensor_pb.data_type, TensorPB.DataType.UINT8)
+        self.assertEqual(list(tensor_pb.shape), [4])
+        self.assertEqual(tensor_pb.uint8_data, tensor.numpy().tobytes())
+
+    def test_trans_input_omits_default_multimodal_tensor(self):
+        input_pb = trans_input(
+            GenerateInput(
+                token_ids=torch.tensor([1, 2, 3]),
+                generate_config=GenerateConfig(),
+                request_id=123,
+                mm_inputs=[
+                    self._make_multimodal_input(torch.empty(0, dtype=torch.uint8))
+                ],
+            )
+        )
+
+        self.assertFalse(
+            input_pb.multimodal_inputs[0].HasField("multimodal_tensor")
         )
 
 

@@ -458,6 +458,14 @@ class PyMultimodalInputs:
     def mm_features_locs(self, arg0: torch.Tensor) -> None:
         ...
     @property
+    def mm_features_locs_host(self) -> torch.Tensor:
+        """
+        Multimodal features locations tensor, kept on the host
+        """
+    @mm_features_locs_host.setter
+    def mm_features_locs_host(self, arg0: torch.Tensor) -> None:
+        ...
+    @property
     def multimodal_features(self) -> list[torch.Tensor]:
         """
         Multimodal features tensor

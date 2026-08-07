@@ -22,6 +22,8 @@ def trans_grpc_dtype(type: TensorPB.DataType):
         return torch.float16
     elif type == TensorPB.DataType.BF16:
         return torch.bfloat16
+    elif type == TensorPB.DataType.UINT8:
+        return torch.uint8
     else:
         raise Exception("unkown error type")
 
@@ -39,6 +41,8 @@ def trans_tensor(t: TensorPB):
         return torch.frombuffer(t.bf16_data, dtype=torch.bfloat16).reshape(
             list(t.shape)
         )
+    elif t.data_type == TensorPB.DataType.UINT8:
+        return torch.frombuffer(t.uint8_data, dtype=torch.uint8).reshape(list(t.shape))
     else:
         raise Exception("unkown error type")
 
@@ -61,6 +65,9 @@ def trans_from_tensor(t: torch.Tensor):
     elif t.dtype == torch.bfloat16:
         res.data_type = TensorPB.DataType.BF16
         res.bf16_data = t.view(torch.int16).numpy().tobytes()
+    elif t.dtype == torch.uint8:
+        res.data_type = TensorPB.DataType.UINT8
+        res.uint8_data = t.numpy().tobytes()
     else:
         raise Exception("unknown tensor data type")
     return res

@@ -275,6 +275,7 @@ class RenderedInputs:
         input_urls: List[str] = [],
         input_urls_type: List[MMUrlType] = [],
         preprocess_configs: List[MMPreprocessConfig] = [],
+        input_tensors: Optional[List[torch.Tensor]] = None,
     ):
         self.input_ids = input_ids
         self.rendered_prompt = rendered_prompt
@@ -295,9 +296,19 @@ class RenderedInputs:
                 f"the number of multimodal preprocess config must match url, now types {len(preprocess_configs)} urls {len(input_urls)}"
             )
 
-        for url, type, config in zip(input_urls, input_urls_type, preprocess_configs):
+        if input_tensors is None:
+            input_tensors = [torch.empty(0)] * len(input_urls)
+        elif len(input_tensors) != len(input_urls):
+            raise Exception(
+                "the number of multimodal tensors must match urls, "
+                f"now tensors {len(input_tensors)} urls {len(input_urls)}"
+            )
+
+        for url, type, tensor, config in zip(
+            input_urls, input_urls_type, input_tensors, preprocess_configs
+        ):
             self.multimodal_inputs.append(
-                MultimodalInput(url, type, torch.empty(0), config)
+                MultimodalInput(url, type, tensor, config)
             )
 
 
@@ -424,6 +435,11 @@ class CustomChatRenderer:
 
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
+
+    async def render_chat_async(
+        self, request: ChatCompletionRequest
+    ) -> RenderedInputs:
+        return self.render_chat(request)
 
     def apply_chat_completion_constraints(
         self, request: ChatCompletionRequest, generate_config: GenerateConfig

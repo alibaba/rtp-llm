@@ -1,13 +1,23 @@
+import asyncio
 import json
 import logging
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+import torch
+from PIL import Image
 from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
+    K3_MAX_IMAGE_FILE_SIZE_KB,
+    KimiK3VisionProcessor,
+)
+from rtp_llm.multimodal.multimodal_util import MMUrlType, get_bytes_io_from_url
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
@@ -17,6 +27,7 @@ from rtp_llm.openai.api_datatype import (
     get_tool_choice_function_name,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
+from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
     OutputDelta,
@@ -28,6 +39,11 @@ from rtp_llm.ops import MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 
 
+_K3_MEDIA_PREFLIGHT_CONCURRENCY = 4
+_K3_MEDIA_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_K3_MEDIA_PREFLIGHT_CONCURRENCY,
+    thread_name_prefix="kimi-k3-media",
+)
 _GRAMMAR_RESPONSE_FORMAT_TYPES = {
     "json_object",
     "json_schema",
@@ -96,7 +112,7 @@ class _KimiK3StreamStatus(StreamStatus):
 
 
 class KimiK3Renderer(CustomChatRenderer):
-    """Render Kimi K3's Python-defined XTML chat encoding.
+    """Render Kimi K3's Python-defined XTML and collect image inputs.
 
     K3 deliberately has no Jinja ``chat_template``.  Its remote tokenizer
     renders a sequence of trusted structural segments and untrusted text
@@ -105,8 +121,13 @@ class KimiK3Renderer(CustomChatRenderer):
     so this renderer consumes the tokenizer's tokenized result directly.
     """
 
+    MAX_IMAGES_PER_REQUEST = 16
+    MAX_IMAGE_BYTES = K3_MAX_IMAGE_FILE_SIZE_KB * 1024
+    MAX_TOTAL_IMAGE_BYTES = 128 * 1024 * 1024
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._image_processor = KimiK3VisionProcessor()
         self.add_extra_stop_words(["<|end_of_msg|>"])
 
     _TOOLS_OPEN = "<|open|>tools<|sep|>"
@@ -459,21 +480,128 @@ class KimiK3Renderer(CustomChatRenderer):
         return request.model_dump(exclude_none=True, mode="json")
 
     @staticmethod
-    def _ensure_text_only(messages: List[Dict[str, Any]]) -> None:
+    def _collect_and_rewrite(
+        messages: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], PromptWithMMInput]:
+        urls: List[str] = []
+        types: List[MMUrlType] = []
+        rewritten: List[Dict[str, Any]] = []
         for message in messages:
+            role = message.get("role")
             content = message.get("content")
             if not isinstance(content, list):
+                rewritten.append(message)
                 continue
-            unsupported = [
-                part.get("type")
-                for part in content
-                if isinstance(part, dict) and part.get("type") != "text"
-            ]
-            if unsupported:
+
+            new_parts: List[Dict[str, Any]] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    raise ValueError("Kimi K3 message content parts must be objects")
+                part_type = part.get("type")
+                if part_type == "text":
+                    new_parts.append({"type": "text", "text": part.get("text")})
+                elif part_type == "image_url":
+                    if role != "user":
+                        raise ValueError(
+                            "Kimi K3 supports image_url content only in user "
+                            f"messages; got role {role!r}"
+                        )
+                    image_url = part.get("image_url")
+                    url = image_url.get("url") if isinstance(image_url, dict) else None
+                    if not isinstance(url, str) or not url:
+                        raise ValueError(
+                            "Kimi K3 image_url content requires a non-empty URL"
+                        )
+                    urls.append(url)
+                    types.append(MMUrlType.IMAGE)
+                    new_parts.append({"type": "image", "image": url})
+                else:
+                    raise ValueError(
+                        "Kimi K3 supports only text and image_url content parts; "
+                        f"got {part_type!r}"
+                    )
+
+            new_message = dict(message)
+            new_message["content"] = new_parts
+            rewritten.append(new_message)
+
+        return rewritten, PromptWithMMInput(prompt="", urls=urls, mm_types=types)
+
+    def _preflight_one(self, url: str) -> tuple[torch.Tensor, tuple[int, int]]:
+        data = get_bytes_io_from_url(
+            url,
+            self.vit_config.download_headers,
+            max_file_size_kb=self.MAX_IMAGE_BYTES // 1024,
+        )
+        raw = data.getbuffer()
+        with Image.open(BytesIO(raw)) as image:
+            width, height = image.size
+        return torch.frombuffer(raw, dtype=torch.uint8), (width, height)
+
+    def _validate_image_count(self, urls: List[str]) -> None:
+        if len(urls) > self.MAX_IMAGES_PER_REQUEST:
+            raise ValueError(
+                "Kimi K3 image count exceeds the per-request limit: "
+                f"{len(urls)} > {self.MAX_IMAGES_PER_REQUEST}"
+            )
+
+    def _append_preflight_batch(
+        self,
+        results: List[tuple[torch.Tensor, tuple[int, int]]],
+        tensors: List[torch.Tensor],
+        metadata: List[tuple[int, int]],
+        total_bytes: int,
+    ) -> int:
+        for tensor, size in results:
+            total_bytes += tensor.numel()
+            if total_bytes > self.MAX_TOTAL_IMAGE_BYTES:
                 raise ValueError(
-                    "Kimi K3 RTP-LLM bring-up is text-only; unsupported content "
-                    f"types: {unsupported}"
+                    "Kimi K3 image bytes exceed the per-request limit: "
+                    f"{total_bytes} > {self.MAX_TOTAL_IMAGE_BYTES}"
                 )
+            tensors.append(tensor)
+            metadata.append(size)
+        return total_bytes
+
+    def _preflight_media(
+        self, urls: List[str]
+    ) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
+        self._validate_image_count(urls)
+        tensors: List[torch.Tensor] = []
+        metadata: List[tuple[int, int]] = []
+        total_bytes = 0
+        for offset in range(0, len(urls), _K3_MEDIA_PREFLIGHT_CONCURRENCY):
+            batch = urls[offset : offset + _K3_MEDIA_PREFLIGHT_CONCURRENCY]
+            results = list(_K3_MEDIA_EXECUTOR.map(self._preflight_one, batch))
+            total_bytes = self._append_preflight_batch(
+                results, tensors, metadata, total_bytes
+            )
+        return tensors, metadata
+
+    async def _preflight_media_async(
+        self, urls: List[str]
+    ) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
+        self._validate_image_count(urls)
+        loop = asyncio.get_running_loop()
+        tensors: List[torch.Tensor] = []
+        metadata: List[tuple[int, int]] = []
+        total_bytes = 0
+        for offset in range(0, len(urls), _K3_MEDIA_PREFLIGHT_CONCURRENCY):
+            batch = urls[offset : offset + _K3_MEDIA_PREFLIGHT_CONCURRENCY]
+            results = await asyncio.gather(
+                *(
+                    loop.run_in_executor(
+                        _K3_MEDIA_EXECUTOR,
+                        self._preflight_one,
+                        url,
+                    )
+                    for url in batch
+                )
+            )
+            total_bytes = self._append_preflight_batch(
+                results, tensors, metadata, total_bytes
+            )
+        return tensors, metadata
 
     @staticmethod
     def _tools(request_dict: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
@@ -664,11 +792,37 @@ class KimiK3Renderer(CustomChatRenderer):
             )
         return value
 
-    @override
-    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
-        request_dict = self._request_dict(request)
-        messages = request_dict["messages"]
-        self._ensure_text_only(messages)
+    def _validate_visual_token_budget(
+        self,
+        token_ids: List[int],
+        metadata: List[tuple[int, int]],
+    ) -> None:
+        if not self.max_seq_len or not metadata:
+            return
+        visual_tokens = sum(
+            self._image_processor.resize_config_for_size(width, height)["num_tokens"]
+            for width, height in metadata
+        )
+        expanded_input_length = len(token_ids) - len(metadata) + visual_tokens
+        if expanded_input_length > self.max_seq_len:
+            raise ValueError(
+                "Kimi K3 expanded multimodal input exceeds max_seq_len: "
+                f"{expanded_input_length} > {self.max_seq_len}"
+            )
+
+    def _render_preflighted(
+        self,
+        request: ChatCompletionRequest,
+        request_dict: Dict[str, Any],
+        messages: List[Dict[str, Any]],
+        mm_input: PromptWithMMInput,
+        tensors: List[torch.Tensor],
+        metadata: List[tuple[int, int]],
+    ) -> RenderedInputs:
+        image_prompts = [
+            KimiK3VisionProcessor.make_image_prompt(width, height)
+            for width, height in metadata
+        ]
         tools = self._tools(request_dict)
         template_kwargs = self._template_kwargs(request, request_dict)
 
@@ -677,23 +831,50 @@ class KimiK3Renderer(CustomChatRenderer):
             tools=tools,
             tokenize=True,
             add_generation_prompt=True,
+            image_prompts=image_prompts,
             **template_kwargs,
         )
-        rendered_prompt = self.tokenizer.apply_chat_template(
-            messages,
-            tools=tools,
-            tokenize=False,
-            add_generation_prompt=True,
-            **template_kwargs,
-        )
-        if not isinstance(rendered_prompt, str):
-            raise TypeError(
-                "Kimi K3 tokenizer.apply_chat_template must return str when "
-                f"tokenize=False, got {type(rendered_prompt).__name__}"
-            )
         token_ids = self._as_token_ids(input_ids)
+        self._validate_visual_token_budget(token_ids, metadata)
         logging.debug("Kimi K3 rendered %d XTML prompt tokens", len(token_ids))
-        return RenderedInputs(input_ids=token_ids, rendered_prompt=rendered_prompt)
+        # Leave rendered_prompt empty: both endpoints decode input_ids on demand
+        # for debug output, avoiding a second expensive XTML template pass.
+        return RenderedInputs(
+            input_ids=token_ids,
+            input_urls=mm_input.urls,
+            input_urls_type=mm_input.mm_types,
+            input_tensors=tensors,
+        )
+
+    @override
+    def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        request_dict = self._request_dict(request)
+        messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
+        tensors, metadata = self._preflight_media(mm_input.urls)
+        return self._render_preflighted(
+            request,
+            request_dict,
+            messages,
+            mm_input,
+            tensors,
+            metadata,
+        )
+
+    @override
+    async def render_chat_async(
+        self, request: ChatCompletionRequest
+    ) -> RenderedInputs:
+        request_dict = self._request_dict(request)
+        messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
+        tensors, metadata = await self._preflight_media_async(mm_input.urls)
+        return self._render_preflighted(
+            request,
+            request_dict,
+            messages,
+            mm_input,
+            tensors,
+            metadata,
+        )
 
     @override
     def apply_chat_completion_constraints(

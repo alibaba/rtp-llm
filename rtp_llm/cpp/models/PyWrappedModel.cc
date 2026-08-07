@@ -437,6 +437,7 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 
     // Set input_embedding_scalar
     bert_embedding_inputs.input_embedding_scalar = description_.input_embedding_scalar;
+
     return bert_embedding_inputs;
 }
 
@@ -671,6 +672,10 @@ torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptM
         multimodal_input.mm_extra_input = mm_extra_input;
     }
     if (inputs.mm_features_locs.defined()) {
+        // Keep both views: the fused embedding path consumes the device copy, while
+        // models that splice features in Python read the offsets on the host.
+        multimodal_input.mm_features_locs_host =
+            inputs.mm_features_locs.is_cuda() ? inputs.mm_features_locs.cpu() : inputs.mm_features_locs;
         multimodal_input.mm_features_locs = inputs.mm_features_locs.cuda();
     }
     return multimodal_input;

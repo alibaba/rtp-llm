@@ -153,12 +153,13 @@ class KimiK3RendererTest(unittest.TestCase):
         )
         renderer = KimiK3Renderer.__new__(KimiK3Renderer)
         renderer.tokenizer = Tokenizer()
+        renderer.max_seq_len = 0
 
         rendered = renderer.render_chat(request)
 
         self.assertEqual(rendered.input_ids, [1, 2, 3])
-        self.assertEqual(rendered.rendered_prompt, "prompt")
-        self.assertEqual(len(renderer.tokenizer.calls), 2)
+        self.assertEqual(rendered.rendered_prompt, "")
+        self.assertEqual(len(renderer.tokenizer.calls), 1)
         for messages, kwargs in renderer.tokenizer.calls:
             self.assertEqual(messages[0]["tools"], [tool])
             self.assertIsNone(kwargs["tools"])

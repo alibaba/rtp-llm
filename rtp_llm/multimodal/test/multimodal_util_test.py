@@ -67,6 +67,23 @@ class TestMultiModalUtil(unittest.TestCase):
             Image.open(get_bytes_io_from_url(base64_str)).size == image.size
         )
 
+    def test_local_file_checks_size_before_read(self):
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=True) as tmp_file:
+            tmp_file.write(b"x" * (2 * 1024))
+            tmp_file.flush()
+            # The local-path branch wraps its payload in BytesIO, so an untouched
+            # mock proves the size was checked before the body was read.
+            with patch(
+                "rtp_llm.multimodal.multimodal_util.BytesIO",
+                side_effect=AssertionError("file read before size check"),
+            ) as no_payload:
+                self.assert_mm_error(
+                    ExceptionType.MM_WRONG_FORMAT_ERROR,
+                    MMErr.FILE_TOO_LARGE,
+                    lambda: get_bytes_io_from_url(tmp_file.name, max_file_size_kb=1),
+                )
+            no_payload.assert_not_called()
+
     def test_http_checks_content_length_before_body(self):
         response = _FakeResponse(headers={"Content-Length": str(2 * 1024)})
         with patch(

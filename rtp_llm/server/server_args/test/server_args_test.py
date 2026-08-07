@@ -1,11 +1,30 @@
 import importlib
+import json
 import os
 import sys
 from unittest import TestCase, main
 
+from rtp_llm.server.server_args.grpc_group_args import (
+    default_dash_sc_grpc_config_json,
+    default_model_grpc_config_json,
+)
+
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+
+class GrpcGroupArgsTest(TestCase):
+    def test_default_server_receive_message_limit(self):
+        for config_json in (
+            default_model_grpc_config_json(),
+            default_dash_sc_grpc_config_json(),
+        ):
+            config = json.loads(config_json)
+            self.assertEqual(
+                config["server_config"]["grpc.max_receive_message_length"],
+                1024 * 1024 * 1024,
+            )
 
 
 class ServerArgsSetTest(TestCase):

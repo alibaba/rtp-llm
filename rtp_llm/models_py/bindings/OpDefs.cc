@@ -215,6 +215,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("multimodal_features", &PyMultimodalInputs::multimodal_features, "Multimodal features tensor")
         .def_readwrite(
             "mm_features_locs", &PyMultimodalInputs::mm_features_locs, "Multimodal features locations tensor")
+        .def_readwrite("mm_features_locs_host",
+                       &PyMultimodalInputs::mm_features_locs_host,
+                       "Multimodal features locations tensor, kept on the host")
         .def_readwrite(
             "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
         .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });

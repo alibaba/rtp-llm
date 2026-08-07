@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import torch
 from torch import nn
@@ -45,6 +45,9 @@ from rtp_llm.models_py.modules.base import RMSNorm
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     create_write_cache_store_impl,
+)
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbeddingInjector,
 )
 from rtp_llm.models_py.modules.hybrid.dense_mlp import (
     DenseMLP,
@@ -327,6 +330,36 @@ class KimiK3DecoderLayer(nn.Module):
         return KimiK3DecoderOutput(output, block_residual)
 
 
+def _mask_multimodal_token_ids(
+    input_ids: torch.Tensor,
+    multimodal_features: Sequence[torch.Tensor],
+    multimodal_locs: torch.Tensor,
+) -> torch.Tensor:
+    """Zero the token ids that ``MultimodalEmbeddingInjector`` will overwrite.
+
+    Multimodal rows do not hold vocab ids: ``MultimodalProcessor::expandTokenIds``
+    replaces them with per-row feature hashes (``featureHashToTokenId``, an arbitrary
+    ``int32`` that is routinely negative or ``>= vocab_size``) so the prefix cache can
+    tell two images apart. Feeding those to the embedding op indexes out of bounds, so
+    they must be masked before lookup. The zeroed rows are overwritten by the injector.
+    """
+    locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+    masked_ids = input_ids.clone()
+    for feature, loc in zip(multimodal_features, locs):
+        if feature is None:
+            continue
+        # loc < 0 means the head rows already live in the reused KV prefix and only
+        # the tail lands in this chunk, at token 0 -- same convention as the injector.
+        offset = max(loc, 0)
+        length = feature.size(0) - min(max(-loc, 0), feature.size(0))
+        # Out-of-range spans are clipped rather than rejected here; the injector
+        # raises the canonical IndexError after the embedding lookup.
+        length = min(length, masked_ids.size(0) - offset)
+        if length > 0:
+            masked_ids.narrow(0, offset, length).fill_(0)
+    return masked_ids
+
+
 class KimiK3Model(GptModelBase):
     """Text decoder body consumed by RTP's Python model executor."""
 
@@ -361,6 +394,7 @@ class KimiK3Model(GptModelBase):
         self.num_attn_res_blocks = (
             self.layer_num + self.attn_res_block_size - 1
         ) // self.attn_res_block_size
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
             [
                 KimiK3DecoderLayer(
@@ -439,6 +473,28 @@ class KimiK3Model(GptModelBase):
     # framework MLA impl via ``AttnImplFactory.get_fmha_impl`` (identical to the
     # generic MoE path).  K3's MLA layers consume that impl through
     # ``KimiK3MLA`` (an ``MlaAttention`` subclass); K3's KDA layers ignore it.
+
+    def _embed(self, input_ids: torch.Tensor, multimodal_inputs: Any) -> torch.Tensor:
+        multimodal_features = multimodal_inputs.multimodal_features
+        mm_features_locs = multimodal_inputs.mm_features_locs_host
+        if multimodal_features:
+            if (
+                mm_features_locs is None
+                or mm_features_locs.numel() != len(multimodal_features)
+            ):
+                raise ValueError(
+                    "Kimi K3 multimodal feature locations must match the feature count"
+                )
+            input_ids = _mask_multimodal_token_ids(
+                input_ids, multimodal_features, mm_features_locs
+            )
+
+        hidden_states = self.embed_tokens(input_ids)
+        # Vision features use full hidden space, so inject after the TP all-gather
+        # in Embedding rather than into its rank-local vocabulary projection.
+        return self.multimodal_embedding_injector(
+            hidden_states, multimodal_features, mm_features_locs
+        )
 
     @staticmethod
     def _cu_seqlens(
@@ -543,7 +599,7 @@ class KimiK3Model(GptModelBase):
                     "Kimi K3 Sequence Parallel currently requires TP == EP; "
                     f"got TP={tp_size}, EP={ep_size}"
                 )
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = self._embed(input_ids, inputs.multimodal_inputs)
         if prefill_sp:
             assert prefill_sp_layout is not None
             hidden_states = shard_tokens(

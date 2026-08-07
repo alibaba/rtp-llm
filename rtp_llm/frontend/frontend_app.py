@@ -702,7 +702,7 @@ class FrontendApp(object):
         @app.post("/tokenize")
         async def encode(req: Union[str, Dict[Any, Any]], request: Request):
             check_not_draining(request)
-            return self.frontend_server.tokenize(req)
+            return await self.frontend_server.tokenize_async(req)
 
         if self.frontend_server.is_embedding:
             from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
