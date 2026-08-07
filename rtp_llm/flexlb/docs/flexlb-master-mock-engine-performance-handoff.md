@@ -439,7 +439,7 @@ curl -s -X POST http://127.0.0.1:7001/rtp_llm/server_latency/reset
 典型现象：
 
 - `dispatch_ack_ms` 明显上升，而 `route_submit_ms` 和 `batch_wait_ms` 正常。
-- `mock_engine.log` 中 `prefill_pending` 持续增长，或 mock CPU/event loop 饱和。
+- `mock_engine.log` 中 `prefill_waiting` 持续增长，或 mock CPU/event loop 饱和。
 - 出现 `engine-grpc-client-executor` 拒绝执行、连接失败或 ACK timeout。
 
 处理：先确认使用 Java mock 和 `fast_ab`，检查 mock CPU、`JAVA_MOCK_EVENT_LOOP_THREADS`、outbound gRPC executor 和连接稳定性。若只有冷启动出现，增加预热并复测；若稳态持续出现，才属于真实容量问题。
@@ -459,7 +459,7 @@ curl -s -X POST http://127.0.0.1:7001/rtp_llm/server_latency/reset
 典型现象：
 
 - `NO_AVAILABLE_WORKER`、available concurrency 为 0，或 endpoint 未全部 alive。
-- mock `prefill_pending`/`decode_running` 随时间持续增长。
+- mock `prefill_waiting`/`decode_running` 随时间持续增长。
 - 降低 `sleep_scale` 或增加 engine 后问题消失。
 
 这类结果不能用于宣称 Master 到达上限，应先恢复 engine 余量。
