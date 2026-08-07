@@ -38,7 +38,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         const auto result               = manager_->malloc(malloc_info);
         ASSERT_TRUE(result.success);
         EXPECT_EQ(result.reuse_len, (logical_blocks - 1) * seq_size_per_block);
-        EXPECT_EQ(result.memory_reuse_len, 0);
+        EXPECT_EQ(result.host_reuse_len, 0);
         EXPECT_EQ(result.disk_reuse_len, 0);
         EXPECT_EQ(result.async_context, nullptr);
         eviction_guards.push_back(std::move(hold));
@@ -97,8 +97,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         }
     }
     for (const auto& group_set : cache->groupSets()) {
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 1u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
         if (GetParam() == TierLayout::HOST_DISK) {
             EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
         }
@@ -121,8 +121,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
                 EXPECT_EQ(resource.getTopTier(), Tier::HOST);
                 host_sources[group_set_id] = resource.host_block;
                 EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-                EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-                EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+                EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
                 const size_t group_id = group_set->groupIds().front();
                 EXPECT_FALSE(group_set->devicePools().front()->isAllocated(seed.blocks_by_group[group_id][path_index]));
             } else {
@@ -166,7 +166,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 3 * seq_size_per_block);
-    EXPECT_EQ(load_result.memory_reuse_len, seq_size_per_block);
+    EXPECT_EQ(load_result.host_reuse_len, seq_size_per_block);
     EXPECT_EQ(load_result.disk_reuse_len, 0);
     ASSERT_NE(load_result.async_context, nullptr);
     const bool load_entered = pausable_engine->waitUntilEnteredFor(
@@ -265,7 +265,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     const auto hit_result        = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 3 * seq_size_per_block);
-    EXPECT_EQ(hit_result.memory_reuse_len, 0);
+    EXPECT_EQ(hit_result.host_reuse_len, 0);
     EXPECT_EQ(hit_result.disk_reuse_len, 0);
     EXPECT_EQ(hit_result.async_context, nullptr);
     EXPECT_EQ(pausable_engine->submitCount(), submits_before_second_hit);
@@ -332,7 +332,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
         const size_t group_id = group_set->groupIds().front();
         EXPECT_EQ(resource.device_blocks, (BlockIndicesType{seed.blocks_by_group[group_id][0]}));
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
     }
 
@@ -351,8 +351,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         host_sources[group_set_id] = resource.host_block;
         EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
         const size_t group_id = group_set->groupIds().front();
         EXPECT_FALSE(group_set->devicePools().front()->isAllocated(seed.blocks_by_group[group_id][0]));
     }
@@ -403,8 +403,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         EXPECT_EQ(resource.host_block, host_sources[group_set_id]);
         EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-        EXPECT_EQ(group_set->diskPool()->totalRefCount(BlockRefType::EVICTION), 1u);
-        EXPECT_EQ(group_set->diskPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
     }
 
     pausable_engine->release();
@@ -423,8 +423,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         disk_sources[group_set_id] = resource.disk_slot;
         EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
         EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 1u);
-        EXPECT_EQ(group_set->diskPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-        EXPECT_EQ(group_set->diskPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     descriptors = pausable_engine->descriptors();
@@ -455,7 +455,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, seq_size_per_block);
-    EXPECT_EQ(load_result.memory_reuse_len, 0);
+    EXPECT_EQ(load_result.host_reuse_len, 0);
     EXPECT_EQ(load_result.disk_reuse_len, seq_size_per_block);
     ASSERT_NE(load_result.async_context, nullptr);
     const bool disk_load_entered = pausable_engine->waitUntilEnteredFor(
@@ -541,7 +541,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     const auto hit_result        = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, seq_size_per_block);
-    EXPECT_EQ(hit_result.memory_reuse_len, 0);
+    EXPECT_EQ(hit_result.host_reuse_len, 0);
     EXPECT_EQ(hit_result.disk_reuse_len, 0);
     EXPECT_EQ(hit_result.async_context, nullptr);
     EXPECT_EQ(pausable_engine->submitCount(), submits_before_second_hit);
@@ -610,7 +610,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         const size_t group_id = group_set->groupIds().front();
         EXPECT_EQ(resource.device_blocks.front(), seed.blocks_by_group[group_id][0]);
         EXPECT_EQ(group_set->devicePools().front()->refCount(resource.device_blocks.front()), 1u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
         EXPECT_EQ(group_set->hostPool()->usedBlocksNum(), 0u);
         ASSERT_NE(group_set->diskPool(), nullptr);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
@@ -631,7 +631,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     const auto   hit_result         = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(hit_result.memory_reuse_len, 0);
+    EXPECT_EQ(hit_result.host_reuse_len, 0);
     EXPECT_EQ(hit_result.disk_reuse_len, 0);
     EXPECT_EQ(hit_result.async_context, nullptr);
     EXPECT_EQ(recording_engine->submitCount(), submits_before_hit);
@@ -708,10 +708,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             EXPECT_EQ(resource.getTopTier(), Tier::HOST);
             EXPECT_EQ(resource.host_block, host_sources_before_failure[group_set_id]);
             EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-            EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-            EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
-            EXPECT_EQ(group_set->diskPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
-            EXPECT_EQ(group_set->diskPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
+            EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
         }
         expectPoolSnapshotsEq(lower_before_host_failure, snapshotLowerPools(*cache, GetParam()));
 
@@ -732,7 +732,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         const auto host_hit_result        = manager_->malloc(host_hit_info);
         ASSERT_TRUE(host_hit_result.success);
         EXPECT_EQ(host_hit_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-        EXPECT_EQ(host_hit_result.memory_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+        EXPECT_EQ(host_hit_result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
         EXPECT_EQ(host_hit_result.disk_reuse_len, 0);
         ASSERT_NE(host_hit_result.async_context, nullptr);
         ASSERT_TRUE(
@@ -782,8 +782,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
             EXPECT_EQ(resource.getTopTier(), Tier::HOST);
             EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-            EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-            EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+            EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
         }
         cache->setTierWatermark(Tier::HOST, *host_ratio, 0);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -818,7 +818,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     ASSERT_TRUE(load_result.success);
     ASSERT_NE(load_result.async_context, nullptr);
     EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(load_result.memory_reuse_len, 0);
+    EXPECT_EQ(load_result.host_reuse_len, 0);
     EXPECT_EQ(load_result.disk_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
     ASSERT_TRUE(waitForAsyncContextDoneFor(
         load_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
@@ -862,11 +862,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     cache->setTierWatermark(Tier::DEVICE, *ratio, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
-    ASSERT_TRUE(
-        engine->waitUntilEnteredFor(std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
-    const int pending_tasks = BlockTreeCacheTestPeer::pendingTasksForTest(*cache);
-    ASSERT_GT(pending_tasks, 0);
-    auto demoting = snapshotPathResources(*cache, seed.cache_keys);
+    const size_t pending_tasks = static_cast<size_t>(BlockTreeCacheTestPeer::pendingTasksForTest(*cache));
+    const size_t worker_count  = static_cast<size_t>(cache->config().task_pool_size);
+    const size_t expected_entered_count = std::min(pending_tasks, worker_count);
+    ASSERT_GT(expected_entered_count, 0u);
+    ASSERT_TRUE(engine->waitUntilEnteredCountFor(
+        expected_entered_count, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
+    auto       demoting = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(demoting.has_value());
     ASSERT_EQ(demoting->size(), 1u);
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -880,7 +882,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
         EXPECT_EQ(state.device_blocks, (BlockIndicesType{seed.blocks_by_group[group_id][0]}));
         EXPECT_EQ(group_set->devicePools().front()->refCount(state.device_blocks.front()), 1u);
         EXPECT_EQ(group_set->hostPool()->usedBlocksNum(), 1u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
     }
     auto       resource = makeResource(cache_config_);
     auto       tokens   = makeTokenIds(0,
@@ -896,7 +898,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     // DEMOTING resources are intentionally not matchable; the in-flight source
     // remains retained by the eviction ticket rather than a new request.
     EXPECT_EQ(result.reuse_len, 0);
-    EXPECT_EQ(result.memory_reuse_len, 0);
+    EXPECT_EQ(result.host_reuse_len, 0);
     EXPECT_EQ(result.disk_reuse_len, 0);
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_tasks);
     auto still_demoting = snapshotPathResources(*cache, seed.cache_keys);
@@ -907,7 +909,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::DEMOTING);
         EXPECT_EQ(group_set->devicePools().front()->refCount(state.device_blocks.front()), 1u)
             << "the miss request must not reference the DEMOTING source";
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 1u);
     }
     cache->setTierWatermark(Tier::DEVICE, *ratio, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -925,7 +927,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
         ASSERT_TRUE(state.hasTier(Tier::HOST));
         EXPECT_FALSE(state.hasTier(Tier::DEVICE));
         EXPECT_EQ(group_set->hostPool()->refCount(state.host_block), 1u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
     manager_->free(FreeInfo{resource, tokens});
 
@@ -940,7 +942,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(load_result.memory_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(load_result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
     EXPECT_EQ(load_result.disk_reuse_len, 0);
     ASSERT_NE(load_result.async_context, nullptr);
     load_result.async_context->waitDone();

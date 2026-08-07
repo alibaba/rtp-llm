@@ -132,8 +132,13 @@ bool BlockTreeCache::executeTransfer(const TransferDescriptor& descriptor) {
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return loader_.matchLocked(cache_keys);
+    BlockTreeMatchResult result;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        result = loader_.matchLocked(cache_keys);
+    }
+    metrics_reporter_.reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
+    return result;
 }
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
@@ -209,7 +214,7 @@ void BlockTreeCache::reportMetrics() const {
         std::lock_guard<std::mutex> lock(mutex_);
         snapshots = metrics_reporter_.collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
     }
-    metrics_reporter_.reportEvictableBlockCount(snapshots);
+    metrics_reporter_.reportEvictableCandidateCount(snapshots);
 }
 
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
@@ -245,6 +250,35 @@ BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
         }
     }
     return snapshot;
+}
+
+bool BlockTreeCache::getDeviceBlockDebugInfo(size_t                group_id,
+                                             BlockIdxType          block_id,
+                                             DeviceBlockDebugInfo& debug_info) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_id);
+    if (location == nullptr) {
+        return false;
+    }
+
+    const GroupSetPtr& group_set = tree_->groupSets()[location->group_set_id];
+    TreeNode*          node = group_set->findTreeNodeByDeviceBlock(location->member_group_id, block_id);
+    if (node == nullptr) {
+        return false;
+    }
+
+    const GroupSetResource& resource = node->group_set_resources[location->group_set_id];
+    DeviceBlockDebugInfo    result;
+    result.group_id        = group_id;
+    result.group_set_id    = location->group_set_id;
+    result.member_group_id = location->member_group_id;
+    result.block_id        = block_id;
+    result.node_address    = reinterpret_cast<uintptr_t>(node);
+    result.cache_key       = node->cache_key;
+    result.transfer_state  = resource.transfer_state;
+    result.device_blocks   = resource.device_blocks;
+    debug_info             = std::move(result);
+    return true;
 }
 
 void BlockTreeCache::waitForPendingTasks() {

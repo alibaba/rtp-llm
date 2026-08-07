@@ -500,6 +500,23 @@ TEST(BlockTreeEvictorCascadeTest, ReverseCascadeIncludesAllSiblingGroupsAtLeaf) 
               (std::vector<size_t>{0, 2}));
 }
 
+TEST_F(BlockTreeEvictorTest, TierEntryRefreshesLastAccessTime) {
+    const std::optional<BlockIdList> allocated = device_pool_->malloc(1);
+    ASSERT_TRUE(allocated.has_value());
+    ASSERT_EQ(allocated->size(), 1u);
+    BlockTreeInsertResult result = insert({100}, {{makeResource(Tier::DEVICE, allocated->front())}});
+    TreeNode*             node   = insertedNode(result);
+    ASSERT_NE(node, nullptr);
+
+    CandidateMeta& candidate_meta = node->group_set_resources[0].candidate_meta;
+    candidate_meta.tier_enter_time_us  = 0;
+    candidate_meta.last_access_time_us = 0;
+    evictor_->onTierEntered(node, 0, Tier::DEVICE);
+
+    EXPECT_GT(candidate_meta.tier_enter_time_us, 0);
+    EXPECT_EQ(candidate_meta.last_access_time_us, candidate_meta.tier_enter_time_us);
+}
+
 TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) {
     const auto allocated = device_pool_->malloc(3);
     ASSERT_TRUE(allocated.has_value());
@@ -520,11 +537,15 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     ASSERT_NE(leaf, nullptr);
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 2u);
 
+    const int64_t parent_insert_time_us = parent->group_set_resources[0].candidate_meta.insert_time_us;
     evictor_->onMatched({parent, leaf});
 
     const auto parent_meta = parent->group_set_resources[0].candidate_meta;
     const auto leaf_meta   = leaf->group_set_resources[0].candidate_meta;
     EXPECT_EQ(parent_meta.last_access_seq, leaf_meta.last_access_seq);
+    EXPECT_EQ(parent_meta.insert_time_us, parent_insert_time_us);
+    EXPECT_EQ(parent_meta.last_access_time_us, leaf_meta.last_access_time_us);
+    EXPECT_GE(parent_meta.last_access_time_us, parent_insert_time_us);
     EXPECT_EQ(parent_meta.hit_count, 1u);
     EXPECT_EQ(leaf_meta.hit_count, 1u);
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 2u);
@@ -751,8 +772,8 @@ TEST_F(BlockTreeEvictorTest, PrepareMovePreservesExistingDemotionOwnerAndTarget)
     EXPECT_EQ(insertedNode(result)->group_set_resources[0].host_block, source);
     EXPECT_TRUE(disk_pool->isAllocated(owner_target));
     EXPECT_EQ(disk_pool->refCount(owner_target), 1u);
-    EXPECT_EQ(disk_pool->totalRefCount(BlockRefType::EVICTION), 1u);
-    EXPECT_EQ(disk_pool->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
+    EXPECT_EQ(disk_pool->referencedBlocksNum(BlockRefType::EVICTION), 1u);
+    EXPECT_EQ(disk_pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 0u);
     EXPECT_EQ(transfer_calls_, 0u);
 
@@ -760,7 +781,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMovePreservesExistingDemotionOwnerAndTarget)
     EXPECT_EQ(insertedNode(result)->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(host_pool->refCount(source), 1u);
     EXPECT_FALSE(disk_pool->isAllocated(owner_target));
-    EXPECT_EQ(disk_pool->totalRefCount(BlockRefType::EVICTION), 0u);
+    EXPECT_EQ(disk_pool->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 1u);
 
@@ -926,17 +947,22 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     auto& resource = insertedNode(result)->group_set_resources[0];
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
+    const CandidateMeta candidate_meta = resource.candidate_meta;
     auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
     auto plan = evictor_->buildPlan(*victim);
     ASSERT_TRUE(plan.has_value());
     ASSERT_EQ(plan->primary_desc.target_blocks.size(), 1u);
+    EXPECT_EQ(plan->primary_timing.tier_enter_time_us, candidate_meta.tier_enter_time_us);
+    EXPECT_EQ(plan->primary_timing.insert_time_us, candidate_meta.insert_time_us);
+    EXPECT_EQ(plan->primary_timing.last_access_time_us, candidate_meta.last_access_time_us);
+    EXPECT_GE(plan->primary_timing.selected_time_us, candidate_meta.last_access_time_us);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 0u);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 0u);
-    EXPECT_EQ(host_pool->totalRefCount(BlockRefType::EVICTION), 1u);
-    EXPECT_EQ(host_pool->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockRefType::EVICTION), 1u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
 
     evictor_->rollbackPreparedPlan(*plan);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
@@ -944,14 +970,14 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     EXPECT_FALSE(resource.hasTier(Tier::HOST));
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 1u);
-    EXPECT_EQ(host_pool->totalRefCount(BlockRefType::EVICTION), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockRefType::EVICTION), 0u);
 
     victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(victim.has_value());
     plan = evictor_->buildPlan(*victim);
     ASSERT_TRUE(plan.has_value());
     const BlockIdxType target_block = plan->primary_desc.target_blocks[0];
-    EXPECT_EQ(host_pool->totalRefCount(BlockRefType::EVICTION), 1u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockRefType::EVICTION), 1u);
     evictor_->complete(*plan, BlockTreeEvictor::CopyResultSet{true, {}});
 
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
@@ -960,8 +986,8 @@ TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresO
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 0u);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 1u);
     EXPECT_EQ(host_pool->refCount(target_block), 1u);
-    EXPECT_EQ(host_pool->totalRefCount(BlockRefType::EVICTION), 0u);
-    EXPECT_EQ(host_pool->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
 
     resource.host_block = NULL_BLOCK_IDX;
     group_->releaseSingleBlock(Tier::HOST, target_block, BlockRefType::BLOCK_CACHE);
@@ -1305,6 +1331,7 @@ TEST(BlockTreeEvictorCascadeTest, RejectsResourcesReservedByAnotherPlan) {
     auto first_plan = evictor.buildPlan(*swa_victim);
     ASSERT_TRUE(first_plan.has_value());
     ASSERT_EQ(first_plan->cascade_descs.size(), 1u);
+    EXPECT_EQ(first_plan->cascade_timings.size(), first_plan->cascade_descs.size());
     EXPECT_EQ(insertedNode(insert_result)->group_set_resources[1].transfer_state, GroupSetTransferState::DEMOTING);
     EXPECT_EQ(insertedNode(insert_result)->group_set_resources[2].transfer_state, GroupSetTransferState::DEMOTING);
     EXPECT_EQ(swa_host_pool->freeBlocksNum(), 1u);

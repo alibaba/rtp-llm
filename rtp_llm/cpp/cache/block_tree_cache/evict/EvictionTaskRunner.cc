@@ -174,12 +174,24 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evict
                                       && std::all_of(copy_results.cascade_success.begin(),
                                                      copy_results.cascade_success.end(),
                                                      [](bool success) { return success; });
+        std::vector<BlockTreeTransferBytesSnapshot> transfer_bytes;
+        if (copy_results.primary_success) {
+            metrics_reporter_->accumulateTransferBytes(
+                plan.primary_desc, group_sets_[plan.primary_desc.group_set_id], transfer_bytes);
+        }
+        for (size_t desc_index = 0; desc_index < plan.cascade_descs.size(); ++desc_index) {
+            if (copy_results.cascade_success[desc_index]) {
+                const TransferDescriptor& desc = plan.cascade_descs[desc_index];
+                metrics_reporter_->accumulateTransferBytes(desc, group_sets_[desc.group_set_id], transfer_bytes);
+            }
+        }
         metrics_reporter_->reportTransferFinished(CacheTransferOperation::EVICT,
                                                   source_tier,
                                                   target_tier,
                                                   transfer_block_count,
                                                   transfer_begin_time_us,
-                                                  transfer_success);
+                                                  transfer_success,
+                                                  transfer_bytes);
 
         bool credit_settlement_attempted = false;
         auto credit_settlement_action    = [this, &release_credits, &credit_settlement_attempted]() noexcept {

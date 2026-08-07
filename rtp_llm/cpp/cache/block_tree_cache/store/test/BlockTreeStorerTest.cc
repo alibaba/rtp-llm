@@ -30,13 +30,13 @@ struct StoreEnvironment {
     size_t storeRefCount() const {
         size_t store_refs = 0;
         for (const DeviceBlockPoolPtr& pool : device_pools) {
-            store_refs += pool->totalRefCount(BlockRefType::STORE);
+            store_refs += pool->referencedBlocksNum(BlockRefType::STORE);
         }
         for (const std::shared_ptr<HostBlockPool>& pool : host_pools) {
-            store_refs += pool == nullptr ? 0 : pool->totalRefCount(BlockRefType::STORE);
+            store_refs += pool == nullptr ? 0 : pool->referencedBlocksNum(BlockRefType::STORE);
         }
         for (const std::shared_ptr<BlockTreeDiskBlockPool>& pool : disk_pools) {
-            store_refs += pool == nullptr ? 0 : pool->totalRefCount(BlockRefType::STORE);
+            store_refs += pool == nullptr ? 0 : pool->referencedBlocksNum(BlockRefType::STORE);
         }
         return store_refs;
     }
@@ -213,7 +213,7 @@ TEST(BlockTreeStorerTest, StoreKeepsDeviceSourceAliveAfterRequestRelease) {
         }
         env.cache->insert({100}, deviceSourceResources({request_holder[0]}), Tier::HOST);
         barrier->waitUntilEntered();
-        EXPECT_EQ(env.device_pools[0]->totalRefCount(BlockRefType::STORE), 1u);
+        EXPECT_EQ(env.device_pools[0]->referencedBlocksNum(BlockRefType::STORE), 1u);
 
         releaseDeviceBlocksAndNotify(*env.cache, env.device_pools[0], request_holder.front(), BlockRefType::REQUEST);
         EXPECT_TRUE(env.device_pools[0]->isAllocated(device_block)) << "the pending store still owns the source";
@@ -400,7 +400,7 @@ TEST(BlockTreeStorerTest, StoreShutdownCutoffSettlesQueuedAndInFlightTasksWithou
             {static_cast<CacheKeyType>(100 + index)}, deviceSourceResources({holders.back()[0]}), Tier::HOST);
     }
     barrier->waitUntilEntered(2);
-    EXPECT_EQ(env.host_pools[0]->totalRefCount(BlockRefType::STORE), kStoreTasks);
+    EXPECT_EQ(env.host_pools[0]->referencedBlocksNum(BlockRefType::STORE), kStoreTasks);
 
     BlockTreeCacheTestPeer::beginStoreShutdownForTest(*env.cache);
     barrier->release();

@@ -155,7 +155,6 @@ struct TransferDescriptor {
     Tier                      target_tier{Tier::NONE};
     std::vector<BlockIdxType> source_blocks;
     std::vector<BlockIdxType> target_blocks;
-    int64_t                   source_tier_enter_time_us{0};
 
 private:
     static bool endpointResolved(Tier tier, const std::vector<BlockIdxType>& blocks) {

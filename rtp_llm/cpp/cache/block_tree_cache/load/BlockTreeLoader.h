@@ -23,6 +23,7 @@ struct BlockTreeMatchResult {
     size_t                         matched_device_blocks{0};
     std::vector<MultiNodeResource> matched_device_resources;
     std::shared_ptr<LoadAsyncContext> async_context;
+    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> reuse_time_metrics_snapshots;
 };
 
 // Owns matching and the complete lower-tier-to-device load workflow.
@@ -54,6 +55,10 @@ public:
 
 private:
     bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
+    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
+    collectReuseTimeSnapshots(const std::vector<TreeNode*>& path,
+                              size_t                        matched_device_blocks,
+                              int64_t                       access_time_us) const;
     BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path);
     bool commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     bool releaseDeviceLoadSourcesLocked(const LoadAsyncContext& context);

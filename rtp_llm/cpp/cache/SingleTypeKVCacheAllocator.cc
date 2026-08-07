@@ -84,10 +84,12 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
                                         full_kv_cache_group_->seqSizePerBlock();
 
     int64_t                           match_cost_time_us = 0;
+    int64_t                           match_end_time_us  = 0;
     size_t                            reuse_blocks       = 0;
     std::shared_ptr<LoadAsyncContext> load_context;
     std::vector<MultiNodeResource>    matched_resources;
     bool                              matched_blocks_released = false;
+    bool                                      load_attempted          = false;
     const std::function<void()>       release_matched_blocks  = [&]() {
         if (!matched_blocks_released) {
             block_tree_cache_->releaseMatchedResources(matched_resources);
@@ -110,7 +112,11 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
         block_ids_0.resize(0);
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(0);
-        return {false, 0};
+        MallocResult result{false, 0};
+        result.match_cost_time_us = match_cost_time_us;
+        result.match_end_time_us  = match_end_time_us;
+        result.load_attempted     = load_attempted;
+        return result;
     };
 
     if (malloc_info.enable_cache_lookup && full_kv_cache_group_->prefixReuseEnabled()) {
@@ -120,8 +126,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
         const int64_t        match_begin_time_us = currentTimeUs();
         BlockTreeMatchResult match_result        = block_tree_cache_->match(match_keys);
-        match_cost_time_us                       = currentTimeUs() - match_begin_time_us;
+        match_end_time_us                        = currentTimeUs();
+        match_cost_time_us                       = match_end_time_us - match_begin_time_us;
         const bool has_async_context             = match_result.async_context != nullptr;
+        load_attempted                           = has_async_context;
         load_context = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
         match_result.async_context.reset();
         matched_resources = std::move(match_result.matched_device_resources);
@@ -237,8 +245,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
     const int    reuse_len = static_cast<int>(reuse_blocks) * reuse_unit_tokens;
     MallocResult result{true, reuse_len, match_cost_time_us, load_context};
+    result.match_end_time_us = match_end_time_us;
+    result.load_attempted    = load_attempted;
     if (load_context != nullptr && reuse_blocks > 0) {
-        result.memory_reuse_len = static_cast<int>(load_context->matchedBlocks(Tier::HOST)) * reuse_unit_tokens;
+        result.host_reuse_len = static_cast<int>(load_context->matchedBlocks(Tier::HOST)) * reuse_unit_tokens;
         result.disk_reuse_len   = static_cast<int>(load_context->matchedBlocks(Tier::DISK)) * reuse_unit_tokens;
     }
     return result;

@@ -198,6 +198,32 @@ TEST_F(BlockTreeCacheTest, MatchEmptyThenFullAndPartialPath) {
     cache_->releaseMatchedResources(partial_result.matched_device_resources);
 }
 
+TEST_F(BlockTreeCacheTest, CollectReuseTimeMetricsAggregatesPerTierAndGroupType) {
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    cache_->insert({100, 200}, resources, Tier::DEVICE);
+
+    const std::vector<TreeNode*> path = cache_->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    CandidateMeta& first_meta = path[0]->group_set_resources[0].candidate_meta;
+    EXPECT_GT(first_meta.insert_time_us, 0);
+    EXPECT_EQ(first_meta.last_access_time_us, first_meta.insert_time_us);
+    EXPECT_EQ(first_meta.tier_enter_time_us, first_meta.insert_time_us);
+
+    BlockTreeCacheMetricsReporter                             reporter;
+    const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> snapshots =
+        reporter.collectCacheReuseTimeMetrics({{Tier::DEVICE, CacheGroupType::FULL, 1000, 3000, 11000},
+                                               {Tier::DEVICE, CacheGroupType::FULL, 2000, 5000, 11000}});
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].tier, Tier::DEVICE);
+    EXPECT_EQ(snapshots[0].group_type, CacheGroupType::FULL);
+    EXPECT_EQ(snapshots[0].reuse_interval_avg_ms, 7);
+    EXPECT_EQ(snapshots[0].reuse_interval_max_ms, 8);
+    EXPECT_EQ(snapshots[0].hit_entry_age_avg_ms, 9);
+    EXPECT_EQ(snapshots[0].hit_entry_age_max_ms, 10);
+}
+
 TEST_F(BlockTreeCacheTest, InsertPublishesAndShutdownRetiresDeviceBlockMapping) {
     const GroupSetPtr      group_set = cache_->groupSets()[0];
     constexpr BlockIdxType block_id  = 42;
@@ -211,6 +237,40 @@ TEST_F(BlockTreeCacheTest, InsertPublishesAndShutdownRetiresDeviceBlockMapping) 
 
     cache_.reset();
     EXPECT_EQ(group_set->findTreeNodeByDeviceBlock(0, block_id), nullptr);
+}
+
+TEST_F(BlockTreeCacheTest, DeviceBlockDebugInfoUsesCurrentTreeMapping) {
+    std::vector<DeviceBlockPoolPtr> device_pools = {block_tree_cache_test::makeStructuralDevicePool(0),
+                                                     block_tree_cache_test::makeStructuralDevicePool(1)};
+    std::shared_ptr<FullGroupSet> full_group =
+        std::make_shared<FullGroupSet>(device_pools, nullptr, nullptr);
+    initializeTestGroupSet(full_group, device_pools);
+    cache_ = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{std::move(full_group)});
+
+    constexpr BlockIdxType first_block_id  = 42;
+    constexpr BlockIdxType second_block_id = 43;
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {first_block_id, second_block_id};
+    cache_->insert({100}, resources, Tier::DEVICE);
+
+    TreeNode* node = cache_->tree()->root()->children.at(100);
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+
+    DeviceBlockDebugInfo debug_info;
+    ASSERT_TRUE(cache_->getDeviceBlockDebugInfo(/*group_id=*/1, second_block_id, debug_info));
+    EXPECT_EQ(debug_info.group_id, 1u);
+    EXPECT_EQ(debug_info.group_set_id, 0u);
+    EXPECT_EQ(debug_info.member_group_id, 1u);
+    EXPECT_EQ(debug_info.block_id, second_block_id);
+    EXPECT_EQ(debug_info.node_address, reinterpret_cast<uintptr_t>(node));
+    EXPECT_EQ(debug_info.cache_key, 100u);
+    EXPECT_EQ(debug_info.transfer_state, GroupSetTransferState::DEMOTING);
+    EXPECT_EQ(debug_info.device_blocks, (BlockIndicesType{first_block_id, second_block_id}));
+
+    EXPECT_FALSE(cache_->getDeviceBlockDebugInfo(/*group_id=*/1, first_block_id, debug_info));
+    EXPECT_FALSE(cache_->getDeviceBlockDebugInfo(/*group_id=*/2, second_block_id, debug_info));
+
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
 }
 
 TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndLimit) {

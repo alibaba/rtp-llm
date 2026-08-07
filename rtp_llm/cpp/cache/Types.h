@@ -88,8 +88,14 @@ struct MallocResult {
     int64_t                       match_cost_time_us = 0;
     std::shared_ptr<AsyncContext> async_context      = nullptr;
 
-    int memory_reuse_len = 0;
+    int host_reuse_len = 0;
     int disk_reuse_len   = 0;
+
+    int64_t match_end_time_us          = 0;
+    int64_t malloc_begin_time_us        = 0;
+    int64_t load_prepare_latency_us     = 0;
+    int64_t block_aligned_input_length = 0;
+    bool    load_attempted             = false;
 };
 
 struct FreeInfo {

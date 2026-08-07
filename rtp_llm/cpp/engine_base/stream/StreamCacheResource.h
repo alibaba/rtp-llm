@@ -1,16 +1,22 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
+#include <string>
+#include <vector>
+
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 
 class AsyncContext;
 class GenerateStream;
+struct MallocResult;
 
 class StreamCacheResource {
 public:
@@ -120,6 +126,7 @@ public:
     bool enableDiskCache() const;
     bool enableCacheLookup() const;
     Tier storeTarget() const;
+    void reportCacheReuseMetrics();
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
@@ -136,6 +143,10 @@ public:
     }
 
 private:
+    void clearCacheReuseState();
+    void recordCacheReuseMallocResult(const MallocResult& result);
+    void finishCacheLoadMetrics(bool success);
+
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
     ResourceContext                resource_context_;
@@ -147,6 +158,9 @@ private:
     bool                          fake_inited_           = false;
     bool                          resource_released_     = false;
     std::shared_ptr<AsyncContext> allocator_load_context_;
+    RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
+    int64_t                       malloc_begin_time_us_    = 0;
+    int64_t                       load_wait_begin_time_us_ = 0;
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

@@ -47,8 +47,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
     ASSERT_NO_FATAL_FAILURE(expectPathIdleAtDevice(*cache, seed.cache_keys));
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, seed.cache_keys));
     for (const auto& group_set : cache->groupSets()) {
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
-        EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -69,7 +69,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
         const auto& state = (*host_path)[0][group_set_id];
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
         EXPECT_EQ(state.getTopTier(), Tier::HOST);
-        EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     if (GetParam() == TierLayout::HOST_DISK) {
@@ -102,8 +102,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
             const auto& state = (*retained_host_path)[0][group_set_id];
             EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
             EXPECT_EQ(state.getTopTier(), Tier::HOST);
-            EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
-            EXPECT_EQ(cache->groupSets()[group_set_id]->diskPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+            EXPECT_EQ(cache->groupSets()[group_set_id]->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+            EXPECT_EQ(cache->groupSets()[group_set_id]->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
         }
 
         for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -123,7 +123,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
             const auto& state = (*disk_path)[0][group_set_id];
             EXPECT_EQ(state.transfer_state, GroupSetTransferState::IDLE);
             EXPECT_EQ(state.getTopTier(), Tier::DISK);
-            EXPECT_EQ(cache->groupSets()[group_set_id]->diskPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+            EXPECT_EQ(cache->groupSets()[group_set_id]->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
         }
     }
 
@@ -178,8 +178,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     for (const auto& host_pool : host_pools) {
         EXPECT_EQ(host_pool->freeBlocksNum(), 0u);
         EXPECT_EQ(host_pool->usedBlocksNum(), host_capacity);
-        EXPECT_EQ(host_pool->totalRefCount(BlockRefType::BLOCK_CACHE), host_capacity);
-        EXPECT_EQ(host_pool->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(host_pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), host_capacity);
+        EXPECT_EQ(host_pool->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     auto retry_seed_opt = seedDevicePrefix(manager_, cache_config_, /*token_offset=*/100000, /*cached_blocks=*/1);
@@ -218,8 +218,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
         ASSERT_EQ(resource.device_blocks.size(), 1u);
         EXPECT_EQ(resource.device_blocks.front(), retry_device_sources[group_set_id]);
         EXPECT_EQ(device_pools[group_set_id]->refCount(retry_device_sources[group_set_id]), 1u);
-        EXPECT_EQ(device_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
-        EXPECT_EQ(host_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(device_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
     ASSERT_TRUE(pathDevicePayloadMatches(manager_, *cache, retry_seed.cache_keys));
     ASSERT_NO_FATAL_FAILURE(
@@ -252,8 +252,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
         freed_host_blocks[group_set_id] = removed;
         EXPECT_EQ(host_pools[group_set_id]->freeBlocksNum(), removed);
         EXPECT_EQ(host_pools[group_set_id]->usedBlocksNum(), host_capacity - removed);
-        EXPECT_EQ(host_pools[group_set_id]->totalRefCount(BlockRefType::BLOCK_CACHE), host_capacity - removed);
-        EXPECT_EQ(host_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockRefType::BLOCK_CACHE), host_capacity - removed);
+        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     const size_t submits_before_retry = transfer_engine_->submitCount();
@@ -282,9 +282,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
         EXPECT_EQ(host_pools[group_set_id]->refCount(resource.host_block), 1u);
         EXPECT_FALSE(device_pools[group_set_id]->isAllocated(retry_device_sources[group_set_id]));
         EXPECT_EQ(host_pools[group_set_id]->freeBlocksNum(), freed_host_blocks[group_set_id] - 1);
-        EXPECT_EQ(host_pools[group_set_id]->totalRefCount(BlockRefType::BLOCK_CACHE),
+        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockRefType::BLOCK_CACHE),
                   host_capacity - freed_host_blocks[group_set_id] + 1);
-        EXPECT_EQ(host_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
@@ -343,8 +343,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         EXPECT_EQ(host_pools[group_set_id]->usedBlocksNum(), 0u);
         EXPECT_EQ(disk_pools[group_set_id]->freeBlocksNum(), 0u);
-        EXPECT_EQ(disk_pools[group_set_id]->totalRefCount(BlockRefType::BLOCK_CACHE), disk_capacity);
-        EXPECT_EQ(disk_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockRefType::BLOCK_CACHE), disk_capacity);
+        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     auto retry_seed_opt = seedDevicePrefix(manager_, cache_config_, /*token_offset=*/100000, /*cached_blocks=*/1);
@@ -383,8 +383,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
         ASSERT_EQ(resource.getTopTier(), Tier::HOST);
         EXPECT_EQ(resource.host_block, retry_host_sources[group_set_id]);
         EXPECT_EQ(host_pools[group_set_id]->refCount(retry_host_sources[group_set_id]), 1u);
-        EXPECT_EQ(host_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
-        EXPECT_EQ(disk_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(host_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
     ASSERT_NO_FATAL_FAILURE(
         expectFullTierPathUnchanged(*cache, full_seed.cache_keys, Tier::DISK, disk_blocks, disk_pools, disk_capacity));
@@ -416,8 +416,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
         freed_disk_blocks[group_set_id] = removed;
         EXPECT_EQ(disk_pools[group_set_id]->freeBlocksNum(), removed);
         EXPECT_EQ(disk_pools[group_set_id]->usedBlocksNum(), disk_capacity - removed);
-        EXPECT_EQ(disk_pools[group_set_id]->totalRefCount(BlockRefType::BLOCK_CACHE), disk_capacity - removed);
-        EXPECT_EQ(disk_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockRefType::BLOCK_CACHE), disk_capacity - removed);
+        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     const size_t submits_before_retry = transfer_engine_->submitCount();
@@ -446,9 +446,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRe
         EXPECT_EQ(disk_pools[group_set_id]->refCount(resource.disk_slot), 1u);
         EXPECT_FALSE(host_pools[group_set_id]->isAllocated(retry_host_sources[group_set_id]));
         EXPECT_EQ(disk_pools[group_set_id]->freeBlocksNum(), freed_disk_blocks[group_set_id] - 1);
-        EXPECT_EQ(disk_pools[group_set_id]->totalRefCount(BlockRefType::BLOCK_CACHE),
+        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockRefType::BLOCK_CACHE),
                   disk_capacity - freed_disk_blocks[group_set_id] + 1);
-        EXPECT_EQ(disk_pools[group_set_id]->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(disk_pools[group_set_id]->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));

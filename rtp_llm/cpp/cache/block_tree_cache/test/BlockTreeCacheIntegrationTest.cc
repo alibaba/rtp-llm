@@ -400,6 +400,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(failed_resource.candidate_meta.last_access_seq, before_meta.last_access_seq);
     EXPECT_EQ(failed_resource.candidate_meta.admission_seq, before_meta.admission_seq);
     EXPECT_EQ(failed_resource.candidate_meta.hit_count, before_meta.hit_count);
+    EXPECT_EQ(failed_resource.candidate_meta.last_access_time_us, before_meta.last_access_time_us);
     const auto snapshot_after_failure = cache->getKeySnapshot(/*limit=*/8);
     EXPECT_EQ(snapshot_after_failure.version, snapshot_before.version);
     EXPECT_EQ(snapshot_after_failure.keys, snapshot_before.keys);

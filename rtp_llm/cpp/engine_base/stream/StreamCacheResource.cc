@@ -2,12 +2,15 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include <algorithm>
 #include <thread>
 
 using namespace std;
@@ -74,7 +77,9 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     if (allocator_load_context_) {
-        resource_context_.cache_manager->cancelLoad(allocator_load_context_);
+        if (!resource_context_.cache_manager->cancelLoad(allocator_load_context_)) {
+            RTP_LLM_LOG_DEBUG("allocator load was already completed before release");
+        }
         allocator_load_context_.reset();
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
@@ -181,7 +186,8 @@ absl::Status StreamCacheResource::initKVBlock() {
     }
     malloc_info.enable_remove_skipped_blocks = false;
 
-    auto result = resource_context_.cache_manager->malloc(malloc_info);
+    MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
+    recordCacheReuseMallocResult(result);
     if (!result.success) {
         malloc_failed_times_++;
         return absl::InternalError("malloc failed");
@@ -192,11 +198,89 @@ absl::Status StreamCacheResource::initKVBlock() {
         stream_->setMtpTokenIndex(result.reuse_len);
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
-        stream_->setMemoryReuseLength(result.memory_reuse_len);
+        stream_->setHostReuseLength(result.host_reuse_len);
         stream_->setDiskReuseLength(result.disk_reuse_len);
     }
     allocator_load_context_ = std::move(result.async_context);
     return absl::OkStatus();
+}
+
+void StreamCacheResource::clearCacheReuseState() {
+    stream_->setReuseLength(0);
+    stream_->setMtpTokenIndex(0);
+    stream_->setInitialReuseLength(0);
+    stream_->setHostReuseLength(0);
+    stream_->setDiskReuseLength(0);
+    stream_->setLocalReuseLength(0);
+    stream_->setRemoteReuseLength(0);
+}
+
+void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
+    cache_reuse_metrics_.block_aligned_input_length = result.block_aligned_input_length;
+    cache_reuse_metrics_.match_latency_us           = result.match_cost_time_us;
+    cache_reuse_metrics_.report_match_latency       = result.match_end_time_us > 0;
+    malloc_begin_time_us_                           = result.malloc_begin_time_us;
+    if (!result.load_attempted) {
+        if (result.match_end_time_us > 0) {
+            cache_reuse_metrics_.match_to_ready_latency_us =
+                std::max<int64_t>(currentTimeUs() - malloc_begin_time_us_, 0);
+            cache_reuse_metrics_.report_match_to_ready_latency = true;
+        }
+        return;
+    }
+
+    cache_reuse_metrics_.load_prepare_latency_us = result.load_prepare_latency_us;
+    load_wait_begin_time_us_                     = currentTimeUs();
+    if (!result.success) {
+        clearCacheReuseState();
+        cache_reuse_metrics_.load_success        = false;
+        cache_reuse_metrics_.report_load_metrics = true;
+        cache_reuse_metrics_.match_to_ready_latency_us =
+            std::max<int64_t>(currentTimeUs() - malloc_begin_time_us_, 0);
+        cache_reuse_metrics_.report_match_to_ready_latency = true;
+    }
+}
+
+void StreamCacheResource::finishCacheLoadMetrics(bool success) {
+    if (cache_reuse_metrics_.report_load_metrics) {
+        return;
+    }
+    if (!success) {
+        clearCacheReuseState();
+    }
+    const int64_t load_end_time_us = currentTimeUs();
+    cache_reuse_metrics_.load_success                 = success;
+    cache_reuse_metrics_.report_load_metrics          = true;
+    cache_reuse_metrics_.report_load_wait_latency     = true;
+    cache_reuse_metrics_.load_wait_latency_us =
+        std::max<int64_t>(load_end_time_us - load_wait_begin_time_us_, 0);
+    cache_reuse_metrics_.match_to_ready_latency_us =
+        std::max<int64_t>(load_end_time_us - malloc_begin_time_us_, 0);
+    cache_reuse_metrics_.report_match_to_ready_latency = true;
+}
+
+void StreamCacheResource::reportCacheReuseMetrics() {
+    if (stream_->metrics_reporter_ == nullptr || !reuseCache()) {
+        return;
+    }
+    const int64_t input_length       = stream_->inputLength();
+    const int64_t total_reuse_length = stream_->initialReuseLength();
+    const auto    reuse_rate         = [input_length](int64_t reuse_length) {
+        return input_length > 0 ? static_cast<float>(reuse_length * 100.0 / input_length) : 0.0f;
+    };
+    cache_reuse_metrics_.kv_cache_reuse_length = total_reuse_length;
+    cache_reuse_metrics_.device_reuse_length   = stream_->deviceReuseLength();
+    cache_reuse_metrics_.host_reuse_length     = stream_->hostReuseLength();
+    cache_reuse_metrics_.disk_reuse_length     = stream_->diskReuseLength();
+    cache_reuse_metrics_.remote_reuse_length   = stream_->remoteReuseLength();
+    cache_reuse_metrics_.kv_cache_hit_rate     = reuse_rate(total_reuse_length);
+    cache_reuse_metrics_.device_hit_rate       = reuse_rate(cache_reuse_metrics_.device_reuse_length);
+    cache_reuse_metrics_.host_hit_rate         = reuse_rate(cache_reuse_metrics_.host_reuse_length);
+    cache_reuse_metrics_.disk_hit_rate         = reuse_rate(cache_reuse_metrics_.disk_reuse_length);
+    cache_reuse_metrics_.report_reuse_metrics  = true;
+    kmonitor::MetricsTags tags;
+    stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
+        &tags, &cache_reuse_metrics_);
 }
 
 absl::Status StreamCacheResource::waitForAllocatorLoad() {
@@ -210,6 +294,7 @@ absl::Status StreamCacheResource::waitForAllocatorLoad() {
     }
     const bool      load_success = load_context->success();
     const ErrorInfo error        = load_context->errorInfo();
+    finishCacheLoadMetrics(load_success);
     allocator_load_context_.reset();
     if (load_success) {
         return absl::OkStatus();
@@ -245,7 +330,7 @@ absl::Status StreamCacheResource::incrKVBlock() {
         stream_->setMtpTokenIndex(result.reuse_len);
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
-        stream_->setMemoryReuseLength(result.memory_reuse_len);
+        stream_->setHostReuseLength(result.host_reuse_len);
         stream_->setDiskReuseLength(result.disk_reuse_len);
     }
     if (result.async_context) {
@@ -268,6 +353,7 @@ bool StreamCacheResource::loadCacheDone() {
         }
         if (!allocator_load_context_->success()) {
             const ErrorInfo error = allocator_load_context_->errorInfo();
+            finishCacheLoadMetrics(false);
             RTP_LLM_LOG_WARNING(
                 "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
             allocator_load_context_.reset();
@@ -275,6 +361,7 @@ bool StreamCacheResource::loadCacheDone() {
                 StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "block tree cache load failed");
             return true;
         }
+        finishCacheLoadMetrics(true);
         allocator_load_context_.reset();
     }
     return true;

@@ -52,10 +52,9 @@ TEST(TransferDescriptorTest, NeedsTransferDistinguishesLogicalSettlement) {
     EXPECT_TRUE(TransferDescriptor::diskToDevice(0, 3, {1, 2}).needsTransfer());
 }
 
-TEST(TransferDescriptorTest, TransferValidationIgnoresBusinessMetadata) {
+TEST(TransferDescriptorTest, TransferValidationIgnoresPathMetadata) {
     TransferDescriptor desc        = TransferDescriptor::hostToDevice(7, 3, {1, 2});
     desc.path_index                = 11;
-    desc.source_tier_enter_time_us = 23;
 
     EXPECT_TRUE(desc.isExecutable());
     EXPECT_EQ(desc.debugString(),

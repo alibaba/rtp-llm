@@ -46,6 +46,8 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
     int64_t    disk_transfer_begin_time_us = 0;
     bool       host_transfer_started       = false;
     bool       disk_transfer_started       = false;
+    std::vector<BlockTreeTransferBytesSnapshot> host_transfer_bytes;
+    std::vector<BlockTreeTransferBytesSnapshot> disk_transfer_bytes;
     const auto finish_metrics              = [&](bool success) {
         if (host_transfer_started) {
             host_transfer_started = false;
@@ -54,7 +56,8 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                                     Tier::DEVICE,
                                                     task.host_to_device_descriptors.size(),
                                                     host_transfer_begin_time_us,
-                                                    success);
+                                                    success,
+                                                    host_transfer_bytes);
         }
         if (disk_transfer_started) {
             disk_transfer_started = false;
@@ -63,7 +66,8 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                                     Tier::DEVICE,
                                                     task.disk_to_device_descriptors.size(),
                                                     disk_transfer_begin_time_us,
-                                                    success);
+                                                    success,
+                                                    disk_transfer_bytes);
         }
     };
 
@@ -79,9 +83,19 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
             disk_transfer_started = true;
         }
 
-        bool copy_success =
-            transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms)
-            && transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
+        bool copy_success = transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
+        if (copy_success) {
+            for (const TransferDescriptor& desc : task.host_to_device_descriptors) {
+                metrics_reporter.accumulateTransferBytes(desc, group_sets_[desc.group_set_id], host_transfer_bytes);
+            }
+            copy_success = transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
+            if (copy_success) {
+                for (const TransferDescriptor& desc : task.disk_to_device_descriptors) {
+                    metrics_reporter.accumulateTransferBytes(
+                        desc, group_sets_[desc.group_set_id], disk_transfer_bytes);
+                }
+            }
+        }
         finish_metrics(copy_success);
         return copy_success;
     } catch (...) {

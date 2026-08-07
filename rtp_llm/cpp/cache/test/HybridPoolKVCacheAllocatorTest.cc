@@ -648,6 +648,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportReserveBlocks) 
     ASSERT_EQ(snapshots.size(), 2u);
     EXPECT_EQ("linear", snapshots[0].pool_name);
     EXPECT_EQ("full", snapshots[1].pool_name);
+    EXPECT_EQ(snapshots[0].used_blocks, snapshots[0].total_blocks - snapshots[0].free_blocks);
+    EXPECT_EQ(snapshots[1].used_blocks, snapshots[1].total_blocks - snapshots[1].free_blocks);
 
     const size_t total_reservable_free_blocks = snapshots[0].free_blocks + snapshots[1].free_blocks;
     ASSERT_GT(total_reservable_free_blocks, 0u);

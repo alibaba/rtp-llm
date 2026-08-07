@@ -274,6 +274,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ConstructorAndInit) {
 
     EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num - 1);
     EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+
+    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].total_blocks, config.block_num - 1);
+    EXPECT_EQ(snapshots[0].free_blocks, config.block_num - 1);
+    EXPECT_EQ(snapshots[0].used_blocks, 0u);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, InitRejectsLinearGroupBeforeCreatingBlockPool) {
@@ -328,6 +334,11 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MallocSingleBatch) {
     EXPECT_TRUE(result.success);
     EXPECT_EQ(batch_resource->blocksNum(0, 0), 2);
     EXPECT_LT(allocator_->freeBlocksNum(), config.block_num);
+
+    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator_->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].used_blocks, snapshots[0].total_blocks - snapshots[0].free_blocks);
+    EXPECT_GT(snapshots[0].used_blocks, 0u);
 
     seq_length         = 160;
     complete_token_ids = createCompleteTokenIds(1, seq_length);

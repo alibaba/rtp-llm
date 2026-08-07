@@ -423,36 +423,8 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
     return has_pool ? KVCacheTokenCapacity{total_tokens, available_tokens} : KVCacheTokenCapacity{};
 }
 
-std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsSnapshots() const {
-    std::vector<KVCachePoolMetricsSnapshot> snapshots;
-    snapshots.reserve(group_block_pools_.size());
-    const size_t reserve_blocks               = reserveBlocksNum();
-    const size_t total_reservable_free_blocks = totalReservableFreeBlocks();
-
-    for (size_t group_id = 0; group_id < group_block_pools_.size(); ++group_id) {
-        const auto& pool = group_block_pools_[group_id];
-        if (!pool) {
-            continue;
-        }
-        KVCachePoolMetricsSnapshot snapshot;
-        snapshot.pool_index                = group_id;
-        snapshot.pool_name                 = pool->poolName();
-        snapshot.block_size_bytes          = pool->blockSizeBytes();
-        snapshot.total_blocks              = pool->totalBlocksNum();
-        snapshot.free_blocks               = pool->freeBlocksNum();
-        snapshot.active_tree_cached_blocks = pool->activeTreeCachedBlocksNum();
-        snapshot.reserve_blocks        = reserveBlocksForPool(group_id, reserve_blocks, total_reservable_free_blocks);
-        snapshot.request_ref_count     = pool->totalRefCount(BlockRefType::REQUEST);
-        snapshot.connector_ref_count   = pool->totalRefCount(BlockRefType::CONNECTOR);
-        snapshot.block_cache_ref_count = pool->totalRefCount(BlockRefType::BLOCK_CACHE);
-        snapshot.eviction_ref_count    = pool->totalRefCount(BlockRefType::EVICTION);
-        snapshot.used_ratio            = (snapshot.total_blocks == 0) ?
-                                             0.0f :
-                                             static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)
-                                                     / static_cast<double>(snapshot.total_blocks));
-        snapshots.push_back(snapshot);
-    }
-    return snapshots;
+size_t HybridPoolKVCacheAllocator::reserveBlocksForPoolMetrics(size_t pool_index) const {
+    return reserveBlocksForPool(pool_index, reserveBlocksNum(), totalReservableFreeBlocks());
 }
 
 void HybridPoolKVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {

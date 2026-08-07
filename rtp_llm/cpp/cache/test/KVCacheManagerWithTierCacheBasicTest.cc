@@ -31,7 +31,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DevicePrefixHitKeepsLowerTiersUntouc
     const auto result               = manager_->malloc(malloc_info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(result.memory_reuse_len, 0);
+    EXPECT_EQ(result.host_reuse_len, 0);
     EXPECT_EQ(result.disk_reuse_len, 0);
     EXPECT_EQ(result.async_context, nullptr);
 
@@ -219,7 +219,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     const auto   first_result             = manager_->malloc(first_info);
     ASSERT_TRUE(first_result.success);
     EXPECT_EQ(first_result.reuse_len, 3 * seq_size_per_block);
-    EXPECT_EQ(first_result.memory_reuse_len, 3 * seq_size_per_block);
+    EXPECT_EQ(first_result.host_reuse_len, 3 * seq_size_per_block);
     EXPECT_EQ(first_result.disk_reuse_len, 0);
     ASSERT_NE(first_result.async_context, nullptr);
     const bool first_load_entered = pausable_engine->waitUntilEnteredFor(
@@ -261,7 +261,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     EXPECT_FALSE(second_result.success);
     EXPECT_EQ(second_result.async_context, nullptr);
     EXPECT_EQ(second_result.reuse_len, 0);
-    EXPECT_EQ(second_result.memory_reuse_len, 0);
+    EXPECT_EQ(second_result.host_reuse_len, 0);
     EXPECT_EQ(second_result.disk_reuse_len, 0);
     for (int group_id = 0; group_id < cache_config_.groupNums(); ++group_id) {
         EXPECT_EQ(second_resource->blocksNum(0, group_id), 0u) << "group=" << group_id;
@@ -335,7 +335,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalseStillMatchesResidentP
     // blocks. Device-tree lookup is independently gated by
     // enable_device_cache, so a resident prefix remains reusable here.
     EXPECT_EQ(result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(result.memory_reuse_len, 0);
+    EXPECT_EQ(result.host_reuse_len, 0);
     EXPECT_EQ(result.disk_reuse_len, 0);
     EXPECT_EQ(result.async_context, nullptr);
     ASSERT_TRUE(
@@ -425,7 +425,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     auto result              = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(result.memory_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
     EXPECT_EQ(result.disk_reuse_len, 0);
     ASSERT_NE(result.async_context, nullptr);
     result.async_context->waitDone();
@@ -498,7 +498,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, block_size);
-    EXPECT_EQ(result.memory_reuse_len, block_size);
+    EXPECT_EQ(result.host_reuse_len, block_size);
     EXPECT_EQ(result.disk_reuse_len, 0);
     ASSERT_NE(result.async_context, nullptr);
 
@@ -519,7 +519,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::LOADING);
         EXPECT_EQ(state.host_block, host_sources[group_set_id]);
         EXPECT_EQ(group_set->hostPool()->refCount(state.host_block), 2u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::REQUEST), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::REQUEST), 1u);
 
         ASSERT_EQ(group_set->groupIds().size(), 1u);
         const int   group_id = static_cast<int>(group_set->groupIds().front());
@@ -533,7 +533,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(batch0[0], batch1[0]);
         EXPECT_NE(batch0[1], batch1[1]);
         EXPECT_EQ(group_set->devicePools().front()->refCount(batch0[0]), 3u);
-        EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::REQUEST), 5u);
+        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
         ASSERT_TRUE(
             fillGroupBlockPayload(manager_, cache_config_, group_id, batch0[0], /*path_index=*/0, /*poison=*/true));
     }
@@ -587,8 +587,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         EXPECT_EQ(batch1[0], tree.device_blocks[0]);
         EXPECT_TRUE(groupBlockPayloadMatches(manager_, cache_config_, group_id, batch1[0], /*path_index=*/0));
         EXPECT_EQ(group_set->devicePools().front()->refCount(tree.device_blocks[0]), 3u);
-        EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::REQUEST), 4u);
-        EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
+        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
+        EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
         EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
     }
 

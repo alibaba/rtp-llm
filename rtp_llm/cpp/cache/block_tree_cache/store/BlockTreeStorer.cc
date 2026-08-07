@@ -147,12 +147,20 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
     } catch (...) {
         RTP_LLM_LOG_ERROR("store copy threw an unknown exception");
     }
+    std::vector<BlockTreeTransferBytesSnapshot> transfer_bytes;
+    if (copy_success) {
+        for (const TransferDescriptor& desc : task->descriptors) {
+            metrics_reporter_.accumulateTransferBytes(
+                desc, tree_->groupSets()[desc.group_set_id], transfer_bytes);
+        }
+    }
     metrics_reporter_.reportTransferFinished(CacheTransferOperation::STORE,
                                              Tier::DEVICE,
                                              task->target_tier,
                                              task->entries.size(),
                                              transfer_begin_time_us,
-                                             copy_success);
+                                             copy_success,
+                                             transfer_bytes);
 }
 
 void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {

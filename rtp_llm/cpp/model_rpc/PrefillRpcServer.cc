@@ -417,7 +417,7 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     auto              prefill_total_reuse_len  = prefill_context.getStream()->initialReuseLength();
     auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
     auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
-    auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
+    auto              prefill_memory_reuse_len = prefill_context.getStream()->hostReuseLength();
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {

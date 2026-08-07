@@ -472,6 +472,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
     EXPECT_EQ(allocator->freeBlocksNum(), config.block_num - 1);
 
+    const std::vector<KVCacheGroupPtr> groups = allocator->cacheGroups();
+    ASSERT_GT(groups.size(), 1u);
+    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 1u);
+    EXPECT_EQ(snapshots[0].used_blocks, snapshots[0].total_blocks - snapshots[0].free_blocks);
+
     // Should be able to fetch address for any global layer and non-zero block id.
     auto addr0 = allocator->convertIndexToAddr(/*layer_id=*/0, /*block_id=*/1);
     auto addr3 = allocator->convertIndexToAddr(/*layer_id=*/3, /*block_id=*/1);

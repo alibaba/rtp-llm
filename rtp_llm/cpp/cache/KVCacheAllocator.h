@@ -31,13 +31,15 @@ struct KVCachePoolMetricsSnapshot {
     std::string pool_name                 = "unnamed";
     size_t      block_size_bytes          = 0;
     size_t      free_blocks               = 0;
+    size_t      used_blocks               = 0;
     size_t      active_tree_cached_blocks = 0;
     size_t      total_blocks              = 0;
     size_t      reserve_blocks            = 0;
-    size_t      request_ref_count         = 0;
-    size_t      connector_ref_count       = 0;
-    size_t      block_cache_ref_count     = 0;
-    size_t      eviction_ref_count        = 0;
+    size_t      request_ref_blocks        = 0;
+    size_t      connector_ref_blocks      = 0;
+    size_t      block_cache_ref_blocks    = 0;
+    size_t      eviction_ref_blocks       = 0;
+    size_t      store_ref_blocks          = 0;
     float       used_ratio                = 0.0f;
 };
 
@@ -154,6 +156,7 @@ public:
 
 protected:
     virtual bool         doInit() = 0;
+    virtual size_t       reserveBlocksForPoolMetrics(size_t pool_index) const;
     virtual size_t       reservableFreeBlocksNum() const;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;

@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 #include <chrono>
 #include <functional>
@@ -438,6 +439,127 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
 
     // No allocator load context means the load phase is immediately done.
     ASSERT_TRUE(resource.loadCacheDone());
+}
+
+TEST_F(StreamCacheResourceTest, testCacheReuseMetricsKeepBlockAlignedInputLength) {
+    prepareResource(/*reuse_cache=*/true);
+    StreamCacheResource& resource = stream_->streamCacheResource();
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    EXPECT_EQ(resource.cache_reuse_metrics_.block_aligned_input_length, 6);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
+    EXPECT_TRUE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
+}
+
+TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
+    prepareResource(/*reuse_cache=*/true);
+    StreamCacheResource& resource             = stream_->streamCacheResource();
+    const int64_t        malloc_begin_time_us = currentTimeUs() - 400;
+    MallocResult         result{true, 2};
+    result.match_cost_time_us      = 100;
+    result.match_end_time_us       = malloc_begin_time_us + 100;
+    result.malloc_begin_time_us    = malloc_begin_time_us;
+    result.load_prepare_latency_us = 300;
+    result.load_attempted          = true;
+
+    resource.recordCacheReuseMallocResult(result);
+    resource.finishCacheLoadMetrics(true);
+
+    const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
+    EXPECT_TRUE(metrics.report_match_latency);
+    EXPECT_TRUE(metrics.report_load_metrics);
+    EXPECT_TRUE(metrics.load_success);
+    EXPECT_TRUE(metrics.report_load_wait_latency);
+    EXPECT_TRUE(metrics.report_match_to_ready_latency);
+    EXPECT_EQ(metrics.load_prepare_latency_us, result.load_prepare_latency_us);
+    EXPECT_GE(metrics.match_to_ready_latency_us,
+              metrics.match_latency_us + metrics.load_prepare_latency_us + metrics.load_wait_latency_us);
+}
+
+TEST_F(StreamCacheResourceTest, testCacheLoadPrepareFailureHasNoWaitLatency) {
+    prepareResource(/*reuse_cache=*/true);
+    StreamCacheResource& resource             = stream_->streamCacheResource();
+    const int64_t        malloc_begin_time_us = currentTimeUs() - 400;
+    MallocResult         result{false, 0};
+    result.match_cost_time_us      = 100;
+    result.match_end_time_us       = malloc_begin_time_us + 100;
+    result.malloc_begin_time_us    = malloc_begin_time_us;
+    result.load_prepare_latency_us = 300;
+    result.load_attempted          = true;
+
+    resource.recordCacheReuseMallocResult(result);
+
+    const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
+    EXPECT_TRUE(metrics.report_load_metrics);
+    EXPECT_FALSE(metrics.load_success);
+    EXPECT_FALSE(metrics.report_load_wait_latency);
+    EXPECT_TRUE(metrics.report_match_to_ready_latency);
+    EXPECT_EQ(metrics.load_prepare_latency_us, result.load_prepare_latency_us);
+    EXPECT_GE(metrics.match_to_ready_latency_us, metrics.match_latency_us + metrics.load_prepare_latency_us);
+}
+
+TEST_F(StreamCacheResourceTest, testCacheLoadFailureClearsReuseMetrics) {
+    prepareResource(/*reuse_cache=*/true);
+    StreamCacheResource& resource = stream_->streamCacheResource();
+    kmonitor::MetricsTags kmon_tags;
+    kmonitor::MetricsReporterPtr reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmon_tags);
+    stream_->setMetricsReporter(reporter);
+
+    stream_->setReuseLength(6);
+    stream_->setMtpTokenIndex(6);
+    stream_->setInitialReuseLength(6);
+    stream_->setLocalReuseLength(6);
+    stream_->setHostReuseLength(2);
+    stream_->setDiskReuseLength(2);
+    stream_->setRemoteReuseLength(1);
+    resource.cache_reuse_metrics_.block_aligned_input_length = 6;
+    resource.load_wait_begin_time_us_                         = currentTimeUs();
+    resource.malloc_begin_time_us_                            = resource.load_wait_begin_time_us_;
+
+    resource.finishCacheLoadMetrics(false);
+
+    EXPECT_EQ(stream_->reuseLength(), 0);
+    EXPECT_EQ(stream_->initialReuseLength(), 0);
+    EXPECT_EQ(stream_->localReuseLength(), 0);
+    EXPECT_EQ(stream_->deviceReuseLength(), 0);
+    EXPECT_EQ(stream_->hostReuseLength(), 0);
+    EXPECT_EQ(stream_->diskReuseLength(), 0);
+    EXPECT_EQ(stream_->remoteReuseLength(), 0);
+
+    resource.reportCacheReuseMetrics();
+
+    const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
+    EXPECT_EQ(metrics.block_aligned_input_length, 6);
+    EXPECT_EQ(metrics.kv_cache_reuse_length, 0);
+    EXPECT_EQ(metrics.device_reuse_length, 0);
+    EXPECT_EQ(metrics.host_reuse_length, 0);
+    EXPECT_EQ(metrics.disk_reuse_length, 0);
+    EXPECT_EQ(metrics.remote_reuse_length, 0);
+    EXPECT_FLOAT_EQ(metrics.kv_cache_hit_rate, 0.0f);
+    EXPECT_FLOAT_EQ(metrics.device_hit_rate, 0.0f);
+    EXPECT_FLOAT_EQ(metrics.host_hit_rate, 0.0f);
+    EXPECT_FLOAT_EQ(metrics.disk_hit_rate, 0.0f);
+    EXPECT_TRUE(metrics.report_reuse_metrics);
+    EXPECT_TRUE(metrics.report_load_metrics);
+    EXPECT_FALSE(metrics.load_success);
+}
+
+TEST_F(StreamCacheResourceTest, testReleasePendingAllocatorLoadDoesNotFinalizeMetrics) {
+    prepareResource(/*reuse_cache=*/true);
+    StreamCacheResource& resource             = stream_->streamCacheResource();
+    const int64_t        malloc_begin_time_us = currentTimeUs();
+    MallocResult         result{true, 0};
+    result.match_end_time_us    = malloc_begin_time_us;
+    result.malloc_begin_time_us = malloc_begin_time_us;
+    result.load_attempted       = true;
+    resource.recordCacheReuseMallocResult(result);
+    resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(false, false);
+
+    resource.releaseResource();
+
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_metrics);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_load_wait_latency);
+    EXPECT_FALSE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
 }
 
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_PendingAllocatorLoad_ReturnsFalse) {

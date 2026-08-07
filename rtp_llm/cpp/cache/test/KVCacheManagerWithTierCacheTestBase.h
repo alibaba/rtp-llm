@@ -216,6 +216,11 @@ public:
         return cv_.wait_for(lock, timeout, [this] { return phase_entered_ > 0; });
     }
 
+    bool waitUntilEnteredCountFor(size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this, count] { return phase_entered_ >= count; });
+    }
+
     void release() {
         std::lock_guard<std::mutex> lock(mutex_);
         phase_released_ = true;
@@ -409,9 +414,9 @@ inline PoolSnapshot snapshotPool(const std::shared_ptr<IBlockPool>& pool) {
         pool,
         pool->freeBlocksNum(),
         pool->usedBlocksNum(),
-        pool->totalRefCount(BlockRefType::REQUEST),
-        pool->totalRefCount(BlockRefType::BLOCK_CACHE),
-        pool->totalRefCount(BlockRefType::EVICTION),
+        pool->referencedBlocksNum(BlockRefType::REQUEST),
+        pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE),
+        pool->referencedBlocksNum(BlockRefType::EVICTION),
     };
 }
 
@@ -676,9 +681,9 @@ inline void expectFullTierPathUnchanged(const BlockTreeCache&                   
     for (const auto& pool : pools) {
         EXPECT_EQ(pool->freeBlocksNum(), 0u) << pool->poolName();
         EXPECT_EQ(pool->usedBlocksNum(), capacity) << pool->poolName();
-        EXPECT_EQ(pool->totalRefCount(BlockRefType::REQUEST), 0u) << pool->poolName();
-        EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), capacity) << pool->poolName();
-        EXPECT_EQ(pool->totalRefCount(BlockRefType::EVICTION), 0u) << pool->poolName();
+        EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 0u) << pool->poolName();
+        EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), capacity) << pool->poolName();
+        EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::EVICTION), 0u) << pool->poolName();
     }
 }
 
@@ -1338,8 +1343,8 @@ protected:
                 any_capacity_progress = any_capacity_progress
                                         || source_pool->usedBlocksNum() < source_used_before[group_set_id]
                                         || target_pool->usedBlocksNum() > target_used_before[group_set_id];
-                EXPECT_EQ(source_pool->totalRefCount(BlockRefType::EVICTION), 0u) << "round=" << round;
-                EXPECT_EQ(target_pool->totalRefCount(BlockRefType::EVICTION), 0u) << "round=" << round;
+                EXPECT_EQ(source_pool->referencedBlocksNum(BlockRefType::EVICTION), 0u) << "round=" << round;
+                EXPECT_EQ(target_pool->referencedBlocksNum(BlockRefType::EVICTION), 0u) << "round=" << round;
             }
             EXPECT_TRUE(any_capacity_progress) << "round=" << round;
             for (size_t path_index = 0; path_index < maybe_after->size(); ++path_index) {
@@ -1591,7 +1596,7 @@ protected:
         EXPECT_EQ(failed_result.reuse_len, seq_size_per_block);
         // One logical path is attributed to its slowest source tier. A mixed
         // HOST+DISK ticket therefore counts once as DISK rather than in both.
-        EXPECT_EQ(failed_result.memory_reuse_len,
+        EXPECT_EQ(failed_result.host_reuse_len,
                   host_source_count > 0 && disk_source_count == 0 ? seq_size_per_block : 0);
         EXPECT_EQ(failed_result.disk_reuse_len, disk_source_count > 0 ? seq_size_per_block : 0);
         ASSERT_NE(failed_result.async_context, nullptr);
@@ -1693,7 +1698,7 @@ protected:
         const auto retry_result        = manager_->malloc(retry_info);
         ASSERT_TRUE(retry_result.success);
         EXPECT_EQ(retry_result.reuse_len, seq_size_per_block);
-        EXPECT_EQ(retry_result.memory_reuse_len,
+        EXPECT_EQ(retry_result.host_reuse_len,
                   host_source_count > 0 && disk_source_count == 0 ? seq_size_per_block : 0);
         EXPECT_EQ(retry_result.disk_reuse_len, disk_source_count > 0 ? seq_size_per_block : 0);
         ASSERT_NE(retry_result.async_context, nullptr);
@@ -1822,7 +1827,7 @@ protected:
         const auto   first_result        = manager_->malloc(first_info);
         ASSERT_TRUE(first_result.success);
         EXPECT_EQ(first_result.reuse_len, seq_size_per_block);
-        EXPECT_EQ(first_result.memory_reuse_len, source_tier == Tier::HOST ? seq_size_per_block : 0);
+        EXPECT_EQ(first_result.host_reuse_len, source_tier == Tier::HOST ? seq_size_per_block : 0);
         EXPECT_EQ(first_result.disk_reuse_len, source_tier == Tier::DISK ? seq_size_per_block : 0);
         ASSERT_NE(first_result.async_context, nullptr);
         const bool entered =
@@ -1857,7 +1862,7 @@ protected:
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
             EXPECT_EQ(lowerBlockForTier(resource, source_tier), lower_sources[group_set_id]);
             EXPECT_EQ(source_pool->refCount(lower_sources[group_set_id]), 2u);
-            EXPECT_EQ(source_pool->totalRefCount(BlockRefType::REQUEST), 1u);
+            EXPECT_EQ(source_pool->referencedBlocksNum(BlockRefType::REQUEST), 1u);
             ASSERT_EQ(group_set->groupIds().size(), 1u);
             const int   group_id = static_cast<int>(group_set->groupIds().front());
             const auto& blocks   = first_resource->blocks(0, group_id);
@@ -1865,7 +1870,7 @@ protected:
             ASSERT_FALSE(isNullBlockIdx(blocks.front()));
             load_targets[group_set_id] = blocks.front();
             EXPECT_EQ(group_set->devicePools().front()->refCount(blocks.front()), 2u);
-            EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::REQUEST), 3u);
+            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 2u);
         }
 
         auto second_resource = makeResource(cache_config_);
@@ -1877,7 +1882,7 @@ protected:
         const auto second_result        = manager_->malloc(second_info);
         ASSERT_TRUE(second_result.success);
         EXPECT_EQ(second_result.reuse_len, seq_size_per_block);
-        EXPECT_EQ(second_result.memory_reuse_len, source_tier == Tier::HOST ? seq_size_per_block : 0);
+        EXPECT_EQ(second_result.host_reuse_len, source_tier == Tier::HOST ? seq_size_per_block : 0);
         EXPECT_EQ(second_result.disk_reuse_len, source_tier == Tier::DISK ? seq_size_per_block : 0);
         ASSERT_NE(second_result.async_context, nullptr);
         EXPECT_FALSE(second_result.async_context->done());
@@ -1904,8 +1909,8 @@ protected:
             EXPECT_EQ(first_blocks.front(), load_targets[group_set_id]);
             EXPECT_EQ(second_blocks.front(), load_targets[group_set_id]);
             EXPECT_EQ(group_set->devicePools().front()->refCount(load_targets[group_set_id]), 3u);
-            EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::REQUEST), 5u);
-            EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
+            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
+            EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
         }
 
         engine->release();
@@ -1950,8 +1955,8 @@ protected:
                 ASSERT_NE(source_pool, nullptr);
                 EXPECT_FALSE(source_pool->isAllocated(lower_sources[group_set_id]));
                 EXPECT_EQ(group_set->devicePools().front()->refCount(load_targets[group_set_id]), 3u);
-                EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::REQUEST), 4u);
-                EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
+                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
+                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
             }
             manager_->free(FreeInfo{first_resource, first_tokens});
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -1978,8 +1983,8 @@ protected:
                 EXPECT_EQ(lowerBlockForTier(resource, source_tier), lower_sources[group_set_id]);
                 EXPECT_EQ(source_pool->refCount(lower_sources[group_set_id]), 1u);
                 EXPECT_EQ(group_set->devicePools().front()->refCount(load_targets[group_set_id]), 2u);
-                EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::REQUEST), 4u);
-                EXPECT_EQ(group_set->devicePools().front()->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
+                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::REQUEST), 3u);
+                EXPECT_EQ(group_set->devicePools().front()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
             }
             expectPoolSnapshotsEq(lower_before_load, snapshotLowerPools(*cache, GetParam()));
             manager_->free(FreeInfo{first_resource, first_tokens});
@@ -1999,7 +2004,7 @@ protected:
             const auto retry_result        = manager_->malloc(retry_info);
             ASSERT_TRUE(retry_result.success);
             EXPECT_EQ(retry_result.reuse_len, seq_size_per_block);
-            EXPECT_EQ(retry_result.memory_reuse_len, source_tier == Tier::HOST ? seq_size_per_block : 0);
+            EXPECT_EQ(retry_result.host_reuse_len, source_tier == Tier::HOST ? seq_size_per_block : 0);
             EXPECT_EQ(retry_result.disk_reuse_len, source_tier == Tier::DISK ? seq_size_per_block : 0);
             ASSERT_NE(retry_result.async_context, nullptr);
             ASSERT_TRUE(

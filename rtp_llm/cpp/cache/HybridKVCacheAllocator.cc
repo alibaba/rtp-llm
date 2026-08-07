@@ -179,8 +179,10 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
     const CacheKeysType& cache_keys         = kv_resource->cacheKeys(0);
     int64_t              match_cost_time_us = 0;
+    int64_t              match_end_time_us  = 0;
     const size_t         reserve_blocks     = reserveBlocksNum();
     PreparedKVCache      prepared;
+    bool                 load_attempted = false;
     prepared.required_positions.resize(static_cast<size_t>(kv_resource->groupNums()));
     prepared.referenced_blocks.resize(static_cast<size_t>(kv_resource->groupNums()));
     BlockReleaseBatch releases;
@@ -190,15 +192,22 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         match_keys.resize(std::min(match_keys.size(), maxReusableMatchKeys(seq_len, reuse_unit_tokens)));
         const int64_t begin_us = currentTimeUs();
         prepareKVCache(match_keys, *kv_resource, cp_mapper, prepared);
-        match_cost_time_us = currentTimeUs() - begin_us;
+        match_end_time_us  = currentTimeUs();
+        match_cost_time_us = match_end_time_us - begin_us;
+        load_attempted     = prepared.load_context != nullptr;
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(static_cast<size_t>(prepared.reuse_blocks));
     }
 
     const auto rollback = [&]() -> MallocResult {
+        load_attempted = load_attempted || prepared.load_context != nullptr;
         prepared.load_context.reset();
         rollbackInitMalloc(*kv_resource, prepared.referenced_blocks, prepared.original_sizes, releases);
         submitBlockReleases(releases);
-        return {false, 0};
+        MallocResult result{false, 0};
+        result.match_cost_time_us = match_cost_time_us;
+        result.match_end_time_us  = match_end_time_us;
+        result.load_attempted     = load_attempted;
+        return result;
     };
 
     if (!hasAvailableBlocksForReserve(malloc_info, reserve_blocks, prepared)) {
@@ -246,8 +255,10 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         }
     }
     MallocResult result{true, prepared.reuse_blocks * reuse_unit_tokens, match_cost_time_us, prepared.load_context};
+    result.match_end_time_us = match_end_time_us;
+    result.load_attempted    = load_attempted;
     if (prepared.load_context != nullptr) {
-        result.memory_reuse_len =
+        result.host_reuse_len =
             static_cast<int>(prepared.load_context->matchedBlocks(Tier::HOST)) * reuse_unit_tokens;
         result.disk_reuse_len = static_cast<int>(prepared.load_context->matchedBlocks(Tier::DISK)) * reuse_unit_tokens;
     }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 
 #include "gtest/gtest.h"
 
@@ -78,24 +79,39 @@ TEST(IBlockPoolTest, BatchMallocIsAtomic) {
     EXPECT_EQ(pool.freeBlocksNum(), 1u);
 }
 
-TEST(IBlockPoolTest, RefcountMetricsFollowAggregateRefcount) {
-    auto pool = TestPool(std::make_shared<TestPoolConfig>("test", 4));
+TEST(IBlockPoolTest, RefMetricsCountDistinctBlocksAndActiveTreeCachedBlocks) {
+    TestPool pool(std::make_shared<TestPoolConfig>("test", 4));
     ASSERT_TRUE(pool.init());
 
-    auto block = pool.malloc();
-    ASSERT_TRUE(block.has_value());
-    EXPECT_EQ(block_tree_cache_test::unreferencedBlocksNum(pool), 1u);
+    const std::optional<BlockIdxType> first_block  = pool.malloc();
+    const std::optional<BlockIdxType> second_block = pool.malloc();
+    ASSERT_TRUE(first_block.has_value());
+    ASSERT_TRUE(second_block.has_value());
 
-    pool.incRef(*block, BlockRefType::REQUEST);
-    EXPECT_EQ(pool.refCount(*block), 1u);
-    EXPECT_EQ(block_tree_cache_test::treeCachedBlocksNum(pool), 1u);
+    pool.incRef(*first_block, BlockRefType::REQUEST);
+    pool.incRef(*first_block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::REQUEST), 1u);
+    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 0u);
 
-    pool.incRef(*block, BlockRefType::REQUEST);
-    EXPECT_EQ(pool.refCount(*block), 2u);
+    pool.incRef(*second_block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::REQUEST), 2u);
+
+    pool.incRef(*first_block, BlockRefType::BLOCK_CACHE);
+    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
     EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 1u);
 
-    pool.decRef(*block, BlockRefType::REQUEST);
-    pool.free(*block);
+    pool.incRef(*first_block, BlockRefType::CONNECTOR);
+    pool.decRef(*first_block, BlockRefType::REQUEST);
+    pool.decRef(*first_block, BlockRefType::CONNECTOR);
+    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::CONNECTOR), 0u);
+    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::REQUEST), 2u);
+    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 1u);
+
+    pool.decRef(*first_block, BlockRefType::REQUEST);
+    EXPECT_EQ(pool.referencedBlocksNum(BlockRefType::REQUEST), 1u);
+    EXPECT_EQ(pool.activeTreeCachedBlocksNum(), 0u);
+    pool.decRef(*first_block, BlockRefType::BLOCK_CACHE);
+    pool.decRef(*second_block, BlockRefType::REQUEST);
     EXPECT_EQ(pool.freeBlocksNum(), 3u);
 }
 
@@ -127,19 +143,19 @@ TEST(IBlockPoolTest, DecRefDoesNotFreeWhileAnotherHolderExists) {
     pool->incRef(*block, BlockRefType::BLOCK_CACHE);
     pool->incRef(*block, BlockRefType::REQUEST);
     EXPECT_EQ(pool->refCount(*block), 2u);
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::REQUEST), 1u);
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::CONNECTOR), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::CONNECTOR), 0u);
 
     pool->decRef(*block, BlockRefType::REQUEST);
     EXPECT_TRUE(pool->isAllocated(*block));
     EXPECT_EQ(pool->refCount(*block), 1u);
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::REQUEST), 0u);
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
 
     pool->decRef(*block, BlockRefType::BLOCK_CACHE);
     EXPECT_FALSE(pool->isAllocated(*block));
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
 }
 
 TEST(IBlockPoolTest, DecRefFreesSingleRequestHolder) {
@@ -164,13 +180,13 @@ TEST(IBlockPoolTest, RefTypeMismatchOnlyAffectsMetrics) {
 
     EXPECT_TRUE(pool->isAllocated(*block));
     EXPECT_EQ(pool->refCount(*block), 1u);
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::REQUEST), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 1u);
 
     pool->decRef(*block, BlockRefType::CONNECTOR);
     EXPECT_FALSE(pool->isAllocated(*block));
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::BLOCK_CACHE), 0u);
-    EXPECT_EQ(pool->totalRefCount(BlockRefType::REQUEST), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 0u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockRefType::REQUEST), 0u);
 }
 
 TEST(IBlockPoolTest, DecRefRejectsUnheldAllocatedBlock) {

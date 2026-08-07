@@ -96,8 +96,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
         host_sources[group_set_id] = resource.host_block;
         EXPECT_EQ(group_set->hostPool()->refCount(resource.host_block), 1u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-        EXPECT_EQ(group_set->hostPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
     }
 
@@ -146,8 +146,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         disk_sources[group_set_id] = resource.disk_slot;
         EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
         EXPECT_EQ(group_set->diskPool()->refCount(resource.disk_slot), 1u);
-        EXPECT_EQ(group_set->diskPool()->totalRefCount(BlockRefType::BLOCK_CACHE), 1u);
-        EXPECT_EQ(group_set->diskPool()->totalRefCount(BlockRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::BLOCK_CACHE), 1u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockRefType::EVICTION), 0u);
     }
 
     descriptors = pausable_engine->descriptors();
@@ -178,7 +178,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 2 * seq_size_per_block);
-    EXPECT_EQ(load_result.memory_reuse_len, 0);
+    EXPECT_EQ(load_result.host_reuse_len, 0);
     EXPECT_EQ(load_result.disk_reuse_len, 2 * seq_size_per_block);
     ASSERT_NE(load_result.async_context, nullptr);
     const bool load_entered = pausable_engine->waitUntilEnteredFor(
@@ -264,7 +264,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     const auto hit_result        = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 2 * seq_size_per_block);
-    EXPECT_EQ(hit_result.memory_reuse_len, 0);
+    EXPECT_EQ(hit_result.host_reuse_len, 0);
     EXPECT_EQ(hit_result.disk_reuse_len, 0);
     EXPECT_EQ(hit_result.async_context, nullptr);
     EXPECT_EQ(pausable_engine->submitCount(), submits_before_second_hit);
@@ -349,7 +349,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     const auto touch_result        = manager_->malloc(touch_info);
     ASSERT_TRUE(touch_result.success);
     EXPECT_EQ(touch_result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(touch_result.memory_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(touch_result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
     EXPECT_EQ(touch_result.disk_reuse_len, 0);
     ASSERT_NE(touch_result.async_context, nullptr);
     touch_result.async_context->waitDone();
@@ -374,7 +374,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     const auto heat_result        = manager_->malloc(heat_info);
     ASSERT_TRUE(heat_result.success);
     EXPECT_EQ(heat_result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(heat_result.memory_reuse_len, 0);
+    EXPECT_EQ(heat_result.host_reuse_len, 0);
     EXPECT_EQ(heat_result.disk_reuse_len, 0);
     EXPECT_EQ(heat_result.async_context, nullptr);
     ASSERT_TRUE(
@@ -448,7 +448,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 3 * static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(load_result.memory_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(load_result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
     EXPECT_EQ(load_result.disk_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
     ASSERT_NE(load_result.async_context, nullptr);
     const bool entered =
@@ -656,7 +656,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, logical_blocks * block_size);
-    EXPECT_EQ(result.memory_reuse_len, 0);
+    EXPECT_EQ(result.host_reuse_len, 0);
     EXPECT_EQ(result.disk_reuse_len, logical_blocks * block_size);
     ASSERT_NE(result.async_context, nullptr);
 

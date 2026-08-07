@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -116,12 +117,45 @@ BlockTreeLoader::matchedBlocksForGroup(size_t                                gro
     return {};
 }
 
+std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeLoader::collectReuseTimeSnapshots(
+    const std::vector<TreeNode*>& path, size_t matched_device_blocks, int64_t access_time_us) const {
+    std::vector<BlockTreeCacheReuseTimeSample> reuse_time_samples;
+    reuse_time_samples.reserve(path.size() * tree_->groupSets().size());
+    for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
+        const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+        const size_t       ready_reuse_count =
+            std::min(group_set->computeReuseBlockCount(matched_device_blocks), matched_device_blocks);
+        for (size_t i = matched_device_blocks - ready_reuse_count; i < matched_device_blocks; ++i) {
+            const GroupSetResource& resource       = path[i]->group_set_resources[group_set_id];
+            const CandidateMeta&    candidate_meta = resource.candidate_meta;
+            reuse_time_samples.push_back({Tier::DEVICE,
+                                          group_set->groupType(),
+                                          candidate_meta.insert_time_us,
+                                          candidate_meta.last_access_time_us,
+                                          access_time_us});
+        }
+
+        const size_t logical_reuse_count = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
+        for (size_t i = std::max(path.size() - logical_reuse_count, matched_device_blocks); i < path.size(); ++i) {
+            const GroupSetResource& resource       = path[i]->group_set_resources[group_set_id];
+            const CandidateMeta&    candidate_meta = resource.candidate_meta;
+            reuse_time_samples.push_back({resource.getTopTier(),
+                                          group_set->groupType(),
+                                          candidate_meta.insert_time_us,
+                                          candidate_meta.last_access_time_us,
+                                          access_time_us});
+        }
+    }
+    return metrics_reporter_.collectCacheReuseTimeMetrics(reuse_time_samples);
+}
+
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& path) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
     if (!validMatch(path, candidate_valid)) {
         return result;
     }
+    const int64_t access_time_us = currentTimeUs();
 
     for (size_t candidate_count = path.size(); candidate_count > 0; --candidate_count) {
         if (!candidate_valid[candidate_count - 1]) {
@@ -144,10 +178,17 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
         if (all_groups_ready) {
             result.matched_device_blocks = candidate_count;
-            evictor_.onMatched(std::vector<TreeNode*>(
-                path.begin(), path.begin() + static_cast<ptrdiff_t>(candidate_count)));
             break;
         }
+    }
+
+    if (metrics_reporter_.enabled()) {
+        result.reuse_time_metrics_snapshots =
+            collectReuseTimeSnapshots(path, result.matched_device_blocks, access_time_us);
+    }
+    if (result.matched_device_blocks > 0) {
+        evictor_.onMatched(
+            std::vector<TreeNode*>(path.begin(), path.begin() + static_cast<ptrdiff_t>(result.matched_device_blocks)));
     }
 
     std::vector<TransferDescriptor> pending_load_descs;
@@ -158,8 +199,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             group_set->computeReuseBlockCount(result.matched_device_blocks), result.matched_device_blocks);
         MultiNodeResource matched_device_resource{group_set_id, Tier::DEVICE};
         for (size_t i = result.matched_device_blocks - ready_reuse_count; i < result.matched_device_blocks; ++i) {
-            matched_device_resource.node_blocks.emplace_back(
-                path[i], path[i]->group_set_resources[group_set_id].getBlocks(Tier::DEVICE));
+            const GroupSetResource& resource = path[i]->group_set_resources[group_set_id];
+            matched_device_resource.node_blocks.emplace_back(path[i], resource.getBlocks(Tier::DEVICE));
         }
         if (!matched_device_resource.node_blocks.empty()) {
             group_set->referenceBlocks(matched_device_resource, BlockRefType::REQUEST);

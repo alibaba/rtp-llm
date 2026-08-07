@@ -80,8 +80,8 @@ public:
     void                            decRef(const BlockIdList& blocks, BlockRefType ref_type);
     std::vector<BlockRefTransition> decRefWithResult(const BlockIdList& blocks, BlockRefType ref_type);
     uint32_t                        refCount(BlockIdxType block) const;
-    // used only for metrics report
-    size_t totalRefCount(BlockRefType ref_type) const;
+    // Number of distinct blocks carrying at least one reference of this type.
+    size_t referencedBlocksNum(BlockRefType ref_type) const;
 
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
@@ -116,9 +116,9 @@ private:
     BlockIdxType popFreeBlockNoLock();
     void         pushFreeBlockNoLock(BlockIdxType block);
 
-    // Logical refcount controls lifecycle; typed refcounts are metrics-only bookkeeping.
     void decRefOneNoLock(BlockIdxType block, size_t ref_type_index);
-    void adjustActiveTreeCachedBlocksNoLock(uint32_t old_ref_count, uint32_t new_ref_count);
+    bool isActiveTreeCachedBlockNoLock(BlockIdxType block) const;
+    void adjustActiveTreeCachedBlocksNoLock(bool was_active, bool is_active);
     void freeAllocatedBlockNoLock(BlockIdxType block);
 
 private:
@@ -128,7 +128,7 @@ private:
     std::vector<uint8_t>                                  allocated_;
     std::vector<uint32_t>                                 refcounts_;
     std::array<std::vector<uint32_t>, kBlockRefTypeCount> metric_refcounts_by_type_;
-    std::array<size_t, kBlockRefTypeCount>                metric_total_ref_counts_{};
+    std::array<size_t, kBlockRefTypeCount>                referenced_block_counts_{};
     std::vector<BlockIdxType>                             free_blocks_;
     std::vector<BlockIdxType>                             released_blocks_;
     size_t                                                free_head_{0};

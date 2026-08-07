@@ -200,8 +200,8 @@ public:
     int     localReuseLength() const;
     int     deviceReuseLength() const;
     int     remoteReuseLength() const;
-    void    setMemoryReuseLength(int length);
-    int     memoryReuseLength() const;
+    void    setHostReuseLength(int length);
+    int     hostReuseLength() const;
     void    setDiskReuseLength(int length);
     int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
@@ -555,7 +555,6 @@ protected:
     void resizeSubGenerateStatus(size_t new_size);
 
     void reportStreamMetrics();
-    void reportCacheReuseMetrics() const;
 
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
@@ -577,7 +576,7 @@ protected:
     int                                   local_reuse_length_   = 0;
     int                                   device_reuse_length_  = 0;
     int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
+    int                                   host_reuse_length_    = 0;
     int                                   disk_reuse_length_    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;

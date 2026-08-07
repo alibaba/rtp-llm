@@ -45,13 +45,23 @@ public:
     using SettledFn         = std::function<void(bool tree_data_mutated, bool check_watermark)>;
     using RemoteWriteFn     = std::function<void(CacheKeyType cache_key, size_t group_set_id)>;
 
+    struct EvictionTimingSnapshot {
+        int64_t tier_enter_time_us{0};
+        int64_t insert_time_us{0};
+        int64_t last_access_time_us{0};
+        int64_t selected_time_us{0};
+    };
+
     struct EvictionPlan {
-        TransferDescriptor              primary_desc;
-        std::vector<TransferDescriptor> cascade_descs;
+        TransferDescriptor                   primary_desc;
+        EvictionTimingSnapshot               primary_timing;
+        std::vector<TransferDescriptor>      cascade_descs;
+        std::vector<EvictionTimingSnapshot>  cascade_timings;
         // FULL prune closure only. Every dependent descriptor targets NONE,
         // and nodes stay valid because such plans are committed synchronously.
-        std::vector<TransferDescriptor> dependent_prune_descs;
-        std::vector<TreeNode*>          full_prune_nodes_bottom_up;
+        std::vector<TransferDescriptor>     dependent_prune_descs;
+        std::vector<EvictionTimingSnapshot> dependent_prune_timings;
+        std::vector<TreeNode*>                full_prune_nodes_bottom_up;
 
         bool needsCopy() const;
         bool empty() const {
@@ -145,6 +155,7 @@ private:
     static Tier                       defaultTargetTier(Tier source);
 
     TransferDescriptor  makeDesc(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const;
+    EvictionTimingSnapshot makeTimingSnapshot(const TransferDescriptor& eviction_desc) const;
     std::vector<size_t> selectCascadeGroupSets(const TreeNode* node,
                                                size_t          source_group_set_id,
                                                Tier            tier,
