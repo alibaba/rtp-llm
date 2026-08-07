@@ -61,6 +61,10 @@ def fake_inference(*args, **kwargs):
     )
 
 
+async def fake_inference_async(*args, **kwargs):
+    return fake_inference(*args, **kwargs)
+
+
 FrontendWorker.__init__ = fake_init
 FrontendWorker.inference = fake_inference
 
@@ -68,7 +72,7 @@ BackendManager.start = fake_start
 BackendManager.ready = fake_ready
 
 OpenaiEndpoint.__init__ = fake_init
-OpenaiEndpoint.chat_completion = fake_inference
+OpenaiEndpoint.chat_completion_async = fake_inference_async
 
 
 class ConcurrencyLimitTest(TestCase):

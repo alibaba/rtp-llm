@@ -13,6 +13,7 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "DeepseekV4Renderer": "rtp_llm.openai.renderers.deepseekv4_renderer",
     "InternVLRenderer": "rtp_llm.openai.renderers.internvl_renderer",
     "KimiK2Renderer": "rtp_llm.openai.renderers.kimik2_renderer",
+    "KimiK3Renderer": "rtp_llm.openai.renderers.kimi_k3_renderer",
     "LlavaRenderer": "rtp_llm.openai.renderers.llava_renderer",
     "MiniCPMVRenderer": "rtp_llm.openai.renderers.minicpmv_renderer",
     "Qwen3CoderRenderer": "rtp_llm.openai.renderers.qwen3_code_renderer",

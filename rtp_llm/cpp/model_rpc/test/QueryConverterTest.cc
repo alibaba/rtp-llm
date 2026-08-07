@@ -175,6 +175,19 @@ TEST_F(QueryConverterTest, TransTensorPB_BF16) {
     EXPECT_EQ(std::memcmp(proto_data.data(), tensor_data, expected_size), 0);
 }
 
+TEST_F(QueryConverterTest, TransTensorPB_UINT8) {
+    torch::Tensor tensor = torch::arange(8, torch::kUInt8);
+    TensorPB      tensor_pb;
+    QueryConverter::transTensorPB(&tensor_pb, tensor);
+
+    EXPECT_EQ(tensor_pb.data_type(), TensorPB::UINT8);
+    EXPECT_EQ(tensor_pb.uint8_data().size(), tensor.numel());
+
+    torch::Tensor restored = QueryConverter::transTensor(tensor_pb);
+    EXPECT_EQ(restored.dtype(), torch::kUInt8);
+    EXPECT_TRUE(torch::equal(restored, tensor));
+}
+
 TEST_F(QueryConverterTest, TransTensorPB_ScalarShape) {
     torch::Tensor tensor = torch::tensor(42, torch::kInt32);
     TensorPB      tensor_pb;

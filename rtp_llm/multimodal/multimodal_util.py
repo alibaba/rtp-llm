@@ -4,6 +4,7 @@ import base64
 import concurrent.futures
 import json
 import logging
+import os
 import re
 import threading
 from io import BytesIO
@@ -301,8 +302,11 @@ def get_bytes_io_from_url(
             else:
                 # treat url as local path
                 with open(url, "rb") as fh:
-                    buf = BytesIO(fh.read())
-                res = buf
+                    # fstat the open handle, not the path, so the size checked is
+                    # the size of the file about to be read.
+                    size = os.fstat(fh.fileno()).st_size
+                    _validate_file_size(size, max_file_size_kb)
+                    res = BytesIO(fh.read())
             _validate_file_size(res.getbuffer().nbytes, max_file_size_kb)
         except FtRuntimeException:
             raise

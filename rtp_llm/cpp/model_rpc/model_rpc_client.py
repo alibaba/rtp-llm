@@ -246,6 +246,10 @@ def trans_multimodal_input(
         mm_input_pb = MultimodalInputPB()
         mm_input_pb.multimodal_url = mm_input.url
         mm_input_pb.multimodal_type = mm_input.mm_type
+        if mm_input.tensor.numel() > 0:
+            mm_input_pb.multimodal_tensor.CopyFrom(
+                trans_from_tensor(mm_input.tensor)
+            )
         mm_preprocess_config_pb = mm_input_pb.mm_preprocess_config
         mm_preprocess_config_pb.width = get_multimodal_preprocess_value(
             mm_input.mm_preprocess_config.width, resized_shape[0]

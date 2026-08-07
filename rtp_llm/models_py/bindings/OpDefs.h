@@ -397,6 +397,7 @@ struct PyEmbeddingInputs {
 struct PyMultimodalInputs {
     std::vector<torch::Tensor> multimodal_features;
     torch::Tensor              mm_features_locs;
+    torch::Tensor              mm_features_locs_host;
     std::vector<torch::Tensor> mm_extra_input;
 };
 

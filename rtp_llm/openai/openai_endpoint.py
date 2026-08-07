@@ -553,7 +553,9 @@ class OpenaiEndpoint(object):
             generate_config=gen_config,
         )
 
-    def render_chat(self, chat_request: ChatCompletionRequest):
+    async def render_chat_async(
+        self, chat_request: ChatCompletionRequest
+    ) -> RenderedInputs:
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
@@ -561,19 +563,23 @@ class OpenaiEndpoint(object):
         if len(chat_request.messages) > 0 and chat_request.messages[-1].partial:
             prepopulate_str = str(chat_request.messages[-1].content)
             chat_request.messages.pop()
-        rendered_input = renderer.render_chat(chat_request)
+        rendered_input = await renderer.render_chat_async(chat_request)
         if prepopulate_str != "":
-            rendered_input.rendered_prompt += prepopulate_str
+            # An empty ``rendered_prompt`` means "decode ``input_ids`` on demand"
+            # (see ``_get_debug_info``); appending here would turn that marker into a
+            # prompt consisting of the partial fragment alone.
+            if rendered_input.rendered_prompt != "":
+                rendered_input.rendered_prompt += prepopulate_str
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
         return rendered_input
 
-    def chat_completion(
+    async def chat_completion_async(
         self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
     ) -> CompleteResponseAsyncGenerator:
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
-        rendered_input = self.render_chat(chat_request)
+        rendered_input = await self.render_chat_async(chat_request)
         generate_config = self._extract_generation_config(chat_request)
         self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
@@ -604,11 +610,13 @@ class OpenaiEndpoint(object):
             choice_generator, debug_info, self.tokenizer
         )
 
-    def chat_render(self, chat_request: ChatCompletionRequest) -> DebugInfo:
+    async def chat_render_async(
+        self, chat_request: ChatCompletionRequest
+    ) -> DebugInfo:
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
         )
-        rendered_input = renderer.render_chat(chat_request)
+        rendered_input = await renderer.render_chat_async(chat_request)
         generate_config = self._extract_generation_config(chat_request)
         self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)

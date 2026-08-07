@@ -36,14 +36,41 @@ class KimiK3ModelConfig(ModelConfig):
 
 
 class KimiK3(BaseModel):
-    """Text-only Kimi K3 model entry.
+    """Kimi K3 text model with MoonViT multimodal support.
 
     Kimi K3 checkpoints use a multimodal outer config and put the complete text
-    model config under ``text_config``.  RTP-LLM intentionally registers only the
-    language model in the first bring-up; vision inputs are out of scope.
+    model config under ``text_config``.  The MoonViT vision tower and projector
+    live in the registry-based mixin ``KimiK3Mixin`` (registered for
+    ``model_type == "kimi_k3"``); this class only parses config.
     """
 
     WEIGHT_PREFIX = "language_model."
+
+    @staticmethod
+    def _load_vision_config(config: ModelConfig, top_config: Dict[str, Any]) -> None:
+        if "vision_config" not in top_config:
+            config.mm_model_config.is_multimodal = False
+            return
+
+        vision_config = dict(top_config["vision_config"])
+        vision_config.pop("_name_or_path", None)
+        if "media_placeholder_token_id" not in top_config:
+            raise ValueError(
+                "Kimi K3 config has vision_config but no media_placeholder_token_id; "
+                "guessing it would silently mis-place every image placeholder"
+            )
+        media_token_id = int(top_config["media_placeholder_token_id"])
+
+        config.mm_model_config.is_multimodal = True
+        config.mm_model_config.mm_sep_tokens = [[media_token_id]]
+        config.mm_related_params.config = {"vision_config": vision_config}
+        config.mm_related_params.special_token_ids.update(
+            {"image_token_index": media_token_id}
+        )
+        config.mm_related_params.special_tokens.update(
+            {"default_mm_token": "<|media_pad|>"}
+        )
+        config.mm_related_params.support_batch = True
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> KimiK3ModelConfig:
@@ -82,6 +109,7 @@ class KimiK3(BaseModel):
         cls._parse_moe_config(text_config, config)
         cls._parse_hybrid_attention_config(text_config, config)
         cls._parse_kimi_runtime_config(text_config, config)
+        cls._load_vision_config(config, config_json)
 
         logging.info(
             "Kimi K3 text config loaded: layers=%d hidden=%d heads=%d "
@@ -155,8 +183,6 @@ class KimiK3(BaseModel):
         config.special_tokens.stop_words_id_list = [
             [config.special_tokens.eos_token_id]
         ]
-        config.mm_model_config.is_multimodal = False
-
     @classmethod
     def _parse_attention_config(
         cls, text_config: Dict[str, Any], config: KimiK3ModelConfig

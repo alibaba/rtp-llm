@@ -21,7 +21,7 @@ import inspect
 import logging
 import os
 from contextlib import nullcontext
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -50,6 +50,9 @@ from rtp_llm.models_py.model_desc.kimi_k3_cuda_graph_cache import (
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     create_write_cache_store_impl,
+)
+from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
+    MultimodalEmbeddingInjector,
 )
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.kimi_k3.diagnostics.accuracy_trace import (
@@ -5351,6 +5354,39 @@ class KimiK3DecoderLayer(nn.Module):
         return output, block_residual
 
 
+def _mask_multimodal_token_ids(
+    input_ids: torch.Tensor,
+    multimodal_features: Sequence[torch.Tensor],
+    multimodal_locs: torch.Tensor,
+) -> torch.Tensor:
+    """Zero the token ids that ``MultimodalEmbeddingInjector`` will overwrite.
+
+    Multimodal rows do not hold vocab ids: ``MultimodalProcessor::expandTokenIds``
+    replaces them with per-row feature hashes (``featureHashToTokenId``, an arbitrary
+    ``int32`` that is routinely negative or ``>= vocab_size``) so the prefix cache can
+    tell two images apart.  Feeding those to ``F.embedding`` indexes out of bounds, so
+    they must be masked before the lookup -- this is the Python equivalent of the
+    ``text_tokens_mask`` that the fused ``rtp_llm_ops.embedding`` kernel consumes and
+    that ``PyMultimodalInputs`` does not carry.  The zeroed rows are all overwritten
+    by the injector afterwards, so the value written here is irrelevant.
+    """
+    locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+    masked_ids = input_ids.clone()
+    for feature, loc in zip(multimodal_features, locs):
+        if feature is None:
+            continue
+        # loc < 0 means the head rows already live in the reused KV prefix and only
+        # the tail lands in this chunk, at token 0 -- same convention as the injector.
+        offset = max(loc, 0)
+        length = feature.size(0) - min(max(-loc, 0), feature.size(0))
+        # Out-of-range spans are clipped rather than rejected here; the injector
+        # raises the canonical IndexError for them a few lines below.
+        length = min(length, masked_ids.size(0) - offset)
+        if length > 0:
+            masked_ids.narrow(0, offset, length).fill_(0)
+    return masked_ids
+
+
 class KimiK3Model(GptModelBase):
     """Text decoder body consumed by RTP's Python model executor."""
 
@@ -5374,6 +5410,7 @@ class KimiK3Model(GptModelBase):
             device_resource_config=device_resource_config,
         )
         self.embedding_weight = weights.get_global_weight(W.embedding)
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
             [
                 KimiK3DecoderLayer(
@@ -5397,28 +5434,47 @@ class KimiK3Model(GptModelBase):
     # generic MoE path).  K3's MLA layers consume that impl through
     # ``KimiK3MLA`` (an ``MlaAttention`` subclass); K3's KDA layers ignore it.
 
-    def _embed(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _embed(self, input_ids: torch.Tensor, multimodal_inputs: Any) -> torch.Tensor:
+        multimodal_features = multimodal_inputs.multimodal_features
+        mm_features_locs = multimodal_inputs.mm_features_locs_host
+        if multimodal_features:
+            if (
+                mm_features_locs is None
+                or mm_features_locs.numel() != len(multimodal_features)
+            ):
+                raise ValueError(
+                    "Kimi K3 multimodal feature locations must match the feature count"
+                )
+            input_ids = _mask_multimodal_token_ids(
+                input_ids, multimodal_features, mm_features_locs
+            )
+
         hidden_states = F.embedding(input_ids, self.embedding_weight)
         if self.parallelism_config.get_attn_tp_size() > 1:
             tokens, local_hidden = hidden_states.shape
             hidden_states = all_gather(hidden_states, group=Group.TP)
             if _perf_fusions_enabled():
-                return kimi_k3_interleave_tp_hidden(
+                hidden_states = kimi_k3_interleave_tp_hidden(
                     hidden_states,
                     tokens,
                     self.parallelism_config.get_attn_tp_size(),
                 )
-            hidden_states = (
-                hidden_states.reshape(
-                    self.parallelism_config.get_attn_tp_size(),
-                    tokens,
-                    local_hidden,
+            else:
+                hidden_states = (
+                    hidden_states.reshape(
+                        self.parallelism_config.get_attn_tp_size(),
+                        tokens,
+                        local_hidden,
+                    )
+                    .transpose(0, 1)
+                    .contiguous()
+                    .reshape(tokens, -1)
                 )
-                .transpose(0, 1)
-                .contiguous()
-                .reshape(tokens, -1)
-            )
-        return hidden_states
+        # K3 splices after the TP all-gather: vision features are produced in full
+        # hidden space, while the lookup above is sharded across attn TP ranks.
+        return self.multimodal_embedding_injector(
+            hidden_states, multimodal_features, mm_features_locs
+        )
 
     def _materialize_kda_a2a_weights(self) -> None:
         """Preflight memory and build all KDA A2A layouts in layer order."""
@@ -5659,7 +5715,7 @@ class KimiK3Model(GptModelBase):
         with _perf_profile(
             "model.embedding_vocab_parallel_then_hidden_allgather", input_ids
         ):
-            hidden_states = self._embed(input_ids)
+            hidden_states = self._embed(input_ids, inputs.multimodal_inputs)
         if trace_enabled:
             record_accuracy_tensor("embedding", hidden_states, token_dim=0)
         if prefill_sp:
