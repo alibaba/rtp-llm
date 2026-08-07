@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -90,7 +91,11 @@ public:
     void           initCapture() override;
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
-    static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
+    static CudaGraphRunner* createForPrefill(py::object                   py_instance,
+                                             GraphParams                  params,
+                                             std::optional<torch::Tensor> position_encoding      = std::nullopt,
+                                             std::optional<torch::Tensor> token_type_embedding   = std::nullopt,
+                                             float                        input_embedding_scalar = 1.0f);
     static CudaGraphRunner* createForDecode(py::object py_instance, GraphParams params);
 
 private:
@@ -131,7 +136,7 @@ private:
                                                      size_t&               copy_numel) const;
     bool                    canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
-    void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
+    void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs);
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
@@ -158,16 +163,20 @@ private:
     CaptureMemoryHold                      capture_mem_hold_;
     torch::Tensor                          position_encoding_;
     torch::Tensor                          token_type_embedding_;
-    float                                  input_embedding_scalar_;
+    float                                  input_embedding_scalar_{1.0f};
     c10::ScalarType                        model_data_type_;
     at::TensorOptions                      options_cuda_int32_;
     at::TensorOptions                      options_cpu_int32_;
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<std::string>      kv_cache_group_tags_;
-    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
-    mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
+    std::vector<std::string> kv_cache_group_tags_;
+    int                      position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    // Log-throttling state only. The actionable fallback signal is the
+    // power-of-two warning; operational rollback uses enable_cuda_graph.
+    mutable std::atomic<uint64_t> combo_position_fallback_log_count_{0};
+    mutable std::atomic<uint64_t> bert_replay_id_fallback_log_count_{0};
+    mutable std::atomic<uint64_t> multimodal_input_fallback_log_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
