@@ -101,6 +101,17 @@ py_test(
 )
 
 py_test(
+    name = "frontend_sse_done_test",
+    srcs = [
+        "frontend_sse_done_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "server_test",
     srcs = [
         "server_test.py",
