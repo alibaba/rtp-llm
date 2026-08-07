@@ -118,9 +118,12 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                    sizeof(int32_t) * accept_len);
         }
 
-        // always use target token as the last token
-        accept_tokens.data_ptr<int>()[accept_len - 1] =
-            new_all_token_ids[(stream_idx * (propose_step_ + 1) + accept_len - 1) * token_stride + token_stride - 1];
+        // The device kernel already writes the q-p correction token when a draft is rejected.
+        // It leaves only the bonus slot empty when every draft token is accepted.
+        if (accept_len == propose_step_ + 1) {
+            accept_tokens.data_ptr<int>()[accept_len - 1] =
+                new_all_token_ids[(stream_idx * (propose_step_ + 1) + accept_len - 1) * token_stride + token_stride - 1];
+        }
 
         sample_output.accept_tokens.push_back(std::move(accept_tokens));
         sample_output.accept_len.push_back(accept_len);

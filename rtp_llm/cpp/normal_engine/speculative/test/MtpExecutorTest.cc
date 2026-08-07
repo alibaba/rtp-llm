@@ -901,4 +901,64 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
 }
 
+TEST_F(MtpExecutorTest, speculativeSamplerPreservesCorrectionTokenAfterRejection) {
+    constexpr int64_t propose_step = 1;
+    constexpr int64_t vocab_size   = 3;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 16;
+    auto stream = createContextStream(model_config, RuntimeConfig{}, ResourceContext{}, {0});
+
+    SamplerOutput draft_output;
+    draft_output.token_ids = torch::tensor({0}, torch::kInt32).reshape({1, propose_step});
+    draft_output.all_probs =
+        torch::tensor({0.5f, 0.0f, 0.5f}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+            .reshape({1, propose_step, vocab_size});
+
+    SamplerOutput target_output;
+    // The draft token has zero target probability, so rejection is deterministic. The q-p
+    // correction distribution selects token 1, while an independent valid target sample is 2.
+    target_output.all_probs =
+        torch::tensor({0.0f, 0.5f, 0.5f, 1.0f, 0.0f, 0.0f},
+                      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+            .reshape({1, propose_step + 1, vocab_size});
+    target_output.token_ids = torch::tensor({2, 0}, torch::kInt32).reshape({propose_step + 1, 1});
+
+    spec::SpeculativeSampler sampler(propose_step);
+    auto                     output = sampler.forward({stream}, draft_output, target_output);
+
+    ASSERT_EQ(output.accept_len, std::vector<int>({1}));
+    ASSERT_EQ(output.accept_tokens.size(), 1);
+    EXPECT_EQ(toVec<int>(output.accept_tokens[0]), std::vector<int>({1}));
+}
+
+TEST_F(MtpExecutorTest, speculativeSamplerUsesTargetBonusTokenWhenAllDraftsAccepted) {
+    constexpr int64_t propose_step = 1;
+    constexpr int64_t vocab_size   = 3;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 16;
+    auto stream = createContextStream(model_config, RuntimeConfig{}, ResourceContext{}, {0});
+
+    SamplerOutput draft_output;
+    draft_output.token_ids = torch::tensor({0}, torch::kInt32).reshape({1, propose_step});
+    draft_output.all_probs =
+        torch::tensor({0.5f, 0.5f, 0.0f}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+            .reshape({1, propose_step, vocab_size});
+
+    SamplerOutput target_output;
+    target_output.all_probs =
+        torch::tensor({1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+                      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+            .reshape({1, propose_step + 1, vocab_size});
+    target_output.token_ids = torch::tensor({0, 2}, torch::kInt32).reshape({propose_step + 1, 1});
+
+    spec::SpeculativeSampler sampler(propose_step);
+    auto                     output = sampler.forward({stream}, draft_output, target_output);
+
+    ASSERT_EQ(output.accept_len, std::vector<int>({2}));
+    ASSERT_EQ(output.accept_tokens.size(), 1);
+    EXPECT_EQ(toVec<int>(output.accept_tokens[0]), std::vector<int>({0, 2}));
+}
+
 }  // namespace rtp_llm
