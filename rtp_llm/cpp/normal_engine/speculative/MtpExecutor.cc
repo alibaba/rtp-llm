@@ -834,7 +834,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.input_lengths = saved_input_lengths;
             }
             if (is_dspark_) {
-                maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
+                maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_, cp_enabled);
                 batch_stream_processor_->validatePrefillDSparkCommitInput(model_input);
             } else {
                 model_input.last_hidden_states = model_output.all_hidden_states;

@@ -388,7 +388,8 @@ def forward_layers(
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
-    capture_aux = bool(getattr(v4, "capture_aux_hidden_layer_ids", ()))
+    capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
+    capture_aux = bool(capture_ids)
     if capture_aux and cp_ctx is not None:
         # The DSpark draft commit that follows this forward receives the
         # rank-local aux rows; hand it the row -> (request, position) map.
@@ -528,7 +529,7 @@ def forward_layers(
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                 )  # [T, hc, dim]
-                if capture_aux:
+                if layer_idx in capture_ids:
                     v4.capture_aux_hidden(layer_idx, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)

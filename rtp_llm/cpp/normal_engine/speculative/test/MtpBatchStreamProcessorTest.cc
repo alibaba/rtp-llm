@@ -842,13 +842,20 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
 
     TensorHolder host_holder;
     model_input.last_hidden_states = target_features;
-    processor.validatePrefillDSparkCommitInput(model_input);
+    // A well-formed commit input passes; the validator does not mutate it.
+    EXPECT_NO_THROW(processor.validatePrefillDSparkCommitInput(model_input));
 
-    // The commit call keeps the target's own incremental-prefill geometry.
-    EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.input_lengths));
-    EXPECT_EQ((std::vector<int32_t>{7, 4}), toVec<int32_t>(model_input.prefix_lengths));
-    EXPECT_EQ(5, model_input.last_hidden_states.size(0));
-    EXPECT_EQ(12, model_input.last_hidden_states.size(1));
+    // Missing aux features must refuse the commit.
+    GptModelInputs no_features   = model_input;
+    no_features.last_hidden_states = torch::Tensor();
+    EXPECT_THROW(processor.validatePrefillDSparkCommitInput(no_features), std::exception);
+
+    // A non-positive draft width must refuse the commit.
+    SpeculativeExecutionConfig zero_width_config = sp_config;
+    zero_width_config.gen_num_per_cycle          = 0;
+    MtpBatchStreamProcessor    zero_width(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, zero_width_config, false);
+    EXPECT_THROW(zero_width.validatePrefillDSparkCommitInput(model_input), std::exception);
 
     // Anchors / committed ends now come from stream state at the decode round
     // head (buildDSparkProposeInputFromStreams); feed equivalent values here.

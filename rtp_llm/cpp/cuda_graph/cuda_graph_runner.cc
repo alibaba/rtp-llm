@@ -354,7 +354,33 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
 #else
+    // Mirror the CUDA fused-fill regions with plain aten fills so padded
+    // rows are zeroed on non-CUDA builds too (correctness over launch count).
     py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device.fill_(0);
+    if (has_hybrid_cache) {
+        for (size_t g = 0; g < hybrid_cache_group; ++g) {
+            py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device_by_group[g].fill_(0);
+        }
+    }
+    if (is_prefill_cuda_graph_mode_ && state.current_batch_size < max_bs_) {
+        const auto pad = max_bs_ - state.current_batch_size;
+        py_model_inputs_.attention_inputs.prefix_lengths.narrow(0, state.current_batch_size, pad).fill_(0);
+        py_model_inputs_.attention_inputs.input_lengths.narrow(0, state.current_batch_size, pad).fill_(0);
+    }
+    if (!is_prefill_cuda_graph_mode_) {
+        const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
+                                               && inputs.attention_inputs.sequence_lengths.numel() > 0;
+        const auto start = has_live_sequence_lengths ? state.current_batch_size : 0;
+        if (start < selected_graph_batch_size) {
+            py_model_inputs_.attention_inputs.sequence_lengths.narrow(0, start, selected_graph_batch_size - start)
+                .fill_(0);
+        }
+    }
+    if (is_target_verify_ && state.current_batch_size < selected_graph_batch_size) {
+        const auto pad = selected_graph_batch_size - state.current_batch_size;
+        py_model_inputs_.attention_inputs.input_lengths.narrow(0, state.current_batch_size, pad).fill_(0);
+        py_model_inputs_.attention_inputs.prefix_lengths.narrow(0, state.current_batch_size, pad).fill_(0);
+    }
 #endif
 
     // NOTE: kv_cache_block_id_{host,device} are physical block IDs dedicated for cache store
@@ -591,14 +617,12 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
     state.current_batch_size = inputs.attention_inputs.input_lengths.size(0);
     state.current_seq_len    = inferTotalTokensNoSync(inputs);
     if (state.current_seq_len <= 0) {
-        RTP_LLM_CHECK_WITH_INFO(
-            false, "prefill cuda graph: cannot infer total tokens without CPU sync, fallback to normal run");
+        RTP_LLM_LOG_WARNING("prefill cuda graph: cannot infer total tokens without CPU sync, falling back to eager");
         return false;
     }
-    if (capture_range_.empty()) {
-        RTP_LLM_CHECK_WITH_INFO(false, "prefill cuda graph: capture_range_ is empty, cannot run");
-        return false;
-    }
+    RTP_LLM_CHECK_WITH_INFO(!capture_range_.empty(),
+                            "prefill cuda graph: capture_range_ is empty, cannot run "
+                            "(should not happen when enable_cuda_graph=true)");
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), state.current_seq_len);
     // No captured graph for seq_len >= current (all captures smaller than requested)
     RTP_LLM_CHECK_WITH_INFO(it != capture_range_.end(),

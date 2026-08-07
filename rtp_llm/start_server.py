@@ -7,6 +7,7 @@ import time
 import traceback
 
 from rtp_llm.utils.time_util import timer_wrapper
+from rtp_llm.utils.util import str_to_bool
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -644,14 +645,10 @@ def _get_startup_real_warmup_speculative_reserve_step(
     if sp_type in (None, "", SpeculativeType.NONE):
         return 0
     gamma = int(getattr(sp_config, "gen_num_per_cycle", 0) or 0)
-    stream_async = str(os.environ.get("RTP_LLM_STREAM_ASYNC", "0")).lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-    # Match GenerateStream::maxTokenNum(): one verify window in synchronous
-    # mode, or two in-flight proposal windows when async bookkeeping is on.
+    # Match GenerateStream::useStreamAsyncReserveTokens(): one verify window
+    # in synchronous mode, or two in-flight proposal windows when async
+    # bookkeeping is on.
+    stream_async = str_to_bool(os.environ.get("RTP_LLM_STREAM_ASYNC", "0") or "0")
     return 2 * gamma + 1 if stream_async else gamma + 1
 
 
