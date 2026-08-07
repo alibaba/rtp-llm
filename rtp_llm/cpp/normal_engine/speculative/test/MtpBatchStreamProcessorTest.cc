@@ -238,18 +238,47 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     GptModelOutputs model_output;
     model_output.logits = torch::zeros({3, 16}, torch::kFloat32);
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output);
+    // Since the spec-logits overlap (#1262), stateful processors (think,
+    // grammar) are excluded from the inline score-batch states and applied
+    // through the SpecLogitsVerifyRunner vocab mask instead. Build that mask
+    // exactly the way MtpExecutor::buildSpecLogitsVerifyInline wires it.
+    SpecLogitsVerifyRunner             runner;
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams = 1;
+    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
+    task.vocab_size    = model_config.vocab_size;
+    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+    size_t processor_idx = 0;
+    for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
+        auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor_ptr);
+        ASSERT_NE(spec_processor, nullptr);
+        ASSERT_TRUE(spec_processor->isSpecVerifyEligible());
+        task.active.push_back({spec_processor,
+                               /*stream_idx=*/0,
+                               processor_idx,
+                               static_cast<uint64_t>(stream->streamId()),
+                               static_cast<int64_t>(stream->seqLength()),
+                               static_cast<int64_t>(stream->outputTokenLen())});
+        ++processor_idx;
+    }
+    ASSERT_EQ(1u, task.active.size());
+    auto spec_result = runner.buildInline(task);
+    ASSERT_TRUE(spec_result.has_active_processor);
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = sampler_inputs_status.value();
 
     ASSERT_NE(sampler_inputs.logits_processor_states_ptr, nullptr);
+    sampler_inputs.logits = sampler_inputs.logits.cuda();
     sampler_inputs.logits_processor_states_ptr->batchProcess(sampler_inputs);
+    auto logits_cpu = sampler_inputs.logits.cpu();
 
     float neg_inf = -std::numeric_limits<float>::max();
     for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
-        EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
+        EXPECT_EQ(neg_inf, logits_cpu[i][7].item<float>());
+        EXPECT_EQ(neg_inf, logits_cpu[i][8].item<float>());
+        EXPECT_EQ(0, logits_cpu[i][9].item<float>());
     }
 }
 
@@ -434,10 +463,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
+    // MtpAsyncDeviceState publication moved to MtpExecutor's dispatch wrappers
+    // (45564fbc57); the processor-level dispatchDecode deliberately leaves the
+    // stream device state untouched.
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, -1);
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, -1);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
