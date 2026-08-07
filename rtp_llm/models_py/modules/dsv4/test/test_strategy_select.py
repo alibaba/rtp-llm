@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.dsv4.moe.strategies import (
     GroupedFP4Strategy,
     LocalLoopStrategy,
     MegaMoEStrategy,
+    MegaMoEStrategySE,
     MoeCfg,
     _has_fp8_fp4_grouped_kernel,
     select_strategy,
@@ -73,6 +74,8 @@ class StrategySelectTest(unittest.TestCase):
         for k in (
             "DSV4_MOE_STRATEGY",
             "DSV4_USE_MEGA_MOE",
+            "DSV4_USE_MEGA_MOE_SE",
+            "DSV4_USE_MEGA_MOE_FUSED",
             "DSV4_USE_GROUPED_FP4",
         ):
             os.environ.pop(k, None)
@@ -80,10 +83,10 @@ class StrategySelectTest(unittest.TestCase):
     # --- auto-pick matrix --------------------------------------------------
 
     def test_ep1_with_grouped_kernel_picks_grouped(self):
-        with mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=True), \
-             mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
-            self.assertIs(select_strategy(_cfg(ep_size=1)),
-                          GroupedFP4Strategy)
+        with mock.patch.object(
+            GroupedFP4Strategy, "can_handle", return_value=True
+        ), mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
+            self.assertIs(select_strategy(_cfg(ep_size=1)), GroupedFP4Strategy)
 
     def test_grouped_selection_is_gated_by_ep_size(self):
         cfg = _cfg(ep_size=2)
@@ -99,43 +102,47 @@ class StrategySelectTest(unittest.TestCase):
             m_grouped_fp8_fp4_gemm_nt_contiguous=object(),
             get_mk_alignment_for_contiguous_layout=lambda: (128, 128),
         )
-        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), \
-             mock.patch(
-                 "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-                 "torch.cuda.is_available",
-                 return_value=True,
-             ), \
-             mock.patch(
-                 "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-                 "torch.cuda.get_device_capability",
-                 return_value=(12, 0),
-             ):
+        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "torch.cuda.is_available",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "torch.cuda.get_device_capability",
+            return_value=(12, 0),
+        ):
             self.assertFalse(_has_fp8_fp4_grouped_kernel())
 
-        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), \
-             mock.patch(
-                 "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-                 "torch.cuda.is_available",
-                 return_value=True,
-             ), \
-             mock.patch(
-                 "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
-                 "torch.cuda.get_device_capability",
-                 return_value=(10, 0),
-             ):
+        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "torch.cuda.is_available",
+            return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "torch.cuda.get_device_capability",
+            return_value=(10, 0),
+        ):
             self.assertTrue(_has_fp8_fp4_grouped_kernel())
 
     def test_ep1_no_grouped_falls_to_local(self):
-        with mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False), \
-             mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False), \
-             mock.patch.object(DeepEPStrategy, "can_handle", return_value=False):
-            self.assertIs(select_strategy(_cfg(ep_size=1)),
-                          LocalLoopStrategy)
+        with mock.patch.object(
+            GroupedFP4Strategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(
+            DeepEPStrategy, "can_handle", return_value=False
+        ):
+            self.assertIs(select_strategy(_cfg(ep_size=1)), LocalLoopStrategy)
 
     def test_ep_gt1_with_mega_picks_mega(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=True):
-            self.assertIs(select_strategy(_cfg(ep_size=4)),
-                          MegaMoEStrategy)
+            self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
+
+    def test_ep_gt1_default_stays_mega_when_se_is_capable(self):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=True
+        ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
+            self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
     def test_ep_gt1_no_mega_raises(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
@@ -193,6 +200,55 @@ class StrategySelectTest(unittest.TestCase):
         with _env(DSV4_USE_MEGA_MOE="1"):
             self.assertEqual(_resolve_forced(None), ("mega", False))
 
+    def test_mega_moe_se_opt_in_is_strict(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="1"):
+            self.assertEqual(_resolve_forced(None), ("mega_se", True))
+
+    def test_mega_moe_se_opt_in_accepts_generic_mega_hint(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="1", DSV4_USE_MEGA_MOE="1"):
+            self.assertEqual(_resolve_forced(None), ("mega_se", True))
+
+    def test_mega_moe_se_opt_in_accepts_generic_mega_ctor(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="1"):
+            self.assertEqual(_resolve_forced("mega"), ("mega_se", True))
+
+    def test_mega_moe_se_and_grouped_conflict(self):
+        with _env(
+            DSV4_USE_MEGA_MOE_SE="1",
+            DSV4_USE_GROUPED_FP4="1",
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                _resolve_forced(None)
+        self.assertIn("Conflicting", str(cm.exception))
+
+    def test_mega_moe_se_opt_in_selects_se(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="1"), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=True
+        ):
+            forced, strict = _resolve_forced(None)
+            self.assertIs(
+                select_strategy(_cfg(ep_size=2), forced=forced, strict=strict),
+                MegaMoEStrategySE,
+            )
+
+    def test_mega_moe_se_unavailable_fails_loudly(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="1"), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=False
+        ):
+            forced, strict = _resolve_forced(None)
+            with self.assertRaises(RuntimeError) as cm:
+                select_strategy(_cfg(ep_size=2), forced=forced, strict=strict)
+        self.assertIn("Forced MoE strategy 'mega_se'", str(cm.exception))
+
+    def test_mega_moe_se_and_old_fused_conflict(self):
+        with _env(
+            DSV4_USE_MEGA_MOE_SE="1",
+            DSV4_USE_MEGA_MOE_FUSED="1",
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                select_strategy(_cfg(ep_size=2))
+        self.assertIn("select exactly one Mega variant", str(cm.exception))
+
     def test_legacy_use_grouped_fp4_1_translates_to_grouped_nonstrict(self):
         with _env(DSV4_USE_GROUPED_FP4="1"):
             self.assertEqual(_resolve_forced(None), ("grouped_fp4", False))
@@ -226,8 +282,9 @@ class StrategySelectTest(unittest.TestCase):
         # because ep_size=1; should silently fall through to LocalLoop
         # (NOT raise — that's the strict-mode behaviour). Mirrors the
         # 64k_cp4_ep1 smoke that has ep_size=1 + DSV4_USE_MEGA_MOE=1.
-        with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False), \
-             mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False):
+        with mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=False
+        ), mock.patch.object(GroupedFP4Strategy, "can_handle", return_value=False):
             self.assertIs(
                 select_strategy(_cfg(ep_size=1), forced="mega", strict=False),
                 LocalLoopStrategy,
