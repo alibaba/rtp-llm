@@ -836,6 +836,41 @@ class TestGlm47MoeDetectorArgumentStreaming(unittest.TestCase):
             self.fail(f"Arguments should form valid JSON. Got: {full_args}")
 
 
+    def test_object_valued_final_argument_closes_outer_arguments(self):
+        tools = [
+            Tool(
+                type="function",
+                function=Function(
+                    name="configure",
+                    description="Configure a task",
+                    parameters={
+                        "type": "object",
+                        "properties": {"payload": {"type": "object"}},
+                    },
+                ),
+            )
+        ]
+        text = (
+            "<tool_call>configure"
+            '<arg_key>payload</arg_key><arg_value>{"mode":"fast"}</arg_value>'
+            "</tool_call>"
+        )
+
+        for chunks in ([text], list(text)):
+            with self.subTest(chunk_count=len(chunks)):
+                calls = [
+                    call
+                    for result in collect_streaming_results(
+                        Glm47MoeDetector(), chunks, tools
+                    )
+                    for call in result.calls
+                ]
+                parameters = "".join(c.parameters for c in calls if c.parameters)
+                self.assertEqual(
+                    json.loads(parameters), {"payload": {"mode": "fast"}}
+                )
+
+
 def merge_tool_call_deltas(calls: list) -> dict:
     """
     Merge ToolCallItem deltas by tool_index (simulates client-side merge).

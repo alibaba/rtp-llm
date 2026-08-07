@@ -170,9 +170,7 @@ class Glm47MoeDetector(BaseFormatDetector):
         self.current_tool_name_sent = False
         self._streamed_raw_length = 0
         self._tool_call_completed = False  # Track if tool call has been completed
-        self._sent_empty_object = (
-            False  # Track if empty object has been sent for no-arg functions
-        )
+        self._arguments_closed = False
         self._reset_streaming_state()
 
     def _reset_streaming_state(self) -> None:
@@ -187,7 +185,7 @@ class Glm47MoeDetector(BaseFormatDetector):
             None  # Cache the value type for consistency
         )
         self._tool_call_completed = False  # Reset tool call completion status
-        self._sent_empty_object = False  # Reset empty object sent status
+        self._arguments_closed = False
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a glm-4.5 / glm-4.6 format tool call."""
@@ -572,31 +570,21 @@ class Glm47MoeDetector(BaseFormatDetector):
         """
         calls = []
 
-        # Handle no-arg function or need to close braces
-        if self._is_first_param and not self._sent_empty_object:
-            # No-arg function
+        # The state machine opens the outer arguments object but never closes it.
+        # Close it exactly once; a final object-valued parameter also ends in "}"
+        # and must not be mistaken for this outer delimiter.
+        if not self._arguments_closed:
+            closing_parameters = "{}" if self._is_first_param else "}"
             calls.append(
                 ToolCallItem(
                     tool_index=self.current_tool_id,
                     name=None,
-                    parameters="{}",
+                    parameters=closing_parameters,
                 )
             )
-            self._last_arguments += "{}"
-            self.streamed_args_for_tool[self.current_tool_id] += "{}"
-            self._sent_empty_object = True
-        elif not self._last_arguments.endswith("}") and not self._sent_empty_object:
-            # Need to close brace
-            calls.append(
-                ToolCallItem(
-                    tool_index=self.current_tool_id,
-                    name=None,
-                    parameters="}",
-                )
-            )
-            self._last_arguments += "}"
-            self.streamed_args_for_tool[self.current_tool_id] += "}"
-            self._sent_empty_object = True
+            self._last_arguments += closing_parameters
+            self.streamed_args_for_tool[self.current_tool_id] += closing_parameters
+            self._arguments_closed = True
 
         # Parse final arguments
         if func_args_raw:
