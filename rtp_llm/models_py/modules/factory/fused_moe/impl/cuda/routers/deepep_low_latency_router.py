@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
@@ -248,12 +249,12 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     def _finalize_post_tp_gather(
         self,
         combined_x: torch.Tensor,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         """Finalize post tp gather for DeepEP Low-Latency.
         Args:
             combined_x (torch.Tensor): Combined output from all tp ranks.
-            extra_finalize_args (Optional[Dict[str, Any]]): Extra finalize arguments.
+            extra_finalize_args (Optional[FinalizeArgs]): Extra finalize arguments.
         """
         # Check input data
         assert combined_x.dim() == 2
@@ -286,7 +287,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         """
         Combines expert outputs back to all original ranks.

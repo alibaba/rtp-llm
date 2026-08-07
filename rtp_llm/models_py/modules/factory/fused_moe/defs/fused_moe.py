@@ -1,6 +1,18 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Final,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypedDict,
+    Union,
+    final,
+)
 
 import torch
 
@@ -15,7 +27,15 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     RouterType,
 )
 
-SKIP_TP_ALLREDUCE_ARG = "skip_tp_allreduce"
+SKIP_TP_ALLREDUCE_ARG: Final[Literal["skip_tp_allreduce"]] = "skip_tp_allreduce"
+
+
+class FinalizeArgs(TypedDict, total=False):
+    """Private, optional arguments passed from ``FusedMoe`` to routers."""
+
+    a1_shape: torch.Size
+    original_num_tokens: int
+    skip_tp_allreduce: bool
 
 
 @dataclass
@@ -54,7 +74,7 @@ class CombineForwardPayload:
 
 
 def should_skip_tp_allreduce(
-    extra_finalize_args: Optional[Dict[str, Any]],
+    extra_finalize_args: Optional[FinalizeArgs],
 ) -> bool:
     """Return whether a pure-TP router should leave reduction to its caller.
 
@@ -84,6 +104,15 @@ class FusedMoeDataRouter(ABC):
         """
         self.config = config
         self.quant_config = quant_config
+        # Keep the legacy field for router-local logic. Callers that need the
+        # size of the Group.TP collective must use tp_collective_size below.
+        self.tp_size = config.tp_size
+
+    @property
+    def tp_collective_size(self) -> int:
+        """Return the TP size used by this router's Group.TP collective."""
+
+        return self.config.tp_size
 
     @classmethod
     def router_type(cls) -> RouterType:
@@ -91,6 +120,11 @@ class FusedMoeDataRouter(ABC):
 
     @property
     def supports_skip_tp_allreduce(self) -> bool:
+        """Whether ``finalize`` consumes ``skip_tp_allreduce``.
+
+        A router must only override this capability when its finalize path
+        delegates to the shared skip decision (or an equivalent implementation).
+        """
         return False
 
     @classmethod
@@ -123,7 +157,7 @@ class FusedMoeDataRouter(ABC):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -208,7 +242,7 @@ class FusedMoe(torch.nn.Module):
         a2_scale: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         extra_expert_args: Optional[Dict[str, Any]] = None,
-        extra_finalize_args: Optional[Dict[str, Any]] = None,
+        extra_finalize_args: Optional[FinalizeArgs] = None,
         skip_tp_allreduce: bool = False,
     ) -> torch.Tensor:
 
@@ -255,16 +289,18 @@ class FusedMoe(torch.nn.Module):
                 extra_expert_args=extra_expert_args,
             )
 
-        # pass a1.shape to finalize for shape check
-        if extra_finalize_args is None:
-            extra_finalize_args = {"a1_shape": a1.shape}
-        else:
-            extra_finalize_args.update({"a1_shape": a1.shape})
+        # Finalize arguments are a private per-call protocol. Copy caller
+        # input before adding derived values so a reusable dict cannot retain
+        # state from a previous forward.
+        finalize_args: FinalizeArgs = {
+            **(extra_finalize_args or {}),
+            "a1_shape": a1.shape,
+        }
 
         # Pure-TP routers normally reduce their routed output in finalize().
         # GenericMoeLayer can set this flag to combine routed and shared-expert
         # partial outputs first, reducing the number of small TP collectives.
-        extra_finalize_args.update(
+        finalize_args.update(
             {
                 "original_num_tokens": hidden_states.size(0),
                 SKIP_TP_ALLREDUCE_ARG: skip_tp_allreduce,
@@ -276,7 +312,7 @@ class FusedMoe(torch.nn.Module):
             expert_payload.expert_topk_weights,
             expert_payload.expert_topk_ids,
             apply_router_weight_on_input,
-            extra_finalize_args,
+            finalize_args,
         )
 
         assert (

@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
@@ -196,7 +197,7 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
         assert payload.fused_expert_output is not None, "fused_expert_output is None"

@@ -13,6 +13,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
+    FinalizeArgs,
     FusedMoeDataRouter,
     should_skip_tp_allreduce,
 )
@@ -42,6 +43,13 @@ class PureTpRouterBase(FusedMoeDataRouter):
     @property
     def supports_skip_tp_allreduce(self) -> bool:
         return True
+
+    def _maybe_all_reduce_tp(
+        self, output: torch.Tensor, extra_finalize_args: Optional[FinalizeArgs]
+    ) -> torch.Tensor:
+        if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
+            return all_reduce(output, group=Group.TP)
+        return output
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -124,12 +132,11 @@ class PureTpRouterBase(FusedMoeDataRouter):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
-        extra_finalize_args: Optional[dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
-        fused_expert_output = payload.fused_expert_output
-        if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
-            fused_expert_output = all_reduce(fused_expert_output, group=Group.TP)
-        return fused_expert_output
+        return self._maybe_all_reduce_tp(
+            payload.fused_expert_output, extra_finalize_args
+        )
 
 
 class PureTpRouterNoQuant(PureTpRouterBase):

@@ -16,13 +16,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
 
 
 def _extract_extra_finalize_args(router_finalize_mock):
-    kwargs = router_finalize_mock.call_args.kwargs
-    if "extra_finalize_args" in kwargs:
-        return kwargs["extra_finalize_args"]
     args = router_finalize_mock.call_args.args
-    if not args:
-        raise AssertionError("router.finalize did not receive finalize arguments")
-    return args[-1]
+    if len(args) != 5:
+        raise AssertionError(
+            "router.finalize must receive the five positional finalize arguments"
+        )
+    return args[4]
 
 
 class FusedMoeSkipAllreduceTest(TestCase):
@@ -94,7 +93,7 @@ class FusedMoeSkipAllreduceTest(TestCase):
             skip_tp_allreduce=False,
         )
 
-        self.assertFalse(extra_finalize_args[SKIP_TP_ALLREDUCE_ARG])
+        self.assertTrue(extra_finalize_args[SKIP_TP_ALLREDUCE_ARG])
         self.assertFalse(
             _extract_extra_finalize_args(router.finalize)[SKIP_TP_ALLREDUCE_ARG]
         )
@@ -112,9 +111,12 @@ class FusedMoeSkipAllreduceTest(TestCase):
             skip_tp_allreduce=False,
         )
 
-        self.assertFalse(extra_finalize_args[SKIP_TP_ALLREDUCE_ARG])
+        self.assertTrue(extra_finalize_args[SKIP_TP_ALLREDUCE_ARG])
         router.prepare.assert_called_once()
         experts.execute.assert_called_once()
+        self.assertFalse(
+            _extract_extra_finalize_args(router.finalize)[SKIP_TP_ALLREDUCE_ARG]
+        )
 
     def test_forward_rejects_skip_tp_allreduce_for_unsupported_router(self):
         fused_moe, router, experts, hidden_states, topk_weights, topk_ids = (

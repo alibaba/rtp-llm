@@ -40,7 +40,10 @@ class LinearTorch(nn.Module):
 class FakeFusedMoe(nn.Module):
     topk_ids_dtype = torch.int32
 
-    router = SimpleNamespace(supports_skip_tp_allreduce=True)
+    router = SimpleNamespace(
+        supports_skip_tp_allreduce=True,
+        tp_collective_size=1,
+    )
 
     def forward(self, hidden_states, **kwargs):
         return torch.zeros_like(hidden_states)

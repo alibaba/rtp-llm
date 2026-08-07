@@ -52,16 +52,6 @@ class GenericMoeLayer(nn.Module):
         self.parallelism_config = parallelism_config
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
-        attn_tp_size = parallelism_config.get_attn_tp_size()
-        self.attn_tp_size = attn_tp_size
-        # Router TP reduction uses attention TP (see config_adapter.py). Keep
-        # this relation explicit so ffn_tp_size > 1 implies the router's
-        # original TP reduction also spans more than one rank.
-        if self.ffn_tp_size > attn_tp_size:
-            raise ValueError(
-                f"ffn_tp_size={self.ffn_tp_size} must not exceed "
-                f"attn_tp_size={attn_tp_size}"
-            )
 
         self.hidden_dim = config.hidden_size
         self.ffn_dim = config.inter_size
@@ -92,6 +82,8 @@ class GenericMoeLayer(nn.Module):
             enable_cuda_graph=enable_cuda_graph,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        router = self.fused_moe.router
+        router_tp_size = router.tp_collective_size
 
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
@@ -134,16 +126,17 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert is not None
             and self.ffn_tp_size > 1
             and self.ep_size == 1
-            and self.fused_moe.router.supports_skip_tp_allreduce
+            and self.ffn_tp_size == router_tp_size
+            and router.supports_skip_tp_allreduce
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "GenericMoE unified TP all-reduce %s "
-                "(router=%s, ffn_tp_size=%d, attn_tp_size=%d, ep_size=%d)",
+                "(router=%s, ffn_tp_size=%d, router_tp_size=%d, ep_size=%d)",
                 "enabled" if self.use_unified_tp_allreduce else "disabled",
-                type(self.fused_moe.router).__name__,
+                type(router).__name__,
                 self.ffn_tp_size,
-                self.attn_tp_size,
+                router_tp_size,
                 self.ep_size,
             )
 
@@ -218,9 +211,6 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
-        # EP mode: routed expert output is already complete (EP combine handles it).
-        # Shared expert output is TP-partial and needs separate allreduce.
-        use_ep_shared_allreduce = self.use_ep_shared_allreduce
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
         # path separately.  This is especially important for decode, where the
@@ -237,7 +227,7 @@ class GenericMoeLayer(nn.Module):
             shared_expert_output = self.shared_expert(
                 hidden_states,
                 skip_allreduce=(
-                    use_ep_shared_allreduce or self.use_unified_tp_allreduce
+                    self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
                 ),
             )
             if self.use_unified_tp_allreduce:
@@ -249,7 +239,7 @@ class GenericMoeLayer(nn.Module):
                     hidden_states, experts_output, shared_expert_output
                 )
                 experts_output = all_reduce(experts_output, group=Group.TP)
-            elif use_ep_shared_allreduce:
+            elif self.use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
                 # Only the shared expert output is TP-partial and needs all_reduce.
@@ -260,8 +250,8 @@ class GenericMoeLayer(nn.Module):
                 experts_output = experts_output + shared_expert_output
             else:
                 # Fallback path: each path is already complete independently.
-                # This includes ffn_tp_size == 1 and routers that do not
-                # support deferred TP reduction, so only local merging remains.
+                # This includes ffn_tp_size == 1 and routers that retain their
+                # own finalize reduction, so only local merging remains.
                 experts_output = self._merge_shared_expert_output(
                     hidden_states, experts_output, shared_expert_output
                 )
