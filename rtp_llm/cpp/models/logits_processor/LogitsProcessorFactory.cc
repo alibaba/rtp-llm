@@ -97,7 +97,7 @@ GrammarKeyCpp keyFromResponseFormat(const std::string& response_format) {
         return {};
     }
     if (*type == "json_object") {
-        return {"json", R"({"type":"object"})"};
+        return {"json", R"({"anyOf":[{"type":"object"},{"type":"array"}]})"};
     }
     if (*type == "json_schema") {
         auto schema = extractJsonSchemaFromEnvelope(*response_map);
