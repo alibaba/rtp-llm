@@ -146,6 +146,9 @@ final class MockControlServer {
             engines.add(service.getSnapshot());
         }
         Map<String, Object> response = new LinkedHashMap<>();
+        // Sampling timestamp for cross-source alignment with client epoch_ms
+        // fields and the java_mock_stats ts_epoch_ms field (additive, top-level).
+        response.put("ts_epoch_ms", System.currentTimeMillis());
         response.put("engines", engines);
         // The Java cluster runs engines in-process (no remote decode forwarding),
         // so the gRPC forwarding counters are always zero — kept for schema parity.

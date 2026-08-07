@@ -32,6 +32,10 @@ MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-61000}"
 JAVA_MOCK_ENGINE_JAR="${JAVA_MOCK_ENGINE_JAR:-${FLEXLB_DIR}/flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar}"
 JAVA_MOCK_EVENT_LOOP_THREADS="${JAVA_MOCK_EVENT_LOOP_THREADS:-32}"
 JAVA_MOCK_COMPLETION_THREADS="${JAVA_MOCK_COMPLETION_THREADS:-16}"
+# java_mock_stats sampling interval, passed straight to --stats-interval-ms
+# (single env, no renaming). Default matches the historical 5s cadence; lower
+# to 1000 for fine-grained pressure-test timelines.
+JAVA_MOCK_STATS_INTERVAL_MS="${JAVA_MOCK_STATS_INTERVAL_MS:-5000}"
 JAVA_MOCK_ENGINE_HEAP_SIZE="${JAVA_MOCK_ENGINE_HEAP_SIZE:-32g}"
 JAVA_MOCK_JVM_XMS="${JAVA_MOCK_JVM_XMS:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
 JAVA_MOCK_JVM_XMX="${JAVA_MOCK_JVM_XMX:-${JAVA_MOCK_ENGINE_HEAP_SIZE}}"
@@ -116,6 +120,7 @@ export SCHEDULE_WORKER_SIZE="${SCHEDULE_WORKER_SIZE:-16}"
 
 MOCK_PID=""
 FLEXLB_PID=""
+MASTER_COUNTER_POLLER_PID=""
 CLIENT_PIDS=()
 JAVA_MODULE_OPTS=(
   --add-modules ALL-SYSTEM
@@ -140,6 +145,7 @@ if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
 fi
 
 cleanup() {
+  stop_master_counter_poller
   for pid in "${CLIENT_PIDS[@]}"; do
     kill "${pid}" >/dev/null 2>&1 || true
   done
@@ -308,6 +314,53 @@ save_master_prometheus() {
   return 1
 }
 
+# Per-second master arrival/completion counter time series. The management
+# Prometheus endpoint has no arrival/completion counters, but the master
+# already exposes cumulative arrival_count/completion_count on the existing
+# GET /rtp_llm/server_latency endpoint — poll that (no master code change).
+# Counters are cumulative within the recorder window; the multi-worker path
+# resets the window right after the poller starts, visible as a counter drop.
+MASTER_COUNTERS_FILE="${RUN_DIR}/master_counters_timeseries.txt"
+MASTER_COUNTER_POLL_INTERVAL_S="${MASTER_COUNTER_POLL_INTERVAL_S:-1}"
+
+start_master_counter_poller() {
+  if [[ "${START_FLEXLB}" != "1" ]]; then
+    return 0
+  fi
+  python3 - "${FLEXLB_HTTP_ADDR}" "${MASTER_COUNTERS_FILE}" \
+    "${MASTER_COUNTER_POLL_INTERVAL_S}" <<'PY' &
+import json
+import sys
+import time
+import urllib.request
+
+addr, out_path, interval_s = sys.argv[1], sys.argv[2], float(sys.argv[3])
+url = f"http://{addr}/rtp_llm/server_latency"
+with open(out_path, "a", encoding="utf-8") as out:
+    while True:
+        started = time.time()
+        try:
+            with urllib.request.urlopen(url, timeout=2) as response:
+                data = json.load(response)
+            out.write(
+                f"ts_epoch_ms={int(started * 1000)} "
+                f"arrival_count={data.get('arrival_count', 0)} "
+                f"completion_count={data.get('completion_count', 0)}\n")
+            out.flush()
+        except Exception:
+            pass  # master briefly unavailable; skip this sample
+        time.sleep(max(0.0, interval_s - (time.time() - started)))
+PY
+  MASTER_COUNTER_POLLER_PID="$!"
+}
+
+stop_master_counter_poller() {
+  if [[ -n "${MASTER_COUNTER_POLLER_PID}" ]]; then
+    kill "${MASTER_COUNTER_POLLER_PID}" >/dev/null 2>&1 || true
+    MASTER_COUNTER_POLLER_PID=""
+  fi
+}
+
 assert_mock_engine_healthy() {
   if [[ "${START_MOCK}" != "1" ]]; then
     return 0
@@ -360,11 +413,13 @@ if [[ "${START_MOCK}" == "1" ]]; then
     --master-config "${PROCESS_CONFIG_FILE}" \
     --prefill-cache-blocks "${PREFILL_CACHE_BLOCKS}" \
     --decode-cache-blocks "${DECODE_CACHE_BLOCKS}" \
+    --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
     --endpoint-file "${ENDPOINT_FILE}" \
     --env-file "${FLEXLB_ENV_FILE}" \
     >"${RUN_DIR}/mock_engine.log" 2>&1 &
   MOCK_PID="$!"
   echo "Java mock engine heap: Xms=${JAVA_MOCK_JVM_XMS}, Xmx=${JAVA_MOCK_JVM_XMX}"
+  echo "Java mock engine stats interval: ${JAVA_MOCK_STATS_INTERVAL_MS}ms"
   # The Java process writes discovery files only after every gRPC port is bound.
   wait_for_port "127.0.0.1" "$((MOCK_BASE_GRPC_PORT + N_PREFILL + N_DECODE - 1))" 60
   if ! kill -0 "${MOCK_PID}" >/dev/null 2>&1; then
@@ -573,6 +628,10 @@ PY
 )"
 echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
 
+# Capture the master arrival/completion counter time series for the whole load
+# window (stopped right after all clients finish; also killed by cleanup).
+start_master_counter_poller
+
 # Launch one load client instance. Args: output_dir, num_shards, shard_index,
 # max_concurrency, skip_server_latency (0/1). JavaLoadClient is env-var
 # configured (see JavaLoadClient.Config.fromEnv); all client parameters are
@@ -773,6 +832,7 @@ PY
   fi
 fi
 
+stop_master_counter_poller
 assert_mock_engine_healthy
 
 if [[ "${SLO_BATCH_DRAIN_SECONDS}" -gt 0 ]]; then
@@ -808,6 +868,7 @@ echo "report=${RUN_DIR}/load_client/report.md"
 echo "server_latency=${RUN_DIR}/load_client/server_latency.json"
 echo "slo_batch_analysis=${SLO_ANALYSIS_FILE}"
 echo "flexlb_file_log=${FLEXLB_LOG_PATH}/flexlb.log"
+echo "master_counters_timeseries=${MASTER_COUNTERS_FILE}"
 echo "jfr=${JFR_FILE}"
 
 SUMMARY_FILE="${RUN_DIR}/load_client/summary.json"

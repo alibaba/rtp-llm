@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -92,15 +94,42 @@ public final class JavaMockEngineCluster {
         }
 
         scheduler.scheduleAtFixedRate(() -> {
-            int prefillPending = services.values().stream()
+            // Symmetric P/D four-state queue metrics. Units: prefill_waiting /
+            // decode_waiting count queued REQUESTS (not yet running);
+            // prefill_running counts running BATCHES (a batch may hold several
+            // requests); decode_running counts running requests. The old
+            // prefill_pending (pendingRequests = waiting + running mixed) was
+            // misleading and is gone.
+            int prefillWaiting = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                    .mapToInt(service -> service.pendingRequests.get()).sum();
-            int maxPrefillPending = services.values().stream()
+                    .mapToInt(service -> service.waitingPrefillRequests.get()).sum();
+            int maxPrefillWaiting = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                    .mapToInt(service -> service.pendingRequests.get()).max().orElse(0);
+                    .mapToInt(service -> service.waitingPrefillRequests.get()).max().orElse(0);
+            int prefillRunning = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                    .mapToInt(service -> service.activePrefillBatches.get()).sum();
+            int decodeWaiting = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .mapToInt(FastRpcService::decodePendingQueueSize).sum();
             int decodeRunning = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
                     .mapToInt(service -> service.activeDecodeRequests.get()).sum();
+            // Decode balance summary: per-engine running min/max (mean is derivable
+            // as decode_running / n_decode) plus the peak single-engine wait queue,
+            // symmetric with max_prefill_waiting.
+            int decodeRunMin = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .mapToInt(service -> service.activeDecodeRequests.get()).min().orElse(0);
+            int decodeRunMax = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .mapToInt(service -> service.activeDecodeRequests.get()).max().orElse(0);
+            int maxDecodeWaiting = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .mapToInt(FastRpcService::decodePendingQueueSize).max().orElse(0);
+            // Decode completion window since the previous sample: count + execution
+            // time p50/p95/max (end minus running-start of completed decode requests).
+            ClusterStats.DecodeWindow decodeWindow = stats.drainDecodeWindow();
             long prefillBatches = stats.prefillBatches.sum();
             double avgBatchSize = prefillBatches == 0
                     ? 0.0 : stats.prefillBatchRequests.sum() / (double) prefillBatches;
@@ -110,19 +139,26 @@ public final class JavaMockEngineCluster {
             long heapUsedMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
             long heapMaxMb = runtime.maxMemory() / (1024 * 1024);
             System.out.printf(
-                    "java_mock_stats enqueue_rpcs=%d enqueued_requests=%d status_rpcs=%d cache_rpcs=%d "
+                    "java_mock_stats ts_epoch_ms=%d enqueue_rpcs=%d enqueued_requests=%d status_rpcs=%d cache_rpcs=%d "
                             + "prefill_batches=%d avg_batch_size=%.2f max_batch_size=%d "
-                            + "avg_batch_ms=%.2f max_batch_ms=%d prefill_pending=%d "
-                            + "max_prefill_pending=%d decode_running=%d heap_used_mb=%d heap_max_mb=%d "
+                            + "avg_batch_ms=%.2f max_batch_ms=%d prefill_waiting=%d prefill_running=%d "
+                            + "max_prefill_waiting=%d decode_waiting=%d decode_running=%d "
+                            + "decode_run_min=%d decode_run_max=%d max_decode_waiting=%d "
+                            + "decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
+                            + "heap_used_mb=%d heap_max_mb=%d "
                             + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d%n",
+                    System.currentTimeMillis(),
                     stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
                     stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
                     prefillBatches, avgBatchSize, stats.maxPrefillBatchSize.get(),
                     avgBatchMs, stats.maxPrefillBatchExecutionMs.get(),
-                    prefillPending, maxPrefillPending, decodeRunning, heapUsedMb, heapMaxMb,
+                    prefillWaiting, prefillRunning, maxPrefillWaiting, decodeWaiting, decodeRunning,
+                    decodeRunMin, decodeRunMax, maxDecodeWaiting,
+                    decodeWindow.count(), decodeWindow.p50Ms(), decodeWindow.p95Ms(), decodeWindow.maxMs(),
+                    heapUsedMb, heapMaxMb,
                     stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum());
         },
-                5, 5, TimeUnit.SECONDS);
+                config.statsIntervalMs, config.statsIntervalMs, TimeUnit.MILLISECONDS);
 
         scheduler.scheduleAtFixedRate(() -> {
             for (FastRpcService service : services.values()) {
@@ -147,10 +183,11 @@ public final class JavaMockEngineCluster {
             shutdown(serversByPort, bossGroup, workerGroup);
         }, "java-mock-engine-shutdown"));
 
-        System.out.printf("Java mock engine ready: prefill=%d decode=%d ports=%d-%d eventLoops=%d performance=%s completionThreads=%d%n",
+        System.out.printf("Java mock engine ready: prefill=%d decode=%d ports=%d-%d eventLoops=%d performance=%s completionThreads=%d statsIntervalMs=%d%n",
                 config.nPrefill, config.nDecode, config.baseGrpcPort,
                 config.baseGrpcPort + config.nPrefill + config.nDecode - 1,
-                config.eventLoopThreads, config.performanceFile, config.completionThreads);
+                config.eventLoopThreads, config.performanceFile, config.completionThreads,
+                config.statsIntervalMs);
         System.out.printf("HTTP control server listening on port %d%n", config.baseGrpcPort - 1);
         new CountDownLatch(1).await();
     }
@@ -1022,6 +1059,12 @@ public final class JavaMockEngineCluster {
                     }
                 }
                 recordCompletion(shape, batchId, executionMs, 0);
+                if (wasRunning) {
+                    // Feed the per-sample decode completion window (java_mock_stats
+                    // decode_done / decode_exec_*). Cancelled-while-queued requests
+                    // (wasRunning=false) never executed, so they are excluded.
+                    stats.recordDecodeDone(executionMs);
+                }
                 boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                 recordLifecycleEnd(requestId, alreadyCancelled);
                 if (!alreadyCancelled) {
@@ -1478,6 +1521,63 @@ public final class JavaMockEngineCluster {
             maxPrefillBatchSize.accumulateAndGet(batchSize, Math::max);
             maxPrefillBatchExecutionMs.accumulateAndGet(executionMs, Math::max);
         }
+
+        // ---- Decode completion window (drained on every java_mock_stats tick) ----
+        // A bounded reservoir keeps p50/p95 approximation cheap under load: exact
+        // count/max are always tracked, samples beyond the cap replace a random
+        // slot (unbiased reservoir sampling). Guarded by decodeWindowLock only —
+        // one short critical section per decode completion and per stats tick.
+        private static final int DECODE_WINDOW_SAMPLE_CAP = 8192;
+        private final Object decodeWindowLock = new Object();
+        private final long[] decodeWindowSamples = new long[DECODE_WINDOW_SAMPLE_CAP];
+        private long decodeWindowCount;
+        private long decodeWindowMaxMs;
+        private int decodeWindowSize;
+
+        void recordDecodeDone(long executionMs) {
+            synchronized (decodeWindowLock) {
+                decodeWindowCount++;
+                decodeWindowMaxMs = Math.max(decodeWindowMaxMs, executionMs);
+                if (decodeWindowSize < DECODE_WINDOW_SAMPLE_CAP) {
+                    decodeWindowSamples[decodeWindowSize++] = executionMs;
+                } else {
+                    long slot = ThreadLocalRandom.current().nextLong(decodeWindowCount);
+                    if (slot < DECODE_WINDOW_SAMPLE_CAP) {
+                        decodeWindowSamples[(int) slot] = executionMs;
+                    }
+                }
+            }
+        }
+
+        DecodeWindow drainDecodeWindow() {
+            long count;
+            long maxMs;
+            long[] samples;
+            synchronized (decodeWindowLock) {
+                count = decodeWindowCount;
+                maxMs = decodeWindowMaxMs;
+                samples = Arrays.copyOf(decodeWindowSamples, decodeWindowSize);
+                decodeWindowCount = 0;
+                decodeWindowMaxMs = 0;
+                decodeWindowSize = 0;
+            }
+            if (samples.length == 0) {
+                return new DecodeWindow(count, 0, 0, maxMs);
+            }
+            Arrays.sort(samples);
+            return new DecodeWindow(count,
+                    samples[percentileIndex(samples.length, 0.50)],
+                    samples[percentileIndex(samples.length, 0.95)],
+                    maxMs);
+        }
+
+        private static int percentileIndex(int size, double quantile) {
+            return Math.max(0, Math.min(size - 1, (int) Math.ceil(quantile * size) - 1));
+        }
+
+        /** Decode completions since the previous stats sample, with execution-time summary. */
+        record DecodeWindow(long count, long p50Ms, long p95Ms, long maxMs) {
+        }
     }
 
     static final class Config {
@@ -1499,6 +1599,7 @@ public final class JavaMockEngineCluster {
         long totalKvTokens = DEFAULT_TOTAL_KV_TOKENS;
         int blockSize = 0;
         int decodeMaxConcurrency = DEFAULT_DECODE_MAX_CONCURRENCY;
+        int statsIntervalMs = 5000;
 
         static Config parse(String[] args) {
             Config config = new Config();
@@ -1526,6 +1627,7 @@ public final class JavaMockEngineCluster {
                     case "--total-kv-tokens" -> config.totalKvTokens = Long.parseLong(value);
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
+                    case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
                 }
             }
@@ -1546,6 +1648,9 @@ public final class JavaMockEngineCluster {
             }
             if (config.decodeMaxConcurrency < 1) {
                 throw new IllegalArgumentException("--decode-max-concurrency must be >= 1");
+            }
+            if (config.statsIntervalMs < 1) {
+                throw new IllegalArgumentException("--stats-interval-ms must be >= 1");
             }
             return config;
         }
