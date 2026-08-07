@@ -10,7 +10,12 @@ from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
+from rtp_llm.ops import (
+    SpeculativeExecutionConfig,
+    SpeculativeType,
+    VitSeparation,
+    get_block_cache_keys,
+)
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
@@ -261,9 +266,7 @@ class BackendRPCServerVisitor:
             )
 
     def check_sp_supported(self, input: GenerateInput):
-        if not self.sp_config or not self.sp_config.model_type:
-            return
-        if input.generate_config.force_disable_sp_run:
+        if not self._speculative_decoding_enabled():
             return
 
         # speculative decoding does not support batched input
@@ -288,20 +291,36 @@ class BackendRPCServerVisitor:
                 "speculative decoding does not support return_all_probs",
             )
 
+    def _speculative_decoding_enabled(self) -> bool:
+        return (
+            self.sp_config is not None
+            and self.sp_config.type != SpeculativeType.NONE
+        )
+
+    def _speculative_reserved_tokens(self) -> int:
+        if not self._speculative_decoding_enabled():
+            return 0
+        assert self.sp_config is not None
+        return self.sp_config.gen_num_per_cycle
+
     def _validate_input(self, input: GenerateInput) -> None:
         if input.prompt_length <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
                 f"model tokens can not be empty, request length is {input.prompt_length}",
             )
+        speculative_reserved_tokens = self._speculative_reserved_tokens()
+        effective_max_seq_len = self.max_seq_len - speculative_reserved_tokens
         max_new_tokens = min(
-            self.max_seq_len - input.prompt_length,
+            effective_max_seq_len - input.prompt_length,
             input.generate_config.max_new_tokens,
         )
         if max_new_tokens <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
                 f"model max tokens is {self.max_seq_len}, "
+                f"speculative reserved tokens is {speculative_reserved_tokens}, "
+                f"effective max tokens is {effective_max_seq_len}, "
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 

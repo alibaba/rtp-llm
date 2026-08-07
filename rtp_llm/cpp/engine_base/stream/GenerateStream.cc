@@ -715,8 +715,26 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         const_cast<torch::Tensor&>(new_tokens).zero_();
     }
 
-    auto num_new_tokens = update_info.num_new_tokens;
-    int  cur_cached_len = seqLength() - 1;
+    RTP_LLM_CHECK(new_tokens.dim() == 2);
+    RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
+    RTP_LLM_CHECK(update_info.num_new_tokens > 0);
+    RTP_LLM_CHECK(update_info.num_new_tokens <= new_tokens.size(1));
+
+    const int     previous_seq_len     = seqLength();
+    const int64_t effective_max_tokens = static_cast<int64_t>(maxTokenNum());
+    const int64_t remaining_token_num  = effective_max_tokens - previous_seq_len;
+    if (remaining_token_num <= 0) {
+        reportEventWithoutLock(
+            StreamEvents::Error,
+            ErrorCode::LONG_PROMPT_ERROR,
+            "stream [" + std::to_string(streamId()) + "] cannot accept speculative tokens at sequence length ["
+                + std::to_string(previous_seq_len) + "], effective max tokens is ["
+                + std::to_string(effective_max_tokens) + "]");
+        return;
+    }
+    const int num_new_tokens =
+        static_cast<int>(std::min<int64_t>(update_info.num_new_tokens, remaining_token_num));
+    const int cur_cached_len = previous_seq_len - 1;
 
     int error_token_id = 0;
     if (!complete_token_ids_->update(new_tokens,

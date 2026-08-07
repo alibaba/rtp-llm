@@ -228,6 +228,34 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testSpecUpdateAtEffectiveMaxLengthReportsLongPromptError) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+
+    model_config.max_seq_len                 = 8;
+    model_config.vocab_size                  = 10;
+    model_config.num_layers                  = 1;
+    model_config.special_tokens.eos_token_id = 9;
+
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 4, 5, 6}, 1);
+    stream->getSPOutputBuffer()->propose_step = 2;
+    const auto tokens_before = stream->getCompleteTokenIds()->completeTokenIdsVec(0);
+
+    ASSERT_EQ(stream->maxTokenNum(), 6);
+    ASSERT_EQ(stream->seqLength(), 6);
+    ASSERT_NO_THROW(stream->specUpdate({torch::tensor({{7}}, torch::kInt32),
+                                        1,
+                                        /*draft_token=*/8,
+                                        torch::Tensor(),
+                                        torch::Tensor()}));
+
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::Error));
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::LONG_PROMPT_ERROR);
+    EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), tokens_before);
+    EXPECT_EQ(toVec<int>(stream->getSPOutputBuffer()->tokens), vector<int>({-1, -1}));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
