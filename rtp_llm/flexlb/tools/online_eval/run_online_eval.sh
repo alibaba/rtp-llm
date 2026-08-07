@@ -64,6 +64,10 @@ GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED:-1000}"
 GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
 SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
 LOOP="${LOOP:-0}"
+# Send mode is a pure pass-through (single env-var layer): empty SEND_MODE
+# means JavaLoadClient's built-in default (replay), identical to before.
+SEND_MODE="${SEND_MODE:-}"
+SEND_MODE_QPS="${SEND_MODE_QPS:-}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
 LOAD_CLIENT_START_DELAY_SECONDS="${LOAD_CLIENT_START_DELAY_SECONDS:-10}"
@@ -630,6 +634,7 @@ print(int(time.time() * 1000 + float(sys.argv[1]) * 1000))
 PY
 )"
 echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
+echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
 
 # Capture the master arrival/completion counter time series for the whole load
 # window (stopped right after all clients finish; also killed by cleanup).
@@ -665,6 +670,8 @@ launch_load_client() {
     "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
     "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
     "LOOP=${LOOP}" \
+    "SEND_MODE=${SEND_MODE}" \
+    "SEND_MODE_QPS=${SEND_MODE_QPS}" \
     "N_CHANNELS=${FLEXLB_N_CHANNELS}" \
     "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
     "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
@@ -781,8 +788,17 @@ validity_checks = {
     "master_completion_matches_success": server.get("completion_count", 0) == success_count,
     "client_pacing_p99_within_limit": pacing["p99"] <= pacing_limit_ms,
 }
+# Uniform send-mode fields are propagated from the shard summaries so the
+# aggregated report shows the arrival process (fields absent in replay mode).
+send_mode_fields = {}
+if shards and shards[0].get("send_mode") == "uniform":
+    send_mode_fields = {
+        key: shards[0].get(key)
+        for key in ("send_mode", "target_qps", "per_shard_qps", "uniform_interval_ms")
+    }
 summary = {
     "load_client_workers": worker_count,
+    **send_mode_fields,
     "sent_task_count": sent_task_count,
     "actual_rpc_start_count": actual_rpc_start_count,
     "recorded_result_count": recorded_result_count,
