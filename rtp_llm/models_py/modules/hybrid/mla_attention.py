@@ -124,15 +124,23 @@ class MlaAttention(nn.Module):
             cp_params=fmha_impl.cp_params,
         )
 
+    def _project_qkv_a_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Project the shared MLA input and optionally return an output gate."""
+
+        return self.fused_qkv_a_proj(hidden_states), None
+
     def _apply_output_gate(
-        self, attn_output: torch.Tensor, hidden_states: torch.Tensor
+        self,
+        attn_output: torch.Tensor,
+        output_gate: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Hook applied to the attention context after reshape and before o_proj.
 
         Identity by default (standard MLA has no output gate). Subclasses that
         need a per-element output gate (e.g. Kimi-K3's sigmoid gate) override
-        this. It runs before o_proj + TP all_reduce, so any gate weight sharded
-        along the head/output-feature axis stays element-wise correct per rank.
+        this. The projected gate must follow the local attention-head layout.
         """
         return attn_output
 
@@ -164,11 +172,11 @@ class MlaAttention(nn.Module):
         fmha_impl: MlaImplBase,
         kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
-        input_shape = hidden_states.shape[:-1]
+        output_gate = None
         q_c = None
         if self.q_lora_rank > 0:
             with self._profile_stage("q_kv_down_projection", hidden_states):
-                fused_qkv = self.fused_qkv_a_proj(hidden_states)
+                fused_qkv, output_gate = self._project_qkv_a_input(hidden_states)
             kv_offset = self.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -198,6 +206,7 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
+        input_shape = q.shape[:-1]
         q_view = q.reshape(-1, self.num_heads, self.q_head_dim)
 
         compressed_kv, k_pe = torch.split(
@@ -225,10 +234,10 @@ class MlaAttention(nn.Module):
         else:
             attn_output = torch.zeros(
                 (*input_shape, self.num_heads * self.v_head_dim),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
+                dtype=q.dtype,
+                device=q.device,
             )
         with self._profile_stage("sigmoid_output_gate", attn_output):
-            attn_output = self._apply_output_gate(attn_output, hidden_states)
+            attn_output = self._apply_output_gate(attn_output, output_gate)
         with self._profile_stage("o_projection_then_token_reduce_scatter", attn_output):
             return self._project_output(attn_output)

@@ -1,12 +1,11 @@
 """RTP-LLM serving model for the text-only Kimi K3 decoder.
 
 The hybrid decoder interleaves KDA (linear-attention) and MLA (full-attention)
-layers.  MLA runs through the shared framework path -- ``KimiK3MLA`` is a thin
-``MlaAttention`` subclass over ``MlaFlashInfer*Impl`` (same as deepseek's
-generic MLA), adding only K3's NoPE (neutralised by an identity rope cache) and
-sigmoid output gate.  KDA runs K3's own path (Triton kernel with a pure-Torch
-reference), with two forms: packed prefill dispatches to the chunk scan while
-token decode dispatches to the recurrent update.  KDA canonical states are
+layers. MLA reuses the framework cache and attention kernels while K3 owns its
+NoPE convention, sigmoid output gate, packed input projection and
+Sequence-Parallel projection boundary. KDA runs K3's own path (Triton kernel
+with a pure-Torch reference): packed prefill dispatches to the chunk scan and
+token decode dispatches to the recurrent update. KDA canonical states are
 mapped onto RTP's paged linear-cache ABI; MLA uses RTP's compressed latent
 cache layout, so the same layer caches can flow through PD transfer.
 
@@ -263,6 +262,12 @@ def _accuracy_trace_enabled() -> bool:
     return not _perf_mode_enabled() and accuracy_trace_mode() is not None
 
 
+def _accuracy_trace_requested() -> bool:
+    """Return the process-wide trace selector shared by every TP rank."""
+
+    return bool(os.environ.get("KIMI_K3_ACCURACY_TRACE_DIR"))
+
+
 def _host_metadata_enabled() -> bool:
     """Use gather-time pinned host metadata instead of synchronous D2H reads."""
 
@@ -502,35 +507,6 @@ def _sequence_parallel_row_weight(
     local_height = full_weight.shape[0] // tp_size
     begin = tp_rank * local_height
     return full_weight[begin : begin + local_height]
-
-
-class _KimiK3SplitQKVAProjection(nn.Module):
-    """Preserve K3's two independent MLA down-projection rounding points."""
-
-    def __init__(self, q_a_weight: torch.Tensor, kv_a_weight: torch.Tensor) -> None:
-        super().__init__()
-        self.q_a_weight = q_a_weight
-        self.kv_a_weight = kv_a_weight
-        self.fused_weight = (
-            torch.cat((q_a_weight, kv_a_weight), dim=-1).contiguous()
-            if _perf_fusions_enabled()
-            else None
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.fused_weight is not None:
-            return _linear(hidden_states, self.fused_weight)
-        # The original K3 model owns two nn.Linear modules.  Concatenating
-        # their weights and issuing one wider GEMM can select a different
-        # cuBLAS kernel and changes BF16 results enough to cross a later MoE
-        # top-k boundary.
-        return torch.cat(
-            (
-                _linear(hidden_states, self.q_a_weight),
-                _linear(hidden_states, self.kv_a_weight),
-            ),
-            dim=-1,
-        )
 
 
 class _KimiK3MLALatentRMSNorm(nn.Module):
@@ -3061,18 +3037,13 @@ class KimiK3KDA(nn.Module):
 
 
 class KimiK3MLA(MlaAttention):
-    """No-RoPE MLA over RTP's packed-token layout.
+    """K3 NoPE MLA over RTP's packed-token and compressed-cache layouts.
 
-    By default this runs the *framework* MLA path -- it is a thin subclass of
-    :class:`MlaAttention` (same fused down-projection, ``MlaFlashInfer*Impl``
-    kernel, paged latent cache) as deepseek's generic MLA, adding only the two
-    things K3 needs: NoPE (neutralised via K3's identity ``rope_cos_sin_cache``)
-    and a sigmoid output gate applied through the ``_apply_output_gate`` hook.
-
-    The original hand-written einsum path is retained verbatim as
-    :meth:`_reference_forward` and selected by ``KIMI_K3_MLA_BACKEND=reference``
-    (default ``kernel``), mirroring KDA's ``KIMI_K3_KDA_BACKEND`` switch, so the
-    two implementations can be diffed for precision.
+    The production path reuses the framework MLA kernels and executes one
+    packed Q-A/KV-A/output-gate projection. Accuracy and reference paths keep
+    the source model's independent projection boundaries. The pure-Torch
+    attention implementation remains selectable with
+    ``KIMI_K3_MLA_BACKEND=reference``.
     """
 
     def __init__(
@@ -3096,6 +3067,7 @@ class KimiK3MLA(MlaAttention):
         self._perf_profile_prefix = self.trace_prefix if _perf_mode_enabled() else None
         self._perf_accepts_strided_latent = _perf_fusions_enabled()
         tp_size = int(parallelism_config.get_attn_tp_size())
+        self.attn_tp_size = tp_size
         total_heads = int(config.attn_config.head_num)
         if total_heads % tp_size:
             raise ValueError(
@@ -3130,55 +3102,81 @@ class KimiK3MLA(MlaAttention):
                 f"got {self._mla_backend!r}"
             )
 
-        # Per-projection views the reference einsum path consumes, reconstructed
-        # from the shared ``W.mla_*`` layout so ``_reference_forward`` stays byte
-        # identical to the pre-migration path.  ``mla_fusedqkrope_w`` is
-        # ``concat([q_a_proj, kv_a_proj], dim=0).T`` (see ``concat_0_tranpose``),
-        # so the leading ``q_lora_rank`` columns are the old ``MLA_Q_A`` and the
-        # trailing columns the old ``MLA_KV_A``.  The full-rank sigmoid gate keeps
-        # its private ``K3W.MLA_OUTPUT_GATE`` key.  (The kernel backend does not
-        # use these views -- it goes through the linears built by
-        # ``MlaAttention.__init__``.)
-        fused_qkv_a = weights[W.mla_fusedqkrope_w]
-        self._q_a_w = fused_qkv_a[:, : self.q_lora_rank].contiguous()
-        self._kv_a_w = fused_qkv_a[:, self.q_lora_rank :].contiguous()
         self._q_a_norm = weights[W.mla_q_a_ln_gamma]
         self._q_b_w = weights[W.mla_q_b_w]
         self._kv_a_norm = weights[W.mla_kv_a_ln_gamma]
         self._kv_b_w = weights[W.mla_kv_b_w]
         self._o_w = weights[W.attn_o_w]
-        # Generic MLA uses RTP's fused CUDA RMSNorm here.  Its reduction order
-        # differs by a few BF16 ULPs from KimiRMSNorm, which is enough to move
-        # a token across K3's later MoE top-k boundary.  These are only the two
-        # small MLA latent norms; decoder-wide norms keep the framework kernel.
+        self._packed_qkv_gate_w = weights[W.mla_fusedqkrope_w]
+        # These are only the two small MLA latent norms; decoder-wide norms keep
+        # the framework kernel.
         self.q_a_layernorm = _KimiK3MLALatentRMSNorm(self._q_a_norm)
         self.kv_a_layernorm = _KimiK3MLALatentRMSNorm(self._kv_a_norm)
-        # Generic MLA fuses q_a_proj and kv_a_proj.  K3's source model does
-        # not, and the wider fused BF16 GEMM is numerically observably
-        # different on SM10x.  Keep the framework cache/FMHA path, but restore
-        # the source model's two GEMM boundaries.
-        self.fused_qkv_a_proj = _KimiK3SplitQKVAProjection(self._q_a_w, self._kv_a_w)
         self._sp_active_for_forward = False
         self._sp_padded_for_forward = False
 
+    def _use_source_projection_boundaries(self) -> bool:
+        return (
+            self._mla_backend == "reference"
+            or not _perf_fusions_enabled()
+            or _accuracy_canonical_tp_enabled()
+            or _accuracy_canonical_mla_enabled()
+            or _accuracy_local_eager_mla_enabled()
+            or _accuracy_trace_requested()
+        )
+
+    def _project_source_qkv_a_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        q_end = self.q_lora_rank
+        kv_end = q_end + self.kv_lora_rank + self.suffix_dim
+        q_a = _linear(hidden_states, self._packed_qkv_gate_w[:, :q_end])
+        kv_a = _linear(hidden_states, self._packed_qkv_gate_w[:, q_end:kv_end])
+        output_gate = None
+        if self.use_output_gate:
+            output_gate = _column_parallel_linear(
+                hidden_states,
+                self._packed_qkv_gate_w[:, kv_end:],
+                self.attn_tp_size,
+                self.attn_tp_rank,
+                self._accuracy_full_weight_cache,
+                "mla_output_gate",
+            )
+        return torch.cat((q_a, kv_a), dim=-1), output_gate
+
+    def _project_qkv_a_input(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if self._use_source_projection_boundaries():
+            return self._project_source_qkv_a_input(hidden_states)
+        packed = self.fused_qkv_a_proj(hidden_states)
+        return torch.split(
+            packed,
+            [
+                self.q_lora_rank + self.kv_lora_rank + self.suffix_dim,
+                self.local_heads * self.value_dim,
+            ],
+            dim=-1,
+        )
+
     def _apply_output_gate(
-        self, attn_output: torch.Tensor, hidden_states: torch.Tensor
+        self,
+        attn_output: torch.Tensor,
+        output_gate: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """K3 sigmoid output gate, applied on the framework (kernel) path.
 
         ``attn_output`` is the framework context flattened to
         ``[tokens, local_heads * v_head_dim]`` (head-major), matching the flat
-        layout of the full-rank gate projection, so the gate multiplies element
+        layout of the rank-local gate projection, so the gate multiplies element
         wise per (head, value) exactly as the reference path does before o_proj.
-        The gate weight is sharded ``sp_neg1`` and this runs before o_proj's TP
-        all_reduce, so each rank gates only its local heads -- TP correct.
+        This runs before o_proj's TP all_reduce, so each rank gates only its
+        local heads.
         """
         if not self.use_output_gate:
             return attn_output
-        gate = _linear(hidden_states, self.weights[K3W.MLA_OUTPUT_GATE]).reshape_as(
-            attn_output
-        )
-        return attn_output * torch.sigmoid(gate)
+        assert output_gate is not None
+        return attn_output * torch.sigmoid(output_gate.reshape_as(attn_output))
 
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
         if self._sp_active_for_forward:
@@ -3246,11 +3244,13 @@ class KimiK3MLA(MlaAttention):
             if attn_inputs is None:
                 raise ValueError("MLA reference path requires PyAttentionInputs")
             is_prefill = bool(attn_inputs.is_prefill)
+            fused_qkv, output_gate = self._project_qkv_a_input(hidden_states)
             cu_seqlens = self._reference_cu_seqlens(
-                attn_inputs, hidden_states.shape[0], is_prefill, hidden_states.device
+                attn_inputs, fused_qkv.shape[0], is_prefill, fused_qkv.device
             )
             return self._reference_forward(
-                hidden_states,
+                fused_qkv,
+                output_gate,
                 cu_seqlens,
                 is_prefill=is_prefill,
                 kv_cache=kv_cache,
@@ -3267,8 +3267,8 @@ class KimiK3MLA(MlaAttention):
         # score/probability row.  Canonical mode additionally materializes
         # Dummy's eager O(T^2) attention so source and distributed accumulation
         # can be compared without changing the default production path.
-        input_shape = hidden_states.shape[:-1]
-        fused_qkv = self.fused_qkv_a_proj(hidden_states)
+        fused_qkv, output_gate = self._project_qkv_a_input(hidden_states)
+        input_shape = fused_qkv.shape[:-1]
         q, compressed = torch.split(
             fused_qkv,
             [
@@ -3326,8 +3326,8 @@ class KimiK3MLA(MlaAttention):
         else:
             context = torch.zeros(
                 (*input_shape, self.num_heads * self.v_head_dim),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
+                dtype=fused_qkv.dtype,
+                device=fused_qkv.device,
             )
         # Accuracy requests contain one packed sequence.  Recompute only its
         # final score row: O(T) storage instead of the O(T^2) full matrix.
@@ -3340,11 +3340,11 @@ class KimiK3MLA(MlaAttention):
             raise ValueError("MLA kernel trace requires PyAttentionInputs")
         cu_seqlens = self._reference_cu_seqlens(
             attn_inputs,
-            hidden_states.shape[0],
+            fused_qkv.shape[0],
             bool(attn_inputs.is_prefill),
-            hidden_states.device,
+            fused_qkv.device,
         )
-        ranges = _sequence_offsets(cu_seqlens, hidden_states.shape[0])
+        ranges = _sequence_offsets(cu_seqlens, fused_qkv.shape[0])
         if len(ranges) != 1:
             raise RuntimeError(
                 "K3 MLA accuracy trace currently requires one packed sequence"
@@ -3393,7 +3393,7 @@ class KimiK3MLA(MlaAttention):
             context_by_head, scores, probabilities = self._canonical_eager_context(
                 query, key, value
             )
-            context = context_by_head.reshape(hidden_states.shape[0], -1).contiguous()
+            context = context_by_head.reshape(fused_qkv.shape[0], -1).contiguous()
         elif local_eager_mla:
             context_by_head, scores, probabilities = _source_eager_attention_context(
                 query.transpose(0, 1).contiguous(),
@@ -3401,10 +3401,10 @@ class KimiK3MLA(MlaAttention):
                 value.transpose(0, 1).contiguous(),
                 self.softmax_scale,
             )
-            context = context_by_head.reshape(hidden_states.shape[0], -1).contiguous()
+            context = context_by_head.reshape(fused_qkv.shape[0], -1).contiguous()
         else:
             context_by_head = context.reshape(
-                hidden_states.shape[0], self.num_heads, self.v_head_dim
+                fused_qkv.shape[0], self.num_heads, self.v_head_dim
             )
             scores = torch.einsum("thd,shd->hts", query[-1:], key) * self.softmax_scale
             probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(
@@ -3421,23 +3421,12 @@ class KimiK3MLA(MlaAttention):
         )
 
         if self.use_output_gate:
-            gate_weight = self.weights[K3W.MLA_OUTPUT_GATE]
-            output_gate = (
-                _column_parallel_linear(
-                    hidden_states,
-                    gate_weight,
-                    self.parallelism_config.get_attn_tp_size(),
-                    self.attn_tp_rank,
-                    self._accuracy_full_weight_cache,
-                    "mla_output_gate",
-                )
-                if canonical_mla or local_eager_mla
-                else _linear(hidden_states, gate_weight)
-            ).reshape_as(context)
+            assert output_gate is not None
+            output_gate = output_gate.reshape_as(context)
             record_accuracy_tensor(
                 f"{self.trace_prefix}.output_gate",
                 output_gate.reshape(
-                    hidden_states.shape[0],
+                    fused_qkv.shape[0],
                     self.num_heads,
                     self.v_head_dim,
                 ),
@@ -3579,14 +3568,16 @@ class KimiK3MLA(MlaAttention):
 
     def _reference_forward(
         self,
-        hidden_states: torch.Tensor,
+        fused_qkv: torch.Tensor,
+        output_gate: Optional[torch.Tensor],
         cu_seqlens: torch.Tensor,
         *,
         is_prefill: bool,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> torch.Tensor:
-        ranges = _sequence_offsets(cu_seqlens, hidden_states.shape[0])
+        token_count = fused_qkv.shape[0]
+        ranges = _sequence_offsets(cu_seqlens, token_count)
         if attention_inputs is None:
             if not is_prefill or kv_cache is not None:
                 raise ValueError("MLA cache/decode requires PyAttentionInputs")
@@ -3608,19 +3599,22 @@ class KimiK3MLA(MlaAttention):
         if (not is_prefill or any(past_lengths)) and kv_cache is None:
             raise RuntimeError("MLA decode/prefix reuse requires a LayerKVCache")
 
-        query_latent = _rms_norm(
-            _linear(hidden_states, self._q_a_w),
-            self._q_a_norm,
-            self.eps,
+        q_a, compressed = torch.split(
+            fused_qkv,
+            [
+                self.q_lora_rank,
+                self.kv_lora_rank + self.suffix_dim,
+            ],
+            dim=-1,
         )
+        query_latent = _rms_norm(q_a.contiguous(), self._q_a_norm, self.eps)
         query = _linear(query_latent, self._q_b_w).reshape(
-            hidden_states.shape[0], self.local_heads, self.q_head_dim
+            token_count, self.local_heads, self.q_head_dim
         )
         record_accuracy_tensor(
             f"{self.trace_prefix}.query_latent", query_latent, token_dim=0
         )
         record_accuracy_tensor(f"{self.trace_prefix}.query", query, token_dim=0)
-        compressed = _linear(hidden_states, self._kv_a_w)
         compressed_kv, key_suffix = torch.split(
             compressed, [self.kv_lora_rank, self.suffix_dim], dim=-1
         )
@@ -3703,7 +3697,7 @@ class KimiK3MLA(MlaAttention):
         ):
             if start == end:
                 outputs.append(
-                    hidden_states.new_empty((0, self.local_heads, self.value_dim))
+                    fused_qkv.new_empty((0, self.local_heads, self.value_dim))
                 )
                 continue
             fake_cache_row = is_fake_stream or (
@@ -3736,11 +3730,11 @@ class KimiK3MLA(MlaAttention):
                 torch.einsum("thd,shd->hts", query[start:end], key) * self.softmax_scale
             )
             query_positions = effective_prefix_length + torch.arange(
-                end - start, device=hidden_states.device
+                end - start, device=fused_qkv.device
             )
             key_positions = torch.arange(
                 effective_prefix_length + end - start,
-                device=hidden_states.device,
+                device=fused_qkv.device,
             )
             causal_mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
             scores = scores.masked_fill(
@@ -3750,7 +3744,7 @@ class KimiK3MLA(MlaAttention):
                 dtype=query.dtype
             )
             context = torch.einsum("hts,shv->thv", probabilities, value).to(
-                dtype=hidden_states.dtype
+                dtype=fused_qkv.dtype
             )
             outputs.append(context)
             if trace_mode is not None:
@@ -3799,15 +3793,14 @@ class KimiK3MLA(MlaAttention):
                 f"{self.trace_prefix}.cache", torch.cat(canonical_cache, dim=0)
             )
         if self.use_output_gate:
-            output_gate = _linear(
-                hidden_states, self.weights[K3W.MLA_OUTPUT_GATE]
-            ).reshape_as(output)
+            assert output_gate is not None
+            output_gate = output_gate.reshape_as(output)
             record_accuracy_tensor(
                 f"{self.trace_prefix}.output_gate", output_gate, token_dim=0
             )
             output = output * torch.sigmoid(output_gate)
         output = _row_parallel_linear(
-            output.reshape(hidden_states.shape[0], -1),
+            output.reshape(token_count, -1),
             self._o_w,
             self.parallelism_config.get_attn_tp_size(),
             reduce_scatter_tokens=self._sp_active_for_forward,

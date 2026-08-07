@@ -34,14 +34,12 @@ from rtp_llm.ops import HybridAttentionType, MlaOpsType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
-    concat_0_tranpose,
     ffn_sp_0,
     ffn_sp_neg1,
     identity,
     mla_pad_t,
     sp_0,
     sp_id,
-    sp_neg1,
     stack_,
     transpose,
     transpose_slice_k,
@@ -67,6 +65,16 @@ def _merge_kda_qkvg_fa_beta(ts: List[torch.Tensor]) -> torch.Tensor:
         raise ValueError(f"K3 KDA fused projection expects six tensors, got {len(ts)}")
     q, k, v, g, f_a, beta = ts
     return torch.cat((q.T, k.T, v.T, g.T, f_a.T, beta.T), dim=1).contiguous()
+
+
+def _merge_mla_input_projections(
+    ts: List[torch.Tensor], *, tp_size: int, tp_rank: int
+) -> torch.Tensor:
+    """Pack replicated Q/KV-A and the rank-local output gate into one GEMM B."""
+
+    q_a, kv_a, output_gate = ts
+    local_output_gate = output_gate.chunk(tp_size, dim=0)[tp_rank]
+    return torch.cat((q_a, kv_a, local_output_gate), dim=0).T.contiguous()
 
 
 def _unpad_kda_alog(ts: List[torch.Tensor], *, num_heads: int) -> torch.Tensor:
@@ -107,12 +115,6 @@ class KimiK3WeightNames:
 
     # KDA linear-attention weights migrated to the shared ``W.linear_attn_*``
     # vocabulary (see ``_kda_weights``); no K3-private keys remain for them.
-
-    # MLA down/up projections, layernorms and o_proj migrated to the shared
-    # ``W.mla_*`` / ``W.attn_o_w`` vocabulary (see ``_mla_weights``); only the
-    # K3-private full-rank sigmoid output gate keeps a bespoke key because the
-    # framework MLA layout has no slot for it.
-    MLA_OUTPUT_GATE = "kimi_k3.mla.output_gate"
 
     DENSE_GATE = "kimi_k3.dense.gate"
     DENSE_UP = "kimi_k3.dense.up"
@@ -489,13 +491,10 @@ class KimiK3Weight(ModelDeployWeightInfo):
           positional signal (NoPE).  The unconditional RoPE in the shared Impl
           is neutralised by an identity ``W.rope_cos_sin_cache`` (see
           ``_create_rope_w``), not by a code fork.
-        * K3 has a per-head sigmoid output gate that the framework layout has no
-          slot for; it is kept as the private ``MLA_OUTPUT_GATE`` key and
-          re-applied by the K3 attention module between the FMHA kernel and
-          ``o_proj``.
+        * K3's Q-A, KV-A and sigmoid-gate projections share the same input, so
+          the loader packs them into one rank-local GEMM weight.
         """
 
-        n = KimiK3WeightNames
         cfg = self._mla_config()
 
         def _mla(name, suffix, process_fun):
@@ -523,7 +522,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
             _mla(W.mla_kv_a_ln_gamma, "self_attn.kv_a_layernorm.weight", identity),
             _mla(W.mla_q_b_w, "self_attn.q_b_proj.weight", transpose),
             _mla(W.mla_q_a_ln_gamma, "self_attn.q_a_layernorm.weight", identity),
-            # Fuse q_a_proj + kv_a_proj_with_mqa into one down-projection GEMM.
+            # Q-A and KV-A are replicated; g_proj contributes this rank's heads.
             MlaAttnAtomicWeight(
                 W.mla_fusedqkrope_w,
                 [
@@ -534,13 +533,16 @@ class KimiK3Weight(ModelDeployWeightInfo):
                         self._layer_ckpt("self_attn.kv_a_proj_with_mqa.weight"),
                         identity,
                     ),
+                    CkptWeightInfo(
+                        self._layer_ckpt("self_attn.g_proj.weight"), identity
+                    ),
                 ],
-                concat_0_tranpose,
+                functools.partial(
+                    _merge_mla_input_projections,
+                    tp_size=self.tp_size,
+                    tp_rank=self.tp_rank,
+                ),
                 config=cfg,
-            ),
-            # K3-private full-rank sigmoid output gate (no framework slot).
-            self._linear(
-                n.MLA_OUTPUT_GATE, "self_attn.g_proj.weight", split_func=sp_neg1
             ),
         ]
 

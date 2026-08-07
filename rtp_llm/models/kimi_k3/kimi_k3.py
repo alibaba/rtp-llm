@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Set
 
+import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
@@ -33,6 +35,21 @@ class KimiK3ModelConfig(ModelConfig):
 
     _python_fields = ModelConfig._python_fields | {"k3_runtime_config"}
     k3_runtime_config: KimiK3RuntimeConfig
+
+    def init_precision_config(
+        self, kv_cache_config: Optional[Any], act_type: Optional[str]
+    ) -> None:
+        super().init_precision_config(kv_cache_config, act_type)
+        if self.compute_dtype != torch.bfloat16:
+            raise ValueError(
+                "Kimi K3 currently supports only BF16 compute, got "
+                f"{self.compute_dtype}"
+            )
+        if self.quant_config is not None:
+            raise ValueError(
+                "Kimi K3 does not support runtime weight quantization; its "
+                "checkpoint-native MXFP4 experts are loaded by the K3 weight path"
+            )
 
 
 class KimiK3(BaseModel):
@@ -222,9 +239,7 @@ class KimiK3(BaseModel):
             raise ValueError(
                 f"invalid Kimi K3 top-k {config.moe_k} for {config.expert_num} experts"
             )
-        config.moe_inter_size = int(
-            cls._required(text_config, "moe_intermediate_size")
-        )
+        config.moe_inter_size = int(cls._required(text_config, "moe_intermediate_size"))
         config.moe_n_group = int(text_config.get("num_expert_group", 1))
         config.moe_topk_group = int(text_config.get("topk_group", 1))
         config.scoring_func = 1  # sigmoid
@@ -320,9 +335,7 @@ class KimiK3(BaseModel):
         cls, text_config: Dict[str, Any], config: KimiK3ModelConfig
     ) -> None:
         linear_config = cls._required(text_config, "linear_attn_config")
-        attn_res_block_size = int(
-            cls._required(text_config, "attn_res_block_size")
-        )
+        attn_res_block_size = int(cls._required(text_config, "attn_res_block_size"))
         if attn_res_block_size <= 0:
             raise ValueError("attn_res_block_size must be > 0")
 
@@ -347,19 +360,13 @@ class KimiK3(BaseModel):
                 None if linear_beta is None else float(linear_beta)
             ),
             attn_res_block_size=attn_res_block_size,
-            latent_moe_use_norm=bool(
-                text_config.get("latent_moe_use_norm", False)
-            ),
+            latent_moe_use_norm=bool(text_config.get("latent_moe_use_norm", False)),
             mla_use_nope=bool(cls._required(text_config, "mla_use_nope")),
-            mla_use_output_gate=bool(
-                cls._required(text_config, "mla_use_output_gate")
-            ),
+            mla_use_output_gate=bool(cls._required(text_config, "mla_use_output_gate")),
             kda_gate_lower_bound=(
                 None if gate_lower_bound is None else float(gate_lower_bound)
             ),
-            kda_use_full_rank_gate=bool(
-                linear_config.get("use_full_rank_gate", False)
-            ),
+            kda_use_full_rank_gate=bool(linear_config.get("use_full_rank_gate", False)),
         )
 
     def support_cuda_graph(self) -> bool:
