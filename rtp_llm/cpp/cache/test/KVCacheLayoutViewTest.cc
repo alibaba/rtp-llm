@@ -59,15 +59,15 @@ private:
     size_t v_elems_;
 };
 
-GroupBase makeGroup(const std::string& tag,
-                    KVCacheSpecType    spec_type,
-                    CacheGroupType     group_type,
-                    size_t             physical_seq_size,
-                    size_t             kernel_seq_size,
-                    size_t             k_elems,
-                    size_t             v_elems,
-                    uint32_t           local_kv_heads = 1) {
-    GroupBase group;
+GroupTopology makeGroup(const std::string& tag,
+                        KVCacheSpecType    spec_type,
+                        CacheGroupType     group_type,
+                        size_t             physical_seq_size,
+                        size_t             kernel_seq_size,
+                        size_t             k_elems,
+                        size_t             v_elems,
+                        uint32_t           local_kv_heads = 1) {
+    GroupTopology group;
     auto spec = std::make_shared<TestKVCacheSpec>(tag, spec_type, physical_seq_size, kernel_seq_size, k_elems, v_elems);
     group.tag = tag;
     group.spec              = std::move(spec);
@@ -77,7 +77,7 @@ GroupBase makeGroup(const std::string& tag,
     return group;
 }
 
-GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>                    groups,
+GroupedCacheLayerLayout makeLayout(std::vector<GroupTopology>                groups,
                                    std::vector<std::string>                  layer_tags,
                                    std::map<std::string, BlockBufferPtrInfo> group_buffers) {
     EXPECT_EQ(groups.size(), group_buffers.size());

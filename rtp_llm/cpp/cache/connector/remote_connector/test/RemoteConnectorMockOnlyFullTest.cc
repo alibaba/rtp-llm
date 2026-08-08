@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolCoordinatorKVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
@@ -116,7 +116,7 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto coordinator_cache_manager = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_);
+            auto coordinator_cache_manager = std::make_shared<HybridPoolCoordinatorKVCacheManager>(cache_config_);
             ASSERT_TRUE(coordinator_cache_manager->init());
             ASSERT_EQ(cache_config_.groupNums(), 1);
             const auto& group_tag  = cache_config_.topology().groups().front().tag;

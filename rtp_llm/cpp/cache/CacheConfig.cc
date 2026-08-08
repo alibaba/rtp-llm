@@ -12,14 +12,14 @@
 
 namespace rtp_llm {
 
-CacheConfig::CacheConfig(uint32_t               main_layer_num,
-                         uint32_t               total_layer_num,
-                         bool                   mla,
-                         bool                   sparse,
-                         bool                   hybrid_attention,
-                         size_t                 block_seq_size,
-                         std::vector<GroupBase> groups,
-                         std::vector<LayerBase> layers):
+CacheConfig::CacheConfig(uint32_t                   main_layer_num,
+                         uint32_t                   total_layer_num,
+                         bool                       mla,
+                         bool                       sparse,
+                         bool                       hybrid_attention,
+                         size_t                     block_seq_size,
+                         std::vector<GroupTopology> groups,
+                         std::vector<LayerTopology> layers):
     configured_sparse_(sparse),
     layer_num(main_layer_num),
     layer_all_num(total_layer_num),
@@ -35,7 +35,7 @@ CacheGroupType groupTypeForSpec(const KVCacheSpec& spec) {
     return spec.type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
 }
 
-std::vector<GroupBase> copyGroups(const CacheTopology& topology) {
+std::vector<GroupTopology> copyGroups(const CacheTopology& topology) {
     const auto groups = topology.groups();
     return {groups.begin(), groups.end()};
 }
@@ -172,7 +172,7 @@ size_t CacheConfig::explicitlySizedPoolReserveBytes() const {
 }
 
 bool CacheConfig::usesTypedCacheRegions() const {
-    return std::any_of(topology().groups().begin(), topology().groups().end(), [](const GroupBase& group) {
+    return std::any_of(topology().groups().begin(), topology().groups().end(), [](const GroupTopology& group) {
         return group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
     });
 }
@@ -182,7 +182,7 @@ bool CacheConfig::usesOpaqueKVCacheStore() const {
 }
 
 bool CacheConfig::usesActiveOpaqueKVCacheStore() const {
-    return std::any_of(topology().groups().begin(), topology().groups().end(), [](const GroupBase& group) {
+    return std::any_of(topology().groups().begin(), topology().groups().end(), [](const GroupTopology& group) {
         return !group.layer_ids.empty()
                && (group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState);
     });
@@ -197,7 +197,7 @@ rtp_llm::DataType CacheConfig::cacheDType() const {
     return topology().groups().front().spec->memoryLayoutDType();
 }
 
-void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
+void CacheConfig::setTopology(std::vector<GroupTopology> new_groups, std::vector<LayerTopology> new_layers) {
     RTP_LLM_CHECK_WITH_INFO(!new_groups.empty(), "CacheConfig::setTopology requires at least one cache group");
     RTP_LLM_CHECK_WITH_INFO(!new_layers.empty(), "CacheConfig::setTopology requires at least one cache layer");
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0,
@@ -383,11 +383,11 @@ std::string CacheConfig::debugString(size_t indent) const {
     OUTPUT_FIELD(linear_step);
     OUTPUT_FIELD_EXPR("group_layer_num", groupLayerNum());
     OUTPUT_FIELD_EXPR("full_group_num",
-                      std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
+                      std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupTopology& group) {
                           return group.policy.group_type == CacheGroupType::FULL;
                       }));
     OUTPUT_FIELD_EXPR("linear_group_num",
-                      std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
+                      std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupTopology& group) {
                           return group.policy.group_type == CacheGroupType::LINEAR;
                       }));
     os << indent1 << "group_block_layout=[";

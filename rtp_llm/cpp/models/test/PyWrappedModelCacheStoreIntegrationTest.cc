@@ -83,12 +83,12 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     config.layer_all_num      = 1;
     config.seq_size_per_block = groups.front().tokens_per_block;
 
-    std::vector<GroupBase>   topology_groups;
-    std::vector<std::string> layer_tags;
+    std::vector<GroupTopology> topology_groups;
+    std::vector<std::string>   layer_tags;
     topology_groups.reserve(groups.size());
     layer_tags.reserve(groups.size());
     for (const auto& spec : groups) {
-        GroupBase group;
+        GroupTopology group;
         group.tag  = spec.tag;
         group.spec = std::make_shared<TestCacheSpec>(
             spec.tag, spec.tokens_per_block, config.seq_size_per_block, spec.stride_bytes);
@@ -100,7 +100,7 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         layer_tags.push_back(spec.tag);
     }
 
-    LayerBase layer;
+    LayerTopology layer;
     layer.layer_id   = kLayerId;
     layer.group_tags = std::move(layer_tags);
     config.setTopology(std::move(topology_groups), {std::move(layer)});

@@ -1,34 +1,30 @@
 #pragma once
 
 #include <memory>
-#include <vector>
-#include <cstdint>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeKVCacheManager.h"
 
 namespace rtp_llm {
 
-class LinearKVCacheGroup: public KVCacheGroup {
+class FullKVCacheManager: public SingleTypeKVCacheManager {
 public:
-    LinearKVCacheGroup(GroupBase                           cache_group,
+    FullKVCacheManager(GroupTopology                       group_topology,
                        BlockPoolPtr                        block_pool,
-                       int                                 linear_step      = 0,
                        SharedBlockCache*                   shared_cache     = nullptr,
                        const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), shared_cache, metrics_reporter),
-        linear_step_(linear_step) {}
+        SingleTypeKVCacheManager(std::move(group_topology), std::move(block_pool), shared_cache, metrics_reporter) {}
 
-    MatchResult matchSingleKey(CacheKeyType cache_key) const override;
-    bool        malloc(BlockIds&            block_ids,
+    bool        malloc(BlockIds&            block_indices,
                        int                  seq_len,
                        bool                 enable_reuse_cache   = false,
                        int                  reserve_step         = 0,
                        std::vector<size_t>* backfilled_positions = nullptr) override;
-
-    void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    MatchResult matchPrefix(const CacheKeysType& cache_keys) const override;
+    void
+    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
     void free(const BlockIndicesType& block_indices) override;
-    void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
-    int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
+    void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
                                 int                     remaining_tokens,
@@ -45,21 +41,9 @@ public:
                                  int  reserve_step,
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
-    bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
+    void           reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
 
 private:
-    void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
-    int  materializedTailBlockCount() const;
-    int  retainedTailBlockCount() const;
-
-private:
-    // NOTE: linear attention cache can be sparsified; current implementation is conservative:
-    // - materialize at least one policy tail block during allocation
-    // - retain at least two tail blocks across decode cleanup
-    // - other blocks can be freed (set to NULL_BLOCK_IDX)
-    int linear_step_ = 0;
 };
-
-using LinearKVCacheGroupPtr = std::shared_ptr<LinearKVCacheGroup>;
 
 }  // namespace rtp_llm

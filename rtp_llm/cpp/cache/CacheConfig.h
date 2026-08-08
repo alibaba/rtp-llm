@@ -30,14 +30,14 @@ private:
     std::optional<uint32_t>              finalized_global_block_num_;
     bool                                 configured_sparse_ = false;
 
-    CacheConfig(uint32_t               main_layer_num,
-                uint32_t               total_layer_num,
-                bool                   mla,
-                bool                   sparse,
-                bool                   hybrid_attention,
-                size_t                 block_seq_size,
-                std::vector<GroupBase> groups,
-                std::vector<LayerBase> layers);
+    CacheConfig(uint32_t                   main_layer_num,
+                uint32_t                   total_layer_num,
+                bool                       mla,
+                bool                       sparse,
+                bool                       hybrid_attention,
+                size_t                     block_seq_size,
+                std::vector<GroupTopology> groups,
+                std::vector<LayerTopology> layers);
 
     void publishSentinelOnlyBlockNum();
 
@@ -138,7 +138,7 @@ public:
         return cache_topology;
     }
 
-    const GroupBase& group(std::string_view tag) const {
+    const GroupTopology& group(std::string_view tag) const {
         return topology().group(tag);
     }
 
@@ -146,7 +146,7 @@ public:
         return topology().groupsForLayer(layer_id);
     }
 
-    const GroupBase& groupForLayer(int layer_id, std::string_view tag) const {
+    const GroupTopology& groupForLayer(int layer_id, std::string_view tag) const {
         return topology().groupForLayer(layer_id, tag);
     }
 
@@ -201,7 +201,7 @@ public:
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
+    void        setTopology(std::vector<GroupTopology> new_groups, std::vector<LayerTopology> new_layers);
     void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
     std::string debugString(size_t indent = 0) const;
 };

@@ -153,7 +153,7 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
 
     auto full_spec = std::make_shared<MHAKVCacheSpec>(8, 8);
     full_spec->tag = "full";
-    GroupBase full_group;
+    GroupTopology full_group;
     full_group.tag               = full_spec->tag;
     full_group.spec              = full_spec;
     full_group.layer_ids         = {0};
@@ -163,7 +163,7 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
 
     auto swa_spec = std::make_shared<MHAKVCacheSpec>(8, 8);
     swa_spec->tag = "swa";
-    GroupBase swa_group;
+    GroupTopology swa_group;
     swa_group.tag             = swa_spec->tag;
     swa_group.spec            = swa_spec;
     swa_group.layer_ids       = {0};
@@ -185,7 +185,7 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionUsesRawKeysWithoutMutatingSourceTime
 
     auto full_spec = std::make_shared<MHAKVCacheSpec>(8, 8);
     full_spec->tag = "full";
-    GroupBase full_group;
+    GroupTopology full_group;
     full_group.tag               = full_spec->tag;
     full_group.spec              = full_spec;
     full_group.layer_ids         = {0};

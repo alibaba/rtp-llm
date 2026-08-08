@@ -6,22 +6,22 @@
 #include <unordered_set>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/LinearKVCacheGroup.h"
-#include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
+#include "rtp_llm/cpp/cache/FullKVCacheManager.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheManager.h"
+#include "rtp_llm/cpp/cache/SWAKVCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 namespace rtp_llm {
 
-class HybridPoolKVCacheAllocator:
-    public KVCacheAllocator,
-    public std::enable_shared_from_this<HybridPoolKVCacheAllocator> {
+class HybridPoolCoordinatorKVCacheManager:
+    public CoordinatorKVCacheManager,
+    public std::enable_shared_from_this<HybridPoolCoordinatorKVCacheManager> {
 public:
-    HybridPoolKVCacheAllocator(const CacheConfig&                 config,
-                               AllocationType                     allocation_type     = AllocationType::DEVICE,
-                               const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                               int64_t                            reserve_block_ratio = 0);
+    HybridPoolCoordinatorKVCacheManager(const CacheConfig&                 config,
+                                        AllocationType                     allocation_type     = AllocationType::DEVICE,
+                                        const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                                        int64_t                            reserve_block_ratio = 0);
 
     void free(const FreeInfo& free_info) override;
     void insertIntoCache(const InsertInfo& insert_info) override;
@@ -95,18 +95,18 @@ private:
     void freeBlocksInGroup(std::string_view tag, const BlockIndicesType& blocks, bool is_connector = false);
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
 
-    bool                   skipReuseCacheGroup(std::string_view tag) const;
-    bool                   cpCompactSwaGroup(std::string_view tag, const std::shared_ptr<CPSlotMapper>& mapper) const;
-    void                   rollbackGroupMalloc(std::string_view           tag,
-                                               BlockIds&                  block_ids,
-                                               size_t                     original_size,
-                                               const std::vector<size_t>& filled_positions);
-    void                   rollbackInitMalloc(BatchKVCacheResource&                                       kv_resource,
-                                              const std::unordered_map<std::string, BlockIndicesType>&    referenced_blocks,
-                                              const std::unordered_map<std::string, size_t>&              original_sizes,
-                                              const std::unordered_map<std::string, std::vector<size_t>>& backfilled_positions);
-    const KVCacheGroupPtr& cacheGroupForTag(std::string_view tag, const char* context) const;
-    const BlockPoolPtr&    blockPoolForTag(std::string_view tag, const char* context) const;
+    bool skipReuseCacheGroup(std::string_view tag) const;
+    bool cpCompactSwaGroup(std::string_view tag, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    void rollbackGroupMalloc(std::string_view           tag,
+                             BlockIds&                  block_ids,
+                             size_t                     original_size,
+                             const std::vector<size_t>& filled_positions);
+    void rollbackInitMalloc(BatchKVCacheResource&                                       kv_resource,
+                            const std::unordered_map<std::string, BlockIndicesType>&    referenced_blocks,
+                            const std::unordered_map<std::string, size_t>&              original_sizes,
+                            const std::unordered_map<std::string, std::vector<size_t>>& backfilled_positions);
+    const SingleTypeKVCacheManagerPtr& singleTypeManagerForTag(std::string_view tag, const char* context) const;
+    const BlockPoolPtr&                blockPoolForTag(std::string_view tag, const char* context) const;
 
     size_t                   globalUsableTokens() const;
     std::vector<std::string> dynamicFullAttentionTags() const;
@@ -115,13 +115,13 @@ private:
     size_t
     reserveBlocksForPool(std::string_view tag, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
 
-    std::unordered_map<std::string, KVCacheGroupPtr> kv_cache_groups_;
-    std::vector<std::string>                         full_group_tags_;
-    std::vector<std::string>                         linear_group_tags_;
-    std::vector<std::string>                         swa_group_tags_;
-    std::unordered_map<std::string, BlockPoolPtr>    group_block_pools_;
+    std::unordered_map<std::string, SingleTypeKVCacheManagerPtr> single_type_managers_;
+    std::vector<std::string>                                     full_group_tags_;
+    std::vector<std::string>                                     linear_group_tags_;
+    std::vector<std::string>                                     swa_group_tags_;
+    std::unordered_map<std::string, BlockPoolPtr>                group_block_pools_;
 };
 
-using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;
+using HybridPoolCoordinatorKVCacheManagerPtr = std::shared_ptr<HybridPoolCoordinatorKVCacheManager>;
 
 }  // namespace rtp_llm

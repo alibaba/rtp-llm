@@ -141,7 +141,7 @@ static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_s
     auto spec = std::make_shared<WriterTestSpec>(/*tokens_per_block=*/1, kv_stride);
     spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag       = tag;
     group.spec      = spec;
     group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);

@@ -712,7 +712,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     auto& mutable_draft_config =
         const_cast<CacheConfig&>(components.executor->cache_manager_->getMTPModuleCacheConfig(0));
-    auto& mutable_draft_group = const_cast<GroupBase&>(mutable_draft_config.group("full"));
+    auto& mutable_draft_group = const_cast<GroupTopology&>(mutable_draft_config.group("full"));
     mutable_draft_group.kv_block_stride_bytes += 64;
 
     size_t batch_size = 1;

@@ -49,8 +49,8 @@ static void initFullCacheConfig(CacheConfig& cache_config,
 }
 
 static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, const std::vector<std::string>& tags) {
-    std::vector<GroupBase> groups;
-    std::vector<int>       layer_ids(static_cast<size_t>(layer_num));
+    std::vector<GroupTopology> groups;
+    std::vector<int>           layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     for (const auto& tag : tags) {
         auto spec = std::make_shared<MHAKVCacheSpec>();

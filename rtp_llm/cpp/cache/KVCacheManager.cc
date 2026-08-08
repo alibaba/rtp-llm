@@ -14,8 +14,8 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
+#include "rtp_llm/cpp/cache/HybridPoolCoordinatorKVCacheManager.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -37,27 +37,27 @@ struct GlobalCacheMetricsSnapshot {
     size_t                      connector_ref_blocks = 0;
 };
 
-GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
+GlobalCacheMetricsSnapshot collectGlobalCacheMetrics(const CoordinatorKVCacheManagerPtr& coordinator_cache_manager) {
     GlobalCacheMetricsSnapshot snapshot;
-    auto                       shared_cache = allocator->sharedBlockCache();
+    auto                       shared_cache = coordinator_cache_manager->sharedBlockCache();
 
-    snapshot.total_blocks         = allocator->totalBlocksNum();
-    snapshot.available_blocks     = allocator->availableBlocksNum();
-    snapshot.request_ref_blocks   = allocator->requestRefBlocksNum();
-    snapshot.connector_ref_blocks = allocator->connectorRefBlocksNum();
+    snapshot.total_blocks         = coordinator_cache_manager->totalBlocksNum();
+    snapshot.available_blocks     = coordinator_cache_manager->availableBlocksNum();
+    snapshot.request_ref_blocks   = coordinator_cache_manager->requestRefBlocksNum();
+    snapshot.connector_ref_blocks = coordinator_cache_manager->connectorRefBlocksNum();
 
     auto& collector                         = snapshot.collector;
     collector.kv_cache_item_num             = shared_cache ? static_cast<int64_t>(shared_cache->size()) : 0;
-    collector.kv_cache_left_seq             = static_cast<int64_t>(allocator->availableTokensNum());
+    collector.kv_cache_left_seq             = static_cast<int64_t>(coordinator_cache_manager->availableTokensNum());
     collector.kv_cache_available_blocks     = static_cast<int64_t>(snapshot.available_blocks);
     collector.kv_cache_request_ref_blocks   = static_cast<int64_t>(snapshot.request_ref_blocks);
     collector.kv_cache_connector_ref_blocks = static_cast<int64_t>(snapshot.connector_ref_blocks);
-    collector.kv_cache_free_blocks          = static_cast<int64_t>(allocator->freeBlocksNum());
+    collector.kv_cache_free_blocks          = static_cast<int64_t>(coordinator_cache_manager->freeBlocksNum());
     collector.kv_cache_used_ratio           = (snapshot.total_blocks == 0) ?
                                                   0.0f :
                                                   static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.available_blocks)
                                                            / static_cast<double>(snapshot.total_blocks));
-    collector.mr_cost_time_ms               = allocator->getMrCostTimeMs();
+    collector.mr_cost_time_ms               = coordinator_cache_manager->getMrCostTimeMs();
 
     return snapshot;
 }
@@ -104,9 +104,9 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
 
 std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
                                                      const std::vector<size_t>& global_layer_ids) {
-    std::vector<GroupBase> groups;
+    std::vector<GroupTopology> groups;
     groups.reserve(source.groups().size());
-    std::unordered_map<std::string, GroupBase*> groups_by_tag;
+    std::unordered_map<std::string, GroupTopology*> groups_by_tag;
     for (const auto& source_group : source.groups()) {
         groups.push_back(source_group);
         groups_by_tag.emplace(groups.back().tag, &groups.back());
@@ -115,11 +115,11 @@ std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       
         group.layer_ids.clear();
     }
 
-    std::vector<LayerBase> layers;
+    std::vector<LayerTopology> layers;
     layers.reserve(global_layer_ids.size());
     for (size_t local_layer_id = 0; local_layer_id < global_layer_ids.size(); ++local_layer_id) {
-        const auto& source_layer = source.layer(static_cast<int>(global_layer_ids[local_layer_id]));
-        LayerBase   layer;
+        const auto&   source_layer = source.layer(static_cast<int>(global_layer_ids[local_layer_id]));
+        LayerTopology layer;
         layer.layer_id   = static_cast<int>(local_layer_id);
         layer.group_tags = source_layer.group_tags;
         for (const auto& tag : layer.group_tags) {
@@ -226,14 +226,14 @@ KVCacheManager::~KVCacheManager() {
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
-    allocator_.reset();
+    coordinator_cache_manager_.reset();
     coordinator_.reset();
 }
 
 // 初始化和配置相关
 
 bool KVCacheManager::init() {
-    RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
+    RTP_LLM_CHECK_WITH_INFO(!coordinator_cache_manager_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
 #ifdef USE_REMOTE_KV_CACHE
@@ -248,18 +248,19 @@ bool KVCacheManager::init() {
                                                    && kv_cache_config_.enable_prefix_tree_memory_cache
                                                    && kv_cache_config_.enable_independent_group_eviction;
 
-    allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(
+    coordinator_cache_manager_ = std::make_shared<rtp_llm::HybridPoolCoordinatorKVCacheManager>(
         config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
 
     if (use_cuda_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
-        allocator_->setUseCudaMallocBlockPool(true);
+        coordinator_cache_manager_->setUseCudaMallocBlockPool(true);
     }
 
-    allocator_->setCPSlotMapper(cp_slot_mapper_);
-    allocator_->setSharedBlockCache(shared_cache);
-    RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
-    shared_cache->setIndependentGroupEviction(enable_independent_group_eviction, allocator_->independentEvictionTags());
+    coordinator_cache_manager_->setCPSlotMapper(cp_slot_mapper_);
+    coordinator_cache_manager_->setSharedBlockCache(shared_cache);
+    RTP_LLM_CHECK_WITH_INFO(coordinator_cache_manager_->init(), "CoordinatorKVCacheManager init failed");
+    shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
+                                              coordinator_cache_manager_->independentEvictionTags());
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -299,7 +300,7 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     }
     reportPrefillCacheHitMetrics(malloc_info, is_first_malloc);
 
-    return allocator_->malloc(malloc_info);
+    return coordinator_cache_manager_->malloc(malloc_info);
 }
 
 void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc) {
@@ -317,20 +318,21 @@ void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info,
 void KVCacheManager::free(const FreeInfo& free_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(free_info.batch_kv_cache_resource && free_info.complete_token_ids);
-    allocator_->free(free_info);
+    coordinator_cache_manager_->free(free_info);
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
     RTP_LLM_PROFILE_FUNCTION();
     dropLastPartialBlock(insert_info.batch_kv_cache_resource);
-    allocator_->insertIntoCache(insert_info);
+    coordinator_cache_manager_->insertIntoCache(insert_info);
 }
 
 int KVCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                           int                            seq_len,
                                           int                            reserve_step) const {
-    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "singleBatchNeedBlocks called before KVCacheManager initialized");
-    return allocator_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
+    RTP_LLM_CHECK_WITH_INFO(coordinator_cache_manager_ != nullptr,
+                            "singleBatchNeedBlocks called before KVCacheManager initialized");
+    return coordinator_cache_manager_->singleBatchNeedBlocks(batch_kv_cache_resource, seq_len, reserve_step);
 }
 
 int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -340,19 +342,19 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
                                            int                            reserve_step,
                                            bool                           enable_reuse_cache,
                                            int                            target_batch_size) const {
-    return allocator_->estimateBatchPeakNeedBlocks(batch_kv_cache_resource,
-                                                   seq_len,
-                                                   common_seq_len,
-                                                   remaining_tokens,
-                                                   reserve_step,
-                                                   enable_reuse_cache,
-                                                   target_batch_size);
+    return coordinator_cache_manager_->estimateBatchPeakNeedBlocks(batch_kv_cache_resource,
+                                                                   seq_len,
+                                                                   common_seq_len,
+                                                                   remaining_tokens,
+                                                                   reserve_step,
+                                                                   enable_reuse_cache,
+                                                                   target_batch_size);
 }
 
 // 块操作相关
 
 void KVCacheManager::blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping) {
-    return allocator_->blockBatchCopy(copy_mapping);
+    return coordinator_cache_manager_->blockBatchCopy(copy_mapping);
 }
 
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -360,31 +362,32 @@ bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache
                                    bool                           copy_last_block,
                                    std::vector<GroupBlockIdPair>& block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
-    return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+    return coordinator_cache_manager_->updateKVBlock(
+        batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }
 
 // 地址转换和缓冲区访问
 
 BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, const std::string& tag) const {
-    return allocator_->convertIndexToAddr(layer_id, tag, block_index);
+    return coordinator_cache_manager_->convertIndexToAddr(layer_id, tag, block_index);
 }
 
 std::vector<BlockInfo>
 KVCacheManager::convertIndexToBuffer(int layer_id, const std::string& tag, int block_index) const {
-    return allocator_->convertIndexToBuffer(layer_id, tag, block_index);
+    return coordinator_cache_manager_->convertIndexToBuffer(layer_id, tag, block_index);
 }
 
 std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
     int layer_id, const std::string& tag, int block_index, int partition_count, int partition_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, tag, block_index, partition_count, partition_id);
+    return coordinator_cache_manager_->convertIndexToBuffer(layer_id, tag, block_index, partition_count, partition_id);
 }
 
 GroupedCacheLayerLayout KVCacheManager::allLayerCacheBase() const {
-    return allocator_->allLayerCacheBase();
+    return coordinator_cache_manager_->allLayerCacheBase();
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() const {
-    const auto          all_layout = allocator_->allLayerCacheBase();
+    const auto          all_layout = coordinator_cache_manager_->allLayerCacheBase();
     std::vector<size_t> global_layer_ids(config_.layer_num);
     std::iota(global_layer_ids.begin(), global_layer_ids.end(), 0);
     auto main_topology = projectTopology(all_layout.topology(), global_layer_ids);
@@ -413,41 +416,42 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
                                 local_layer_id);
         global_layer_ids.push_back(global_layer_id);
     }
-    return projectLayout(allocator_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
+    return projectLayout(
+        coordinator_cache_manager_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
 }
 
 // 资源统计和信息查询
 
 size_t KVCacheManager::freeBlocksNum() const {
-    return allocator_->freeBlocksNum();
+    return coordinator_cache_manager_->freeBlocksNum();
 }
 
 size_t KVCacheManager::availableBlocksNum() const {
-    return allocator_->availableBlocksNum();
+    return coordinator_cache_manager_->availableBlocksNum();
 }
 
 size_t KVCacheManager::reserveBlocksNum() const {
-    return allocator_->reserveBlocksNum();
+    return coordinator_cache_manager_->reserveBlocksNum();
 }
 
 size_t KVCacheManager::notInUseBlocksNum() const {
-    return allocator_->notInUseBlocksNum();
+    return coordinator_cache_manager_->notInUseBlocksNum();
 }
 
 BatchKVCacheResourcePtr KVCacheManager::popBlocksFromCache(size_t min_blocks_to_free) {
-    return allocator_->popBlocksFromCache(min_blocks_to_free);
+    return coordinator_cache_manager_->popBlocksFromCache(min_blocks_to_free);
 }
 
 void KVCacheManager::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
-    allocator_->blockCacheFree(batch_kv_cache_resource);
+    coordinator_cache_manager_->blockCacheFree(batch_kv_cache_resource);
 }
 
 size_t KVCacheManager::totalBlocksNum() const {
-    return allocator_->totalBlocksNum();
+    return coordinator_cache_manager_->totalBlocksNum();
 }
 
 size_t KVCacheManager::maxSequenceLength() const {
-    return allocator_->maxSequenceLength();
+    return coordinator_cache_manager_->maxSequenceLength();
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
@@ -465,7 +469,7 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
 }
 
 void KVCacheManager::refreshKVCacheInfoSnapshot() {
-    if (!allocator_ || !cacheStatusSnapshotEnabled()) {
+    if (!coordinator_cache_manager_ || !cacheStatusSnapshotEnabled()) {
         return;
     }
     auto snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true));
@@ -477,7 +481,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
     KVCacheInfo info;
     info.version = latest_version;
 
-    if (!allocator_) {
+    if (!coordinator_cache_manager_) {
         RTP_LLM_LOG_ERROR("getKVCacheInfo called before KVCacheManager initialized");
         return info;
     }
@@ -486,7 +490,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
         std::unordered_set<CacheKeyType> all_keys;
         // device cache keys
         std::vector<CacheKeyType> device_cache_keys;
-        auto                      shared_cache = allocator_->sharedBlockCache();
+        auto                      shared_cache = coordinator_cache_manager_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
             all_keys.insert(device_cache_keys.begin(), device_cache_keys.end());
@@ -506,8 +510,8 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
                                          config_.seq_size_per_block;
 
     info.block_size         = block_size_tokens;
-    info.total_kv_cache     = allocator_->totalTokensNum();
-    info.available_kv_cache = allocator_->availableTokensNum();
+    info.total_kv_cache     = coordinator_cache_manager_->totalTokensNum();
+    info.available_kv_cache = coordinator_cache_manager_->availableTokensNum();
 
     return info;
 }
@@ -515,7 +519,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
 // 系统资源管理
 
 void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
-    allocator_->regUserMr(model_id, std::move(cache_store));
+    coordinator_cache_manager_->regUserMr(model_id, std::move(cache_store));
 }
 
 void KVCacheManager::setCacheStore(std::shared_ptr<CacheStore> cache_store) {
@@ -535,7 +539,7 @@ bool KVCacheManager::hasActiveConnectors() const {
 // PD separation: increment KV cache reference count
 std::shared_ptr<KVCacheResource>
 KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector) {
-    return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
+    return coordinator_cache_manager_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
 bool KVCacheManager::hasP2PConnector() const {
@@ -576,7 +580,7 @@ void KVCacheManager::initConnectorCoordinator() {
                                                                  runtime_config_,
                                                                  parallelism_config_,
                                                                  sp_config_,
-                                                                 allocator_,
+                                                                 coordinator_cache_manager_,
                                                                  metrics_reporter_,
                                                                  pd_sep_config_,
                                                                  cache_store_config_);
@@ -589,12 +593,12 @@ void KVCacheManager::reportMetricsLoop() {
     constexpr auto        kLogInterval  = std::chrono::minutes(1);
     auto                  last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {
-        if (!metrics_reporter_ || !allocator_) {
+        if (!metrics_reporter_ || !coordinator_cache_manager_) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             continue;
         }
 
-        auto global_metrics = collectGlobalCacheMetrics(allocator_);
+        auto global_metrics = collectGlobalCacheMetrics(coordinator_cache_manager_);
         metrics_reporter_->report<RtpLLMCacheMetrics, RtpLLMCacheMetricsCollector>(&tags, &global_metrics.collector);
 
         const auto now        = std::chrono::steady_clock::now();
@@ -604,7 +608,7 @@ void KVCacheManager::reportMetricsLoop() {
             logGlobalCacheMetrics(global_metrics);
         }
 
-        for (const auto& pool_snapshot : allocator_->poolMetricsSnapshots()) {
+        for (const auto& pool_snapshot : coordinator_cache_manager_->poolMetricsSnapshots()) {
             reportPoolCacheMetrics(metrics_reporter_, pool_snapshot, should_log);
         }
 
@@ -640,7 +644,7 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
         return false;
     }
 
-    auto dst = allocator_->convertIndexToBuffer(layer_id, tag, block_index);
+    auto dst = coordinator_cache_manager_->convertIndexToBuffer(layer_id, tag, block_index);
     RTP_LLM_CHECK_WITH_INFO(
         !dst.empty(), "convertIndexToBuffer returned empty for layer %d, block %d", layer_id, block_index);
     if (!dst[0].addr) {

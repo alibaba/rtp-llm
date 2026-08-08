@@ -57,6 +57,7 @@ struct CacheBlockTableCapacity {
             context_text.c_str(),
             physical_tokens_per_block,
             kernel_tokens_per_block);
+
         const int64_t sequence_blocks = max_seq_len / physical_tokens_per_block
                                         + static_cast<int64_t>(max_seq_len % physical_tokens_per_block != 0);
         RTP_LLM_CHECK_WITH_INFO(sequence_blocks <= std::numeric_limits<int64_t>::max() - sp_steps,

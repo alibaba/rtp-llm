@@ -7,7 +7,7 @@
 
 namespace rtp_llm {
 
-size_t storedKernelBlocksPerKvBlock(const GroupBase& group) {
+size_t storedKernelBlocksPerKvBlock(const GroupTopology& group) {
     RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache group tag=%s has null spec", group.tag.c_str());
     if (group.policy.group_type != CacheGroupType::FULL) {
         return 1;
@@ -24,12 +24,12 @@ size_t storedKernelBlocksPerKvBlock(const GroupBase& group) {
     return physical_seq_size / kernel_seq_size;
 }
 
-std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupBase> groups,
-                                                           std::vector<LayerBase> layers) {
+std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupTopology> groups,
+                                                           std::vector<LayerTopology> layers) {
     return std::shared_ptr<const CacheTopology>(new CacheTopology(std::move(groups), std::move(layers)));
 }
 
-CacheTopology::CacheTopology(std::vector<GroupBase> groups, std::vector<LayerBase> layers):
+CacheTopology::CacheTopology(std::vector<GroupTopology> groups, std::vector<LayerTopology> layers):
     groups_(std::move(groups)), layers_(std::move(layers)) {
     validateAndBuildIndex();
 }
@@ -108,7 +108,7 @@ void CacheTopology::validateAndBuildIndex() {
     }
 }
 
-const GroupBase& CacheTopology::group(std::string_view tag) const {
+const GroupTopology& CacheTopology::group(std::string_view tag) const {
     const std::string value(tag);
     const auto        it = tag_to_group_idx_.find(value);
     RTP_LLM_CHECK_WITH_INFO(it != tag_to_group_idx_.end(), "CacheTopology missing tag=%s", value.c_str());
@@ -119,7 +119,7 @@ bool CacheTopology::containsTag(std::string_view tag) const {
     return tag_to_group_idx_.find(std::string(tag)) != tag_to_group_idx_.end();
 }
 
-const LayerBase& CacheTopology::layer(int layer_id) const {
+const LayerTopology& CacheTopology::layer(int layer_id) const {
     RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers_.size(),
                             "CacheTopology invalid layer_id=%d size=%zu",
                             layer_id,
@@ -137,7 +137,7 @@ CacheTopology::GroupRefs CacheTopology::groupsForLayer(int layer_id) const {
     return result;
 }
 
-const GroupBase& CacheTopology::groupForLayer(int layer_id, std::string_view tag) const {
+const GroupTopology& CacheTopology::groupForLayer(int layer_id, std::string_view tag) const {
     const auto&       layer_config = layer(layer_id);
     const std::string value(tag);
     const auto        it = std::find(layer_config.group_tags.begin(), layer_config.group_tags.end(), value);

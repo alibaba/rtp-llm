@@ -215,9 +215,9 @@ cc_test(
 )
 
 cc_test(
-    name = "full_kv_cache_group_test",
+    name = "full_kv_cache_manager_test",
     srcs = [
-        "FullKVCacheGroupTest.cc",
+        "FullKVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -229,9 +229,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_single_group_test",
+    name = "hybrid_pool_coordinator_kv_cache_manager_single_group_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorSingleGroupTest.cc",
+        "HybridPoolCoordinatorKVCacheManagerSingleGroupTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -251,7 +251,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+        "//rtp_llm/cpp/cache/test/mock:mock_coordinator_kv_cache_manager_lib",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory:memory_connector",
     ],
@@ -276,9 +276,9 @@ cc_test(
 )
 
 cc_test(
-    name = "linear_kv_cache_group_test",
+    name = "linear_kv_cache_manager_test",
     srcs = [
-        "LinearKVCacheGroupTest.cc",
+        "LinearKVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -290,9 +290,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_behavior_test",
+    name = "hybrid_pool_coordinator_kv_cache_manager_behavior_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorBehaviorTest.cc",
+        "HybridPoolCoordinatorKVCacheManagerBehaviorTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -304,9 +304,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_cp_shard_test",
+    name = "hybrid_pool_coordinator_kv_cache_manager_cp_shard_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorCPShardTest.cc",
+        "HybridPoolCoordinatorKVCacheManagerCPShardTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -318,9 +318,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_pool_kv_cache_allocator_test",
+    name = "hybrid_pool_coordinator_kv_cache_manager_test",
     srcs = [
-        "HybridPoolKVCacheAllocatorTest.cc",
+        "HybridPoolCoordinatorKVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
@@ -332,9 +332,9 @@ cc_test(
 )
 
 cc_test(
-    name = "swa_kv_cache_group_test",
+    name = "swa_kv_cache_manager_test",
     srcs = [
-        "SWAKVCacheGroupTest.cc",
+        "SWAKVCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,

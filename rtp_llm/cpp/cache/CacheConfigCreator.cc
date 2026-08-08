@@ -122,7 +122,7 @@ buildLayerSpecs(const ModelConfig& model_config, const ParallelismConfig& parall
     return layer_specs;
 }
 
-std::pair<std::vector<GroupBase>, std::vector<LayerBase>>
+std::pair<std::vector<GroupTopology>, std::vector<LayerTopology>>
 buildTopology(const ModelConfig& model_config, const ParallelismConfig& parallelism_config, int gen_num_per_cycle) {
     validateModelBlockGranularity(model_config);
     const auto layer_specs = buildLayerSpecs(model_config, parallelism_config, gen_num_per_cycle);
@@ -169,15 +169,15 @@ buildTopology(const ModelConfig& model_config, const ParallelismConfig& parallel
         }
     }
 
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers(layer_specs.size());
+    std::vector<GroupTopology> groups;
+    std::vector<LayerTopology> layers(layer_specs.size());
     for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
         layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
     groups.reserve(ordered_tags.size());
     for (const auto& tag : ordered_tags) {
-        const auto& state = group_by_tag.at(tag);
-        GroupBase   group;
+        const auto&   state = group_by_tag.at(tag);
+        GroupTopology group;
         group.tag                   = tag;
         group.spec                  = state.spec;
         group.policy                = state.policy;
@@ -200,10 +200,10 @@ buildTopology(const ModelConfig& model_config, const ParallelismConfig& parallel
         }
     }
     RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "cache config produced no cache specs");
-    const bool has_linear_group         = std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
+    const bool has_linear_group         = std::any_of(groups.begin(), groups.end(), [](const GroupTopology& group) {
         return group.policy.group_type == CacheGroupType::LINEAR;
     });
-    const bool has_full_attention_group = std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
+    const bool has_full_attention_group = std::any_of(groups.begin(), groups.end(), [](const GroupTopology& group) {
         return group.policy.group_type == CacheGroupType::FULL && group.spec
                && (group.spec->type == KVCacheSpecType::MultiHeadAttention
                    || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention);
@@ -213,9 +213,9 @@ buildTopology(const ModelConfig& model_config, const ParallelismConfig& parallel
     return {std::move(groups), std::move(layers)};
 }
 
-const GroupBase* findGroup(const std::vector<GroupBase>& groups, const std::string& tag) {
+const GroupTopology* findGroup(const std::vector<GroupTopology>& groups, const std::string& tag) {
     const auto it =
-        std::find_if(groups.begin(), groups.end(), [&tag](const GroupBase& group) { return group.tag == tag; });
+        std::find_if(groups.begin(), groups.end(), [&tag](const GroupTopology& group) { return group.tag == tag; });
     return it == groups.end() ? nullptr : &*it;
 }
 
@@ -235,7 +235,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
     return stream.str();
 }
 
-std::string groupSummary(const std::vector<GroupBase>& groups) {
+std::string groupSummary(const std::vector<GroupTopology>& groups) {
     std::ostringstream stream;
     stream << '[';
     for (size_t gid = 0; gid < groups.size(); ++gid) {
@@ -262,8 +262,8 @@ std::string groupSummary(const std::vector<GroupBase>& groups) {
     return stream.str();
 }
 
-std::optional<std::string> resolveDefaultMtpGroupAlias(const std::vector<GroupBase>& target_groups,
-                                                       const std::vector<GroupBase>& propose_groups) {
+std::optional<std::string> resolveDefaultMtpGroupAlias(const std::vector<GroupTopology>& target_groups,
+                                                       const std::vector<GroupTopology>& propose_groups) {
     if (propose_groups.size() != 1 || propose_groups.front().tag != "default") {
         return std::nullopt;
     }
@@ -318,7 +318,7 @@ std::optional<std::string> resolveDefaultMtpGroupAlias(const std::vector<GroupBa
     return candidates.front();
 }
 
-std::string groupTags(const std::vector<GroupBase>& groups) {
+std::string groupTags(const std::vector<GroupTopology>& groups) {
     std::ostringstream stream;
     for (size_t i = 0; i < groups.size(); ++i) {
         if (i != 0) {
@@ -329,12 +329,13 @@ std::string groupTags(const std::vector<GroupBase>& groups) {
     return stream.str();
 }
 
-std::pair<std::vector<GroupBase>, std::vector<LayerBase>> mergeMtpModule(std::vector<GroupBase>&       target_groups,
-                                                                         std::vector<LayerBase>&       target_layers,
-                                                                         const std::vector<GroupBase>& propose_groups,
-                                                                         uint32_t                      mtp_layer_num,
-                                                                         int                           module_index,
-                                                                         uint32_t                      main_layer_num) {
+std::pair<std::vector<GroupTopology>, std::vector<LayerTopology>>
+mergeMtpModule(std::vector<GroupTopology>&       target_groups,
+               std::vector<LayerTopology>&       target_layers,
+               const std::vector<GroupTopology>& propose_groups,
+               uint32_t                          mtp_layer_num,
+               int                               module_index,
+               uint32_t                          main_layer_num) {
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "invalid MTP module_index=%d", module_index);
     const size_t total_layers =
         static_cast<size_t>(main_layer_num) + static_cast<size_t>(module_index + 1) * mtp_layer_num;
@@ -352,21 +353,21 @@ std::pair<std::vector<GroupBase>, std::vector<LayerBase>> mergeMtpModule(std::ve
                                 groupTags(target_groups).c_str());
     }
 
-    std::vector<GroupBase> sub_groups;
-    std::vector<LayerBase> sub_layers(mtp_layer_num);
+    std::vector<GroupTopology> sub_groups;
+    std::vector<LayerTopology> sub_layers(mtp_layer_num);
     sub_groups.reserve(target_groups.size());
     for (size_t layer_id = 0; layer_id < sub_layers.size(); ++layer_id) {
         sub_layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
 
     for (auto& target_group : target_groups) {
-        const GroupBase* source_group = findGroup(propose_groups, target_group.tag);
-        const bool       uses_default_alias =
+        const GroupTopology* source_group = findGroup(propose_groups, target_group.tag);
+        const bool           uses_default_alias =
             source_group == nullptr && default_alias_target.has_value() && target_group.tag == *default_alias_target;
         if (uses_default_alias) {
             source_group = &propose_groups.front();
         }
-        GroupBase sub_group = source_group == nullptr ? target_group : *source_group;
+        GroupTopology sub_group = source_group == nullptr ? target_group : *source_group;
         sub_group.layer_ids.clear();
         if (source_group != nullptr) {
             RTP_LLM_CHECK_WITH_INFO(target_group.spec->layoutFingerprint() == source_group->spec->layoutFingerprint()

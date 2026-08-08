@@ -14,12 +14,12 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolCoordinatorKVCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorKVCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/test/mock/MockKVCacheConnectorCoordinator.h"
@@ -151,9 +151,9 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
 }
 
 static void setGroupBlockNumsForTest(CacheConfig& config, const std::unordered_map<std::string, uint32_t>& block_nums) {
-    const auto             topology_groups = config.topology().groups();
-    std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
-    uint32_t               global_block_num = 0;
+    const auto                 topology_groups = config.topology().groups();
+    std::vector<GroupTopology> groups(topology_groups.begin(), topology_groups.end());
+    uint32_t                   global_block_num = 0;
     for (auto& group : groups) {
         const auto it = block_nums.find(group.tag);
         ASSERT_NE(it, block_nums.end());
@@ -336,8 +336,8 @@ TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearGroup) {
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
     ASSERT_TRUE(cache_manager->init());
-    ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_NE(cache_manager->allocator_->getBlockPool("linear"), nullptr);
+    ASSERT_NE(cache_manager->coordinator_cache_manager_, nullptr);
+    EXPECT_NE(cache_manager->coordinator_cache_manager_->getBlockPool("linear"), nullptr);
     EXPECT_NE(cache_manager->convertIndexToAddr(1, 0, "linear").kv_addr, nullptr);
 }
 
@@ -366,7 +366,7 @@ TEST_F(KVCacheManagerTest, MultiGroupRemoteFailsBeforeAllocatorInitialization) {
                                                           RuntimeConfig{});
 
     EXPECT_THROW(cache_manager->init(), std::runtime_error);
-    EXPECT_EQ(cache_manager->allocator_, nullptr);
+    EXPECT_EQ(cache_manager->coordinator_cache_manager_, nullptr);
     EXPECT_EQ(cache_manager->coordinator_, nullptr);
 }
 
@@ -384,7 +384,7 @@ TEST_F(KVCacheManagerTest, SingleNonFullRemoteFailsBeforeAllocatorInitialization
                                                           RuntimeConfig{});
 
     EXPECT_THROW(cache_manager->init(), std::runtime_error);
-    EXPECT_EQ(cache_manager->allocator_, nullptr);
+    EXPECT_EQ(cache_manager->coordinator_cache_manager_, nullptr);
     EXPECT_EQ(cache_manager->coordinator_, nullptr);
 }
 #endif
@@ -406,7 +406,8 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
                                                               pd_sep_config);
         ASSERT_TRUE(cache_manager->init());
 
-        auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
+        auto allocator =
+            std::dynamic_pointer_cast<HybridPoolCoordinatorKVCacheManager>(cache_manager->coordinator_cache_manager_);
         ASSERT_NE(allocator, nullptr);
         ASSERT_EQ(allocator->groupBlockPools().size(), static_cast<size_t>(config.groupNums()));
 
@@ -989,7 +990,7 @@ TEST_F(KVCacheManagerTest, AsyncLoadCache_ReturnFromCoordinator_Success) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          allocator = std::make_shared<MockCoordinatorKVCacheManager>(cache_config);
     auto          mock_coordinator =
         std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
@@ -1009,7 +1010,7 @@ TEST_F(KVCacheManagerTest, AsyncStoreCache_ReturnFromCoordinator_Success) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          allocator = std::make_shared<MockCoordinatorKVCacheManager>(cache_config);
     auto          mock_coordinator =
         std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
@@ -1029,7 +1030,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnFalse_CoordinatorReturnFalse) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          allocator = std::make_shared<MockCoordinatorKVCacheManager>(cache_config);
     auto          mock_coordinator =
         std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
@@ -1049,7 +1050,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunction_ReturnTrue_Success) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
-    auto          allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
+    auto          allocator = std::make_shared<MockCoordinatorKVCacheManager>(cache_config);
     auto          mock_coordinator =
         std::make_shared<MockKVCacheConnectorCoordinator>(cache_config, kv_cache_config, runtime_config, allocator);
 
@@ -1073,11 +1074,11 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
-    ASSERT_NE(kv_cache_manager->allocator_, nullptr);
+    ASSERT_NE(kv_cache_manager->coordinator_cache_manager_, nullptr);
     ASSERT_NE(kv_cache_manager->coordinator_, nullptr);
 
     // Seed device block cache with keys: 10, 11, 12 (put makes MRU at front => snapshot order: 12,11,10)
-    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
+    auto shared_cache = kv_cache_manager->coordinator_cache_manager_->sharedBlockCache();
     ASSERT_NE(shared_cache, nullptr);
     {
         shared_cache->put(10, {{"default", 1}}, false);
@@ -1088,7 +1089,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:
     // put 11 then 13 => MRU order: 13,11 (11 duplicates device key)
     auto mem_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config, kv_cache_config, kv_cache_manager->allocator_, std::vector<std::string>{});
+        cache_config, kv_cache_config, kv_cache_manager->coordinator_cache_manager_, std::vector<std::string>{});
     mem_connector->block_cache_ = std::make_shared<MemoryDiskBlockCache>();
     {
         MemoryBlockCache::CacheItem item;
@@ -1126,7 +1127,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto shared_cache = kv_cache_manager->allocator_->sharedBlockCache();
+    auto shared_cache = kv_cache_manager->coordinator_cache_manager_->sharedBlockCache();
     ASSERT_NE(shared_cache, nullptr);
 
     shared_cache->put(10, {{"default", 1}}, false);
@@ -1175,7 +1176,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoUsesFinalizedGlobalTokenCapacity) {
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator =
+        std::dynamic_pointer_cast<HybridPoolCoordinatorKVCacheManager>(kv_cache_manager->coordinator_cache_manager_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     size_t      expected_available_tokens = std::numeric_limits<size_t>::max();
@@ -1222,7 +1224,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoKeepsGlobalCapacityUnderCP) {
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
-    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator =
+        std::dynamic_pointer_cast<HybridPoolCoordinatorKVCacheManager>(kv_cache_manager->coordinator_cache_manager_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     auto cp_slot_mapper               = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
@@ -1246,7 +1249,8 @@ TEST_F(KVCacheManagerTest, MaxSequenceLengthKeepsGlobalCapacityUnderCP) {
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
+    auto hybrid_allocator =
+        std::dynamic_pointer_cast<HybridPoolCoordinatorKVCacheManager>(kv_cache_manager->coordinator_cache_manager_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
     const size_t physical_capacity = hybrid_allocator->totalTokensNum();
@@ -1279,10 +1283,10 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
 
     // The "device-only" kv cache would be totalBlocksNum() * seq_size_per_block.
     // With memory cache enabled, total_kv_cache/available_kv_cache should be >= device-only.
-    const size_t device_only_total =
-        kv_cache_manager->allocator_->totalBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
-    const size_t device_only_available =
-        kv_cache_manager->allocator_->availableBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
+    const size_t device_only_total = kv_cache_manager->coordinator_cache_manager_->totalBlocksNum()
+                                     * kv_cache_manager->cacheConfig().seq_size_per_block;
+    const size_t device_only_available = kv_cache_manager->coordinator_cache_manager_->availableBlocksNum()
+                                         * kv_cache_manager->cacheConfig().seq_size_per_block;
 
     EXPECT_GE(info.total_kv_cache, device_only_total);
     EXPECT_GE(info.available_kv_cache, device_only_available);
