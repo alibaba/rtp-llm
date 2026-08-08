@@ -208,6 +208,36 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             )
         )
 
+    def test_rank_local_hidden_states_pass_through_standard_split(self):
+        """MTP/DSpARK draft commit may re-enter CP with local feature rows."""
+        total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
+        input_lengths = torch.tensor([6], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        rank_local_hidden = torch.tensor(
+            [[20.0, 20.5], [21.0, 21.5], [22.0, 22.5], [23.0, 23.5]],
+            dtype=torch.float32,
+        )
+
+        tokens, lengths, hidden, shuffle = cp_test.handle_inputs_with_hidden(
+            total_tokens,
+            input_lengths,
+            sequence_lengths,
+            rank_local_hidden,
+            0,
+            2,
+        )
+
+        self.assertTrue(
+            torch.equal(tokens, torch.tensor([10, 11, 0, 0], dtype=torch.int32))
+        )
+        self.assertTrue(torch.equal(lengths, torch.tensor([4], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(shuffle, torch.tensor([0, 1, 6, 7], dtype=torch.int32))
+        )
+        # The features already follow this rank's target-prefill layout. The
+        # ordinary CP input processor must not apply the shuffle a second time.
+        self.assertTrue(torch.equal(hidden, rank_local_hidden))
+
 
 class TestGenerateQKVRestoreIndices(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:

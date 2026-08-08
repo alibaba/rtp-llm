@@ -76,6 +76,15 @@ public:
                                                        bool                   is_dspark = false);
 
 protected:
+    struct DraftPrefillGraphPolicy {
+        bool create_propose_graph = false;
+        bool create_commit_graph  = false;
+    };
+
+    static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
+    static DraftPrefillGraphPolicy
+    draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, RoleType role_type);
+
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;

@@ -33,6 +33,31 @@ namespace rtp_llm {
 using namespace std;
 namespace spec = speculative;
 
+TEST(MtpExecutorPolicyTest, DSparkSeparatesPrefillCPFromDecodeGraphs) {
+    PrefillCPConfig prefill_cp_config;
+    prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    EXPECT_TRUE(MtpExecutor::dsparkPrefillCPRoleIsValid(prefill_cp_config, RoleType::PREFILL));
+    const auto prefill_graphs =
+        MtpExecutor::draftPrefillGraphPolicy(/*enable_cuda_graph=*/true, /*is_dspark=*/true, RoleType::PREFILL);
+    EXPECT_FALSE(prefill_graphs.create_propose_graph);
+    EXPECT_FALSE(prefill_graphs.create_commit_graph);
+
+    PrefillCPConfig decode_cp_config;
+    decode_cp_config.method = CPRotateMethod::PREFILL_CP;
+    EXPECT_FALSE(decode_cp_config.is_enabled());
+    EXPECT_TRUE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
+    const auto decode_graphs =
+        MtpExecutor::draftPrefillGraphPolicy(/*enable_cuda_graph=*/true, /*is_dspark=*/true, RoleType::DECODE);
+    EXPECT_TRUE(decode_graphs.create_propose_graph);
+    EXPECT_TRUE(decode_graphs.create_commit_graph);
+
+    // A split-enabled decode/colocated engine would conflate the two roles:
+    // its proposal block would be fed through the prefill CP splitter.
+    decode_cp_config.method = CPRotateMethod::ALL_GATHER;
+    EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
+    EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::PDFUSION));
+}
+
 struct MtpExecutorTestConfig {
     size_t max_seq_len         = 2048;
     size_t vocab_size          = 4;

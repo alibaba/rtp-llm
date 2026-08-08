@@ -37,6 +37,26 @@
 
 namespace rtp_llm {
 
+bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
+    return !prefill_cp_config.is_enabled() || role_type == RoleType::PREFILL;
+}
+
+MtpExecutor::DraftPrefillGraphPolicy
+MtpExecutor::draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, RoleType role_type) {
+    if (!enable_cuda_graph) {
+        return {};
+    }
+    if (!is_dspark) {
+        return {/*create_propose_graph=*/false, /*create_commit_graph=*/true};
+    }
+    // A DSpARK PREFILL worker only seeds the draft KV through the ordinary
+    // CP-capable model. Decode workers own both fixed-width prefill graphs.
+    if (role_type == RoleType::PREFILL) {
+        return {};
+    }
+    return {/*create_propose_graph=*/true, /*create_commit_graph=*/true};
+}
+
 namespace {
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
@@ -520,8 +540,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         // and a decode role with an enabled split method is a misconfiguration
         // (decode roles describe imported CP layout via PREFILL_CP, which is
         // not an enabled split).
-        RTP_LLM_CHECK_WITH_INFO(!(params.parallelism_config.prefill_cp_config.is_enabled()
-                                  && role_type_ != RoleType::PREFILL),
+        RTP_LLM_CHECK_WITH_INFO(dsparkPrefillCPRoleIsValid(params.parallelism_config.prefill_cp_config, role_type_),
                                 "dspark with an enabled prefill-CP split requires the PREFILL role");
     }
 
@@ -683,10 +702,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // path and never runs decode proposal/tail-commit. Capturing both
             // fixed-width graphs there only consumes graph-pool memory and can
             // turn CP-RR startup into an avoidable OOM.
-            const bool needs_draft_prefill_graphs = !is_dspark_ || role_type_ != RoleType::PREFILL;
-            if (enable_cuda_graph && needs_draft_prefill_graphs) {
+            const auto graph_policy = draftPrefillGraphPolicy(enable_cuda_graph, is_dspark_, role_type_);
+            if (graph_policy.create_commit_graph) {
                 RTP_LLM_LOG_INFO("[speculative decoding] creating prefill draft CUDA graph model(s)");
-                if (is_dspark_) {
+                if (graph_policy.create_propose_graph) {
                     sp_prefill_draft_propose_model_.reset(new PyWrappedModel(model_params,
                                                                              params.py_sp_model,
                                                                              true,
