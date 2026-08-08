@@ -35,8 +35,14 @@ public final class PriorityNormalizer {
     /**
      * Returns true iff the value denotes an explicit priority (i.e. is not
      * the {@link #NO_PRIORITY} sentinel). Always true for values returned
-     * by {@link #normalize(int, String, int)}; retained for defensive checks
-     * and unit tests.
+     * by {@link #normalize(int, String, int)}.
+     *
+     * <p><b>This is the single home of the "has a priority" concept.</b>
+     * The only place a 0 priority can legitimately appear downstream is on
+     * items admitted by the legacy (non-Auto-TPM) path before the switch was
+     * flipped; such items never participate in any priority mechanism.
+     * Downstream code MUST call this method instead of hand-rolling
+     * {@code priority > 0} / {@code priority == 0} checks.
      */
     public static boolean hasPriority(int normalizedPriority) {
         return normalizedPriority != NO_PRIORITY;

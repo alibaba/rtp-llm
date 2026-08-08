@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.enums.DecodeTaskPhase;
+import org.flexlb.util.PriorityNormalizer;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -96,13 +97,13 @@ public final class EvictionPlanner {
         }
 
         // 9.2: only PREFILL_QUEUED requests of strictly lower priority.
-        // Task40: no-priority items (priority 0, legacy path) are never
-        // selected as victims — filter them out before the < comparison,
-        // which would otherwise always match them.
+        // Task40: no-priority items (legacy path) are never selected as
+        // victims — filter them out before the < comparison, which would
+        // otherwise always match them.
         List<QueuedRequestSnapshot> candidates = new ArrayList<>();
         for (QueuedRequestSnapshot item : queue.items()) {
             if (QueuedRequestSnapshot.PREFILL_QUEUED.equals(item.state())
-                    && item.priority() > 0
+                    && PriorityNormalizer.hasPriority(item.priority())
                     && item.priority() < envelope.priority()) {
                 candidates.add(item);
             }
@@ -452,7 +453,7 @@ public final class EvictionPlanner {
         List<DecodeRequestSnapshot> candidates = new ArrayList<>();
         for (DecodeRequestSnapshot entry : ep.reserved()) {
             if (entry.phase() == DecodeTaskPhase.RESERVED_NOT_ACCEPTED
-                    && entry.priority() > 0
+                    && PriorityNormalizer.hasPriority(entry.priority())
                     && entry.priority() < envelope.priority()
                     && !excludedVictimIds.contains(entry.requestId())
                     && (!releasableKvOnly || entry.kvTokens() > 0)
@@ -463,7 +464,7 @@ public final class EvictionPlanner {
         if (includeAccepted) {
             for (DecodeRequestSnapshot entry : ep.accepted()) {
                 if (entry.phase() == DecodeTaskPhase.ACCEPTED_NOT_RUNNING
-                        && entry.priority() > 0
+                        && PriorityNormalizer.hasPriority(entry.priority())
                         && entry.priority() < envelope.priority()
                         && !excludedVictimIds.contains(entry.requestId())
                         && (!releasableKvOnly || entry.kvTokens() > 0)) {

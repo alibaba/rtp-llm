@@ -9,6 +9,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityNormalizer;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -162,11 +163,11 @@ public class DeadlineRescueService {
                 // Task40: rescue only handles the danger zone with remaining
                 // time left (deadline > now); already-expired requests are
                 // rejected by the scheduler's SLO check instead, and
-                // no-priority items (priority 0, legacy path) never migrate.
+                // no-priority items (legacy path) never migrate.
                 if (snap.deadlineMs() > 0
                         && snap.deadlineMs() > nowMs
                         && snap.deadlineMs() - nowMs <= dangerThresholdMs
-                        && snap.priority() > 0
+                        && PriorityNormalizer.hasPriority(snap.priority())
                         && snap.priority() > lowestPriority
                         && snap.transferCount() < maxTransferCount) {
                     candidates.add(new Candidate(key, manager, snap));

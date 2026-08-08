@@ -58,12 +58,4 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
-
-    /**
-     * Defensive check — always true after normalization (priority is 1-100).
-     * Retained for unit tests and future use.
-     */
-    public boolean hasPriority() {
-        return priority > 0;
-    }
 }

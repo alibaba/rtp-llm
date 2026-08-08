@@ -155,14 +155,6 @@ public class BalanceContext {
     }
 
     /**
-     * Defensive check — always true after normalization. Delegates to
-     * {@link org.flexlb.dao.loadbalance.Request#hasPriority()}.
-     */
-    public boolean hasPriority() {
-        return request.hasPriority();
-    }
-
-    /**
      * Increment retry count
      * @return the new retry count after incrementing
      */

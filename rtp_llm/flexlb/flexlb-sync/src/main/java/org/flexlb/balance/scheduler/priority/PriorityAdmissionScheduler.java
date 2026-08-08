@@ -22,6 +22,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityNormalizer;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -549,7 +550,8 @@ public class PriorityAdmissionScheduler {
             for (DecodeEndpointSnapshot ep : decodes) {
                 for (DecodeRequestSnapshot candidate : ep.reserved()) {
                     candidatesSeen++;
-                    if (candidate.priority() > 0 && candidate.priority() < planEnvelope.priority()) {
+                    if (PriorityNormalizer.hasPriority(candidate.priority())
+                            && candidate.priority() < planEnvelope.priority()) {
                         candidatesEligible++;
                     }
                 }

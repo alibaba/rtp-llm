@@ -94,9 +94,6 @@ public final class BatchItem {
     public int priority() { return priority; }
     public void setPriority(int priority) { this.priority = priority; }
 
-    /** Defensive check — always true after normalization (priority is 1-100). */
-    public boolean hasPriority() { return priority > 0; }
-
     public long deadlineMs() { return deadlineMs; }
     public void setDeadlineMs(long deadlineMs) { this.deadlineMs = deadlineMs; }
 
