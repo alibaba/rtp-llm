@@ -67,8 +67,8 @@ public:
                                           TensorHolder&          host_holder);
 
     // DSpARK runs two standard-slot draft calls per round: a commit call
-    // (incremental-prefill shape, feature rows already loaded into
-    // last_hidden_states from the shared MTP hidden buffer) and a
+    // (incremental-prefill shape, normalized target feature rows handed off
+    // through last_hidden_states) and a
     // fixed-width propose call ([anchor, noise x (gamma - 1)] against the
     // committed feature KV).
     void validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const;

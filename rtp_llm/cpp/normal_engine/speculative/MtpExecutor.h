@@ -82,8 +82,7 @@ protected:
     };
 
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
-    static DraftPrefillGraphPolicy
-    draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, RoleType role_type);
+    static DraftPrefillGraphPolicy draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, RoleType role_type);
 
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
@@ -148,14 +147,12 @@ protected:
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
-    // Spec-decode hand-off: when the source model exposes a pre-output-projection
-    // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
-    // carrier. The source returns the full buffer; consumers slice as needed.
-
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
-                                              ModelBase&      source,
-                                              bool            request_actual_rows = false);
-    void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source);
+    // Normalize the model's optional pre-output-projection MTP buffer into the
+    // forward result. Callers then use the regular all_hidden_states ->
+    // last_hidden_states hand-off.
+    void maybeOverrideAllHiddenStatesWithMtpBuffer(GptModelOutputs& model_output,
+                                                   ModelBase&       source,
+                                                   int64_t          hidden_rows = 0);
 
     // Env-gated stream-async switch. Default off unless
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
@@ -207,9 +204,9 @@ private:
     size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
-    bool                                             is_dspark_ = false;
-    size_t                                           draft_vocab_size_;
-    std::shared_ptr<ModelBase>                       draft_model_;
+    bool                       is_dspark_ = false;
+    size_t                     draft_vocab_size_;
+    std::shared_ptr<ModelBase> draft_model_;
     // DSpARK uses two prefill-shaped graph contracts: gamma query rows for
     // proposal and gamma+1 verified rows for commit. They must not share one
     // capture-width/phase identity.
@@ -223,6 +220,7 @@ private:
 
     bool     warm_up_;
     RoleType role_type_;
+    bool     enable_prefill_cp_;
 
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page

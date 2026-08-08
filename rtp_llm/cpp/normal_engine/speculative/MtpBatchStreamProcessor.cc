@@ -157,9 +157,8 @@ torch::Tensor dsparkNewestToken(const GenerateStreamPtr& stream) {
 // Round-head per-stream state: the anchor (newest committed token) and the
 // committed end (committed length - 1). The propose and verify builders read
 // exactly the same stream state, so both consume this one derivation.
-std::pair<torch::Tensor, torch::Tensor> dsparkRoundHeadState(const StreamGroups&   stream_groups,
-                                                             const GptModelInputs& model_input,
-                                                             TensorHolder&         host_holder) {
+std::pair<torch::Tensor, torch::Tensor>
+dsparkRoundHeadState(const StreamGroups& stream_groups, const GptModelInputs& model_input, TensorHolder& host_holder) {
     const int64_t              batch_size = static_cast<int64_t>(stream_groups.size());
     std::vector<torch::Tensor> anchors;
     std::vector<torch::Tensor> committed_end_parts;
@@ -774,8 +773,8 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) 
 void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const {
     // The commit call keeps the target's own incremental-prefill geometry:
     // combo = prompt suffix tokens, input_lengths = suffix rows,
-    // prefix_lengths = reused prefix, feature rows already loaded into
-    // last_hidden_states by the shared MTP buffer override (rank-local rows
+    // prefix_lengths = reused prefix, feature rows handed off from the target's
+    // normalized all_hidden_states into last_hidden_states (rank-local rows
     // under CP; the draft commit gathers only the projected KV). CacheStore
     // keys derive from these standard fields, which describe exactly the
     // committed prompt — no override channel needed.
