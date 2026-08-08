@@ -129,11 +129,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             // Auto-TPM priority path: delegate plan/commit to the priority
             // scheduler. Disabled by default — the legacy path below is
             // byte-for-byte unchanged when the switch is off.
-            // Task40: requests without an explicit priority always take the
-            // legacy path and never enter any priority mechanism; if no
-            // worker is available they fail fast with NO_AVAILABLE_WORKER.
-            if (configService.loadBalanceConfig().isAutoTpmEnabled() && priorityScheduler != null
-                    && ctx.hasPriority()) {
+            // normalize() always assigns 1-100, so every request participates
+            // when Auto-TPM is enabled; no separate hasPriority gate needed.
+            if (configService.loadBalanceConfig().isAutoTpmEnabled() && priorityScheduler != null) {
                 priorityScheduler.schedule(ctx, future, this);
                 return future;
             }

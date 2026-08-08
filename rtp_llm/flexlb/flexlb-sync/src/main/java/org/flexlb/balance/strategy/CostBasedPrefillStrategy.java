@@ -238,9 +238,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             // Auto-TPM (design doc 6.2 simplified): endpointWaitMs +
             // estimatedWait (8.4, priority-aware) + predictedPrefill −
             // cacheBenefit. Cache benefit data is not available yet — 0.
-            // Task40: no-priority requests (legacy path) keep the legacy
-            // batcherWaitMs estimate — they never join the priority ordering.
-            long batcherWaitMs = config.isAutoTpmEnabled() && balanceContext.hasPriority()
+            // When Auto-TPM is on, all requests carry a normalized priority
+            // (1-100), so the priority-aware estimate always applies.
+            long batcherWaitMs = config.isAutoTpmEnabled()
                     ? ep.batcherEstimatedWaitMs(balanceContext.getPriority(),
                             balanceContext.getDeadlineMs(), balanceContext.getRequestId())
                     : ep.batcherWaitMs();

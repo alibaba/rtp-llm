@@ -21,13 +21,23 @@ public final class PriorityNormalizer {
 
     public static final int DEFAULT_PRIORITY = 50;
 
-    /** Sentinel for "request carried no priority"; such requests bypass Auto-TPM. */
+    /**
+     * Sentinel for "request carried no priority". Never returned by
+     * {@link #normalize(int, String, int)} — which always yields 1-100 —
+     * so every normalized request participates in Auto-TPM. Kept as a
+     * defensive guard and for unit-test assertions.
+     */
     public static final int NO_PRIORITY = 0;
 
     private PriorityNormalizer() {
     }
 
-    /** Returns true iff the normalized value denotes an explicit priority. */
+    /**
+     * Returns true iff the value denotes an explicit priority (i.e. is not
+     * the {@link #NO_PRIORITY} sentinel). Always true for values returned
+     * by {@link #normalize(int, String, int)}; retained for defensive checks
+     * and unit tests.
+     */
     public static boolean hasPriority(int normalizedPriority) {
         return normalizedPriority != NO_PRIORITY;
     }

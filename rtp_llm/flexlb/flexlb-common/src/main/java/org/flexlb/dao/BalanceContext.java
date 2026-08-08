@@ -146,14 +146,18 @@ public class BalanceContext {
     }
 
     /**
-     * Normalized Auto-TPM priority of the request (one of 30/40/50/60/70),
-     * or 0 when the request carried no priority (legacy path, task40).
+     * Normalized Auto-TPM priority of the request (1-100, higher = more
+     * important). Always set to 1-100 by {@code PriorityNormalizer.normalize()}
+     * upstream; 0 only appears before normalization.
      */
     public int getPriority() {
         return request.getPriority();
     }
 
-    /** True iff the request carries an explicit Auto-TPM priority (task40). */
+    /**
+     * Defensive check — always true after normalization. Delegates to
+     * {@link org.flexlb.dao.loadbalance.Request#hasPriority()}.
+     */
     public boolean hasPriority() {
         return request.hasPriority();
     }

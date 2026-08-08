@@ -292,11 +292,11 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill());
         addRoleAddr(config, item.decode());
-        // Task40: pass the normalized Auto-TPM priority through to the engine
-        // (metrics tagging only). No-priority requests leave the field at the
-        // proto3 default 0 = "not set".
+        // Pass the normalized Auto-TPM priority through to the engine
+        // (metrics tagging only). normalize() always sets 1-100, so every
+        // dispatched request carries its priority into the proto field.
         Request request = item.ctx().getRequest();
-        if (request != null && request.hasPriority()) {
+        if (request != null) {
             input.setPriority(request.getPriority());
         }
         return input.build();

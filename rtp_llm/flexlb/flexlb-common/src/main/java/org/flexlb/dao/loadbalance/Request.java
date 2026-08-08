@@ -51,15 +51,18 @@ public class Request {
     private String model = "";
 
     /**
-     * Auto-TPM QoS priority. Valid values: 30/40/50/60/70; 0 means "no
-     * priority" (request opts out of Auto-TPM and is scheduled on the legacy
-     * path). Explicit invalid values are normalized to 50 upstream. See
-     * {@code PriorityNormalizer}.
+     * Auto-TPM QoS priority. Valid range: 1-100 (higher = more important).
+     * Set by {@code PriorityNormalizer.normalize()} upstream — always 1-100
+     * in production; the proto3 default 0 only appears before normalization.
+     * See {@code PriorityNormalizer}.
      */
     @JsonProperty("priority")
     private int priority = 0;
 
-    /** True iff the request carries an explicit Auto-TPM priority. */
+    /**
+     * Defensive check — always true after normalization (priority is 1-100).
+     * Retained for unit tests and future use.
+     */
     public boolean hasPriority() {
         return priority > 0;
     }

@@ -281,26 +281,22 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
         // Auto-TPM: normalize priority (proto valid value > metadata header > default)
         // and derive the per-request SLO / coarse deadline for observability.
-        // Phase 0: never changes any scheduling decision.
-        // Task40: a request that carries no priority at all normalizes to
-        // the default priority (50) and participates in Auto-TPM at the
-        // normal level. The NO_PRIORITY (0) sentinel is a defensive guard
-        // in hasPriority() checks but is never returned by normalize().
+        // normalize() always returns 1-100 (never NO_PRIORITY/0): a request
+        // carrying no priority gets the default (50) and participates in
+        // Auto-TPM at the normal level, so the SLO block runs unconditionally.
         int priority = PriorityNormalizer.normalize(pb.getPriority(),
                 GrpcQosHeaderInterceptor.get(),
                 configService.loadBalanceConfig().getAutoTpmDefaultPriority());
         request.setPriority(priority);
         ctx.setRequest(request);
 
-        if (PriorityNormalizer.hasPriority(priority)) {
-            long requestSloMs = prioritySloPolicy.requestSloMs(pb.getSeqLen(), priority);
-            ctx.setRequestSloMs(requestSloMs);
-            // Coarse deadline (no predicted prefill time yet); the priority
-            // scheduler overwrites it once the target prefill endpoint is known.
-            ctx.setDeadlineMs(ctx.getStartTime() + requestSloMs);
-            prioritySchedulerReporter.reportRequest(priority,
-                    prioritySloPolicy.bucketLabel(pb.getSeqLen()), requestSloMs);
-        }
+        long requestSloMs = prioritySloPolicy.requestSloMs(pb.getSeqLen(), priority);
+        ctx.setRequestSloMs(requestSloMs);
+        // Coarse deadline (no predicted prefill time yet); the priority
+        // scheduler overwrites it once the target prefill endpoint is known.
+        ctx.setDeadlineMs(ctx.getStartTime() + requestSloMs);
+        prioritySchedulerReporter.reportRequest(priority,
+                prioritySloPolicy.bucketLabel(pb.getSeqLen()), requestSloMs);
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());

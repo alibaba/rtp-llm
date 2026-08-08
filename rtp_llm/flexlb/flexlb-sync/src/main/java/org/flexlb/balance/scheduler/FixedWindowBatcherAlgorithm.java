@@ -144,14 +144,12 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         //     ensure stale requests are cleared even when the engine is
         //     under sustained backpressure — otherwise the deadline check
         //     would never execute and expired requests would accumulate.
-        //     Auto-TPM never drops prioritized requests silently (design doc
-        //     8.3): entry rejection/rescue/eviction cover them; deadline
-        //     rescue is a later phase. No-priority (legacy) requests never
-        //     enter any priority mechanism, so the drop stays active for them
-        //     regardless of the global switch (P0-2 protection-vacuum fix).
+        //     Auto-TPM never drops requests silently (design doc 8.3):
+        //     entry rejection/rescue/eviction cover them; deadline rescue
+        //     is a later phase. When Auto-TPM is off, the drop stays.
         long queueDeadlineMs = ctx.cfg().getFlexlbBatchEnqueueDeadlineMs();
         if (queueDeadlineMs > 0 && elapsedMs > queueDeadlineMs
-                && !(ctx.cfg().isAutoTpmEnabled() && head.hasPriority())) {
+                && !ctx.cfg().isAutoTpmEnabled()) {
             Logger.warn("flexlb_batch_drop request_id={} reason=queue_deadline_exceeded "
                             + "elapsed_ms={} deadline_ms={}",
                     head.requestId(), elapsedMs, queueDeadlineMs);

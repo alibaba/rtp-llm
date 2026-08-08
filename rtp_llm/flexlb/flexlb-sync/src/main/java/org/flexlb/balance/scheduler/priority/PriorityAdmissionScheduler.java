@@ -175,10 +175,9 @@ public class PriorityAdmissionScheduler {
             if (outcome.plan == null) {
                 // Phase 4 (gated, default off): the route failed specifically
                 // for decode capacity — try a decode reserved-only eviction.
-                // Task40: defensive hasPriority gate — no-priority requests
-                // never reach here (legacy path), and must never preempt.
+                // This method is only reached via the Auto-TPM priority path,
+                // so every request here already carries a normalized priority.
                 if (config.isAutoTpmDecodeReservedEvictEnabled()
-                        && ctx.hasPriority()
                         && isDecodeCapacityFailure(outcome.failureResponse)) {
                     DecodeEvictionOutcome eviction =
                             tryDecodeEviction(ctx, future, snapshot, config, registrar);
@@ -254,11 +253,11 @@ public class PriorityAdmissionScheduler {
 
             // Phase 3: the offer failed — typically a full prefill queue.
             // Try to free queue slots by evicting strictly lower-priority
-            // queued requests (gated, default off). Task40: defensive
-            // hasPriority gate — no-priority requests must never evict.
+            // queued requests (gated, default off). This method is only
+            // reached via the Auto-TPM priority path, so every request here
+            // already carries a normalized priority.
             if (result == PlanCommitter.CommitResult.OFFER_FAILED
-                    && config.isAutoTpmPrefillQueueEvictEnabled()
-                    && ctx.hasPriority()) {
+                    && config.isAutoTpmPrefillQueueEvictEnabled()) {
                 EvictionOutcome eviction = tryPrefillQueueEviction(outcome.plan, config, registrar);
                 switch (eviction) {
                     case COMMITTED -> {

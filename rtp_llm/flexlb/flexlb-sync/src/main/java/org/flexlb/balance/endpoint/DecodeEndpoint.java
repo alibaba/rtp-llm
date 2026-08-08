@@ -682,6 +682,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * decode concurrency gate while the engine is idle (root cause C of the
      * 8400 storm). {@link #getTotalLoad()} keeps the full shadow view for
      * observability and eviction planning.
+     *
+     * <p>Formula: {@code confirmedRunningCount + inflightRequests.size()
+     * − |queuedPhase ∩ inflightRequests|}. The loop computes the intersection
+     * rather than using {@code queuedPhase.size()} because {@code queuedPhase}
+     * is cleaned lazily (only in calibrate and release), so it may contain
+     * stale entries already removed from {@code inflightRequests}. Directly
+     * subtracting {@code queuedPhase.size()} would over-subtract and make the
+     * load artificially low. The {@code containsKey} check is lock-free and
+     * consistent with other read paths ({@link #getTotalLoad()}, etc.).
      */
     public int getEngineLoad() {
         int queued = 0;
