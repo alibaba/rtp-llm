@@ -16,6 +16,24 @@ import org.springframework.stereotype.Component;
 import java.util.Iterator;
 import java.util.Map;
 
+/**
+ * Periodically evicts workers that have stopped sending WorkerStatus reports
+ * (crash, network partition, OOM kill, etc.) from the routing tables.
+ *
+ * <p>Without this cleaner, the Master would keep routing requests to dead
+ * workers, producing a flood of 8400 / 8513 errors (the "decode death spiral"):
+ * every dispatched request times out on a dead endpoint, the request is
+ * retried onto another stale entry, and the cycle amplifies until the entire
+ * decode fleet appears saturated. This component is the backstop that breaks
+ * the cycle — once a worker's last report is older than {@code workerTimeoutMs}
+ * (default 15 s = 3× the 5 s gRPC sync timeout), the entry is removed from both
+ * {@link EngineWorkerStatus} and {@link EndpointRegistry}, forcing the
+ * scheduler to rediscover live workers on the next sync round.
+ *
+ * <p>Runs every {@code WORKER_CLEAN_INTERVAL_MS} (default 3 s) via Spring
+ * {@link Scheduled}. The timeout is intentionally generous (3× gRPC timeout)
+ * to avoid racing a transient gRPC delay and evicting a still-alive endpoint.
+ */
 @Component
 public class ExpirationCleaner {
 
