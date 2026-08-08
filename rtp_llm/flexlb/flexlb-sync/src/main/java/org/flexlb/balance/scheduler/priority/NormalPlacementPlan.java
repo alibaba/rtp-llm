@@ -5,23 +5,16 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.dao.loadbalance.Response;
 
-import java.util.List;
-
 /**
  * Phase 1 admission plan: place the incoming request on the router-selected
  * prefill/decode pair without any eviction.
  *
- * <p>The decode reservation ({@link PlanAction#RESERVE_DECODE_FOR_INCOMING})
- * is already held when the plan is constructed — it happens inside
- * {@code router.route()} — so commit only needs to validate versions and
- * perform {@link PlanAction#OFFER_PREFILL_FOR_INCOMING}. On commit failure the
- * caller must release the decode reservation.
+ * <p>The decode reservation is already held when the plan is constructed — it
+ * happens inside {@code router.route()} — so commit only needs to validate
+ * versions and offer the incoming request to the target prefill batcher
+ * queue. On commit failure the caller must release the decode reservation.
  */
-public final class NormalPlacementPlan implements AdmissionPlan {
-
-    private static final List<PlanAction> ACTIONS = List.of(
-            PlanAction.RESERVE_DECODE_FOR_INCOMING,
-            PlanAction.OFFER_PREFILL_FOR_INCOMING);
+public final class NormalPlacementPlan {
 
     private final PriorityRequestEnvelope envelope;
     private final BatchItem item;
@@ -54,14 +47,8 @@ public final class NormalPlacementPlan implements AdmissionPlan {
         this.createdAtMs = System.currentTimeMillis();
     }
 
-    @Override
     public PriorityRequestEnvelope envelope() {
         return envelope;
-    }
-
-    @Override
-    public List<PlanAction> actions() {
-        return ACTIONS;
     }
 
     public BatchItem item() {

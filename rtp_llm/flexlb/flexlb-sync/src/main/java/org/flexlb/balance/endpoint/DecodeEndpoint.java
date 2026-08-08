@@ -258,8 +258,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * never appear here — calibrate removes them (design doc 10.1).
      *
      * <p>Taken under {@link #admissionLock} so the returned map is a consistent
-     * point w.r.t. concurrent mutations; pair it with the version via
-     * {@link #reservedAdmissionView()} when commit-time validation is needed.
+     * point w.r.t. concurrent mutations.
      */
     public Map<Long, RequestInflight> reservedView() {
         admissionLock.lock();
@@ -268,26 +267,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
         }
-    }
-
-    /**
-     * Consistent (admissionVersion, reserved entries) pair captured atomically
-     * under {@link #admissionLock}. This makes the pair a valid optimistic-
-     * concurrency anchor: if the version is unchanged at commit time, the
-     * reserved view is still current. Capturing them separately would risk a
-     * false pass (stale view paired with a fresher version).
-     */
-    public ReservedAdmissionView reservedAdmissionView() {
-        admissionLock.lock();
-        try {
-            return new ReservedAdmissionView(admissionVersion.get(), Map.copyOf(inflightRequests));
-        } finally {
-            admissionLock.unlock();
-        }
-    }
-
-    /** Atomic (admissionVersion, reserved entries) pair — see {@link #reservedAdmissionView()}. */
-    public record ReservedAdmissionView(long admissionVersion, Map<Long, RequestInflight> reserved) {
     }
 
     /**

@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.scheduler.priority.PrefillQueueSnapshot;
-import org.flexlb.balance.scheduler.priority.PriorityRequestEnvelope;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
 
 import java.util.ArrayList;
@@ -70,11 +69,6 @@ public final class PrefillQueueManager {
      * dispatch-interval sliding average as the per-cycle cost and the head's
      * remaining window as the partial first cycle.
      */
-    public long estimateWait(PriorityRequestEnvelope envelope) {
-        return estimateWaitMs(envelope.priority(), envelope.deadlineMs(), envelope.requestId());
-    }
-
-    /** Primitive-args variant of {@link #estimateWait} for callers without an envelope. */
     public long estimateWaitMs(int priority, long deadlineMs, long requestId) {
         long now = ctx.now();
         int itemsAhead = 0;
@@ -158,42 +152,6 @@ public final class PrefillQueueManager {
      */
     public ReplaceOutcome tryReplaceVictimsPresent(List<Long> victimIds, BatchItem incoming) {
         return batcher.tryReplaceVictimsPresent(victimIds, incoming);
-    }
-
-    /**
-     * Poll up to {@code limit} items in queue order, respecting
-     * {@code flexlbBatchSizeMax}, the strict padded batch token capacity and
-     * the worker-reported KV budget (greedy prefix scan, same shape rules as
-     * the dispatch algorithms). Removed items bump the queue version.
-     */
-    public List<BatchItem> pollBatch(int limit) {
-        ctx.queueLock().lock();
-        try {
-            int maxBatchSize = Math.max(1, ctx.cfg().getFlexlbBatchSizeMax());
-            int max = limit > 0 ? Math.min(limit, maxBatchSize) : maxBatchSize;
-            long tokenCapacity = ctx.batchTokenCapacity();
-            long kvCapacity = ctx.batchKvCapacity();
-
-            List<BatchItem> picked = new ArrayList<>();
-            BatchShape shape = BatchShape.empty();
-            for (BatchItem item : ctx.sortedItems()) {
-                if (picked.size() >= max) {
-                    break;
-                }
-                BatchShape candidate = shape.add(item);
-                if (!candidate.fitsCompute(tokenCapacity) || !candidate.fitsKv(kvCapacity)) {
-                    break;
-                }
-                shape = candidate;
-                picked.add(item);
-            }
-            for (BatchItem item : picked) {
-                ctx.remove(item);
-            }
-            return picked;
-        } finally {
-            ctx.queueLock().unlock();
-        }
     }
 
     // ==================== Replace outcome ====================

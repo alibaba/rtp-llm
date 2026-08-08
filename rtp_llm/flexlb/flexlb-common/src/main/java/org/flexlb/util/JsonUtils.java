@@ -9,9 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.ObjectWriter;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.type.CollectionType;
-import com.fasterxml.jackson.databind.type.MapType;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.StatusEnum;
@@ -19,7 +17,6 @@ import org.flexlb.exception.FlexLBException;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Map;
 
 @Slf4j
 public class JsonUtils {
@@ -27,8 +24,6 @@ public class JsonUtils {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final ObjectWriter WRITER;
-
-    private static final ObjectReader READER;
 
     private static final ObjectMapper MAPPER_WITH_INDENT = new ObjectMapper();
 
@@ -41,7 +36,6 @@ public class JsonUtils {
         MAPPER.disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
         MAPPER.setSerializationInclusion(JsonInclude.Include.NON_NULL);
         WRITER = MAPPER.writer();
-        READER = MAPPER.reader();
 
         MAPPER_WITH_INDENT.registerModule(new JavaTimeModule());
         MAPPER_WITH_INDENT.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
@@ -157,16 +151,6 @@ public class JsonUtils {
         }
     }
 
-    public static <T> Map<String, T> toMap(String text, Class<T> valueType) throws FlexLBException {
-        MapType type = MAPPER.getTypeFactory().constructMapType(Map.class, String.class, valueType);
-        ObjectReader reader = MAPPER.readerFor(type);
-        try {
-            return reader.readValue(text);
-        } catch (IOException e) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException(text, e);
-        }
-    }
-
     public static <T> List<T> toList(String text, Class<T> valueType) throws FlexLBException {
         CollectionType type = MAPPER.getTypeFactory().constructCollectionType(List.class, valueType);
         ObjectReader reader = MAPPER.readerFor(type);
@@ -210,30 +194,6 @@ public class JsonUtils {
     }
 
     /**
-     * Convert a java object to a json node.
-     *
-     * @param object The java object.
-     * @return The json node.
-     */
-    public static JsonNode toTreeNode(Object object) {
-        return MAPPER.valueToTree(object);
-    }
-
-    /**
-     * Convert a string to a json node.
-     *
-     * @param text The json string.
-     * @return The json node.
-     */
-    public static JsonNode toTreeNode(String text) throws FlexLBException {
-        try {
-            return READER.readTree(text);
-        } catch (JsonProcessingException error) {
-            throw StatusEnum.JSON_MAPPER_ERROR.toException("Failed to parse text to json tree!, text=" + text, error);
-        }
-    }
-
-    /**
      * Convert an object to a formatted string.
      */
     public static String toFormattedString(Object object) {
@@ -245,9 +205,5 @@ public class JsonUtils {
             }
             return "";
         }
-    }
-
-    public static ArrayNode createArrayNode() {
-        return MAPPER.createArrayNode();
     }
 }

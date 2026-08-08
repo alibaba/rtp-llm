@@ -13,15 +13,14 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
  * Phase 2 tests for {@link PrefillQueueManager} + {@link WorkerBatcher}:
- * Auto-TPM queue order (design doc 8.1), capacity-bounded {@code pollBatch},
- * the 8.4 wait estimate, legacy-order regression and the version-checked
- * atomic victim replace (17.2).
+ * Auto-TPM queue order (design doc 8.1), the 8.4 wait estimate,
+ * legacy-order regression and the version-checked atomic victim
+ * replace (17.2).
  *
  * <p>Uses the {@code fixed_window} algorithm so {@code computeSortKey}
  * (FIFO: enqueuedAtMs) needs no predictor and the batcher can be built
@@ -101,49 +100,6 @@ class PrefillQueueManagerTest {
         List<Long> order = batcher.queueManager().snapshot().items().stream()
                 .map(QueuedRequestSnapshot::requestId).toList();
         assertEquals(List.of(1L, 2L, 3L), order);
-    }
-
-    // ==================== pollBatch capacity ====================
-
-    @Test
-    void poll_batch_respects_batch_size_max_and_bumps_version() {
-        config.setFlexlbBatchSizeMax(2);
-        WorkerBatcher batcher = newBatcher();
-        long now = System.currentTimeMillis();
-        assertTrue(batcher.tryOffer(item(1, 70, now + 1_000, now, 16)));
-        assertTrue(batcher.tryOffer(item(2, 50, now + 1_000, now, 16)));
-        assertTrue(batcher.tryOffer(item(3, 30, now + 1_000, now, 16)));
-        long versionBefore = batcher.queueVersion();
-
-        List<BatchItem> polled = batcher.queueManager().pollBatch(0);
-
-        // Highest-priority prefix, capped at flexlbBatchSizeMax
-        assertEquals(2, polled.size());
-        assertEquals(1L, polled.get(0).requestId());
-        assertEquals(2L, polled.get(1).requestId());
-        assertEquals(1, batcher.queueSize());
-        assertNotEquals(versionBefore, batcher.queueVersion());
-
-        // Explicit limit below batchSizeMax wins
-        assertTrue(batcher.tryOffer(item(4, 70, now + 1_000, now, 16)));
-        assertEquals(1, batcher.queueManager().pollBatch(1).size());
-    }
-
-    @Test
-    void poll_batch_respects_strict_padded_token_capacity() {
-        // Padded shape = maxSeqLen * size must stay strictly below capacity:
-        // one seqLen=100 item fits (100 < 150), two do not (200 >= 150).
-        config.setFlexlbBatchMaxCapacity(150);
-        WorkerBatcher batcher = newBatcher();
-        long now = System.currentTimeMillis();
-        assertTrue(batcher.tryOffer(item(1, 50, now + 1_000, now, 100)));
-        assertTrue(batcher.tryOffer(item(2, 50, now + 2_000, now, 100)));
-
-        List<BatchItem> polled = batcher.queueManager().pollBatch(0);
-
-        assertEquals(1, polled.size());
-        assertEquals(1L, polled.get(0).requestId());
-        assertEquals(1, batcher.queueSize());
     }
 
     // ==================== 8.4 wait estimate ====================

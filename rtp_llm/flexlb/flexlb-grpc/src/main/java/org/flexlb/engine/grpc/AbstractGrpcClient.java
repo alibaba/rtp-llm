@@ -275,10 +275,6 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             return rpcServiceStub;
         }
 
-        public MultimodalRpcServiceGrpc.MultimodalRpcServiceBlockingStub getMultimodalRpcServiceStub() {
-            return multimodalRpcServiceStub;
-        }
-
         public GrpcStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
             return new GrpcStubWrapper(
                     rpcServiceStub.withDeadlineAfter(timeout, unit),

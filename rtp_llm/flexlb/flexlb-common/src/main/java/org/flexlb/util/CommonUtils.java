@@ -16,14 +16,4 @@ public final class CommonUtils {
     public static int toGrpcPort(int httpPort) {
         return httpPort + CommonConstants.GRPC_PORT_OFFSET;
     }
-
-    /**
-     * Convert gRPC port back to HTTP port
-     *
-     * @param grpcPort gRPC port
-     * @return HTTP port
-     */
-    public static int toHttpPort(int grpcPort) {
-        return grpcPort - CommonConstants.GRPC_PORT_OFFSET;
-    }
 }
