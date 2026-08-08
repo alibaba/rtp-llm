@@ -225,6 +225,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             }
 
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
+            // Cache 收益已折进 estimate(predictor, cacheHit)（hitTokens 参与公式求值），不再单列扣减
             long singlePrefillMs = formulaEstimateMemo.estimate(predictor, cacheHit);
 
             long endpointWaitMs = ep.realWaitTimeMs();
@@ -236,17 +237,15 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
             long pendingCount = ep.realPendingCount();
             // Auto-TPM (design doc 6.2 simplified): endpointWaitMs +
-            // estimatedWait (8.4, priority-aware) + predictedPrefill −
-            // cacheBenefit. Cache benefit data is not available yet — 0.
+            // estimatedWait (8.4, priority-aware) + predictedPrefill.
             // When Auto-TPM is on, all requests carry a normalized priority
             // (1-100), so the priority-aware estimate always applies.
             long batcherWaitMs = config.isAutoTpmEnabled()
                     ? ep.batcherEstimatedWaitMs(balanceContext.getPriority(),
                             balanceContext.getDeadlineMs(), balanceContext.getRequestId())
                     : ep.batcherWaitMs();
-            long cacheBenefitMs = 0;
             feasible.setCandidate(feasibleCount++, ep, cacheHit,
-                    singlePrefillMs + endpointWaitMs + batcherWaitMs - cacheBenefitMs,
+                    singlePrefillMs + endpointWaitMs + batcherWaitMs,
                     endpointWaitMs, pendingCount);
             sumWaitMs += endpointWaitMs;
             sumPendingCount += pendingCount;
