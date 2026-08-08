@@ -56,6 +56,10 @@ public class DynamicWorkerManager {
     @PostConstruct
     public void startScheduler() {
         FlexlbConfig config = configService.loadBalanceConfig();
+        if (config.isFixedScheduleWorkerPermits()) {
+            Logger.info("Worker permit capacity is fixed at {}", maxTotalWorkers);
+            return;
+        }
 
         this.capacityScheduler = Executors.newScheduledThreadPool(1, r -> {
             Thread t = new Thread(r, "worker-capacity-scheduler");
@@ -88,12 +92,15 @@ public class DynamicWorkerManager {
     }
 
     public void recalculateWorkerCapacity() {
+        FlexlbConfig config = configService.loadBalanceConfig();
+        if (config.isFixedScheduleWorkerPermits()) {
+            return;
+        }
 
         ModelWorkerStatus modelWorkerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = modelWorkerStatus.getRoleTypeList();
         double maxWaterLevel = 0.0;
 
-        FlexlbConfig config = configService.loadBalanceConfig();
         // 水位 debug 日志限流：默认每 10s 打印一次，allowedWorkers 变化时立即打印
         long now = System.currentTimeMillis();
         boolean shouldLog = now - lastWaterLevelLogTimeMs >= WATER_LEVEL_LOG_INTERVAL_MS;

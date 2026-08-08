@@ -30,7 +30,8 @@
 | `decodeAvailableMemoryThreshold` | 90 | Decode 可用性滞回阈值（%） |
 | `hysteresisBiasPercent` | 15 | Decode 可用性滞回带宽（%） |
 | `scheduleWorkerSize` | CPU 核数 | 调度线程数 = 最大许可数 |
-| `resourceCheckIntervalMs` | 10 | 许可重算间隔 |
+| `fixedScheduleWorkerPermits` | false | true 时许可固定为 `scheduleWorkerSize`，不随资源水位动态缩减 |
+| `resourceCheckIntervalMs` | 10 | 动态许可重算间隔 |
 | `decodeFullSpeedThreshold` / `decodeStopThreshold` | 40 / 80 | Decode 水位线性区间（%） |
 | `nettySelectThreadMultiplier` / `nettyWorkerThreadMultiplier` | 1 / 2 | Netty 线程倍数 |
 

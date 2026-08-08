@@ -1,17 +1,24 @@
 # Resource Management
 
-FlexLB 依据后端资源水位动态调整**路由并发许可数**，把请求"卡"在调度层而不是打爆引擎；
-同时在策略层按角色维度过滤资源不可用的 worker。
+FlexLB 可依据后端资源水位动态调整**路由并发许可数**，把请求"卡"在调度层而不是打爆引擎；
+设置 `fixedScheduleWorkerPermits=true` 时，许可改为固定值。策略层仍按角色维度过滤资源不可用的 worker。
 
 主要代码：`flexlb-sync/src/main/java/org/flexlb/balance/resource/`。
 
 ## DynamicWorkerManager
 
-- `@PostConstruct` 启动单线程 `ScheduledExecutorService`（daemon，线程名
-  `worker-capacity-scheduler`），`scheduleWithFixedDelay` 每 `resourceCheckIntervalMs`
-  （默认 **10ms**）执行一次 `recalculateWorkerCapacity()`。`@PreDestroy` 等待 5s 后强停。
+- 当 `fixedScheduleWorkerPermits=false` 时，`@PostConstruct` 启动单线程
+  `ScheduledExecutorService`（daemon，线程名 `worker-capacity-scheduler`），
+  `scheduleWithFixedDelay` 每 `resourceCheckIntervalMs`（默认 **10ms**）执行一次
+  `recalculateWorkerCapacity()`。`@PreDestroy` 等待 5s 后强停。
 - 初始容量：`maxTotalWorkers = scheduleWorkerSize`（默认 CPU 核数），`ReducibleSemaphore`、
   `totalPermits`、`allowedWorkers` 都初始化为该值。
+
+### 固定许可模式
+
+`fixedScheduleWorkerPermits=true` 时，不启动容量重算任务，调度许可始终保持
+`scheduleWorkerSize`。Worker 资源水位仍会上报，也仍用于策略层的候选 worker 过滤，
+但不会再缩减调度并发。
 
 ### 每 tick 的重算流程
 
@@ -77,6 +84,6 @@ PDFUSION/PREFILL/VIT → `WAIT_TIME`，DECODE → `REMAINING_KV_CACHE`。
 
 ## 相关配置（默认值）
 
-`resourceCheckIntervalMs=10`、`scheduleWorkerSize=CPU核数`、`prefillQueueSizeThreshold=3`、
+`resourceCheckIntervalMs=10`、`scheduleWorkerSize=CPU核数`、`fixedScheduleWorkerPermits=false`、`prefillQueueSizeThreshold=3`、
 `decodeFullSpeedThreshold=40`、`decodeStopThreshold=80`、
 `decodeAvailableMemoryThreshold=90`、`hysteresisBiasPercent=15`。

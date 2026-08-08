@@ -145,6 +145,12 @@ public class FlexlbConfig {
     private int scheduleWorkerSize = Runtime.getRuntime().availableProcessors();
 
     /**
+     * Whether scheduling permits stay fixed at {@code scheduleWorkerSize}.
+     * When enabled, resource water levels are observed but do not reduce scheduling concurrency.
+     */
+    private boolean fixedScheduleWorkerPermits = false;
+
+    /**
      * Resource availability check interval (milliseconds, default 10ms)
      */
     private long resourceCheckIntervalMs = 10;
