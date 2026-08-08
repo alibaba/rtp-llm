@@ -33,13 +33,14 @@ import java.util.concurrent.locks.ReentrantLock;
 public class WorkerBatcher {
 
     /**
-     * Auto-TPM queue order (design doc 8.1): priority desc → deadline asc →
-     * arrival asc → requestId asc (deterministic).
+     * Auto-TPM queue order (design doc 8.1, FIFO fix): priority desc →
+     * arrival asc (same-priority requests are strictly first-in-first-out) →
+     * deadline asc → requestId asc (deterministic).
      */
     public static final Comparator<BatchItem> AUTO_TPM_QUEUE_ORDER = Comparator
             .comparingInt(BatchItem::priority).reversed()
-            .thenComparingLong(BatchItem::deadlineMs)
             .thenComparingLong(BatchItem::enqueuedAtMs)
+            .thenComparingLong(BatchItem::deadlineMs)
             .thenComparingLong(BatchItem::requestId);
 
     /** Legacy order: algorithm-computed sort key (unchanged behavior). */

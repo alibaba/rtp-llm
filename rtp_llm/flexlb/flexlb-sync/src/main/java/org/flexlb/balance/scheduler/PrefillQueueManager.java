@@ -105,8 +105,8 @@ public final class PrefillQueueManager {
 
     /**
      * Whether a queued item is ordered before an incoming probe under
-     * {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER} (priority desc → deadline asc
-     * → arrival asc → requestId asc). The probe's arrival is "now" — it has
+     * {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER} (priority desc → arrival asc
+     * → deadline asc → requestId asc). The probe's arrival is "now" — it has
      * not been enqueued yet.
      */
     private static boolean ordersBefore(BatchItem item, int priority, long deadlineMs,
@@ -114,11 +114,11 @@ public final class PrefillQueueManager {
         if (item.priority() != priority) {
             return item.priority() > priority;
         }
-        if (item.deadlineMs() != deadlineMs) {
-            return item.deadlineMs() < deadlineMs;
-        }
         if (item.enqueuedAtMs() != arrivalMs) {
             return item.enqueuedAtMs() < arrivalMs;
+        }
+        if (item.deadlineMs() != deadlineMs) {
+            return item.deadlineMs() < deadlineMs;
         }
         return item.requestId() < requestId;
     }

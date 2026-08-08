@@ -47,7 +47,7 @@ class PrefillQueueManagerTest {
     // ==================== 8.1 queue order ====================
 
     @Test
-    void auto_tpm_order_is_priority_desc_then_deadline_asc_then_arrival_asc() {
+    void auto_tpm_order_is_priority_desc_then_arrival_fifo() {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
@@ -60,13 +60,31 @@ class PrefillQueueManagerTest {
         PrefillQueueSnapshot snapshot = batcher.queueManager().snapshot();
         List<Long> order = snapshot.items().stream().map(QueuedRequestSnapshot::requestId).toList();
 
-        // P70 first; P50s by deadline asc; equal deadlines by arrival asc
-        assertEquals(List.of(2L, 3L, 4L, 1L), order);
+        // P70 first (priority desc); P50s strictly FIFO by arrival — item 3's
+        // earlier deadline must NOT let it jump ahead of earlier arrivals
+        assertEquals(List.of(2L, 4L, 1L, 3L), order);
         assertEquals(4, snapshot.items().size());
         assertEquals(config.getFlexlbBatchQueueMaxSize(), snapshot.queueCapacity());
         for (QueuedRequestSnapshot item : snapshot.items()) {
             assertEquals(QueuedRequestSnapshot.PREFILL_QUEUED, item.state());
         }
+    }
+
+    @Test
+    void auto_tpm_order_breaks_arrival_ties_by_deadline_then_request_id() {
+        WorkerBatcher batcher = newBatcher();
+        long now = System.currentTimeMillis();
+
+        // Same priority + same arrival: deadline asc decides
+        assertTrue(batcher.tryOffer(item(1, 50, now + 9_000, now, 128)));
+        assertTrue(batcher.tryOffer(item(2, 50, now + 1_000, now, 128)));
+        // Same priority + arrival + deadline: requestId asc decides
+        assertTrue(batcher.tryOffer(item(4, 50, now + 9_000, now, 128)));
+        assertTrue(batcher.tryOffer(item(3, 50, now + 9_000, now, 128)));
+
+        List<Long> order = batcher.queueManager().snapshot().items().stream()
+                .map(QueuedRequestSnapshot::requestId).toList();
+        assertEquals(List.of(2L, 1L, 3L, 4L), order);
     }
 
     @Test
