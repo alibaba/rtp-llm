@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -16,7 +16,7 @@ namespace rtp_llm {
 
 namespace {
 
-std::string groupTags(const std::vector<GroupBase>& groups) {
+std::string groupTags(const std::vector<GroupTopology>& groups) {
     std::ostringstream stream;
     for (size_t i = 0; i < groups.size(); ++i) {
         if (i != 0) {
@@ -30,9 +30,9 @@ std::string groupTags(const std::vector<GroupBase>& groups) {
 }  // namespace
 
 void RemoteConnector::validateConfig(const CacheConfig& cache_config) {
-    const auto&      groups           = cache_config.topology().groups();
-    size_t           full_group_count = 0;
-    const GroupBase* full_group       = nullptr;
+    const auto&          groups           = cache_config.topology().groups();
+    size_t               full_group_count = 0;
+    const GroupTopology* full_group       = nullptr;
     for (const auto& group : groups) {
         if (group.policy.group_type == CacheGroupType::FULL) {
             ++full_group_count;
@@ -196,16 +196,16 @@ bool RemoteAsyncMatchContext::success() const {
     return state_.successImpl();
 }
 
-RemoteConnector::RemoteConnector(const CacheConfig&                        cache_config,
-                                 const KVCacheConfig&                      kv_cache_config,
-                                 const RuntimeConfig&                      runtime_config,
-                                 const ParallelismConfig&                  parallelism_config,
-                                 const SpeculativeExecutionConfig&         sp_config,
-                                 void*                                     register_buffer_addr,
-                                 size_t                                    register_buffer_size,
-                                 std::shared_ptr<KVCacheAllocator>         allocator,
-                                 const kmonitor::MetricsReporterPtr        metrics_reporter,
-                                 const std::map<std::string, std::string>& lora_info_map):
+RemoteConnector::RemoteConnector(const CacheConfig&                         cache_config,
+                                 const KVCacheConfig&                       kv_cache_config,
+                                 const RuntimeConfig&                       runtime_config,
+                                 const ParallelismConfig&                   parallelism_config,
+                                 const SpeculativeExecutionConfig&          sp_config,
+                                 void*                                      register_buffer_addr,
+                                 size_t                                     register_buffer_size,
+                                 std::shared_ptr<CoordinatorKVCacheManager> coordinator_cache_manager,
+                                 const kmonitor::MetricsReporterPtr         metrics_reporter,
+                                 const std::map<std::string, std::string>&  lora_info_map):
     metrics_reporter_(metrics_reporter) {
     RemoteConnector::InitParams init_params{cache_config,
                                             kv_cache_config,
@@ -219,7 +219,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
     // Do not select the future-only multi-group policies here until the production protocol is restored end to end.
     const auto& group_tag = cache_config.topology().groups().front().tag;
     group_policy_         = std::make_unique<remote_connector::FullLayerGroupPolicy>(
-        allocator, std::vector<std::string>{group_tag}, std::vector<std::string>{});
+        coordinator_cache_manager, std::vector<std::string>{group_tag}, std::vector<std::string>{});
 }
 
 RemoteConnector::~RemoteConnector() {

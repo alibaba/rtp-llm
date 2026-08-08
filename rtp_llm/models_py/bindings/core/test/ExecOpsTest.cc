@@ -212,7 +212,7 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     config.seq_size_per_block = tokens_per_block;
     (void)independent_pools;
 
-    GroupBase target_group;
+    GroupTopology target_group;
     target_group.tag              = tag;
     const size_t kv_transfer      = transfer_kv_bytes == 0 ? physical_kv_stride : transfer_kv_bytes;
     const size_t scale_transfer   = transfer_scale_bytes == 0 ? physical_scale_stride : transfer_scale_bytes;
@@ -229,14 +229,14 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     target_group.kv_block_stride_bytes = physical_kv_stride;
     target_group.kv_scale_stride_bytes = physical_scale_stride;
 
-    std::vector<LayerBase> layers(static_cast<size_t>(layer_id + 1));
+    std::vector<LayerTopology> layers(static_cast<size_t>(layer_id + 1));
     for (size_t i = 0; i < layers.size(); ++i) {
         layers[i].layer_id = static_cast<int>(i);
     }
 
-    std::vector<GroupBase> groups;
+    std::vector<GroupTopology> groups;
     if (add_dummy_group) {
-        GroupBase dummy_group;
+        GroupTopology dummy_group;
         dummy_group.tag                   = tag == "full" ? "linear" : "full";
         dummy_group.spec                  = makeTestSpec(dummy_group.tag,
                                         tokens_per_block,
@@ -968,7 +968,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
     config.seq_size_per_block = tokens_per_block;
 
     auto make_group = [](const std::string& tag, CacheGroupType type) {
-        GroupBase group;
+        GroupTopology group;
         group.tag       = tag;
         group.spec      = makeTestSpec(tag, tokens_per_block, block_stride, 0, KVCacheSpecType::MultiHeadAttention);
         group.policy    = defaultCacheGroupPolicy(type);

@@ -23,18 +23,18 @@ struct NeedBlocksInfo {
     int extra_blocks  = 0;  // extra blocks per batch
 };
 
-class KVCacheGroup {
+class SingleTypeKVCacheManager {
 public:
-    KVCacheGroup(GroupBase                           cache_group,
-                 BlockPoolPtr                        block_pool,
-                 SharedBlockCache*                   shared_cache     = nullptr,
-                 const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        cache_group_(std::move(cache_group)),
+    SingleTypeKVCacheManager(GroupTopology                       group_topology,
+                             BlockPoolPtr                        block_pool,
+                             SharedBlockCache*                   shared_cache     = nullptr,
+                             const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+        group_topology_(std::move(group_topology)),
         block_pool_(std::move(block_pool)),
         shared_cache_(shared_cache),
         metrics_reporter_(metrics_reporter) {}
 
-    virtual ~KVCacheGroup() = default;
+    virtual ~SingleTypeKVCacheManager() = default;
 
     bool                init();
     virtual bool        malloc(BlockIds&            block_ids,
@@ -80,7 +80,7 @@ public:
     bool                    ensureFreeBlocks(int need_blocks);
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
-    const GroupBase&        config() const;
+    const GroupTopology&    config() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;
@@ -93,7 +93,7 @@ public:
     virtual bool isReservable() const;
 
 protected:
-    GroupBase                    cache_group_;
+    GroupTopology                group_topology_;
     BlockPoolPtr                 block_pool_;
     SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
@@ -103,6 +103,6 @@ protected:
     std::unordered_map<int, int>           global_layer_to_local_layer;
 };
 
-using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
+using SingleTypeKVCacheManagerPtr = std::shared_ptr<SingleTypeKVCacheManager>;
 
 }  // namespace rtp_llm

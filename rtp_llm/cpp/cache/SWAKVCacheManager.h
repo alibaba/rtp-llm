@@ -2,29 +2,30 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeKVCacheManager.h"
 
 namespace rtp_llm {
 
-class FullKVCacheGroup: public KVCacheGroup {
+class SWAKVCacheManager: public SingleTypeKVCacheManager {
 public:
-    FullKVCacheGroup(GroupBase                           cache_group,
-                     BlockPoolPtr                        block_pool,
-                     SharedBlockCache*                   shared_cache     = nullptr,
-                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
-        KVCacheGroup(std::move(cache_group), std::move(block_pool), shared_cache, metrics_reporter) {}
+    SWAKVCacheManager(GroupTopology                       group_topology,
+                      BlockPoolPtr                        block_pool,
+                      int                                 linear_step      = 0,
+                      SharedBlockCache*                   shared_cache     = nullptr,
+                      const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+        SingleTypeKVCacheManager(std::move(group_topology), std::move(block_pool), shared_cache, metrics_reporter),
+        linear_step_(linear_step) {}
 
-    bool        malloc(BlockIds&            block_indices,
+    MatchResult matchSingleKey(CacheKeyType cache_key) const override;
+    bool        malloc(BlockIds&            block_ids,
                        int                  seq_len,
                        bool                 enable_reuse_cache   = false,
                        int                  reserve_step         = 0,
                        std::vector<size_t>* backfilled_positions = nullptr) override;
-    MatchResult matchPrefix(const CacheKeysType& cache_keys) const override;
-    void
-    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
-    void free(const BlockIndicesType& block_indices) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
-    int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
+    void free(const BlockIndicesType& block_indices) override;
+    void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
+    int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
                                 int                     remaining_tokens,
@@ -41,9 +42,17 @@ public:
                                  int  reserve_step,
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
-    void           reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) override;
 
 private:
+    void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
+    int  activeTailBlockCount() const;
+    bool effectiveReuseCacheForAllocation(bool enable_reuse_cache) const;
+    bool shouldCheckSWATailBlockIds() const;
+    void checkSWATailBlockIds(const BlockIds& block_ids, const char* caller) const;
+
+    int linear_step_ = 0;
 };
+
+using SWAKVCacheManagerPtr = std::shared_ptr<SWAKVCacheManager>;
 
 }  // namespace rtp_llm

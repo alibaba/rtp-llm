@@ -3,7 +3,7 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -17,21 +17,22 @@
 
 namespace rtp_llm {
 
-KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(const CacheConfig&                       cache_config,
-                                                         const KVCacheConfig&                     kv_cache_config,
-                                                         const RuntimeConfig&                     runtime_config,
-                                                         const ParallelismConfig&                 parallelism_config,
-                                                         const SpeculativeExecutionConfig&        sp_config,
-                                                         const std::shared_ptr<KVCacheAllocator>& allocator,
-                                                         const kmonitor::MetricsReporterPtr&      metrics_reporter,
-                                                         const PDSepConfig&                       pd_sep_config,
-                                                         const CacheStoreConfig&                  cache_store_config):
+KVCacheConnectorCoordinator::KVCacheConnectorCoordinator(
+    const CacheConfig&                                cache_config,
+    const KVCacheConfig&                              kv_cache_config,
+    const RuntimeConfig&                              runtime_config,
+    const ParallelismConfig&                          parallelism_config,
+    const SpeculativeExecutionConfig&                 sp_config,
+    const std::shared_ptr<CoordinatorKVCacheManager>& coordinator_cache_manager,
+    const kmonitor::MetricsReporterPtr&               metrics_reporter,
+    const PDSepConfig&                                pd_sep_config,
+    const CacheStoreConfig&                           cache_store_config):
     cache_config_(cache_config),
     kv_cache_config_(kv_cache_config),
     runtime_config_(runtime_config),
     parallelism_config_(parallelism_config),
     sp_config_(sp_config),
-    allocator_(allocator),
+    coordinator_cache_manager_(coordinator_cache_manager),
     metrics_reporter_(metrics_reporter),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config) {}
@@ -138,7 +139,7 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
         ref_keys     = ref_resource.cacheKeys();
     }
-    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
+    auto resource = coordinator_cache_manager_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -188,7 +189,7 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
         ref_keys     = ref_resource.cacheKeys();
     }
-    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
+    auto resource = coordinator_cache_manager_->incrKVCacheRef(ref_resource, ref_keys, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -230,7 +231,7 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
     auto memory_connector = std::make_shared<KVCacheMemoryConnector>(cache_config_,
                                                                      kv_cache_config_,
                                                                      parallelism_config_,
-                                                                     allocator_,
+                                                                     coordinator_cache_manager_,
                                                                      runtime_config_.worker_grpc_addrs,
                                                                      metrics_reporter_);
     RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
@@ -241,7 +242,7 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
 #ifdef USE_REMOTE_KV_CACHE
     RemoteConnector::validateConfig(cache_config_);
     const auto& group_tag  = cache_config_.topology().groups().front().tag;
-    const auto  block_pool = allocator_->getBlockPool(group_tag);
+    const auto  block_pool = coordinator_cache_manager_->getBlockPool(group_tag);
     RTP_LLM_CHECK_WITH_INFO(
         block_pool != nullptr, "remote connector requires a block pool for group tag=%s", group_tag.c_str());
     // TODO : get lora info map
@@ -252,7 +253,7 @@ std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnecto
                                                                sp_config_,
                                                                block_pool->getBaseAddress(),
                                                                block_pool->getTotalSizeBytes(),
-                                                               allocator_,
+                                                               coordinator_cache_manager_,
                                                                metrics_reporter_);
 
     RTP_LLM_CHECK_WITH_INFO(remote_connector_->init(), "remote connector init failed");
@@ -400,7 +401,7 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
         return true;
     }
     const uint32_t layer_all_num         = cache_config_.totalLayerNum();
-    auto           layer_block_converter = std::make_shared<LayerBlockConverterImpl>(allocator_);
+    auto           layer_block_converter = std::make_shared<LayerBlockConverterImpl>(coordinator_cache_manager_);
 
     auto p2p_config = P2PConnectorConfig::create(
         runtime_config_, cache_store_config_, parallelism_config_, pd_sep_config_, layer_all_num);

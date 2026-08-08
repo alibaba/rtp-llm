@@ -13,11 +13,11 @@
 namespace rtp_llm {
 namespace {
 
-GroupBase makeLayoutGroup(std::string tag, std::vector<int> layer_ids) {
+GroupTopology makeLayoutGroup(std::string tag, std::vector<int> layer_ids) {
     auto spec = std::make_shared<MHAKVCacheSpec>(512, 128);
     spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag       = std::move(tag);
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -109,7 +109,7 @@ TEST(CacheLayerLayoutTest, RejectsLayerWithoutCacheGroups) {
 }
 
 TEST(CacheLayerLayoutTest, TagAccessIsIndependentOfTopologyTraversalOrder) {
-    auto make_layout = [](std::vector<GroupBase> groups, std::vector<std::string> layer_tags) {
+    auto make_layout = [](std::vector<GroupTopology> groups, std::vector<std::string> layer_tags) {
         auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
         GroupedCacheLayerLayout::GroupLayouts layouts;
         layouts.emplace("a", makeLayerLayout(1, {0}, 1));

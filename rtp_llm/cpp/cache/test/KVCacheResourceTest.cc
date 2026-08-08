@@ -14,11 +14,11 @@ namespace test {
 
 namespace {
 
-GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
+GroupTopology makeResourceGroup(std::string tag, CacheGroupType type) {
     auto spec = std::make_shared<MHAKVCacheSpec>(8, type == CacheGroupType::FULL ? 2 : 8);
     spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag       = std::move(tag);
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(type);
@@ -256,7 +256,7 @@ TEST(CacheConfigTest, SetTopologyDerivesSparseFromOpaqueKv) {
     auto spec                 = std::make_shared<OpaqueKVCacheSpec>(8, 2);
     spec->tag                 = "opaque";
 
-    GroupBase group;
+    GroupTopology group;
     group.tag       = spec->tag;
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);

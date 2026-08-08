@@ -145,7 +145,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     MallocInfo info{resource, token_ids};
     auto       cp_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
     mgr->cp_slot_mapper_ = cp_mapper;
-    mgr->allocator_->setCPSlotMapper(cp_mapper);
+    mgr->coordinator_cache_manager_->setCPSlotMapper(cp_mapper);
 
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
@@ -246,7 +246,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
 
     MallocInfo info{resource, token_ids};
     mgr->cp_slot_mapper_ = explicit_mapper;
-    mgr->allocator_->setCPSlotMapper(explicit_mapper);
+    mgr->coordinator_cache_manager_->setCPSlotMapper(explicit_mapper);
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 

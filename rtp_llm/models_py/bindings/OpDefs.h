@@ -97,11 +97,11 @@ private:
         }
     }
 
-    size_t physicalSeqSize(const rtp_llm::GroupBase& group) const {
+    size_t physicalSeqSize(const rtp_llm::GroupTopology& group) const {
         return group.spec->seq_size_per_block;
     }
 
-    int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupBase& group) const {
+    int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupTopology& group) const {
         const auto physical_seq_size = physicalSeqSize(group);
         const auto kernel_seq_size   = group.spec->kernel_seq_size_per_block;
         RTP_LLM_CHECK_WITH_INFO(kernel_seq_size > 0 && physical_seq_size >= kernel_seq_size
@@ -139,8 +139,9 @@ private:
         return tensor.view({kernel_block_num, kernel_seq_size, tensor.numel() / page_elements});
     }
 
-    LayerKVCache
-    makeLayerCache(int layer_id, const rtp_llm::GroupBase& group, const rtp_llm::BlockBufferPtrInfo& buffers) const {
+    LayerKVCache makeLayerCache(int                                layer_id,
+                                const rtp_llm::GroupTopology&      group,
+                                const rtp_llm::BlockBufferPtrInfo& buffers) const {
         RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.defined(),
                                 "KV cache tensor must be defined for layer=%d tag=%s",
                                 layer_id,

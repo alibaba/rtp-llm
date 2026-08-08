@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -74,26 +74,29 @@ static CacheBlockKind copyItemBlockKind(const MemoryOperationRequestPB::CopyItem
     }
 }
 
-KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                                               const KVCacheConfig&                     kv_cache_config,
-                                               const ParallelismConfig&                 parallelism_config,
-                                               const std::shared_ptr<KVCacheAllocator>& allocator,
-                                               const std::vector<std::string>&          tp_addrs,
-                                               const kmonitor::MetricsReporterPtr&      metrics_reporter):
+KVCacheMemoryConnector::KVCacheMemoryConnector(
+    const CacheConfig&                                cache_config,
+    const KVCacheConfig&                              kv_cache_config,
+    const ParallelismConfig&                          parallelism_config,
+    const std::shared_ptr<CoordinatorKVCacheManager>& coordinator_cache_manager,
+    const std::vector<std::string>&                   tp_addrs,
+    const kmonitor::MetricsReporterPtr&               metrics_reporter):
     cache_config_(cache_config),
     kv_cache_config_(kv_cache_config),
     parallelism_config_(parallelism_config),
-    allocator_(allocator),
+    coordinator_cache_manager_(coordinator_cache_manager),
     tp_addrs_(tp_addrs),
     layer_group_slots_(buildLayerGroupSlots(cache_config)),
     metrics_reporter_(metrics_reporter) {}
 
-KVCacheMemoryConnector::KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                                               const KVCacheConfig&                     kv_cache_config,
-                                               const std::shared_ptr<KVCacheAllocator>& allocator,
-                                               const std::vector<std::string>&          tp_addrs,
-                                               const kmonitor::MetricsReporterPtr&      metrics_reporter):
-    KVCacheMemoryConnector(cache_config, kv_cache_config, ParallelismConfig{}, allocator, tp_addrs, metrics_reporter) {}
+KVCacheMemoryConnector::KVCacheMemoryConnector(
+    const CacheConfig&                                cache_config,
+    const KVCacheConfig&                              kv_cache_config,
+    const std::shared_ptr<CoordinatorKVCacheManager>& coordinator_cache_manager,
+    const std::vector<std::string>&                   tp_addrs,
+    const kmonitor::MetricsReporterPtr&               metrics_reporter):
+    KVCacheMemoryConnector(
+        cache_config, kv_cache_config, ParallelismConfig{}, coordinator_cache_manager, tp_addrs, metrics_reporter) {}
 
 KVCacheMemoryConnector::~KVCacheMemoryConnector() {
     RTP_LLM_LOG_INFO("KVCacheMemoryConnector destructor");
@@ -1845,8 +1848,9 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const NormalizedCopyItems&   
                 byte_off += slot.stride_bytes;
                 continue;
             }
-            const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
-            size_t     within_layer_off = 0;
+            const auto gpu_buffers =
+                coordinator_cache_manager_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
+            size_t within_layer_off = 0;
             for (const auto& gpu_buffer : gpu_buffers) {
                 if (within_layer_off + gpu_buffer.size_bytes > slot.stride_bytes
                     || byte_off + within_layer_off + gpu_buffer.size_bytes > backing_buffer.size_bytes) {
@@ -1942,7 +1946,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const NormalizedCopyItem&          ite
             byte_off += slot.stride_bytes;
             continue;
         }
-        const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
+        const auto gpu_buffers = coordinator_cache_manager_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
         size_t     within_layer_off = 0;
         for (const auto& gpu_buffer : gpu_buffers) {
             const auto off = byte_off + within_layer_off;
@@ -2013,7 +2017,7 @@ bool KVCacheMemoryConnector::prepareCopyBuffers(BlockIdxType                    
             continue;
         }
 
-        const auto gpu_buffers      = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
+        const auto gpu_buffers = coordinator_cache_manager_->convertIndexToBuffer(slot.layer_id, slot.tag, gpu_block);
         size_t     within_layer_off = 0;
         for (const auto& gpu_buffer : gpu_buffers) {
             if (within_layer_off + gpu_buffer.size_bytes > layer_stride) {
