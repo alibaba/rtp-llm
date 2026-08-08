@@ -50,13 +50,13 @@ def _positive_float(value: Any, name: str) -> float:
 class VisionEncoderConfig:
     def __init__(
         self,
-        model_name: str = "siglip_large_patch16_384",
+        model_name: str = "siglip_so400m_patch14_384",
         image_size: int = 384,
-        patch_size: int = 16,
-        width: int = 1024,
-        layers: int = 24,
+        patch_size: int = 14,
+        width: int = 1152,
+        layers: int = 27,
         heads: int = 16,
-        mlp_ratio: float = 4,
+        mlp_ratio: float = 3.7362,
         global_pool: str = "map",
         ignore_head: bool = True,
         class_token: bool = False,
@@ -311,7 +311,13 @@ class DeepSeekVLV2VisionModel(RtpModule):
             raise ValueError(
                 "DeepSeek-VL2 SigLIP checkpoint requires image_size=384, "
                 "patch_size=14, width=1152, layers=27, heads=16, and "
-                "mlp_ratio=3.7362"
+                "mlp_ratio=3.7362; got "
+                f"image_size={self.vision_config.image_size}, "
+                f"patch_size={self.vision_config.patch_size}, "
+                f"width={self.vision_config.width}, "
+                f"layers={self.vision_config.layers}, "
+                f"heads={self.vision_config.heads}, and "
+                f"mlp_ratio={self.vision_config.mlp_ratio}"
             )
         if self.vision_config.width != self.projector_config.input_dim:
             raise ValueError(

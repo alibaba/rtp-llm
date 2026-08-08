@@ -389,6 +389,36 @@ def _partition(load_config: Any, prefix: str) -> tuple[int, int]:
     return size, rank
 
 
+def validate_deepseek_newloader_eplb(
+    model_config: Any,
+    model_name: str,
+) -> None:
+    """Reject EPLB before constructing a DeepSeek newloader model."""
+
+    eplb_config = getattr(model_config, "eplb_config", None)
+    enable_eplb = getattr(eplb_config, "enable_eplb", False)
+    if callable(enable_eplb):
+        enable_eplb = enable_eplb()
+    if not isinstance(enable_eplb, bool):
+        raise TypeError("eplb_config.enable_eplb must be a bool")
+    if enable_eplb:
+        raise ValueError(f"EPLB is not supported by the {model_name} newloader path")
+
+
+def validate_deepseek_mla_backend(
+    model_config: Any,
+    use_mla: bool,
+    model_name: str,
+) -> None:
+    """Reject the legacy expanded-MHA fallback for an MLA checkpoint."""
+
+    if use_mla and getattr(model_config, "mla_ops_type", None) == MlaOpsType.MHA:
+        raise ValueError(
+            f"{model_name} newloader does not support the legacy expanded-MHA "
+            "fallback for an MLA checkpoint"
+        )
+
+
 # ------------------------------------------------------------------ #
 #  Config extraction (mirrors DeepSeekV2._from_hf)
 # ------------------------------------------------------------------ #
@@ -411,14 +441,7 @@ def extract_config_values(
             return obj.get(name, default)
         return getattr(obj, name, default)
 
-    eplb_config = _get(model_config, "eplb_config", None)
-    enable_eplb = _get(eplb_config, "enable_eplb", False)
-    if callable(enable_eplb):
-        enable_eplb = enable_eplb()
-    if not isinstance(enable_eplb, bool):
-        raise TypeError("eplb_config.enable_eplb must be a bool")
-    if enable_eplb:
-        raise ValueError("EPLB is not supported by the DeepSeek newloader path")
+    validate_deepseek_newloader_eplb(model_config, "DeepSeek")
 
     hidden_size = positive_int(_get(model_config, "hidden_size", 7168), "hidden_size")
     num_layers = positive_int(
@@ -462,12 +485,12 @@ def extract_config_values(
             _get(attn_config, "use_mla", False),
             "attn_config.use_mla",
         )
-        mla_ops_type = _get(model_config, "mla_ops_type", None)
-        if not use_mla or mla_ops_type == MlaOpsType.MHA:
+        if not use_mla:
             raise ValueError(
                 "DeepSeek newloader requires an MLA attention backend; "
                 "the legacy expanded-MHA fallback is not supported"
             )
+        validate_deepseek_mla_backend(model_config, use_mla, "DeepSeek")
 
     rms_norm_eps = _positive_float(
         _get(
@@ -589,8 +612,9 @@ def extract_config_values(
         has_e_score_correction, "has_e_score_correction"
     )
 
-    # Only the sparse indexer consumes an interleave flag. MLA RoPE itself is
-    # applied by the backend and does not read a model-level is_neox_style.
+    # The model-level MLA RoPE interleave flag is consumed by the attention
+    # backend through ModelConfig. The separate flag below controls only the
+    # sparse indexer RoPE layout.
     indexer_rope_interleave = _get(model_config, "indexer_rope_interleave", None)
     if indexer_rope_interleave is None and config_json:
         indexer_rope_interleave = config_json.get("indexer_rope_interleave", False)

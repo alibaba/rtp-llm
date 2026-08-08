@@ -1054,7 +1054,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
     def test_config_rejects_legacy_expanded_mha_fallback(self):
         config = _model_config()
         config.mla_ops_type = "MHA"
-        with self.assertRaisesRegex(ValueError, "requires an MLA attention backend"):
+        with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
             extract_config_values(config, _load_config(), _raw_config())
 
     def test_sparse_indexer_fast_and_sparse_call_sequences(self):
@@ -1857,7 +1857,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             block = DeepSeekV32MoEBlock(
                 hidden_size=8,
                 moe_intermediate_size=4,
-                num_experts=64,
+                num_experts=128,
                 top_k=2,
                 layer_idx=3,
                 tp_size=1,
@@ -1865,7 +1865,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 ep_size=1,
                 ep_rank=0,
                 model_config=_router_model_config(
-                    expert_num=64,
+                    expert_num=128,
                     moe_n_group=64,
                     moe_topk_group=2,
                 ),
@@ -1926,6 +1926,46 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertFalse(block._use_fast_group_topk)
         self.assertIsNone(block.group_topk)
         group_topk.assert_not_called()
+
+    def test_noaux_router_single_expert_groups_match_scalar_reference(self):
+        logits = torch.tensor(
+            [[-1.0, 0.25, 2.0, 0.5], [1.5, -0.5, 0.0, 0.75]],
+            dtype=torch.float32,
+        )
+        correction_bias = torch.tensor(
+            [0.4, -0.3, 0.2, -0.1],
+            dtype=torch.float32,
+        )
+        actual_weights, actual_ids = _select_deepseek_noaux_topk(
+            logits,
+            correction_bias,
+            top_k=2,
+            n_group=4,
+            topk_group=2,
+            renormalize=True,
+            routed_scaling_factor=1.0,
+        )
+        expected_weights, expected_ids = _manual_noaux_reference(
+            logits,
+            correction_bias,
+            top_k=2,
+            n_group=4,
+            topk_group=2,
+            renormalize=True,
+            routed_scaling_factor=1.0,
+        )
+        actual_order = actual_ids.argsort(dim=-1)
+        expected_order = expected_ids.argsort(dim=-1)
+        self.assertTrue(
+            torch.equal(
+                actual_ids.gather(1, actual_order),
+                expected_ids.gather(1, expected_order),
+            )
+        )
+        torch.testing.assert_close(
+            actual_weights.gather(1, actual_order),
+            expected_weights.gather(1, expected_order),
+        )
 
     def test_greedy_top1_normalization_uses_reference_path_on_cuda(self):
         with (

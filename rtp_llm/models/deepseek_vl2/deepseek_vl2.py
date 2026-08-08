@@ -8,6 +8,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.ops import MlaOpsType
+from rtp_llm.utils.model_weight import yarn_get_mscale
 
 
 class DeepSeekVLV2(BaseModel):
@@ -107,6 +108,53 @@ class DeepSeekVLV2(BaseModel):
             config.attn_config.rope_config.offset = config.attn_config.nope_head_dim
             config.attn_config.rope_config.style = (
                 5 if config.mla_ops_type == MlaOpsType.MHA else 0
+            )
+            rope_scaling = config_json.get("rope_scaling")
+            if rope_scaling is not None:
+                if not isinstance(rope_scaling, dict):
+                    raise TypeError("language_config.rope_scaling must be a mapping")
+                required_yarn_fields = {
+                    "factor",
+                    "original_max_position_embeddings",
+                    "mscale",
+                    "mscale_all_dim",
+                }
+                missing_yarn_fields = required_yarn_fields - rope_scaling.keys()
+                if missing_yarn_fields:
+                    raise ValueError(
+                        "language_config.rope_scaling is missing required fields: "
+                        + ", ".join(sorted(missing_yarn_fields))
+                    )
+                scaling_factor = float(rope_scaling["factor"])
+                mscale = float(rope_scaling["mscale"])
+                mscale_all_dim = float(rope_scaling["mscale_all_dim"])
+                config.attn_config.rope_config.scale = scaling_factor
+                config.attn_config.rope_config.factor1 = float(
+                    rope_scaling.get("beta_slow", 1)
+                )
+                config.attn_config.rope_config.factor2 = float(
+                    rope_scaling.get("beta_fast", 32)
+                )
+                config.attn_config.rope_config.max_pos = int(
+                    rope_scaling["original_max_position_embeddings"]
+                )
+                config.deepseek_rope_mscale = mscale
+                config.deepseek_mscale_all_dim = mscale_all_dim
+                config.attn_config.rope_config.mscale = yarn_get_mscale(
+                    scaling_factor, mscale
+                ) / yarn_get_mscale(scaling_factor, mscale_all_dim)
+                softmax_mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
+                config.attn_config.softmax_extra_scale = softmax_mscale * softmax_mscale
+
+            rope_interleave = config_json.get("rope_interleave", True)
+            if not isinstance(rope_interleave, bool):
+                raise TypeError("language_config.rope_interleave must be bool")
+            config.attn_config.rope_config.is_neox_style = not rope_interleave
+            indexer_rope_interleave = config_json.get("indexer_rope_interleave", False)
+            if not isinstance(indexer_rope_interleave, bool):
+                raise TypeError("language_config.indexer_rope_interleave must be bool")
+            config.attn_config.rope_config.indexer_is_neox_style = (
+                not indexer_rope_interleave
             )
         else:
             config.attn_config.size_per_head = (

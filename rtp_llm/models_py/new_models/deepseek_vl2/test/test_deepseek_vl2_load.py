@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 import types
 import unittest
@@ -28,6 +29,7 @@ from rtp_llm.multimodal.multimodal_mixins.deepseek_vl2.deepseek_vl2_mixin import
     DeepSeekVLV2ImageEmbedding,
     DeepSeekVLV2Mixin,
 )
+from rtp_llm.ops import MlaOpsType
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -51,10 +53,15 @@ def _parallelism(ep_size=1):
     )
 
 
-def _load_config(ep_size=1):
+def _load_config(
+    ep_size=1,
+    *,
+    device="cpu",
+    compute_dtype=torch.float32,
+):
     return NewLoaderConfig(
-        compute_dtype=torch.float32,
-        device="cpu",
+        compute_dtype=compute_dtype,
+        device=device,
         quant_config=QuantizationConfig("none"),
         parallelism_config=_parallelism(ep_size),
         moe_config=types.SimpleNamespace(fake_balance_expert=False),
@@ -102,14 +109,20 @@ def _raw_language_config(*, use_mla=False, tie_word_embeddings=False):
     return config
 
 
-def _model_config(model_path, *, use_mla=False, tie_word_embeddings=False):
+def _model_config(
+    model_path,
+    *,
+    use_mla=False,
+    tie_word_embeddings=False,
+    max_seq_len=32,
+):
     return types.SimpleNamespace(
         model_type="deepseek_vl_v2",
         ckpt_path=model_path,
         hidden_size=4,
         num_layers=1,
         vocab_size=8,
-        max_seq_len=32,
+        max_seq_len=max_seq_len,
         layernorm_eps=1e-6,
         expert_num=2,
         moe_k=1,
@@ -124,6 +137,8 @@ def _model_config(model_path, *, use_mla=False, tie_word_embeddings=False):
         has_moe_norm=False,
         enable_fp32_lm_head=False,
         tie_word_embeddings=tie_word_embeddings,
+        eplb_config=types.SimpleNamespace(enable_eplb=False),
+        mla_ops_type=MlaOpsType.AUTO,
         attn_config=types.SimpleNamespace(
             head_num=2,
             kv_head_num=2,
@@ -136,6 +151,19 @@ def _model_config(model_path, *, use_mla=False, tie_word_embeddings=False):
             v_head_dim=1 if use_mla else 0,
         ),
     )
+
+
+def _model_config_for_raw(model_path, raw, *, use_mla):
+    config = _model_config(model_path, use_mla=use_mla)
+    config.hidden_size = raw.get("hidden_size", 4096)
+    config.num_layers = raw.get("num_hidden_layers", 30)
+    config.vocab_size = raw.get("vocab_size", 102400)
+    config.attn_config.head_num = raw.get("num_attention_heads", 32)
+    config.attn_config.kv_head_num = raw.get(
+        "num_key_value_heads", config.attn_config.head_num
+    )
+    config.attn_config.size_per_head = config.hidden_size // config.attn_config.head_num
+    return config
 
 
 def _write_config(model_path, raw_language):
@@ -206,7 +234,15 @@ def _dense_weights(*, use_mla=False, include_lm_head=True):
     return weights
 
 
-def _load_language(*, use_mla=False, tie_word_embeddings=False, mutate=None):
+def _load_language(
+    *,
+    use_mla=False,
+    tie_word_embeddings=False,
+    mutate=None,
+    max_seq_len=32,
+    device="cpu",
+    compute_dtype=torch.float32,
+):
     model_path = tempfile.TemporaryDirectory()
     raw = _raw_language_config(use_mla=use_mla, tie_word_embeddings=tie_word_embeddings)
     _write_config(model_path.name, raw)
@@ -220,8 +256,12 @@ def _load_language(*, use_mla=False, tie_word_embeddings=False, mutate=None):
                 model_path.name,
                 use_mla=use_mla,
                 tie_word_embeddings=tie_word_embeddings,
+                max_seq_len=max_seq_len,
             ),
-            load_config=_load_config(),
+            load_config=_load_config(
+                device=device,
+                compute_dtype=compute_dtype,
+            ),
             model_path=model_path.name,
         ).load()
     except Exception:
@@ -231,14 +271,15 @@ def _load_language(*, use_mla=False, tie_word_embeddings=False, mutate=None):
 
 
 class _FakeVision(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, token_count=4):
         super().__init__()
         self.proj = torch.nn.Linear(3, 1152)
+        self.token_count = token_count
 
     def forward_features(self, images):
         pooled = images.mean(dim=(-1, -2))
         features = self.proj(pooled)
-        return features[:, None, :].repeat(1, 4, 1)
+        return features[:, None, :].repeat(1, self.token_count, 1)
 
 
 def _vision_config():
@@ -364,6 +405,11 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
         )
         model._ensure_mla_kernel_layout()
         self.assertIsNotNone(model._mla_kernel_layout)
+
+    def test_mla_rope_cache_uses_runtime_max_seq_len(self):
+        model_path, model, _ = _load_language(use_mla=True, max_seq_len=64)
+        self.addCleanup(model_path.cleanup)
+        self.assertEqual(model.cos_sin_cache.shape[0], 64)
 
     def test_mla_lifecycle_preserves_fp32_rope_and_releases_checkpoint_weights(self):
         model_path, model, _ = _load_language(use_mla=True)
@@ -643,6 +689,45 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
             self.assertEqual(mla["q_lora_rank"], 0)
             self.assertEqual(mla["moe_layer_index"], [])
 
+    def test_model_config_layer_override_is_authoritative_and_topology_is_checked(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            raw = _raw_language_config(use_mla=False)
+            raw["num_hidden_layers"] = 2
+            config = _model_config(model_path, use_mla=False)
+            actual = _extract_config_values(config, _load_config(), raw)
+            self.assertEqual(actual["num_layers"], 1)
+
+            config.hidden_size = 8
+            with self.assertRaisesRegex(ValueError, "hidden_size mismatch"):
+                _extract_config_values(config, _load_config(), raw)
+
+    def test_layer_override_filters_only_declared_truncated_layers(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            raw = _raw_language_config(use_mla=False)
+            raw["num_hidden_layers"] = 2
+            _write_config(model_path, raw)
+            weights = _dense_weights(use_mla=False)
+            weights["language.model.layers.1.input_layernorm.weight"] = torch.ones(4)
+            save_file(weights, f"{model_path}/model.safetensors")
+
+            with torch.device("cpu"):
+                model = NewModelLoader(
+                    model_config=_model_config(model_path, use_mla=False),
+                    load_config=_load_config(),
+                    model_path=model_path,
+                ).load()
+
+            should_load = model.checkpoint_weight_name_filter()
+            self.assertFalse(
+                should_load("language.model.layers.1.input_layernorm.weight")
+            )
+            self.assertTrue(
+                should_load("language.model.layers.2.input_layernorm.weight")
+            )
+            self.assertTrue(
+                should_load("language.model.layers.invalid.input_layernorm.weight")
+            )
+
     def test_official_sparse_configs_preserve_variant_defaults(self):
         variants = (
             (
@@ -742,7 +827,11 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
             for raw, expected in variants:
                 with self.subTest(hidden_size=raw["hidden_size"]):
                     actual = _extract_config_values(
-                        _model_config(model_path, use_mla=expected["use_mla"]),
+                        _model_config_for_raw(
+                            model_path,
+                            raw,
+                            use_mla=expected["use_mla"],
+                        ),
                         _load_config(),
                         raw,
                     )
@@ -753,6 +842,7 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as model_path:
             raw = _raw_language_config(use_mla=True)
             raw["scoring_func"] = "sigmoid"
+            raw["first_k_dense_replace"] = 0
             del raw["topk_method"]
             with self.assertRaisesRegex(ValueError, "explicit topk_method"):
                 _extract_config_values(
@@ -761,11 +851,33 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
                     raw,
                 )
 
+            raw["first_k_dense_replace"] = 1
+            dense = _extract_config_values(
+                _model_config(model_path, use_mla=True),
+                _load_config(),
+                raw,
+            )
+            self.assertEqual(dense["moe_layer_index"], [])
+
+    def test_eplb_and_mla_mha_fallback_fail_before_model_construction(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            raw = _raw_language_config(use_mla=True)
+            config = _model_config(model_path, use_mla=True)
+            config.eplb_config.enable_eplb = lambda: True
+            with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
+                _extract_config_values(config, _load_config(), raw)
+
+            config.eplb_config.enable_eplb = False
+            config.mla_ops_type = MlaOpsType.MHA
+            with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
+                _extract_config_values(config, _load_config(), raw)
+
     def test_group_limited_routing_rejects_invalid_partition_and_capacity(self):
         with tempfile.TemporaryDirectory() as model_path:
             raw = _raw_language_config(use_mla=True)
             raw.update(
                 {
+                    "first_k_dense_replace": 0,
                     "n_routed_experts": 6,
                     "n_group": 4,
                     "topk_group": 1,
@@ -829,6 +941,42 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
         self.assertEqual(config.scoring_func, 1)
         self.assertTrue(config.has_moe_norm)
         self.assertEqual(config.routed_scaling_factor, 2.0)
+
+    def test_legacy_mla_config_preserves_rope_layout_and_yarn_scaling(self):
+        config = ModelConfig()
+        DeepSeekVLV2._from_hf(
+            config,
+            {
+                "language_config": {
+                    **_raw_language_config(use_mla=True),
+                    "rope_interleave": False,
+                    "indexer_rope_interleave": True,
+                    "rope_scaling": {
+                        "type": "yarn",
+                        "factor": 4.0,
+                        "original_max_position_embeddings": 32,
+                        "beta_fast": 16,
+                        "beta_slow": 2,
+                        "mscale": 1.0,
+                        "mscale_all_dim": 1.0,
+                    },
+                }
+            },
+        )
+        rope = config.attn_config.rope_config
+        self.assertTrue(rope.is_neox_style)
+        self.assertFalse(rope.indexer_is_neox_style)
+        self.assertEqual(rope.scale, 4.0)
+        self.assertEqual(rope.factor1, 2.0)
+        self.assertEqual(rope.factor2, 16.0)
+        self.assertEqual(rope.max_pos, 32)
+        self.assertEqual(rope.mscale, 1.0)
+        expected_softmax_mscale = 0.1 * math.log(4.0) + 1.0
+        self.assertAlmostEqual(
+            config.attn_config.softmax_extra_scale,
+            expected_softmax_mscale * expected_softmax_mscale,
+            places=6,
+        )
 
     def test_checkpoint_filter_keeps_all_language_tensors_but_rejects_vision(self):
         model = object.__new__(DeepSeekVLV2ForCausalLM)
@@ -948,6 +1096,28 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
         self.assertEqual(tuple(results[1][0].shape), (6, 4))
         self.assertIsNone(results[0][1])
         self.assertIsNone(results[1][1])
+
+    def test_image_embedding_preserves_two_by_three_tile_geometry(self):
+        config = _vision_config()
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_vl2.vision.timm.create_model",
+            side_effect=lambda *args, **kwargs: _FakeVision(token_count=16),
+        ):
+            vision = DeepSeekVLV2VisionModel(config, torch.float32)
+        embedding = DeepSeekVLV2ImageEmbedding(
+            types.SimpleNamespace(config=config),
+            vision_model=vision,
+        )
+        result, extra = embedding.embedding(
+            [torch.ones(7, 3, 14, 14), 2, 3],
+            mm_type=MMUrlType.IMAGE,
+        )
+
+        self.assertEqual(tuple(result.shape), (37, 4))
+        self.assertIsNone(extra)
+        torch.testing.assert_close(result[6], embedding.view_seperator)
+        for newline_index in (2, 5, 11, 16, 21, 26, 31, 36):
+            torch.testing.assert_close(result[newline_index], embedding.image_newline)
 
     def test_image_embedding_rejects_video_and_mismatched_tile_count(self):
         config = _vision_config()
@@ -1094,6 +1264,20 @@ class DeepSeekVLV2NewloaderTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "layers=27"):
             DeepSeekVLV2VisionModel(config, torch.float32)
+
+    def test_vision_defaults_match_the_legacy_fixed_siglip_topology(self):
+        config = _vision_config()
+        config["vision_config"] = {}
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_vl2.vision.timm.create_model",
+            side_effect=lambda *args, **kwargs: _FakeVision(),
+        ):
+            vision = DeepSeekVLV2VisionModel(config, torch.float32)
+        self.assertEqual(vision.vision_config.model_name, "siglip_so400m_patch14_384")
+        self.assertEqual(vision.vision_config.patch_size, 14)
+        self.assertEqual(vision.vision_config.width, 1152)
+        self.assertEqual(vision.vision_config.layers, 27)
+        self.assertEqual(vision.vision_config.mlp_ratio, 3.7362)
 
 
 if __name__ == "__main__":

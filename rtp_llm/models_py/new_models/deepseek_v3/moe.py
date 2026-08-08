@@ -21,6 +21,7 @@ from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules import FakeBalanceExpert, GroupTopK, SelectTopk
+from rtp_llm.models_py.modules.base.common.moe_topk import group_topk_supported
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
 from .mlp import DeepSeekV32MLP
@@ -409,11 +410,12 @@ class DeepSeekV32MoEBlock(RtpModule):
         self._use_fast_group_topk = (
             correction_bias
             and device_type == DeviceType.Cuda
-            and num_experts // n_group >= 2
-            # no_aux_tc_kernels uses a single WARP_SIZE=32 selection warp.
-            and n_group <= 32
-            and top_k <= 32
-            and not (top_k == 1 and has_moe_norm)
+            and group_topk_supported(
+                num_experts=num_experts,
+                n_group=n_group,
+                top_k=top_k,
+                renormalize=has_moe_norm,
+            )
         )
         self.group_topk = GroupTopK() if self._use_fast_group_topk else None
         if (

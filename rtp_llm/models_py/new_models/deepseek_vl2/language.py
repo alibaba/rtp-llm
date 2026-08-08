@@ -35,9 +35,14 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     build_rope_cache,
     nonnegative_int,
     positive_int,
+    validate_deepseek_mla_backend,
+    validate_deepseek_newloader_eplb,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
-from rtp_llm.models_py.new_models.deepseek_v3.moe import DeepSeekV32MoEBlock
+from rtp_llm.models_py.new_models.deepseek_v3.moe import (
+    DeepSeekV32MoEBlock,
+    normalize_topk_method,
+)
 from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.weight_mapper import WeightsMapper
@@ -88,26 +93,63 @@ def _extract_config_values(
     if not isinstance(raw_config, Mapping):
         raise TypeError("language_config must be a mapping")
 
-    hidden_size = positive_int(
-        raw_config.get("hidden_size", 4096),
-        "hidden_size",
-    )
-    num_layers = positive_int(
-        raw_config.get("num_hidden_layers", 30),
+    validate_deepseek_newloader_eplb(model_config, "DeepSeek-VL2")
+
+    hidden_size = positive_int(model_config.hidden_size, "hidden_size")
+    checkpoint_hidden_size = raw_config.get("hidden_size")
+    if (
+        checkpoint_hidden_size is not None
+        and positive_int(checkpoint_hidden_size, "hidden_size") != hidden_size
+    ):
+        raise ValueError(
+            f"hidden_size mismatch: ModelConfig({hidden_size})/"
+            f"checkpoint({checkpoint_hidden_size})"
+        )
+
+    num_layers = positive_int(model_config.num_layers, "num_layers")
+    checkpoint_num_layers = positive_int(
+        raw_config.get("num_hidden_layers", num_layers),
         "num_hidden_layers",
     )
-    vocab_size = positive_int(
-        raw_config.get("vocab_size", 102400),
-        "vocab_size",
-    )
-    num_heads = positive_int(
-        raw_config.get("num_attention_heads", 32),
-        "num_attention_heads",
-    )
-    num_kv_heads = positive_int(
-        raw_config.get("num_key_value_heads", num_heads),
-        "num_key_value_heads",
-    )
+    if num_layers > checkpoint_num_layers:
+        raise ValueError(
+            f"num_layers={num_layers} exceeds checkpoint "
+            f"num_hidden_layers={checkpoint_num_layers}"
+        )
+
+    vocab_size = positive_int(model_config.vocab_size, "vocab_size")
+    checkpoint_vocab_size = raw_config.get("vocab_size")
+    if (
+        checkpoint_vocab_size is not None
+        and positive_int(checkpoint_vocab_size, "vocab_size") != vocab_size
+    ):
+        raise ValueError(
+            f"vocab_size mismatch: ModelConfig({vocab_size})/"
+            f"checkpoint({checkpoint_vocab_size})"
+        )
+
+    max_seq_len = positive_int(model_config.max_seq_len, "max_seq_len")
+    attn_config = model_config.attn_config
+    num_heads = positive_int(attn_config.head_num, "num_attention_heads")
+    checkpoint_num_heads = raw_config.get("num_attention_heads")
+    if (
+        checkpoint_num_heads is not None
+        and positive_int(checkpoint_num_heads, "num_attention_heads") != num_heads
+    ):
+        raise ValueError(
+            f"num_attention_heads mismatch: ModelConfig({num_heads})/"
+            f"checkpoint({checkpoint_num_heads})"
+        )
+    num_kv_heads = positive_int(attn_config.kv_head_num, "num_key_value_heads")
+    checkpoint_num_kv_heads = raw_config.get("num_key_value_heads")
+    if (
+        checkpoint_num_kv_heads is not None
+        and positive_int(checkpoint_num_kv_heads, "num_key_value_heads") != num_kv_heads
+    ):
+        raise ValueError(
+            f"num_key_value_heads mismatch: ModelConfig({num_kv_heads})/"
+            f"checkpoint({checkpoint_num_kv_heads})"
+        )
     if hidden_size % num_heads:
         raise ValueError(
             f"hidden_size={hidden_size} must be divisible by "
@@ -115,8 +157,14 @@ def _extract_config_values(
         )
     head_dim = hidden_size // num_heads
 
-    use_mla = raw_config.get("use_mla", True)
-    use_mla = _bool_value(use_mla, "use_mla")
+    checkpoint_use_mla = _bool_value(raw_config.get("use_mla", True), "use_mla")
+    use_mla = _bool_value(attn_config.use_mla, "attn_config.use_mla")
+    if checkpoint_use_mla != use_mla:
+        raise ValueError(
+            f"use_mla mismatch: ModelConfig({use_mla})/"
+            f"checkpoint({checkpoint_use_mla})"
+        )
+    validate_deepseek_mla_backend(model_config, use_mla, "DeepSeek-VL2")
     q_lora_rank_value = raw_config.get("q_lora_rank", 1536)
     q_lora_rank = (
         0
@@ -193,19 +241,15 @@ def _extract_config_values(
         raw_config.get("norm_topk_prob", False), "norm_topk_prob"
     )
     topk_method_is_explicit = "topk_method" in raw_config
-    topk_method = raw_config.get("topk_method", "greedy")
-    if topk_method == "gready":
-        topk_method = "greedy"
-    if topk_method not in {"greedy", "group_limited_greedy", "noaux_tc"}:
-        raise ValueError(f"unsupported DeepSeek-VL2 topk_method={topk_method!r}")
-    if scoring_func == 1 and not topk_method_is_explicit:
+    topk_method = normalize_topk_method(raw_config.get("topk_method", "greedy")).value
+    if moe_layer_index and scoring_func == 1 and not topk_method_is_explicit:
         raise ValueError(
             "DeepSeek-VL2 sigmoid routing requires an explicit topk_method; "
             "the newloader cannot safely infer whether the checkpoint owns "
             "e_score_correction_bias"
         )
     correction_bias = topk_method == "noaux_tc"
-    if topk_method in {"group_limited_greedy", "noaux_tc"}:
+    if moe_layer_index and topk_method in {"group_limited_greedy", "noaux_tc"}:
         if num_experts % n_group:
             raise ValueError(
                 f"n_routed_experts={num_experts} must be divisible by "
@@ -217,10 +261,7 @@ def _extract_config_values(
                 f"num_experts_per_tok={top_k} exceeds grouped capacity={capacity}"
             )
 
-    rms_norm_eps = _positive_float(
-        raw_config.get("rms_norm_eps", 1e-6),
-        "rms_norm_eps",
-    )
+    rms_norm_eps = _positive_float(model_config.layernorm_eps, "rms_norm_eps")
     attn_tp_size, attn_tp_rank = _partition(load_config, "attn_tp")
     ffn_tp_size, ffn_tp_rank = _partition(load_config, "ffn_tp")
     lm_head_tp_size, lm_head_tp_rank = _partition(load_config, "lm_head_tp")
@@ -251,7 +292,9 @@ def _extract_config_values(
     return {
         "hidden_size": hidden_size,
         "num_layers": num_layers,
+        "checkpoint_num_layers": checkpoint_num_layers,
         "vocab_size": vocab_size,
+        "max_seq_len": max_seq_len,
         "num_heads": num_heads,
         "num_kv_heads": num_kv_heads,
         "head_dim": head_dim,
@@ -478,6 +521,7 @@ class DeepSeekVLV2ForCausalLM(GptModelBase):
         cfg = _extract_config_values(model_config, load_config, raw_config)
         self.use_mla = cfg["use_mla"]
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
+        self._checkpoint_num_layers = cfg["checkpoint_num_layers"]
         self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -518,13 +562,7 @@ class DeepSeekVLV2ForCausalLM(GptModelBase):
             device = torch.device(load_config.device)
             cos_sin_cache = build_rope_cache(
                 rope_config,
-                positive_int(
-                    raw_config.get(
-                        "max_position_embeddings",
-                        2048,
-                    ),
-                    "max_position_embeddings",
-                ),
+                cfg["max_seq_len"],
                 device,
             )
             self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
@@ -552,15 +590,40 @@ class DeepSeekVLV2ForCausalLM(GptModelBase):
             )
         return result
 
+    @staticmethod
+    def _checkpoint_layer_index(name: str) -> Optional[int]:
+        prefix = "language.model.layers."
+        if not name.startswith(prefix):
+            return None
+        layer_text, separator, _ = name[len(prefix) :].partition(".")
+        if not separator or not layer_text.isdigit():
+            return None
+        return int(layer_text)
+
     def checkpoint_weight_name_filter(self) -> Callable[[str], bool]:
         # The language loader owns every non-vision tensor. This both partitions
         # the multimodal checkpoint and ensures an unknown top-level tensor
         # reaches the strict dispatcher instead of being ignored by both
         # component loaders.
-        return lambda name: not (
-            name.startswith(("vision.", "projector."))
-            or name in {"image_newline", "view_seperator"}
-        )
+        num_layers = len(self.layers)
+
+        def should_load(name: str) -> bool:
+            if name.startswith(("vision.", "projector.")) or name in {
+                "image_newline",
+                "view_seperator",
+            }:
+                return False
+            layer_idx = self._checkpoint_layer_index(name)
+            if layer_idx is None:
+                return True
+            # A ModelConfig layer override intentionally truncates the model.
+            # Skip only layers known to belong to the declared checkpoint;
+            # out-of-range or malformed layer keys must still fail strictly.
+            if num_layers <= layer_idx < self._checkpoint_num_layers:
+                return False
+            return True
+
+        return should_load
 
     def load_weights(self, weights: Any) -> None:
         iterator = weights.items() if isinstance(weights, dict) else weights
