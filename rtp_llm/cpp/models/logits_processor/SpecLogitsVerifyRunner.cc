@@ -43,11 +43,8 @@ const MaskedByteLut& maskedByteLut() {
 
 SpecLogitsVerifyRunner::SpecLogitsVerifyRunner(): copy_stream_(cuda_graph::graphGetStreamFromPool(true)) {}
 
-void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
-                                              size_t active_streams,
-                                              int    propose_step,
-                                              size_t vocab_size,
-                                              size_t bitmask_words) {
+void SpecLogitsVerifyRunner::ensureBuffersFit(
+    size_t total_streams, size_t active_streams, int propose_step, size_t vocab_size, size_t bitmask_words) {
     const int64_t B    = static_cast<int64_t>(total_streams);
     const int64_t A    = static_cast<int64_t>(active_streams);
     const int64_t P    = static_cast<int64_t>(propose_step);
@@ -83,10 +80,11 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
     RTP_LLM_CHECK_WITH_INFO(task.draft_tokens.numel() >= B * P && task.draft_tokens.numel() % B == 0,
                             "spec logits runner draft token shape mismatch");
     const int64_t draft_cols = task.draft_tokens.numel() / B;
-    const int64_t draft_offset = draft_cols > P ? 1 : 0;
-    RTP_LLM_CHECK_WITH_INFO(draft_cols >= draft_offset + P, "spec logits runner draft token columns mismatch");
-    auto draft = task.draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
-    auto dst   = draft_tokens_cpu_.flatten().narrow(0, 0, B * P).view({B, P});
+    RTP_LLM_CHECK_WITH_INFO(draft_cols == P || draft_cols == P + 1,
+                            "spec logits runner requires P proposal columns with an optional leading anchor");
+    const int64_t draft_offset = draft_cols == P + 1 ? 1 : 0;
+    auto          draft        = task.draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
+    auto          dst          = draft_tokens_cpu_.flatten().narrow(0, 0, B * P).view({B, P});
     if (!draft.is_cuda()) {
         auto draft_i32 =
             draft.scalar_type() == torch::kInt32 ? draft.contiguous() : draft.to(torch::kInt32).contiguous();
@@ -217,28 +215,28 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
 
     const int64_t mask_elements = static_cast<int64_t>(active_rows * V);
     const int64_t cap_elements  = static_cast<int64_t>(B);
-    auto pinned_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU).pinned_memory(true);
-    auto pinned_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
+    auto          pinned_bool   = torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU).pinned_memory(true);
+    auto          pinned_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true);
     if (!cpu_slot->mask.defined() || cpu_slot->mask.numel() < mask_elements) {
         cpu_slot->mask = torch::empty({mask_elements}, pinned_bool);
     }
     if (!cpu_slot->cap.defined() || cpu_slot->cap.numel() < cap_elements) {
         cpu_slot->cap = torch::empty({cap_elements}, pinned_i32);
     }
-    auto mask_cpu = cpu_slot->mask.narrow(0, 0, mask_elements)
-                        .view({static_cast<int64_t>(active_rows), static_cast<int64_t>(V)});
+    auto mask_cpu =
+        cpu_slot->mask.narrow(0, 0, mask_elements).view({static_cast<int64_t>(active_rows), static_cast<int64_t>(V)});
     auto cap_cpu = cpu_slot->cap.narrow(0, 0, cap_elements);
 
     unpackMergedBitmaskToVocabMask(mask_cpu, active_rows, V, W);
     cap_cpu.copy_(spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(B)));
 
     cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(copy_stream_));
-    auto cuda_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
-    auto cuda_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto mask_gpu  = active_rows == rows
-                         ? torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool)
-                         : torch::zeros({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool);
-    auto cap_gpu = torch::empty({static_cast<int64_t>(B)}, cuda_i32);
+    auto                         cuda_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
+    auto                         cuda_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto                         mask_gpu  = active_rows == rows ?
+                                                 torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool) :
+                                                 torch::zeros({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool);
+    auto                         cap_gpu   = torch::empty({static_cast<int64_t>(B)}, cuda_i32);
     if (active_rows == rows) {
         mask_gpu.copy_(mask_cpu, /*non_blocking=*/true);
     } else {
@@ -254,7 +252,7 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     auto ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     ready->record(copy_stream_);
     cpu_slot->ready_event = ready;
-    auto consumed = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    auto consumed         = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
 
     result.spec_vocab_mask_gpu       = mask_gpu;
     result.spec_cap_gpu              = cap_gpu;

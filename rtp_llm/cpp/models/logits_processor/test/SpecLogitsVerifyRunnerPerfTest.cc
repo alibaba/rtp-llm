@@ -61,6 +61,20 @@ private:
     int     cap_;
 };
 
+class RecordingSpecProcessor: public SpecLogitsProcessor {
+public:
+    bool isSpecVerifyEligible() const override {
+        return true;
+    }
+
+    int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
+        observed_tokens.assign(request.draft_tokens, request.draft_tokens + request.propose_step);
+        return request.propose_step;
+    }
+
+    std::vector<int32_t> observed_tokens;
+};
+
 struct LatencyStats {
     double min_us  = 0;
     double mean_us = 0;
@@ -104,9 +118,9 @@ LatencyStats benchmarkCpu(Func&& func) {
 }
 
 void printStats(const std::string& label, const LatencyStats& stats) {
-    std::cout << std::fixed << std::setprecision(3) << "[spec-logits-perf] " << label
-              << " min_us=" << stats.min_us << " mean_us=" << stats.mean_us << " p50_us=" << stats.p50_us
-              << " p90_us=" << stats.p90_us << " max_us=" << stats.max_us << std::endl;
+    std::cout << std::fixed << std::setprecision(3) << "[spec-logits-perf] " << label << " min_us=" << stats.min_us
+              << " mean_us=" << stats.mean_us << " p50_us=" << stats.p50_us << " p90_us=" << stats.p90_us
+              << " max_us=" << stats.max_us << std::endl;
 }
 
 struct BuildLatencyStats {
@@ -174,9 +188,7 @@ TEST(SpecLogitsVerifyRunnerTest, PackedToDenseHandlesArbitraryBitsAndTail) {
     constexpr size_t bitmask_words = 2;
 
     SpecLogitsVerifyRunner runner;
-    runner.merged_bitmask_cpu_ = torch::tensor(
-        {1513931685, 5, -1513931686, 2},
-        torch::kInt32);
+    runner.merged_bitmask_cpu_ = torch::tensor({1513931685, 5, -1513931686, 2}, torch::kInt32);
     auto mask = torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(vocab_size)}, torch::kBool);
 
     runner.unpackMergedBitmaskToVocabMask(mask, rows, vocab_size, bitmask_words);
@@ -198,7 +210,7 @@ TEST(SpecLogitsVerifyRunnerTest, SparseActiveRowsLeaveInactiveRowsUnmasked) {
     constexpr size_t  vocab_size   = 35;
     constexpr int32_t masked_token = 34;
 
-    SpecLogitsVerifyRunner runner;
+    SpecLogitsVerifyRunner             runner;
     SpecLogitsVerifyRunner::LaunchTask task;
     task.total_streams = stream_count;
     task.propose_step  = propose_step;
@@ -249,7 +261,7 @@ TEST(SpecLogitsVerifyRunnerTest, AllActiveRowsUseDenseFastPath) {
     constexpr int32_t first_token  = 0;
     constexpr int32_t second_token = 34;
 
-    SpecLogitsVerifyRunner runner;
+    SpecLogitsVerifyRunner             runner;
     SpecLogitsVerifyRunner::LaunchTask task;
     task.total_streams = stream_count;
     task.propose_step  = propose_step;
@@ -291,6 +303,31 @@ TEST(SpecLogitsVerifyRunnerTest, AllActiveRowsUseDenseFastPath) {
     EXPECT_EQ(result.applied_processors[1].processor_idx, 3);
 }
 
+TEST(SpecLogitsVerifyRunnerTest, LeadingVerifyAnchorIsNotPassedAsProposal) {
+    constexpr int    propose_step = 3;
+    constexpr size_t vocab_size   = 35;
+
+    auto processor = std::make_shared<RecordingSpecProcessor>();
+
+    SpecLogitsVerifyRunner             runner;
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams = 1;
+    task.propose_step  = propose_step;
+    task.vocab_size    = vocab_size;
+    task.draft_tokens  = torch::tensor({99, 11, 12, 13}, torch::kInt32).reshape({1, propose_step + 1});
+    task.active.push_back({processor,
+                           /*stream_idx=*/0,
+                           /*processor_idx=*/0,
+                           /*stream_id=*/1,
+                           /*base_seq_len=*/0,
+                           /*base_output_len=*/0});
+
+    auto result = runner.buildInline(task);
+    ASSERT_TRUE(result.ready_event != nullptr);
+    result.ready_event->synchronize();
+    EXPECT_EQ((std::vector<int32_t>{11, 12, 13}), processor->observed_tokens);
+}
+
 // Manual perf test matching normal_profiler_wr3_1.json:
 // decode_stream_size=35, mtp_step=3, DeepSeek-V4 vocab_size=129280.
 // Run explicitly with --gtest_also_run_disabled_tests.
@@ -318,12 +355,11 @@ TEST(SpecLogitsVerifyRunnerPerfTest, DISABLED_DeepSeekFlashDecodeB35P3) {
     runner.merged_bitmask_cpu_ = torch::full({rows, bitmask_words},
                                              SpecLogitsProcessor::kBitmaskAllowAll,
                                              torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
-    auto dense_mask_cpu = torch::empty(
+    auto dense_mask_cpu        = torch::empty(
         {rows, kVocabSize}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU).pinned_memory(true));
 
     auto unpack_stats = benchmarkCpu([&]() {
-        runner.unpackMergedBitmaskToVocabMask(
-            dense_mask_cpu, static_cast<size_t>(rows), kVocabSize, bitmask_words);
+        runner.unpackMergedBitmaskToVocabMask(dense_mask_cpu, static_cast<size_t>(rows), kVocabSize, bitmask_words);
     });
     printStats("packed_to_dense_cpu", unpack_stats);
     EXPECT_FALSE(dense_mask_cpu.data_ptr<bool>()[0]);

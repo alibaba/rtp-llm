@@ -26,7 +26,8 @@ public:
         int                          propose_step  = 0;
         size_t                       vocab_size    = 0;
 
-        // Shape [B, P], dtype int32/int64, CPU or CUDA.
+        // Shape [B, P], or [B, P + 1] with a leading target-verify anchor;
+        // dtype int32/int64, CPU or CUDA.
         torch::Tensor                 draft_tokens;
         std::shared_ptr<torch::Event> draft_tokens_ready_event;
     };
@@ -54,16 +55,11 @@ public:
     LaunchResult buildInline(const LaunchTask& task);
 
 private:
-    void ensureBuffersFit(size_t total_streams,
-                          size_t active_streams,
-                          int    propose_step,
-                          size_t vocab_size,
-                          size_t bitmask_words);
+    void ensureBuffersFit(
+        size_t total_streams, size_t active_streams, int propose_step, size_t vocab_size, size_t bitmask_words);
     void materializeDraftTokensToCpu(const LaunchTask& task);
-    void unpackMergedBitmaskToVocabMask(const torch::Tensor& mask_cpu,
-                                        size_t               rows,
-                                        size_t               vocab_size,
-                                        size_t               bitmask_words);
+    void
+    unpackMergedBitmaskToVocabMask(const torch::Tensor& mask_cpu, size_t rows, size_t vocab_size, size_t bitmask_words);
 
 private:
     struct CpuArtifactSlot {
@@ -72,11 +68,11 @@ private:
         std::shared_ptr<torch::Event> ready_event;
     };
 
-    torch::Stream copy_stream_;
-    torch::Tensor draft_tokens_cpu_;
-    torch::Tensor processor_bitmask_cpu_;
-    torch::Tensor merged_bitmask_cpu_;
-    torch::Tensor spec_cap_cpu_;
+    torch::Stream                copy_stream_;
+    torch::Tensor                draft_tokens_cpu_;
+    torch::Tensor                processor_bitmask_cpu_;
+    torch::Tensor                merged_bitmask_cpu_;
+    torch::Tensor                spec_cap_cpu_;
     std::vector<CpuArtifactSlot> cpu_artifact_slots_;
 };
 
