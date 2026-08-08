@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.ADMISSION_SLO_REJECT_COUNT;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
@@ -81,6 +82,9 @@ public class BatchSchedulerReporter {
         // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
         monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
+        // SLO admission rejection count — requests rejected at submit (scheduler upgrade C)
+        monitor.register(ADMISSION_SLO_REJECT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(DECODE_INFLIGHT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -99,7 +103,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (17 metrics)");
+        log.info("BatchSchedulerReporter initialized (18 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -145,6 +149,16 @@ public class BatchSchedulerReporter {
                 "role", role,
                 "reason", reason);
         monitor.report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
+    }
+
+    /**
+     * Report an SLO admission rejection via {@code app.flexlb.admission.slo.reject.count}.
+     * Counted once per rejected request, tagged by role and the selected prefill endpoint IP.
+     */
+    public void reportAdmissionSloReject(String role, String engineIp) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role);
+        monitor.report(ADMISSION_SLO_REJECT_COUNT, tags, 1.0);
     }
 
     // ==================== Inflight metrics ====================

@@ -271,6 +271,8 @@ public class ConfigService {
         log.info("prefillPredictorType={}", config.getPrefillPredictorType());
         log.info("statusLongPollEnabled={}, statusLongPollTimeoutMs={}",
             config.isFlexlbStatusLongPollEnabled(), config.getFlexlbStatusLongPollTimeoutMs());
+        log.info("admissionSloEnabled={}, admissionSloMarginMs={}",
+            config.isFlexlbAdmissionSloEnabled(), config.getFlexlbAdmissionSloMarginMs());
         log.info("==========================================");
     }
 

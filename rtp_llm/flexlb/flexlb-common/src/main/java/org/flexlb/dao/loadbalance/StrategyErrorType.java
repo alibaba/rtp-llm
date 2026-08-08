@@ -23,6 +23,12 @@ public enum StrategyErrorType {
     // queue error
     QUEUE_FULL(8502, false),
     QUEUE_TIMEOUT(8503, false),
+    // SLO-aware admission rejection — the scheduler predicts the request cannot
+    // finish within its SLO even if admitted (est + wait + batcherWait > slo - margin),
+    // so it is rejected before occupying any queue slot. Same non-retryable segment
+    // style as QUEUE_FULL. NOTE: production frontend retry semantics for this code
+    // still need to be aligned before rollout.
+    SLO_REJECTED(8504, false),
 
     // batch dispatch error
     BATCH_DISPATCH_FAILED(8510, true),

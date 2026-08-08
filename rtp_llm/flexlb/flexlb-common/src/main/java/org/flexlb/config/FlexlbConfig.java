@@ -515,6 +515,26 @@ public class FlexlbConfig {
      */
     private int flexlbBatchMaxInflight = 100000;
 
+    // ========== SLO-Aware Admission Control ==========
+
+    /**
+     * Enable SLO-aware unified admission at FlexlbBatchScheduler.submit.
+     * When true, a request whose estimated completion time
+     * (predicted prefill + endpoint wait + batcher queue wait) exceeds
+     * (resolved SLO - flexlbAdmissionSloMarginMs) is rejected early with
+     * SLO_REJECTED instead of occupying a queue slot it cannot honor.
+     * Default false — enable explicitly via env for stress evaluation.
+     * Environment variable: FLEXLB_ADMISSION_SLO_ENABLED.
+     */
+    private boolean flexlbAdmissionSloEnabled = false;
+
+    /**
+     * Safety margin in milliseconds subtracted from the resolved SLO when
+     * evaluating admission. Covers predictor error and dispatch overhead.
+     * Environment variable: FLEXLB_ADMISSION_SLO_MARGIN_MS.
+     */
+    private long flexlbAdmissionSloMarginMs = 100;
+
     // ========== Batcher Algorithm Selection ==========
 
     /**

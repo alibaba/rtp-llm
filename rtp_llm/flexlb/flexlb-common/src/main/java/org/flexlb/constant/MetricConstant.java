@@ -145,6 +145,13 @@ public class MetricConstant {
     public static final String BATCHER_QUEUE_SIZE = "app.flexlb.batcher.queue.size";
 
     /**
+     * FlexLB SLO admission rejection count — requests rejected at submit because
+     * the predicted completion time exceeds the SLO budget (scheduler upgrade C).
+     * <p>Reported by BatchSchedulerReporter with role and engineIp tags.
+     */
+    public static final String ADMISSION_SLO_REJECT_COUNT = "app.flexlb.admission.slo.reject.count";
+
+    /**
      * Engine finished task list size
      */
     public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";

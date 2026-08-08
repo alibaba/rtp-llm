@@ -435,6 +435,82 @@ class FlexlbBatchSchedulerTest {
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
+    // ==================== SLO-aware admission (scheduler upgrade C) ====================
+
+    @Test
+    void admission_allows_request_within_slo_budget() throws Exception {
+        // est = seqLen(128), wait = 0, batcherWait = fixedWaitMs(300) → total = 428
+        // slo(50000) - margin(100) = 49900 ≥ 428 → admitted
+        config.setFlexlbAdmissionSloEnabled(true);
+        config.setFlexlbAdmissionSloMarginMs(100L);
+
+        CompletableFuture<Response> first = scheduler.submit(context(1101));
+        CompletableFuture<Response> second = scheduler.submit(context(1102));
+
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
+        assertEquals(1, sentBatches.size());
+    }
+
+    @Test
+    void admission_rejects_request_exceeding_slo_budget() throws Exception {
+        // total = est(128) + batcherWait(300) = 428 > slo(200) - margin(100) = 100 → rejected
+        config.setFlexlbAdmissionSloEnabled(true);
+        config.setFlexlbAdmissionSloMarginMs(100L);
+        config.setCostSloMs(200L);
+
+        CompletableFuture<Response> future = scheduler.submit(context(1111));
+
+        assertTrue(future.isDone(), "admission rejection must complete synchronously");
+        Response response = future.get(1, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.SLO_REJECTED.getErrorCode(), response.getCode());
+        assertTrue(response.getErrorMessage().contains("slo=200"));
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+        verify(reporter).reportAdmissionSloReject(anyString(), anyString());
+        // Clean rollback: no inflight/terminalStates residue → same request_id can resubmit
+        assertEquals(0, scheduler.getInflightSize());
+        config.setCostSloMs(50000L);
+        Response retry = scheduler.submit(context(1111)).get(2, TimeUnit.SECONDS);
+        assertTrue(retry.isSuccess(), "rejected request_id must be resubmittable (no dedup residue)");
+    }
+
+    @Test
+    void admission_disabled_allows_all_requests() throws Exception {
+        // Same tight SLO as the rejection case, but admission switch off (default)
+        // → request passes through untouched.
+        config.setCostSloMs(200L);
+        config.setFlexlbAdmissionSloMarginMs(100L);
+        assertFalse(config.isFlexlbAdmissionSloEnabled(), "admission must default to disabled");
+
+        CompletableFuture<Response> first = scheduler.submit(context(1121));
+        CompletableFuture<Response> second = scheduler.submit(context(1122));
+
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
+        verify(reporter, never()).reportAdmissionSloReject(anyString(), anyString());
+    }
+
+    @Test
+    void admission_margin_controls_rejection_threshold() throws Exception {
+        // Empty batcher queue → batcherWait = fixedWaitMs(300); total = est(128) + 300 = 428.
+        // slo = 600: margin=100 → slack 500 ≥ 428 → admitted;
+        //            margin=250 → slack 350 < 428 → rejected.
+        config.setFlexlbAdmissionSloEnabled(true);
+        config.setCostSloMs(600L);
+
+        config.setFlexlbAdmissionSloMarginMs(100L);
+        CompletableFuture<Response> admitted = scheduler.submit(context(1131));
+        assertTrue(admitted.get(2, TimeUnit.SECONDS).isSuccess(),
+                "margin=100 leaves enough slack — request must not be rejected");
+
+        // Queue drained → 1132 sees the same empty-queue batcherWait as 1131 did
+        config.setFlexlbAdmissionSloMarginMs(250L);
+        Response rejected = scheduler.submit(context(1132)).get(1, TimeUnit.SECONDS);
+        assertFalse(rejected.isSuccess());
+        assertEquals(StrategyErrorType.SLO_REJECTED.getErrorCode(), rejected.getCode());
+    }
+
     // ==================== BatchIdGenerator Snowflake uniqueness ====================
 
     @Test

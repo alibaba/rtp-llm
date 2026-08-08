@@ -154,6 +154,36 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
                     prefillEp, decodeEp, System.currentTimeMillis());
+
+            // SLO-aware unified admission (scheduler upgrade C): reject before the
+            // request occupies any inflight/queue slot when the predicted completion
+            // time already exceeds the SLO budget. Placed before InflightEntry
+            // registration so the rejection path only needs to release the decode
+            // reservation — no inflight/terminalStates residue, and the same
+            // request_id may be resubmitted later.
+            FlexlbConfig admissionConfig = configService.loadBalanceConfig();
+            if (admissionConfig.isFlexlbAdmissionSloEnabled()) {
+                long estMs = prefillEp.getPredictor().estimateMs(item.seqLen(), item.hitCache());
+                long waitMs = prefillEp.realWaitTimeMs();
+                long batcherWaitMs = prefillEp.batcherWaitMs();
+                long totalMs = estMs + waitMs + batcherWaitMs;
+                long sloMs = admissionConfig.resolveSloMs(item.seqLen());
+                long marginMs = admissionConfig.getFlexlbAdmissionSloMarginMs();
+                if (totalMs > sloMs - marginMs) {
+                    rollback(item);
+                    reporter.reportAdmissionSloReject(RoleType.PREFILL.name(), prefillEp.getIp());
+                    Logger.debug("flexlb_admission_slo_reject request_id={} total_ms={} est_ms={} "
+                                    + "wait_ms={} batcher_wait_ms={} slo_ms={} margin_ms={} worker={}",
+                            ctx.getRequestId(), totalMs, estMs, waitMs, batcherWaitMs,
+                            sloMs, marginMs, prefillEp.ipPort());
+                    completeError(future, StrategyErrorType.SLO_REJECTED,
+                            "SLO admission rejected: total=" + totalMs + "ms (est=" + estMs
+                                    + " wait=" + waitMs + " batcherWait=" + batcherWaitMs
+                                    + ") > slo=" + sloMs + " - margin=" + marginMs);
+                    return future;
+                }
+            }
+
             InflightEntry entry = new InflightEntry(item);
             InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
             if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
