@@ -13,6 +13,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.deepep
 class DeepGemmHybridExecutorSM100Test(
     DeepGemmHybridExecutorTestBase, unittest.TestCase
 ):
+    # SM100 uses FP4 for w13 (Gate/Up GEMM), which has lower precision than FP8
+    DIFF_THRESHOLD = 0.01
+
     def test_sm100_arm(self):
         self.assertTrue(has_deep_gemm())
         self.assertTrue(is_deep_gemm_e8m0_used())

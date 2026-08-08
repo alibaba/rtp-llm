@@ -1,4 +1,5 @@
 import functools
+import logging
 from contextlib import contextmanager
 from typing import Any, Callable, Generator, List, NoReturn, Optional, Tuple
 
@@ -8,21 +9,30 @@ import triton.language as tl
 
 from rtp_llm.utils.module_util import has_module, resolve_symbol
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "fp8_gemm_nt",
+    "fp8_fp4_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
+    "m_grouped_fp8_fp4_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked",
+    "m_grouped_fp8_fp4_gemm_nt_masked",
     "bf16_gemm_nt",
     "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked",
     "has_deep_gemm",
+    "has_fp8_fp4_gemm_nt",
     "is_deep_gemm_e8m0_used",
+    "is_sm100",
     "configure_deep_gemm_num_sms",
     "maybe_pack_ue8m0_scale",
+    "pre_pack_weight_ue8m0_scale",
 ]
 
 _deep_gemm_impl_new_map = {
     "fp8_gemm_nt": "fp8_gemm_nt",
+    "fp8_fp4_gemm_nt": "fp8_fp4_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "m_grouped_fp8_gemm_nt_masked",
     "bf16_gemm_nt": "bf16_gemm_nt",
@@ -32,6 +42,7 @@ _deep_gemm_impl_new_map = {
 
 _deep_gemm_impl_old_map = {
     "fp8_gemm_nt": "fp8_gemm_nt",
+    "fp8_fp4_gemm_nt": "fp8_fp4_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous": "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked": "fp8_m_grouped_gemm_nt_masked",
     "bf16_gemm_nt": "bf16_gemm_nt",
@@ -41,6 +52,7 @@ _deep_gemm_impl_old_map = {
 
 
 _fp8_gemm_nt_impl: Callable[..., Any] | None = None
+_fp8_fp4_gemm_nt_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_contiguous_impl: Callable[..., Any] | None = None
 _m_grouped_fp8_gemm_nt_masked_impl: Callable[..., Any] | None = None
 _bf16_gemm_nt_impl: Callable[..., Any] | None = None
@@ -49,9 +61,20 @@ _m_grouped_bf16_gemm_nt_masked_impl: Callable[..., Any] | None = None
 
 
 @functools.cache
+def is_sm100() -> bool:
+    """Check if current GPU is SM100 (Blackwell)."""
+    return torch.cuda.get_device_capability()[0] == 10
+
+
+@functools.cache
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
     return has_module("deep_gemm")
+
+
+def has_fp8_fp4_gemm_nt() -> bool:
+    """Whether the fp8_fp4_gemm_nt kernel is resolved and usable."""
+    return _fp8_fp4_gemm_nt_impl is not None
 
 
 @functools.cache
@@ -88,7 +111,8 @@ def _missing_deep_gemm() -> NoReturn:
 
 def _lazy_init_deep_gemm(symbols: List[str]) -> None:
     """Import deep_gemm and resolve symbols on first use."""
-    global _fp8_gemm_nt_impl, _m_grouped_fp8_gemm_nt_contiguous_impl, _m_grouped_fp8_gemm_nt_masked_impl
+    global _fp8_gemm_nt_impl, _fp8_fp4_gemm_nt_impl
+    global _m_grouped_fp8_gemm_nt_contiguous_impl, _m_grouped_fp8_gemm_nt_masked_impl
     global _bf16_gemm_nt_impl, _m_grouped_bf16_gemm_nt_contiguous_impl, _m_grouped_bf16_gemm_nt_masked_impl
 
     symbol_impls = [f"_{symbol}_impl" for symbol in symbols]
@@ -107,7 +131,7 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
 
     import deep_gemm
 
-    # resolve symbols
+    # resolve symbols, skip gracefully if a symbol is missing (e.g. FP4 on older DeepGEMM)
     for i, symbol in enumerate(symbols):
         symbol_impl = symbol_impls[i]
         try:
@@ -117,8 +141,11 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
                 _deep_gemm_impl_old_map[symbol],
             )
         except AttributeError:
-            raise RuntimeError(
-                f"DeepGEMM symbol {_deep_gemm_impl_new_map[symbol]} and {_deep_gemm_impl_old_map[symbol]} not found in deep_gemm module"
+            logger.warning(
+                "DeepGEMM symbol %s / %s not found, %s will be unavailable",
+                _deep_gemm_impl_new_map[symbol],
+                _deep_gemm_impl_old_map[symbol],
+                symbol,
             )
 
 
@@ -126,6 +153,7 @@ def _lazy_init_deep_gemm_once():
     _lazy_init_deep_gemm(
         [
             "fp8_gemm_nt",
+            "fp8_fp4_gemm_nt",
             "m_grouped_fp8_gemm_nt_contiguous",
             "m_grouped_fp8_gemm_nt_masked",
             "bf16_gemm_nt",
@@ -402,6 +430,41 @@ def fp8_gemm_nt(
     )
 
 
+def fp8_fp4_gemm_nt(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    c: Optional[torch.Tensor] = None,
+    recipe_a: Optional[Tuple[int, int]] = (1, 128),
+    recipe_b: Optional[Tuple[int, int]] = (1, 32),
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: bool = False,
+) -> None:
+    """Execute FP8xFP4 GEMM (A_fp8 * B_fp4^T) on SM100.
+
+    Args:
+        a: (fp8_data, scale) for activation
+        b: (fp4_packed_data, scale) for weight (FP4 packed as uint8)
+        output: Output BF16 tensor
+        c: Optional bias
+        recipe_a: A-side scaling recipe (gran_mn, gran_k)
+        recipe_b: B-side scaling recipe (gran_mn, gran_k)
+    """
+    global _fp8_fp4_gemm_nt_impl
+    if _fp8_fp4_gemm_nt_impl is None:
+        return _missing_deep_gemm()
+    _fp8_fp4_gemm_nt_impl(
+        a,
+        b,
+        output,
+        c=c,
+        recipe_a=recipe_a,
+        recipe_b=recipe_b,
+        compiled_dims=compiled_dims,
+        disable_ue8m0_cast=disable_ue8m0_cast,
+    )
+
+
 def m_grouped_fp8_gemm_nt_contiguous(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -440,6 +503,70 @@ def m_grouped_fp8_gemm_nt_contiguous(
     )
 
 
+def m_grouped_fp8_fp4_gemm_nt_contiguous(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    m_indices: torch.Tensor,
+    recipe_a: Optional[Tuple[int, int]] = (1, 128),
+    recipe_b: Optional[Tuple[int, int]] = (1, 32),
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: bool = False,
+) -> None:
+    """Execute grouped FP8xFP4 GEMM with contiguous layout on SM100.
+
+    A is FP8 activation, B is FP4 packed weight.
+    Uses m_grouped_fp8_fp4_gemm_nt_contiguous under the hood (same kernel, different recipe).
+    """
+    global _m_grouped_fp8_gemm_nt_contiguous_impl
+    if _m_grouped_fp8_gemm_nt_contiguous_impl is None:
+        return _missing_deep_gemm()
+    _m_grouped_fp8_gemm_nt_contiguous_impl(
+        a,
+        b,
+        output,
+        m_indices,
+        compiled_dims=compiled_dims,
+        disable_ue8m0_cast=disable_ue8m0_cast,
+        recipe_a=recipe_a,
+        recipe_b=recipe_b,
+    )
+
+
+def m_grouped_fp8_fp4_gemm_nt_masked(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+    recipe_a: Optional[Tuple[int, int]] = (1, 128),
+    recipe_b: Optional[Tuple[int, int]] = (1, 32),
+    compiled_dims: str = "nk",
+    disable_ue8m0_cast: bool = False,
+) -> None:
+    """Execute grouped FP8xFP4 GEMM with masked layout on SM100.
+
+    A is FP8 activation, B is FP4 packed weight.
+    """
+    global _m_grouped_fp8_gemm_nt_masked_impl
+    if _m_grouped_fp8_gemm_nt_masked_impl is None:
+        return _missing_deep_gemm()
+
+    a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
+
+    _m_grouped_fp8_gemm_nt_masked_impl(
+        a,
+        b,
+        output,
+        masked_m,
+        expected_m,
+        compiled_dims=compiled_dims,
+        disable_ue8m0_cast=disable_ue8m0_cast,
+        recipe_a=recipe_a,
+        recipe_b=recipe_b,
+    )
+
+
 def maybe_pack_ue8m0_scale(
     x: torch.Tensor, scale: torch.Tensor, disable_ue8m0_cast: bool
 ) -> torch.Tensor:
@@ -465,6 +592,30 @@ def maybe_pack_ue8m0_scale(
     return pack_ue8m0_kernel_launcher(scale, gran_mn)
 
 
+def pre_pack_weight_ue8m0_scale(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    disable_ue8m0_cast: Optional[bool] = None,
+) -> torch.Tensor:
+    """Pre-pack weight scales to UE8M0 format at init time.
+
+    Callers should invoke this once during model loading and store the result,
+    so that the per-forward packing in GEMM wrappers becomes a no-op.
+
+    Args:
+        weight: FP8 weight tensor (used to infer gran_mn).
+        weight_scale: Weight scale tensor to pack.
+        disable_ue8m0_cast: Whether to disable E8M0 cast. Defaults to
+            ``not is_deep_gemm_e8m0_used()``.
+
+    Returns:
+        Packed weight scale tensor (or the original if packing conditions are not met).
+    """
+    if disable_ue8m0_cast is None:
+        disable_ue8m0_cast = not is_deep_gemm_e8m0_used()
+    return maybe_pack_ue8m0_scale(weight, weight_scale, disable_ue8m0_cast)
+
+
 def m_grouped_fp8_gemm_nt_masked(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -473,6 +624,7 @@ def m_grouped_fp8_gemm_nt_masked(
     expected_m: int,
     compiled_dims: str = "nk",
     disable_ue8m0_cast: Optional[bool] = None,
+    b_prepacked: bool = False,
 ) -> None:
     """Execute grouped FP8 GEMM (A * B^T) with masked layout.
 
@@ -485,6 +637,9 @@ def m_grouped_fp8_gemm_nt_masked(
         compiled_dims (str, optional): Compiled dimensions. Defaults to "nk".
         disable_ue8m0_cast (bool, optional): Whether to disable E8M0 type cast for E8M0 scale.
             Defaults to None, which will be set to False if E8M0 scale is used, otherwise True.
+        b_prepacked (bool, optional): If True, skip UE8M0 packing for b scales (caller
+            already pre-packed via ``pre_pack_weight_ue8m0_scale`` at init time).
+            Defaults to False for backward compatibility.
     """
     global _m_grouped_fp8_gemm_nt_masked_impl
     if _m_grouped_fp8_gemm_nt_masked_impl is None:
@@ -497,7 +652,8 @@ def m_grouped_fp8_gemm_nt_masked(
     )
 
     a = (a[0], maybe_pack_ue8m0_scale(a[0], a[1], disable_ue8m0_cast))
-    b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
+    if not b_prepacked:
+        b = (b[0], maybe_pack_ue8m0_scale(b[0], b[1], disable_ue8m0_cast))
 
     _m_grouped_fp8_gemm_nt_masked_impl(
         a,

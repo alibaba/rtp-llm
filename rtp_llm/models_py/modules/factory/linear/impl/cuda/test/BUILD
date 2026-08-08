@@ -35,7 +35,13 @@ py_test(
 py_test(
     name = "fp4_gemm_linear_test",
     srcs = ["fp4_gemm_linear_test.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + [
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:cuda-bindings",
+        "//rtp_llm:cuda-python",
+        "//rtp_llm:cuda-pathfinder",
+        "//rtp_llm:nvidia-cutlass-dsl-libs-base",
+    ],
     tags = ["SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM'},
 )
