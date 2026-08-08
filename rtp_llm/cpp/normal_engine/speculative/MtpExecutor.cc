@@ -1274,6 +1274,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
     size_t batch_size             = model_input.input_lengths.size(0);
     spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
+    if (is_dspark_) {
+        draft_token_ids_t = model_input.combo_tokens.reshape(
+            {static_cast<int64_t>(batch_size), static_cast<int64_t>(propose_step_ + 1)});
+    }
     if (isTpRank0() && !model_input.is_fake_stream && hasUnsupportedMtpStatefulLogitsProcessor(streams)) {
         return absl::InternalError(
             "MTP spec decode found a stateful logits processor without SpecLogitsProcessor support; "
@@ -1326,20 +1330,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         spec_logits_async_launched = true;
     };
 
-    // DSpARK proposals are already part of the target-verify input as
-    // [anchor, p1..p_gamma] per stream. Launch spec-logits verification now so
-    // its D2H and CPU mask construction overlap the target forward. The runner
-    // accepts P+1 columns and skips the anchor internally.
-    if (spec_logits_processor_present && is_dspark_ && propose_step_ > 1) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_dspark_spec_logits_verify_async)");
+    // Both proposal implementations have now produced the same target-verify
+    // rows. Launch once here so spec-logits D2H/CPU work overlaps target verify.
+    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
         const int64_t expected_verify_tokens =
             static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
-        const int64_t actual_verify_tokens = model_input.combo_tokens.defined() ? model_input.combo_tokens.numel() : -1;
+        const int64_t actual_verify_tokens = draft_token_ids_t.numel();
         RTP_LLM_CHECK_WITH_INFO(actual_verify_tokens == expected_verify_tokens,
-                                "dspark spec logits verify tokens mismatch: got %ld, expected %ld",
+                                "spec logits verify tokens mismatch: got %ld, expected %ld",
                                 actual_verify_tokens,
                                 expected_verify_tokens);
-        launch_spec_logits_verify_async(model_input.combo_tokens, draft_tokens_ready_event);
+        launch_spec_logits_verify_async(draft_token_ids_t, draft_tokens_ready_event);
     }
 
     // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
@@ -1375,11 +1377,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                                            draft_probs_list);
             }
         }
-    }
-
-    if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
-        launch_spec_logits_verify_async(draft_token_ids_t, draft_tokens_ready_event);
     }
 
     if (spec_logits_processor_present && !spec_logits_async_launched) {
