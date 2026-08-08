@@ -2006,6 +2006,16 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
 
+    // The previous decode round may still be mutating GenerateStream host
+    // state in the bookkeeping worker. Keep the default stream-async policy
+    // bounded to one outstanding round before prepareStreams reads that state.
+    // DROP_BROAD_SYNC deliberately relies on the narrower device-state syncs
+    // inside decodeStep instead.
+    if (useStreamAsync() && !useDropBroadSync()) {
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.wait_prev_bookkeeping(stream_count=%zu)", streams.size());
+        spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
+
     // prepare streams
     prepareStreams(streams, prefill_streams, decode_streams);
 
