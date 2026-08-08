@@ -63,12 +63,12 @@ inline std::shared_ptr<MHAKVCacheSpec> makeResolvedMhaSpec(rtp_llm::DataType  dt
     return std::dynamic_pointer_cast<MHAKVCacheSpec>(SpecBuilder::build(desc, ctx).first);
 }
 
-inline GroupBase
-makeTestGroupBase(const KVCacheSpecPtr& spec, CacheGroupPolicy policy, std::vector<int> layer_ids = {}) {
+inline GroupTopology
+makeTestGroupTopology(const KVCacheSpecPtr& spec, CacheGroupPolicy policy, std::vector<int> layer_ids = {}) {
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "test cache group requires a non-null spec");
     RTP_LLM_CHECK_WITH_INFO(!spec->tag.empty(), "test cache group requires a non-empty tag");
 
-    GroupBase group;
+    GroupTopology group;
     group.tag                   = spec->tag;
     group.spec                  = spec;
     group.policy                = policy;
@@ -78,12 +78,12 @@ makeTestGroupBase(const KVCacheSpecPtr& spec, CacheGroupPolicy policy, std::vect
     return group;
 }
 
-inline GroupBase makeTestGroupForConfig(const CacheConfig&              config,
-                                        const KVCacheSpecPtr&           spec,
-                                        std::vector<int>                layer_ids,
-                                        CacheGroupType                  type,
-                                        std::string                     tag    = {},
-                                        std::optional<CacheGroupPolicy> policy = std::nullopt) {
+inline GroupTopology makeTestGroupForConfig(const CacheConfig&              config,
+                                            const KVCacheSpecPtr&           spec,
+                                            std::vector<int>                layer_ids,
+                                            CacheGroupType                  type,
+                                            std::string                     tag    = {},
+                                            std::optional<CacheGroupPolicy> policy = std::nullopt) {
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "test cache group requires a non-null spec");
     if (tag.empty()) {
         tag = spec->tag;
@@ -93,7 +93,7 @@ inline GroupBase makeTestGroupForConfig(const CacheConfig&              config,
     auto stored_spec = spec->clone();
     stored_spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag    = std::move(tag);
     group.spec   = std::move(stored_spec);
     group.policy = policy.value_or(defaultCacheGroupPolicy(type));
@@ -107,7 +107,7 @@ inline GroupBase makeTestGroupForConfig(const CacheConfig&              config,
     return group;
 }
 
-inline void setTestTopology(CacheConfig& config, std::vector<GroupBase> groups) {
+inline void setTestTopology(CacheConfig& config, std::vector<GroupTopology> groups) {
     size_t layer_count = config.layer_num;
     for (const auto& group : groups) {
         for (int layer_id : group.layer_ids) {
@@ -118,7 +118,7 @@ inline void setTestTopology(CacheConfig& config, std::vector<GroupBase> groups) 
     }
     RTP_LLM_CHECK_WITH_INFO(layer_count > 0, "test topology requires a positive layer count");
 
-    std::vector<LayerBase> layers(layer_count);
+    std::vector<LayerTopology> layers(layer_count);
     for (size_t layer_id = 0; layer_id < layer_count; ++layer_id) {
         layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
@@ -151,10 +151,10 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
                             group_num);
 
     std::vector<std::vector<int>> group_layer_ids(static_cast<size_t>(group_num));
-    std::vector<LayerBase>        layers;
+    std::vector<LayerTopology>    layers;
     layers.reserve(static_cast<size_t>(layer_num));
     for (int layer_id = 0; layer_id < layer_num; ++layer_id) {
-        LayerBase layer;
+        LayerTopology layer;
         layer.layer_id = layer_id;
         for (int group_id : layer_group_ids[static_cast<size_t>(layer_id)]) {
             RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && group_id < group_num,
@@ -167,8 +167,8 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
         layers.push_back(std::move(layer));
     }
 
-    const size_t           blocks_per_kv_block = std::max<size_t>(1, kernel_blocks_per_kv_block);
-    std::vector<GroupBase> groups;
+    const size_t               blocks_per_kv_block = std::max<size_t>(1, kernel_blocks_per_kv_block);
+    std::vector<GroupTopology> groups;
     groups.reserve(static_cast<size_t>(group_num));
     for (int group_id = 0; group_id < group_num; ++group_id) {
         const auto tag        = "group" + std::to_string(group_id);
@@ -177,7 +177,7 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
             group_type == CacheGroupType::FULL ? 1 : static_cast<uint32_t>(blocks_per_kv_block);
         auto spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag, kernel_seq_size);
 
-        GroupBase group;
+        GroupTopology group;
         group.tag       = tag;
         group.spec      = std::move(spec);
         group.policy    = defaultCacheGroupPolicy(group_type);
@@ -613,7 +613,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     auto linear_spec = makeLinearSpec("linear", tokens_per_block, dtype, local_head_num_kv, size_per_head);
     auto full_spec   = makeMhaSpec("full", tokens_per_block, dtype, local_head_num_kv, size_per_head);
 
-    std::vector<GroupBase> groups;
+    std::vector<GroupTopology> groups;
     groups.reserve(static_cast<size_t>(group_cnt));
 
     for (int gid = 0; gid < group_cnt; ++gid) {

@@ -10,11 +10,11 @@
 namespace rtp_llm {
 namespace {
 
-GroupBase makeGroup(std::string tag, std::vector<int> layer_ids, CacheGroupType type = CacheGroupType::FULL) {
+GroupTopology makeGroup(std::string tag, std::vector<int> layer_ids, CacheGroupType type = CacheGroupType::FULL) {
     auto spec = std::make_shared<MHAKVCacheSpec>(8, type == CacheGroupType::FULL ? 2 : 8);
     spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag       = std::move(tag);
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(type);

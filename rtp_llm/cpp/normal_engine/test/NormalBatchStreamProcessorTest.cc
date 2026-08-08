@@ -49,8 +49,8 @@ static void initFullCacheConfig(CacheConfig& cache_config,
 }
 
 static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, const std::vector<std::string>& tags) {
-    std::vector<GroupBase> groups;
-    std::vector<int>       layer_ids(static_cast<size_t>(layer_num));
+    std::vector<GroupTopology> groups;
+    std::vector<int>           layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     for (const auto& tag : tags) {
         auto spec = std::make_shared<MHAKVCacheSpec>();
@@ -149,8 +149,8 @@ TEST_F(NormalBatchStreamProcessorTest, testPerGroupCacheLayoutMaps) {
     cache_config.seq_size_per_block = 1;
     const auto full_spec            = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 2, 8, 1, "full");
     const auto linear_spec          = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 1, "linear");
-    auto       full = test::makeTestGroupForConfig(cache_config, full_spec, {0}, CacheGroupType::FULL, "full");
-    auto linear = test::makeTestGroupForConfig(cache_config, linear_spec, {0}, CacheGroupType::LINEAR, "linear");
+    auto       full   = test::makeTestGroupForConfig(cache_config, full_spec, {0}, CacheGroupType::FULL, "full");
+    auto       linear = test::makeTestGroupForConfig(cache_config, linear_spec, {0}, CacheGroupType::LINEAR, "linear");
     test::setTestTopology(cache_config, {full, linear});
 
     NormalBatchStreamProcessor processor(

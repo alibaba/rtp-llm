@@ -225,18 +225,18 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_group",
+    name = "single_type_kv_cache_manager",
     srcs = [
-        "FullKVCacheGroup.cc",
-        "KVCacheGroup.cc",
-        "LinearKVCacheGroup.cc",
-        "SWAKVCacheGroup.cc",
+        "FullKVCacheManager.cc",
+        "SingleTypeKVCacheManager.cc",
+        "LinearKVCacheManager.cc",
+        "SWAKVCacheManager.cc",
     ],
     hdrs = [
-        "FullKVCacheGroup.h",
-        "KVCacheGroup.h",
-        "LinearKVCacheGroup.h",
-        "SWAKVCacheGroup.h",
+        "FullKVCacheManager.h",
+        "SingleTypeKVCacheManager.h",
+        "LinearKVCacheManager.h",
+        "SWAKVCacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -247,9 +247,9 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_allocator_hdr",
+    name = "coordinator_kv_cache_manager_hdr",
     hdrs = [
-        "KVCacheAllocator.h",
+        "CoordinatorKVCacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -262,20 +262,19 @@ cc_library(
 )
 
 cc_library(
-    name = "kv_cache_allocator",
+    name = "coordinator_kv_cache_manager",
     srcs = [
-        "HybridPoolKVCacheAllocator.cc",
+        "HybridPoolCoordinatorKVCacheManager.cc",
     ],
     hdrs = [
-        "HybridPoolKVCacheAllocator.h",
-        "KVCacheAllocator.h",
+        "HybridPoolCoordinatorKVCacheManager.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":cp_slot_mapper",
-        ":kv_cache_allocator_hdr",
-        ":kv_cache_group",
+        ":coordinator_kv_cache_manager_hdr",
+        ":single_type_kv_cache_manager",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
@@ -314,7 +313,7 @@ cc_library(
     deps = [
         ":batch_kv_cache_resource",
         ":cache_types",
-        ":kv_cache_allocator",
+        ":coordinator_kv_cache_manager",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",

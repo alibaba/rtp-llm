@@ -1,8 +1,8 @@
-// CP-shard (Stage 5, Plan A) UTs for HybridPoolKVCacheAllocator.
+// CP-shard (Stage 5, Plan A) UTs for HybridPoolCoordinatorKVCacheManager.
 //
 // These exercise the cp_slot_mapper plumbing in initMallocForCommonLen,
 // incrMalloc and insertIntoCache. The shape of the tests
-// piggybacks on the helpers in HybridPoolKVCacheAllocatorTest.cc but
+// piggybacks on the helpers in HybridPoolCoordinatorKVCacheManagerTest.cc but
 // keeps the configuration self-contained so the two files build cleanly
 // alongside each other.
 
@@ -15,7 +15,7 @@
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolCoordinatorKVCacheManager.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -86,7 +86,7 @@ seedCache(BlockPoolPtr block_pool, SharedBlockCachePtr shared_cache, std::string
 
 }  // namespace
 
-class HybridPoolKVCacheAllocatorCPShardTest: public ::testing::Test {
+class HybridPoolCoordinatorKVCacheManagerCPShardTest: public ::testing::Test {
 protected:
     void SetUp() override {
         rtp_llm::initLogger();
@@ -96,9 +96,9 @@ protected:
 
 // 1) When cp_slot_mapper is null/passthrough, behavior is identical to the non-CP baseline:
 //    a request occupying 4 logical blocks allocates 4 blocks in the full group.
-TEST_F(HybridPoolKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
+TEST_F(HybridPoolCoordinatorKVCacheManagerCPShardTest, NullMapperIsPassthrough) {
     auto config    = makeCPHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridPoolCoordinatorKVCacheManager>(config, AllocationType::DEVICE);
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -116,9 +116,9 @@ TEST_F(HybridPoolKVCacheAllocatorCPShardTest, NullMapperIsPassthrough) {
 
 // 2) With cp_slot_mapper(cp_rank=0, cp_size=2, block_size=4): a 4-block request allocates ceil(4/2)=2
 //    physical blocks on this rank for the full group.
-TEST_F(HybridPoolKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
+TEST_F(HybridPoolCoordinatorKVCacheManagerCPShardTest, ShardedAllocHalvesFullGroup) {
     auto config    = makeCPHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridPoolCoordinatorKVCacheManager>(config, AllocationType::DEVICE);
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -137,9 +137,9 @@ TEST_F(HybridPoolKVCacheAllocatorCPShardTest, ShardedAllocHalvesFullGroup) {
 
 // 3) Reuse path: cache the last-rank canonical key and confirm a second malloc hits it,
 //    returning reuse_len in units of virtualBlockSize (= block_size * cp_size).
-TEST_F(HybridPoolKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
+TEST_F(HybridPoolCoordinatorKVCacheManagerCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     auto config    = makeCPHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridPoolCoordinatorKVCacheManager>(config, AllocationType::DEVICE);
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -170,9 +170,9 @@ TEST_F(HybridPoolKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
 }
 
 // 4) When reuse is disabled, cp_slot_mapper still translates seq_len for malloc and skips the match.
-TEST_F(HybridPoolKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
+TEST_F(HybridPoolCoordinatorKVCacheManagerCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
     auto config    = makeCPHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridPoolCoordinatorKVCacheManager>(config, AllocationType::DEVICE);
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -196,9 +196,9 @@ TEST_F(HybridPoolKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled
 // 5) insertIntoCache uses last-rank canonical keys and virtualBlockSize when sharded:
 //    a 12-token request (full_blocks_num = floor(12/8)=1 virtual block) inserts only key {103}
 //    (= last-rank canonical key at index cp_size-1=1 of the first virtual block window).
-TEST_F(HybridPoolKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVirtualBlockSize) {
+TEST_F(HybridPoolCoordinatorKVCacheManagerCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVirtualBlockSize) {
     auto config    = makeCPHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridPoolCoordinatorKVCacheManager>(config, AllocationType::DEVICE);
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 
@@ -229,9 +229,9 @@ TEST_F(HybridPoolKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAn
 }
 
 // 6) Two-malloc smoke: cp_size=4 sharding, request occupies 8 logical blocks ⇒ 2 per rank.
-TEST_F(HybridPoolKVCacheAllocatorCPShardTest, ShardedAllocCpSize4) {
+TEST_F(HybridPoolCoordinatorKVCacheManagerCPShardTest, ShardedAllocCpSize4) {
     auto config    = makeCPHybridConfig();
-    auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridPoolCoordinatorKVCacheManager>(config, AllocationType::DEVICE);
     allocator->setSharedBlockCache(std::make_shared<SharedBlockCache>());
     ASSERT_TRUE(allocator->init());
 

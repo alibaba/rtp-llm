@@ -2,15 +2,15 @@
 
 #include <gmock/gmock.h>
 
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
 
 namespace rtp_llm {
 
-class MockKVCacheAllocator: public KVCacheAllocator {
+class MockCoordinatorKVCacheManager: public CoordinatorKVCacheManager {
 public:
-    explicit MockKVCacheAllocator(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
-        KVCacheAllocator(config, atype) {}
-    ~MockKVCacheAllocator() override = default;
+    explicit MockCoordinatorKVCacheManager(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
+        CoordinatorKVCacheManager(config, atype) {}
+    ~MockCoordinatorKVCacheManager() override = default;
 
 public:
     MOCK_METHOD(void, free, (const FreeInfo&), (override));

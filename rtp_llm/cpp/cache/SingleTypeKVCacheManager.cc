@@ -1,15 +1,15 @@
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeKVCacheManager.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-bool KVCacheGroup::init() {
+bool SingleTypeKVCacheManager::init() {
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 
-    const auto& layer_ids = cache_group_.layer_ids;
+    const auto& layer_ids = group_topology_.layer_ids;
     RTP_LLM_CHECK_WITH_INFO(layer_tensors.size() >= layer_ids.size(),
                             "layer_tensors size (%zu) is less than layer_ids size (%zu)",
                             layer_tensors.size(),
@@ -32,7 +32,7 @@ bool KVCacheGroup::init() {
     return true;
 }
 
-bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
+bool SingleTypeKVCacheManager::ensureFreeBlocks(int required_blocks) {
     if (required_blocks <= 0) {
         return true;
     }
@@ -77,23 +77,23 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
     return true;
 }
 
-MatchResult KVCacheGroup::match(const CacheKeysType& cache_keys) {
+MatchResult SingleTypeKVCacheManager::match(const CacheKeysType& cache_keys) {
     return matchPrefix(cache_keys);
 }
 
-MatchResult KVCacheGroup::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
-    RTP_LLM_FAIL("KVCacheGroup tag=%s does not support prefix matching", tag().c_str());
+MatchResult SingleTypeKVCacheManager::matchPrefix(const CacheKeysType& /*cache_keys*/) const {
+    RTP_LLM_FAIL("SingleTypeKVCacheManager tag=%s does not support prefix matching", tag().c_str());
     return {};
 }
 
-MatchResult KVCacheGroup::matchSingleKey(CacheKeyType /*cache_key*/) const {
-    RTP_LLM_FAIL("KVCacheGroup tag=%s does not support single-key matching", tag().c_str());
+MatchResult SingleTypeKVCacheManager::matchSingleKey(CacheKeyType /*cache_key*/) const {
+    RTP_LLM_FAIL("SingleTypeKVCacheManager tag=%s does not support single-key matching", tag().c_str());
     return {};
 }
 
-void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
-                                   const BlockIndicesType& block_indices,
-                                   bool                    is_resident) {
+void SingleTypeKVCacheManager::insertIntoCache(const CacheKeysType&    cache_keys,
+                                               const BlockIndicesType& block_indices,
+                                               bool                    is_resident) {
     if (!shared_cache_) {
         return;
     }
@@ -107,89 +107,91 @@ void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     }
 }
 
-size_t KVCacheGroup::freeBlocksNum() const {
+size_t SingleTypeKVCacheManager::freeBlocksNum() const {
     return block_pool_->freeBlocksNum();
 }
 
-int KVCacheGroup::seqSizePerBlock() const {
-    return static_cast<int>(cache_group_.spec->seq_size_per_block);
+int SingleTypeKVCacheManager::seqSizePerBlock() const {
+    return static_cast<int>(group_topology_.spec->seq_size_per_block);
 }
 
-const std::string& KVCacheGroup::tag() const {
-    return cache_group_.tag;
+const std::string& SingleTypeKVCacheManager::tag() const {
+    return group_topology_.tag;
 }
 
-const GroupBase& KVCacheGroup::config() const {
-    return cache_group_;
+const GroupTopology& SingleTypeKVCacheManager::config() const {
+    return group_topology_;
 }
 
-const CacheGroupPolicy& KVCacheGroup::policy() const {
-    return cache_group_.policy;
+const CacheGroupPolicy& SingleTypeKVCacheManager::policy() const {
+    return group_topology_.policy;
 }
 
-bool KVCacheGroup::prefixReuseEnabled() const {
+bool SingleTypeKVCacheManager::prefixReuseEnabled() const {
     return policy().enable_prefix_reuse;
 }
 
-CacheEvictPolicy KVCacheGroup::evictPolicy() const {
+CacheEvictPolicy SingleTypeKVCacheManager::evictPolicy() const {
     return policy().evict_policy;
 }
 
-uint32_t KVCacheGroup::explicitBlockNum() const {
+uint32_t SingleTypeKVCacheManager::explicitBlockNum() const {
     return policy().explicit_block_num;
 }
 
-size_t KVCacheGroup::activeTailBlocks() const {
+size_t SingleTypeKVCacheManager::activeTailBlocks() const {
     return policy().active_tail_blocks > 0 ? static_cast<size_t>(policy().active_tail_blocks) : 0;
 }
 
-std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerCacheBase() const {
+std::unordered_map<int, torch::Tensor> SingleTypeKVCacheManager::allLayerCacheBase() const {
     return global_layer_to_kv_tensors;
 }
 
-std::unordered_map<int, torch::Tensor> KVCacheGroup::allLayerScaleCacheBase() const {
+std::unordered_map<int, torch::Tensor> SingleTypeKVCacheManager::allLayerScaleCacheBase() const {
     return global_layer_to_kv_scale_tensors;
 }
 
-BlockAddrInfo KVCacheGroup::convertIndexToAddr(int layer_id, int block_id) const {
+BlockAddrInfo SingleTypeKVCacheManager::convertIndexToAddr(int layer_id, int block_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToAddr(local_layer_id, block_id);
 }
 
-std::vector<BlockInfo> KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id) const {
+std::vector<BlockInfo> SingleTypeKVCacheManager::convertIndexToBuffer(int layer_id, int block_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id);
 }
 
-std::vector<BlockInfo>
-KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
+std::vector<BlockInfo> SingleTypeKVCacheManager::convertIndexToBuffer(int layer_id,
+                                                                      int block_id,
+                                                                      int partition_count,
+                                                                      int partition_id) const {
     auto it = global_layer_to_local_layer.find(layer_id);
     RTP_LLM_CHECK_WITH_INFO(it != global_layer_to_local_layer.end(), "invalid layer_id: " + std::to_string(layer_id));
     int local_layer_id = it->second;
     return block_pool_->convertIndexToBuffer(local_layer_id, block_id, partition_count, partition_id);
 }
 
-void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
+void SingleTypeKVCacheManager::reference(const BlockIndicesType& new_block_indices) {
     block_pool_->requestReference(new_block_indices);
 }
 
-bool KVCacheGroup::prefixReusable() const {
+bool SingleTypeKVCacheManager::prefixReusable() const {
     return policy().enable_prefix_reuse;
 }
 
-bool KVCacheGroup::hasSparseSlots() const {
+bool SingleTypeKVCacheManager::hasSparseSlots() const {
     return policy().group_type != CacheGroupType::FULL;
 }
 
-bool KVCacheGroup::transferTailBlocks() const {
+bool SingleTypeKVCacheManager::transferTailBlocks() const {
     return activeTailBlocks() > 0;
 }
 
-bool KVCacheGroup::isReservable() const {
+bool SingleTypeKVCacheManager::isReservable() const {
     return policy().reservable;
 }
 

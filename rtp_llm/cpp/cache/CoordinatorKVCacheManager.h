@@ -30,18 +30,18 @@ struct KVCachePoolMetricsSnapshot {
     float       used_ratio           = 0.0f;
 };
 
-class KVCacheAllocator {
+class CoordinatorKVCacheManager {
 public:
-    KVCacheAllocator(const CacheConfig&                 config,
-                     AllocationType                     allocation_type     = AllocationType::DEVICE,
-                     const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                     int64_t                            reserve_block_ratio = 0):
+    CoordinatorKVCacheManager(const CacheConfig&                 config,
+                              AllocationType                     allocation_type     = AllocationType::DEVICE,
+                              const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                              int64_t                            reserve_block_ratio = 0):
         config_(config),
         allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
         reserve_block_ratio_(reserve_block_ratio) {}
 
-    virtual ~KVCacheAllocator() = default;
+    virtual ~CoordinatorKVCacheManager() = default;
 
     bool                           init();
     virtual void                   free(const FreeInfo& free_info)                                                = 0;
@@ -154,6 +154,6 @@ protected:
     int64_t reserve_block_ratio_{0};
 };
 
-using KVCacheAllocatorPtr = std::shared_ptr<KVCacheAllocator>;
+using CoordinatorKVCacheManagerPtr = std::shared_ptr<CoordinatorKVCacheManager>;
 
 }  // namespace rtp_llm

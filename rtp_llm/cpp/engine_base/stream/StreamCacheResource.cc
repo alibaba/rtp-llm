@@ -27,7 +27,7 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
         auto           spec            = std::make_shared<MHAKVCacheSpec>();
         spec->tag                      = kWarmupCacheTag;
 
-        GroupBase group;
+        GroupTopology group;
         group.tag       = kWarmupCacheTag;
         group.spec      = std::move(spec);
         group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);

@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-/// @brief 封装 KVCacheAllocator 的 convertIndexToBuffer 接口，将 block_id 转换为 BlockInfo
+/// @brief 封装 CoordinatorKVCacheManager 的 convertIndexToBuffer 接口，将 block_id 转换为 BlockInfo
 class LayerBlockConverter {
 public:
     virtual ~LayerBlockConverter() = default;

@@ -28,16 +28,16 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             prefill_cp_size};
 }
 
-GroupBase makeRpcGroup(std::string      tag,
-                       std::vector<int> layer_ids,
-                       uint32_t         physical_tokens = 8,
-                       uint32_t         kernel_tokens   = 8,
-                       CacheGroupType   group_type      = CacheGroupType::FULL,
-                       CpBlockSliceMode cp_slice        = CpBlockSliceMode::NONE) {
+GroupTopology makeRpcGroup(std::string      tag,
+                           std::vector<int> layer_ids,
+                           uint32_t         physical_tokens = 8,
+                           uint32_t         kernel_tokens   = 8,
+                           CacheGroupType   group_type      = CacheGroupType::FULL,
+                           CpBlockSliceMode cp_slice        = CpBlockSliceMode::NONE) {
     auto spec = std::make_shared<MHAKVCacheSpec>(physical_tokens, kernel_tokens);
     spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag                       = std::move(tag);
     group.spec                      = std::move(spec);
     group.policy                    = defaultCacheGroupPolicy(group_type);
@@ -47,12 +47,12 @@ GroupBase makeRpcGroup(std::string      tag,
     return group;
 }
 
-CacheConfig makeRpcConfig(std::vector<GroupBase> groups, bool use_mla = false) {
+CacheConfig makeRpcConfig(std::vector<GroupTopology> groups, bool use_mla = false) {
     CacheConfig config;
     config.seq_size_per_block = 8;
     config.layer_num          = static_cast<uint32_t>(groups.size());
     config.use_mla            = use_mla;
-    std::vector<LayerBase> layers;
+    std::vector<LayerTopology> layers;
     layers.reserve(groups.size());
     for (size_t layer_id = 0; layer_id < groups.size(); ++layer_id) {
         groups[layer_id].layer_ids = {static_cast<int>(layer_id)};
@@ -62,11 +62,11 @@ CacheConfig makeRpcConfig(std::vector<GroupBase> groups, bool use_mla = false) {
     return config;
 }
 
-GroupBase makeOpaqueRpcGroup(std::string tag) {
+GroupTopology makeOpaqueRpcGroup(std::string tag) {
     auto spec = std::make_shared<OpaqueKVCacheSpec>(8, 2);
     spec->tag = tag;
 
-    GroupBase group;
+    GroupTopology group;
     group.tag    = std::move(tag);
     group.spec   = std::move(spec);
     group.policy = defaultCacheGroupPolicy(CacheGroupType::FULL);

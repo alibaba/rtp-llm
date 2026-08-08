@@ -712,7 +712,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     auto& mutable_draft_config =
         const_cast<CacheConfig&>(components.executor->cache_manager_->getMTPModuleCacheConfig(0));
-    auto& mutable_draft_group = const_cast<GroupBase&>(mutable_draft_config.group("full"));
+    auto& mutable_draft_group = const_cast<GroupTopology&>(mutable_draft_config.group("full"));
     mutable_draft_group.kv_block_stride_bytes += 64;
 
     size_t batch_size = 1;
@@ -883,8 +883,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     };
     const auto& target_config = components.executor->cache_manager_->cacheConfig();
     const auto& draft_config  = components.executor->cache_manager_->getMTPModuleCacheConfig(0);
-    ASSERT_NE(target_config.kvBlockStrideBytesForGroup("full"),
-              draft_config.kvBlockStrideBytesForGroup("full"));
+    ASSERT_NE(target_config.kvBlockStrideBytesForGroup("full"), draft_config.kvBlockStrideBytesForGroup("full"));
     ASSERT_EQ(active_target_model->forwardedInputs().size(), 1u);
     expect_layout(active_target_model->forwardedInputs().front(), target_config);
     ASSERT_EQ(active_draft_model->forwardedInputs().size(), propose_step);
