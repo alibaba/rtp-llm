@@ -548,16 +548,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             ),
             kv_cache_sharded=self._dspark_kv_cache_sharded,
         )
-        if not getattr(self, "_dspark_cp_commit_logged", False):
-            self._dspark_cp_commit_logged = True
-            logging.info(
-                "[dspark] commit row map derived from standard CP metadata "
-                "(cp_size=%d, cp_rank=%d, kv_cache_sharded=%s, rows=%d)",
-                self.tp_size,
-                self.tp_rank,
-                self._dspark_kv_cache_sharded,
-                row_count,
-            )
         positions = cp_ctx.global_positions
         if int(positions.numel()) != int(row_count):
             raise RuntimeError(
@@ -597,16 +587,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
         )
-        if write_cache_store_impl is not None and not getattr(
-            self, "_dspark_commit_cache_store_logged", False
-        ):
-            self._dspark_commit_cache_store_logged = True
-            logging.info(
-                "[dspark-path] commit cache_store publishing draft layers "
-                "(cp_rr=%s, layers=%d)",
-                commit_ctx is not None and self._dspark_kv_cache_sharded,
-                len(self.v4.layers),
-            )
         gathered_req_ids: Optional[torch.Tensor] = None
         gathered_positions: Optional[torch.Tensor] = None
         if commit_ctx is not None:

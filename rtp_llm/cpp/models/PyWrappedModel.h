@@ -109,9 +109,6 @@ private:
     const bool                               enable_prefill_cp_;
     const bool                               is_dspark_draft_;
     const DSparkCallPhase                    dspark_graph_phase_;
-    // First-occurrence markers, keyed per (graph/eager, commit/propose), so
-    // smoke logs positively confirm every draft dispatch path that engaged.
-    bool dspark_dispatch_logged_[2][2] = {{false, false}, {false, false}};
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;

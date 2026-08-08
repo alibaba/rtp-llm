@@ -747,18 +747,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_target_verify,
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state_.current_real_graph_bs);
-            const bool is_dspark_commit = inputs.dspark_call_phase == DSparkCallPhase::COMMIT;
-            if (is_dspark_draft_ && !dspark_dispatch_logged_[0][is_dspark_commit]) {
-                dspark_dispatch_logged_[0][is_dspark_commit] = true;
-                const int graph_key = py_model_inputs.attention_inputs.is_prefill ?
-                                          graph_state_.current_real_graph_seq_len :
-                                          graph_state_.current_real_graph_bs;
-                RTP_LLM_LOG_INFO("[dspark-path] draft %s replayed %s CUDA graph (graph_key=%d, batch=%d)",
-                                 dsparkCallPhaseName(inputs.dspark_call_phase),
-                                 py_model_inputs.attention_inputs.is_prefill ? "prefill" : "decode",
-                                 graph_key,
-                                 graph_state_.current_batch_size);
-            }
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
@@ -767,13 +755,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
-            const bool is_dspark_commit = inputs.dspark_call_phase == DSparkCallPhase::COMMIT;
-            if (is_dspark_draft_ && !dspark_dispatch_logged_[1][is_dspark_commit]) {
-                dspark_dispatch_logged_[1][is_dspark_commit] = true;
-                RTP_LLM_LOG_INFO("[dspark-path] draft %s ran eager (is_prefill=%d)",
-                                 dsparkCallPhaseName(inputs.dspark_call_phase),
-                                 py_model_inputs.attention_inputs.is_prefill);
-            }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);

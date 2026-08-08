@@ -724,8 +724,6 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                                  is_dspark_,
                                                                  is_dspark_ ? DSparkCallPhase::COMMIT :
                                                                               DSparkCallPhase::NONE));
-            } else if (enable_cuda_graph && is_dspark_) {
-                RTP_LLM_LOG_INFO("[dspark-path] PREFILL role skips unused proposal/commit CUDA graph capture");
             }
         }
         break;  // NOTE: only support one mtp model now
@@ -862,10 +860,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
         model_output                        = std::move(model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        if (is_dspark_ && !dspark_target_prefill_logged_) {
-            dspark_target_prefill_logged_ = true;
-            RTP_LLM_LOG_INFO("[dspark-path] target prefill completed (cp_enabled=%d)", cp_enabled);
-        }
     }
 
     // eplb
@@ -945,12 +939,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // incremental-prefill geometry; output intentionally unused).
             // Proposals are produced exclusively at the decode round head and
             // are not persisted in stream or PD state.
-            if (!dspark_prefill_commit_logged_) {
-                dspark_prefill_commit_logged_ = true;
-                RTP_LLM_LOG_INFO("[dspark-path] prefill draft commit dispatch through standard CP path "
-                                 "(cp_enabled=%d)",
-                                 cp_enabled);
-            }
             (void)draft_model_->forward(model_input);
             draft_model_output = GptModelOutputs();
         } else {
@@ -1903,11 +1891,6 @@ GptModelOutputs MtpExecutor::runDSparkProposeForward(GptModelInputs& model_input
     // Its dedicated graph contract captures gamma rows per batch, distinct
     // from the gamma+1 commit contract.
     auto* propose_model = sp_prefill_draft_propose_model_ ? sp_prefill_draft_propose_model_.get() : draft_model_.get();
-    if (!dspark_propose_dispatch_logged_) {
-        dspark_propose_dispatch_logged_ = true;
-        RTP_LLM_LOG_INFO("[dspark-path] decode proposal dispatch to prefill CUDA graph model=%d",
-                         sp_prefill_draft_propose_model_ != nullptr);
-    }
     return propose_model->forward(model_input);
 }
 
