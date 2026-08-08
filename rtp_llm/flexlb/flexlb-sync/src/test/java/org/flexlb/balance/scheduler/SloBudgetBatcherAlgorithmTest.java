@@ -27,17 +27,21 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Drop-valve gating tests for {@link SloBudgetBatcherAlgorithm} (P0-1 fix):
- * the deadline_expired and inflight_full_guard drops are exempted only for
- * "Auto-TPM enabled AND head has priority"; no-priority (legacy) heads keep
- * the legacy drop protection regardless of the global switch.
+ * Drop-valve gating tests for {@link SloBudgetBatcherAlgorithm}: the
+ * deadline_expired and inflight_full_guard drops are gated solely on the
+ * Auto-TPM switch — normalize() assigns every production request a 1-100
+ * priority, so the former hasPriority() gate was removed (dead code); when
+ * the switch is off the legacy drops stay active for everyone.
  */
 class SloBudgetBatcherAlgorithmTest {
 
     // ---- deadline_expired valve ----
 
     @Test
-    void autoTpmOnLegacyHeadPastDeadlineIsDroppedAndReleasesQueueSlot() throws InterruptedException {
+    void autoTpmOnHeadWithoutPriorityFieldPastDeadlineFallsIntoDeadlineGuard() throws InterruptedException {
+        // hasPriority gate removed: the exemption depends only on the switch,
+        // so even a head whose priority field was never set (impossible in
+        // production — normalize() always assigns 1-100) is not dropped.
         FlexlbConfig config = autoTpmOnConfig();
         PrefillEndpoint endpoint = endpoint(0);
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
@@ -47,10 +51,10 @@ class SloBudgetBatcherAlgorithmTest {
 
         new SloBudgetBatcherAlgorithm().processQueue(ctx);
 
-        verify(handler).onExpired(head);
-        verify(handler, never()).onBatchReady(anyList(), any(DispatchMeta.class));
-        assertEquals(0, ctx.size(), "drop must release the reserved queue slot");
-        assertTrue(ctx.isEmpty());
+        verify(handler, never()).onExpired(any(BatchItem.class));
+        ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
+        verify(handler).onBatchReady(anyList(), meta.capture());
+        assertEquals("deadline_guard", meta.getValue().reason());
     }
 
     @Test
@@ -105,7 +109,9 @@ class SloBudgetBatcherAlgorithmTest {
     // ---- inflight_full_guard valve ----
 
     @Test
-    void autoTpmOnLegacyHeadUnderInflightGuardIsDropped() throws InterruptedException {
+    void autoTpmOnHeadWithoutPriorityFieldUnderInflightGuardIsParkedNotDropped() throws InterruptedException {
+        // hasPriority gate removed: the inflight_full_guard exemption also
+        // depends only on the switch — the head is parked, never dropped.
         FlexlbConfig config = autoTpmOnConfig();
         config.setFlexlbBatchSloMaxInflightBatches(1);
         PrefillEndpoint endpoint = endpoint(1); // backpressure active
@@ -116,8 +122,9 @@ class SloBudgetBatcherAlgorithmTest {
 
         new SloBudgetBatcherAlgorithm().processQueue(ctx);
 
-        verify(handler).onExpired(head);
-        assertEquals(0, ctx.size(), "inflight_full_guard drop must release the queue slot");
+        verify(handler, never()).onExpired(any(BatchItem.class));
+        verify(handler, never()).onBatchReady(anyList(), any(DispatchMeta.class));
+        assertEquals(1, ctx.size(), "parked head must stay queued");
     }
 
     @Test

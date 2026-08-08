@@ -174,26 +174,32 @@ class PriorityAdmissionSchedulerTest {
         verify(router, times(2)).route(any(BalanceContext.class));
     }
 
-    // ==================== task40: no-priority requests bypass the priority path ====================
+    // ==================== hasPriority gate removed: every request takes the priority path ====================
 
     @Test
-    void no_priority_request_goes_legacy_even_when_switch_on() throws Exception {
+    void request_without_priority_field_still_takes_priority_path_when_switch_on() throws Exception {
+        // hasPriority gate removed from FlexlbBatchScheduler.submit():
+        // normalize() always assigns 1-100 in production, so the switch is
+        // the sole gate — even a raw priority-0 context goes through the
+        // priority scheduler and is placed normally.
         Response response = scheduler.submit(context(61, 0)).get(2, TimeUnit.SECONDS);
 
         assertTrue(response.isSuccess());
-        verify(priorityScheduler, never()).schedule(any(), any(), any());
-        verify(priorityReporter, never()).reportNormalPlacement(anyInt());
+        verify(priorityScheduler).schedule(any(), any(), any());
+        // The envelope carries the context priority untouched (0 here).
+        verify(priorityReporter).reportNormalPlacement(eq(0));
     }
 
     @Test
-    void no_priority_request_with_no_worker_fails_8400_directly() throws Exception {
+    void request_without_priority_field_and_no_worker_fails_8400_via_priority_path() throws Exception {
         when(router.route(any(BalanceContext.class))).thenReturn(null);
 
         Response response = scheduler.submit(context(62, 0)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        verify(priorityScheduler, never()).schedule(any(), any(), any());
+        // Same 8400 outcome as legacy, but produced by the priority path.
+        verify(priorityScheduler).schedule(any(), any(), any());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
@@ -378,8 +384,9 @@ class PriorityAdmissionSchedulerTest {
     }
 
     private static BalanceContext context(long requestId) {
-        // Existing tests exercise the priority path, so carry an explicit
-        // priority (task40: requests without one bypass the priority scheduler).
+        // Production requests always carry a normalized 1-100 priority
+        // (normalize() default is 50); the raw-0 overload above documents
+        // the removed hasPriority gate.
         return context(requestId, 50);
     }
 

@@ -24,8 +24,11 @@ class PriorityNormalizerTest {
         // 117790880: requests carrying no priority participate at the
         // configured default level instead of opting out (NO_PRIORITY).
         assertEquals(60, PriorityNormalizer.normalize(0, null, 60));
+        // 1-100 relaxation: 45 is now a valid configured default and is kept.
+        assertEquals(45, PriorityNormalizer.normalize(0, null, 45));
         assertEquals(50, PriorityNormalizer.normalize(0, null, 0));
-        assertEquals(50, PriorityNormalizer.normalize(0, null, 45));
+        assertEquals(50, PriorityNormalizer.normalize(0, null, -1));
+        assertEquals(50, PriorityNormalizer.normalize(0, null, 101));
     }
 
     @Test
