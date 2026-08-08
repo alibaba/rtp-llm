@@ -153,10 +153,11 @@ class BackendRPCServerVisitor:
 
     @staticmethod
     def _is_retryable_route_rpc_error(e: BaseException) -> bool:
-        exception_type = getattr(e, "exception_type", None)
-        if exception_type is not None:
+        # Use isinstance instead of getattr duck-typing — only FtRuntimeException
+        # carries exception_type; gRPC RpcError and other exceptions do not.
+        if isinstance(e, FtRuntimeException):
             try:
-                return int(exception_type) >= 8000
+                return int(e.exception_type) >= 8000
             except (TypeError, ValueError):
                 pass
         text = str(e)

@@ -3,7 +3,7 @@ package org.flexlb.util;
 /**
  * Normalizes the Auto-TPM QoS priority carried by a request.
  *
- * <p>Valid priority levels are {30, 40, 50, 60, 70} (higher = more important).
+ * <p>Valid priority levels are 1-100 (higher = more important).
  * Resolution order: proto field (when it carries a valid value) &gt; gRPC
  * metadata header {@code x-dashscope-inner-qos-level} &gt; default (50).
  * A proto value of 0 means "unset" (proto3 default) and falls through to the
@@ -24,8 +24,6 @@ public final class PriorityNormalizer {
     /** Sentinel for "request carried no priority"; such requests bypass Auto-TPM. */
     public static final int NO_PRIORITY = 0;
 
-    private static final int[] VALID_PRIORITIES = {30, 40, 50, 60, 70};
-
     private PriorityNormalizer() {
     }
 
@@ -34,14 +32,13 @@ public final class PriorityNormalizer {
         return normalizedPriority != NO_PRIORITY;
     }
 
-    /** Returns true iff the value is one of the defined priority levels. */
+    /**
+     * Returns true iff the value is a valid priority level.
+     * Valid range is 1-100; 0 is the NO_PRIORITY sentinel, negatives and
+     * values above 100 are invalid.
+     */
     public static boolean isValid(int priority) {
-        for (int valid : VALID_PRIORITIES) {
-            if (priority == valid) {
-                return true;
-            }
-        }
-        return false;
+        return priority > 0 && priority <= 100;
     }
 
     /**
@@ -58,7 +55,7 @@ public final class PriorityNormalizer {
      * @param headerValue     raw {@code x-dashscope-inner-qos-level} header value, may be null/blank
      * @param defaultPriority configured default; itself normalized to 50 when invalid
      * @return the default priority when neither channel carries a value,
-     *         otherwise one of {30, 40, 50, 60, 70}
+     *         otherwise a valid level in 1-100
      */
     public static int normalize(int protoPriority, String headerValue, int defaultPriority) {
         boolean headerPresent = headerValue != null && !headerValue.isBlank();

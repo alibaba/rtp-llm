@@ -38,40 +38,40 @@ class PriorityNormalizerTest {
     // ==================== explicit invalid values ====================
 
     @ParameterizedTest
-    @ValueSource(ints = {-1, 1, 29, 45, 71, 100})
+    @ValueSource(ints = {-1, 0, 101, 200})
     void invalid_proto_priority_falls_back_to_default_50(int protoPriority) {
         assertEquals(50, PriorityNormalizer.normalize(protoPriority, null));
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"0", "-1", "45", "abc", "5o", "30.0"})
+    @ValueSource(strings = {"0", "-1", "101", "abc", "5o", "30.0"})
     void invalid_header_value_falls_back_to_default_50(String header) {
         assertEquals(50, PriorityNormalizer.normalize(0, header));
     }
 
     @Test
     void invalid_configured_default_is_normalized_to_50_for_explicit_invalid_values() {
-        assertEquals(50, PriorityNormalizer.normalize(45, null, 0));
-        assertEquals(50, PriorityNormalizer.normalize(45, null, -1));
-        assertEquals(50, PriorityNormalizer.normalize(45, null, 45));
+        assertEquals(50, PriorityNormalizer.normalize(-1, null, 0));
+        assertEquals(50, PriorityNormalizer.normalize(-1, null, -1));
+        assertEquals(50, PriorityNormalizer.normalize(101, null, 101));
     }
 
     @Test
     void valid_configured_default_is_used_for_explicit_invalid_values() {
-        assertEquals(60, PriorityNormalizer.normalize(45, null, 60));
+        assertEquals(60, PriorityNormalizer.normalize(-1, null, 60));
         assertEquals(60, PriorityNormalizer.normalize(0, "banana", 60));
     }
 
     // ==================== valid values kept ====================
 
     @ParameterizedTest
-    @ValueSource(ints = {30, 40, 50, 60, 70})
+    @ValueSource(ints = {1, 30, 45, 50, 70, 100})
     void valid_proto_priority_is_kept(int priority) {
         assertEquals(priority, PriorityNormalizer.normalize(priority, null));
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {30, 40, 50, 60, 70})
+    @ValueSource(ints = {1, 30, 45, 50, 70, 100})
     void valid_header_priority_is_kept_when_proto_unset(int priority) {
         assertEquals(priority, PriorityNormalizer.normalize(0, String.valueOf(priority)));
     }
@@ -90,28 +90,29 @@ class PriorityNormalizerTest {
 
     @Test
     void invalid_proto_falls_through_to_valid_header() {
-        assertEquals(70, PriorityNormalizer.normalize(45, "70", 60));
+        assertEquals(70, PriorityNormalizer.normalize(-1, "70", 60));
         assertEquals(70, PriorityNormalizer.normalize(0, "70", 60));
     }
 
     @Test
     void invalid_proto_and_invalid_header_fall_through_to_default() {
-        assertEquals(60, PriorityNormalizer.normalize(45, "banana", 60));
-        assertEquals(50, PriorityNormalizer.normalize(-7, "99", 45));
+        assertEquals(60, PriorityNormalizer.normalize(-1, "banana", 60));
+        assertEquals(50, PriorityNormalizer.normalize(-7, "abc", 0));
     }
 
     // ==================== isValid ====================
 
     @Test
-    void isValid_accepts_only_defined_levels() {
+    void isValid_accepts_range_1_to_100() {
+        assertTrue(PriorityNormalizer.isValid(1));
         assertTrue(PriorityNormalizer.isValid(30));
-        assertTrue(PriorityNormalizer.isValid(40));
+        assertTrue(PriorityNormalizer.isValid(45));
         assertTrue(PriorityNormalizer.isValid(50));
-        assertTrue(PriorityNormalizer.isValid(60));
         assertTrue(PriorityNormalizer.isValid(70));
+        assertTrue(PriorityNormalizer.isValid(80));
+        assertTrue(PriorityNormalizer.isValid(100));
         assertFalse(PriorityNormalizer.isValid(0));
         assertFalse(PriorityNormalizer.isValid(-1));
-        assertFalse(PriorityNormalizer.isValid(45));
-        assertFalse(PriorityNormalizer.isValid(80));
+        assertFalse(PriorityNormalizer.isValid(101));
     }
 }

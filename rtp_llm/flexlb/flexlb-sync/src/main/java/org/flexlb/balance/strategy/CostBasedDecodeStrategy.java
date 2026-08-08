@@ -65,10 +65,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
         FilterResult hardFilterResult = applyHardFilters(eligible, seqLen, config);
         List<DecodeEndpoint> survivors = hardFilterResult.endpoints();
-        if (survivors.size() <= 1) {
-            Logger.warn("Decode endpoint scarcity: registered={}, eligible={}, survivors={}, hardFilterRejections={}",
-                    filterResult.registered(), eligible.size(), survivors.size(), hardFilterResult.rejections());
-        }
 
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 

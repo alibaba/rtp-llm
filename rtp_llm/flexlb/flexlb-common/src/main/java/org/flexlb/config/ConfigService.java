@@ -309,8 +309,8 @@ public class ConfigService {
         log.info("autoTpmCommitStrategy={}, autoTpmVictimGuardMode={}, autoTpmDecodeGateLoadMode={}",
             config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode(),
             config.getAutoTpmDecodeGateLoadMode());
-        log.info("workerTimeoutMs={}, autoTpmDecodeGateLoadMode={}",
-            config.getWorkerTimeoutMs(), config.getAutoTpmDecodeGateLoadMode());
+        log.info("workerTimeoutMs={}",
+            config.getWorkerTimeoutMs());
         log.info("==========================================");
     }
 

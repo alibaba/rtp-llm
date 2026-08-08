@@ -557,6 +557,15 @@ public class FlexlbConfig {
 
     private boolean autoTpmDecodeReservedEvictEnabled = false;
 
+    /**
+     * Deadline-rescue danger-zone threshold in milliseconds (Phase 6).
+     * <p>When a queued request's remaining time-to-deadline drops below this
+     * value, the {@code DeadlineRescueService} marks it as a danger-zone
+     * candidate and attempts to migrate it to a less loaded endpoint before
+     * the deadline is breached. 100 ms balances between acting early enough
+     * to help and avoiding premature rescues.
+     * <p>Only effective when {@code autoTpmDeadlineRescueEnabled} is true.
+     */
     private long autoTpmDangerThresholdMs = 100;
 
     /**
@@ -570,7 +579,13 @@ public class FlexlbConfig {
 
     // ---- Auto-TPM reserved config (design doc §18) — future phases, not wired yet ----
 
-    /** Normalized priority levels accepted by the scheduler (Phase 5+, reserved). */
+    /**
+     * Informational priority levels string (Phase 5+, reserved). The actual
+     * validation is in {@link org.flexlb.util.PriorityNormalizer#isValid},
+     * which accepts any value 1-100. This field is not consumed by current
+     * scheduling logic; it is kept for forward compatibility and config
+     * observability.
+     */
     private String autoTpmPriorityLevels = "30,40,50,60,70";
 
     /** Decode accepted-entry eviction switch (Phase 5, reserved). */

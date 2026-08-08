@@ -283,8 +283,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         // and derive the per-request SLO / coarse deadline for observability.
         // Phase 0: never changes any scheduling decision.
         // Task40: a request that carries no priority at all normalizes to
-        // NO_PRIORITY (0) and opts out of SLO/deadline derivation entirely;
-        // it is scheduled on the legacy path.
+        // the default priority (50) and participates in Auto-TPM at the
+        // normal level. The NO_PRIORITY (0) sentinel is a defensive guard
+        // in hasPriority() checks but is never returned by normalize().
         int priority = PriorityNormalizer.normalize(pb.getPriority(),
                 GrpcQosHeaderInterceptor.get(),
                 configService.loadBalanceConfig().getAutoTpmDefaultPriority());
