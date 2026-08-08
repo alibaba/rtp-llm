@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/models/SamplingOps.h"
+#include "rtp_llm/models_py/bindings/core/OpData.h"
 
 #include <algorithm>
 #include <cstring>
@@ -10,6 +10,10 @@
 #include <vector>
 
 using namespace rtp_llm;
+
+namespace rtp_llm {
+void rejectionSampling(const RejectionSamplingParams& params);
+}
 
 class RejectionSamplingOpTest: public ::testing::Test {
 protected:
