@@ -285,6 +285,23 @@ public class FlexlbConfig {
     // ========== FlexLB Batch Configuration ==========
 
     /**
+     * Enable long-poll getWorkerStatus (scheduler upgrade A). When true, status
+     * requests carry wait_timeout_ms so the engine holds the poll until a new
+     * completion event, and the master re-arms the next poll as soon as the
+     * response arrives (instant inflight release). When false, the master falls
+     * back to the fixed SYNC_STATUS_INTERVAL polling loop.
+     * Environment variable: FLEXLB_STATUS_LONG_POLL_ENABLED.
+     */
+    private boolean flexlbStatusLongPollEnabled = true;
+
+    /**
+     * Maximum time in milliseconds the engine may hold a long-poll
+     * getWorkerStatus request while waiting for a new completion event.
+     * Environment variable: FLEXLB_STATUS_LONG_POLL_TIMEOUT_MS.
+     */
+    private long flexlbStatusLongPollTimeoutMs = 1000;
+
+    /**
      * Default schedule mode. Controls the routing path for all requests.
      * Environment variable: DEFAULT_SCHEDULE_MODE (values: BATCH, DIRECT, QUEUE).
      */

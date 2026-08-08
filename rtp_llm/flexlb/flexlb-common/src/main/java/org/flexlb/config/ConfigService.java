@@ -269,6 +269,8 @@ public class ConfigService {
             config.getFlexlbBatchFixedMaxInflightBatches(),
             config.getFlexlbBatchSloMaxInflightBatches());
         log.info("prefillPredictorType={}", config.getPrefillPredictorType());
+        log.info("statusLongPollEnabled={}, statusLongPollTimeoutMs={}",
+            config.isFlexlbStatusLongPollEnabled(), config.getFlexlbStatusLongPollTimeoutMs());
         log.info("==========================================");
     }
 

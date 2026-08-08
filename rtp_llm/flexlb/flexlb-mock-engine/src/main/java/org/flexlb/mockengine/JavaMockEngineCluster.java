@@ -29,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -411,6 +412,15 @@ public final class JavaMockEngineCluster {
         private final ArrayDeque<PrefillPendingBatch> prefillPendingQueue = new ArrayDeque<>();
         private final Object prefillQueueLock = new Object();
         private final ConcurrentLinkedQueue<VersionedTask> completions = new ConcurrentLinkedQueue<>();
+        // ── getWorkerStatus long-poll waiters (scheduler upgrade A) ──
+        // Parked status requests waiting for the next completion event. Each
+        // waiter is completed exactly once (AtomicBoolean CAS) by whichever
+        // fires first: signalStatusWaiters() on a new completion/cancel, the
+        // scheduler timeout task, or flushStatusWaiters() on stop/shutdown.
+        // No gRPC thread ever blocks (the server runs on a directExecutor).
+        private final ConcurrentLinkedQueue<StatusLongPollWaiter> statusWaiters = new ConcurrentLinkedQueue<>();
+        /** Upper bound for client-requested wait_timeout_ms (guards runaway values). */
+        private static final long MAX_STATUS_LONG_POLL_MS = 60_000;
         private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks = new ConcurrentHashMap<>();
         private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues = new ConcurrentHashMap<>();
         private final Map<Long, String> requestStates = new ConcurrentHashMap<>();
@@ -596,6 +606,23 @@ public final class JavaMockEngineCluster {
                                     StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
             stats.statusRpcs.increment();
             long requestedVersion = request.getLatestFinishedVersion();
+            long waitTimeoutMs = request.getWaitTimeoutMs();
+            // Long-poll: when the caller sets wait_timeout_ms > 0 and no completion
+            // newer than its version exists yet, park the request until the next
+            // completion event or the timeout, whichever comes first. The response
+            // is delivered asynchronously; 0 / absent keeps the original immediate
+            // response. Stopped / shutting-down engines always answer immediately
+            // so the master keeps observing alive=false and drain progress.
+            if (waitTimeoutMs > 0 && !stopped && !shuttingDown
+                    && completionVersion.get() <= requestedVersion) {
+                parkStatusWaiter(requestedVersion, waitTimeoutMs, observer);
+                return;
+            }
+            respondWorkerStatus(requestedVersion, observer);
+        }
+
+        private void respondWorkerStatus(long requestedVersion,
+                                         StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
             VersionedTask head;
             while ((head = completions.peek()) != null && head.version <= requestedVersion) {
                 completions.poll();
@@ -635,6 +662,73 @@ public final class JavaMockEngineCluster {
             }
             observer.onNext(status.build());
             observer.onCompleted();
+        }
+
+        /** One parked long-poll getWorkerStatus request. */
+        private static final class StatusLongPollWaiter {
+            final long requestedVersion;
+            final StreamObserver<EngineRpcService.WorkerStatusPB> observer;
+            /** Single-response guard: completion signal, timeout and flush race here. */
+            final AtomicBoolean done = new AtomicBoolean();
+            volatile ScheduledFuture<?> timeoutTask;
+
+            StatusLongPollWaiter(long requestedVersion,
+                                 StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
+                this.requestedVersion = requestedVersion;
+                this.observer = observer;
+            }
+        }
+
+        private void parkStatusWaiter(long requestedVersion,
+                                      long waitTimeoutMs,
+                                      StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
+            StatusLongPollWaiter waiter = new StatusLongPollWaiter(requestedVersion, observer);
+            statusWaiters.add(waiter);
+            long timeout = Math.min(waitTimeoutMs, MAX_STATUS_LONG_POLL_MS);
+            waiter.timeoutTask = scheduler.schedule(
+                    () -> completeStatusWaiter(waiter), timeout, TimeUnit.MILLISECONDS);
+            // Close the race window: a completion (or stop/shutdown) that fired
+            // between the entry check and registration would have missed this
+            // waiter, so re-check after it is visible in the queue.
+            if (completionVersion.get() > requestedVersion || stopped || shuttingDown) {
+                completeStatusWaiter(waiter);
+            }
+        }
+
+        private void completeStatusWaiter(StatusLongPollWaiter waiter) {
+            if (!waiter.done.compareAndSet(false, true)) {
+                return;
+            }
+            statusWaiters.remove(waiter);
+            ScheduledFuture<?> timeoutTask = waiter.timeoutTask;
+            if (timeoutTask != null) {
+                timeoutTask.cancel(false);
+            }
+            try {
+                respondWorkerStatus(waiter.requestedVersion, waiter.observer);
+            } catch (RuntimeException e) {
+                // Client cancelled/disconnected while parked; nothing to deliver.
+            }
+        }
+
+        /** Wake parked status requests that now have a newer completion to report. */
+        private void signalStatusWaiters() {
+            if (statusWaiters.isEmpty()) {
+                return;
+            }
+            long latest = completionVersion.get();
+            for (StatusLongPollWaiter waiter : statusWaiters) {
+                if (latest > waiter.requestedVersion) {
+                    completeStatusWaiter(waiter);
+                }
+            }
+        }
+
+        /** Answer every parked status request immediately (stop / shutdown). */
+        private void flushStatusWaiters() {
+            for (StatusLongPollWaiter waiter : statusWaiters) {
+                completeStatusWaiter(waiter);
+            }
         }
 
         @Override
@@ -813,6 +907,7 @@ public final class JavaMockEngineCluster {
                     .build();
             completions.add(new VersionedTask(version, task));
             statusVersion.incrementAndGet();
+            signalStatusWaiters();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(requestId);
             if (queue != null) {
                 queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
@@ -1267,6 +1362,7 @@ public final class JavaMockEngineCluster {
                     .setDpRank(dpRank)
                     .build();
             completions.add(new VersionedTask(version, task));
+            signalStatusWaiters();
         }
 
         private EngineRpcService.GenerateOutputsPB buildOutput(MockPerformanceModel.RequestShape shape,
@@ -1381,6 +1477,10 @@ public final class JavaMockEngineCluster {
         void drainAndShutdown() {
             shuttingDown = true;
             stopped = true; // same rejection semantics as the control-plane /stop_engine
+            // Long-poll waiters must not outlive the drain: answer them now so the
+            // master immediately observes alive=false instead of waiting for the
+            // poll timeout.
+            flushStatusWaiters();
             // Cancel sweep. A pass can promote queued decode tasks into running
             // slots (cancel's slot hand-off) and a racing cross-engine hand-off
             // may slip in before the shuttingDown guard was observed, so retry
@@ -1430,7 +1530,13 @@ public final class JavaMockEngineCluster {
         void setFaultConfig(FaultInjectionConfig config) { this.faultConfig = config; }
         void clearFaultConfig() { this.faultConfig = FaultInjectionConfig.builder().build(); }
         void resetEnqueueCount() { this.enqueueCount.set(0); }
-        void setStopped(boolean s) { this.stopped = s; }
+        void setStopped(boolean s) {
+            this.stopped = s;
+            if (s) {
+                // Parked long-poll requests must observe alive=false right away.
+                flushStatusWaiters();
+            }
+        }
         boolean isStopped() { return stopped; }
         int getGrpcPort() { return grpcPort; }
         String getRoleName() { return roleName; }

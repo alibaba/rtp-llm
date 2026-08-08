@@ -54,6 +54,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final EndpointRegistry endpointRegistry;
 
+    private final StatusLongPollConfig statusLongPollConfig;
+
     public EngineSyncRunner(String modelName,
                             Map<String, WorkerStatus> workerStatusMap,
                             WorkerAddressService workerAddressService,
@@ -67,6 +69,25 @@ public class EngineSyncRunner implements Runnable {
                             Long syncEngineStatusInterval,
                             FlexlbBatchScheduler batchScheduler,
                             EndpointRegistry endpointRegistry) {
+        this(modelName, workerStatusMap, workerAddressService, statusCheckExecutor, engineHealthReporter,
+                engineGrpcService, roleType, localKvCacheAwareManager, syncRequestTimeoutMs, syncCount,
+                syncEngineStatusInterval, batchScheduler, endpointRegistry, null);
+    }
+
+    public EngineSyncRunner(String modelName,
+                            Map<String, WorkerStatus> workerStatusMap,
+                            WorkerAddressService workerAddressService,
+                            ExecutorService statusCheckExecutor,
+                            EngineHealthReporter engineHealthReporter,
+                            EngineGrpcService engineGrpcService,
+                            RoleType roleType,
+                            CacheAwareService localKvCacheAwareManager,
+                            long syncRequestTimeoutMs,
+                            LongAdder syncCount,
+                            Long syncEngineStatusInterval,
+                            FlexlbBatchScheduler batchScheduler,
+                            EndpointRegistry endpointRegistry,
+                            StatusLongPollConfig statusLongPollConfig) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -81,6 +102,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncEngineStatusInterval = syncEngineStatusInterval;
         this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
+        this.statusLongPollConfig = statusLongPollConfig;
     }
 
     @Override
@@ -144,7 +166,8 @@ public class EngineSyncRunner implements Runnable {
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
                                 = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                                 workerStatus, cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, batchScheduler, endpointRegistry, statusCheckExecutor);
+                                syncRequestTimeoutMs, batchScheduler, endpointRegistry, statusCheckExecutor,
+                                statusLongPollConfig);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getStatusCheckInProgress().set(false);

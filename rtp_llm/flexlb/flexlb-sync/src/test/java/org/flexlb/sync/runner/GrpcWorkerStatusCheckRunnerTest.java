@@ -72,7 +72,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .build();
 
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
+                org.mockito.ArgumentMatchers.any(RoleType.class), anyLong())).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
         // Act — pass null for FlexlbBatchScheduler and EndpointRegistry (not needed in unit test)
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
@@ -83,7 +83,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         runner.run();
 
         // Assert — gRPC port is derived from HTTP port 8080 → 8081
-        verify(engineGrpcService).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
+        verify(engineGrpcService).getWorkerStatusAsync("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL, 0L);
     }
 
     @Test
@@ -116,7 +116,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .build();
 
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
+                org.mockito.ArgumentMatchers.any(RoleType.class), anyLong())).thenReturn(CompletableFuture.completedFuture(workerStatusPB));
 
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, ipPort, site,
@@ -146,7 +146,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setAlive(true)
                 .build();
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                org.mockito.ArgumentMatchers.any(RoleType.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
@@ -170,7 +170,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         EndpointRegistry registry = registry();
         registry.ensureEndpoint(RoleType.VIT, ipPort, status);
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                org.mockito.ArgumentMatchers.any(RoleType.class), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
@@ -196,7 +196,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         EndpointRegistry registry = registry();
         registry.ensureEndpoint(RoleType.VIT, ipPort, status);
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                org.mockito.ArgumentMatchers.any(RoleType.class), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
@@ -213,7 +213,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setAlive(true)
                 .build();
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                org.mockito.ArgumentMatchers.any(RoleType.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(recovered));
 
         runner.run();

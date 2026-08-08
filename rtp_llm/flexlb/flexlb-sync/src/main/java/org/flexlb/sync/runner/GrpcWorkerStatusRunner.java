@@ -19,6 +19,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -42,8 +44,11 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
     private static final int MAX_CONSECUTIVE_FAILURES = 3;
+    /** Minimal delay before re-arming the next long-poll (guards against busy-spin). */
+    private static final long LONG_POLL_REARM_DELAY_MS = 1;
     private final EndpointRegistry endpointRegistry;
     private final Executor callbackExecutor;
+    private final StatusLongPollConfig longPollConfig;
 
     public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
                                   WorkerStatus workerStatus,
@@ -54,6 +59,20 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   FlexlbBatchScheduler batchScheduler,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor) {
+        this(modelName, ipPort, site, roleType, group, workerStatus, workerStatusMap, engineHealthReporter,
+                engineGrpcService, syncRequestTimeoutMs, batchScheduler, endpointRegistry, callbackExecutor, null);
+    }
+
+    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site, RoleType roleType, String group,
+                                  WorkerStatus workerStatus,
+                                  Map<String, WorkerStatus> workerStatusMap,
+                                  EngineHealthReporter engineHealthReporter,
+                                  EngineGrpcService engineGrpcService,
+                                  long syncRequestTimeoutMs,
+                                  FlexlbBatchScheduler batchScheduler,
+                                  EndpointRegistry endpointRegistry,
+                                  Executor callbackExecutor,
+                                  StatusLongPollConfig longPollConfig) {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
@@ -70,6 +89,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.batchScheduler = batchScheduler;
         this.endpointRegistry = endpointRegistry;
         this.callbackExecutor = callbackExecutor;
+        this.longPollConfig = longPollConfig;
     }
 
     @Override
@@ -81,10 +101,17 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
 
+            // Long-poll: ask the engine to hold the request until a new completion
+            // event, and widen the gRPC deadline to cover the parked time.
+            boolean longPoll = longPollConfig != null && longPollConfig.enabled();
+            long waitTimeoutMs = longPoll ? longPollConfig.timeoutMs() : 0;
+            long requestTimeoutMs = syncRequestTimeoutMs + waitTimeoutMs;
+
             engineGrpcService.getWorkerStatusAsync(ip, grpcPort, latestFinishedTaskVersion,
-                            syncRequestTimeoutMs, roleType)
+                            requestTimeoutMs, roleType, waitTimeoutMs)
                     .thenApply(EngineStatusConverter::convertToWorkerStatusResponse)
                     .whenCompleteAsync((response, ex) -> {
+                        boolean rearmed = false;
                         try {
                             if (ex != null) {
                                 Throwable throwable = ex instanceof CompletionException ? ex.getCause() : ex;
@@ -101,9 +128,17 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                 }
                             } else {
                                 handleStatusResponse(response, startTime);
+                                // Long-poll chain: launch the next poll as soon as this
+                                // response lands instead of waiting for the fixed sync
+                                // tick. On failure/stale/dead workers the chain breaks
+                                // and the periodic loop (SYNC_STATUS_INTERVAL) resumes
+                                // ownership — that is the retry/backoff path.
+                                rearmed = rearmLongPoll();
                             }
                         } finally {
-                            workerStatus.getStatusCheckInProgress().set(false);
+                            if (!rearmed) {
+                                workerStatus.getStatusCheckInProgress().set(false);
+                            }
                         }
                     }, callbackExecutor);
             asyncInitiated = true;
@@ -111,6 +146,37 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (!asyncInitiated) {
                 workerStatus.getStatusCheckInProgress().set(false);
             }
+        }
+    }
+
+    /**
+     * Re-arm the next long-poll while keeping statusCheckInProgress=true across
+     * the hand-off, so the periodic EngineSyncRunner loop keeps skipping this
+     * worker (no duplicate in-flight polls).
+     *
+     * @return true when the next poll was scheduled and owns the in-progress flag
+     */
+    private boolean rearmLongPoll() {
+        if (longPollConfig == null || !longPollConfig.enabled()) {
+            return false;
+        }
+        if (workerStatusMap != null && workerStatusMap.get(ipPort) != workerStatus) {
+            return false; // stale generation: the periodic loop owns the current one
+        }
+        if (!workerStatus.isAlive()) {
+            return false;
+        }
+        GrpcWorkerStatusRunner next = new GrpcWorkerStatusRunner(
+                modelName, ipPort, site, roleType, group, workerStatus, workerStatusMap,
+                engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                batchScheduler, endpointRegistry, callbackExecutor, longPollConfig);
+        try {
+            longPollConfig.rearmScheduler().schedule(
+                    next, LONG_POLL_REARM_DELAY_MS, TimeUnit.MILLISECONDS);
+            return true;
+        } catch (RejectedExecutionException e) {
+            logger.warn("long-poll re-arm rejected for worker {}, periodic loop resumes", ipPort);
+            return false;
         }
     }
 

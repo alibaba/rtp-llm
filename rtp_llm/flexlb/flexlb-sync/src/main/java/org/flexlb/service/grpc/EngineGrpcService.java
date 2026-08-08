@@ -24,9 +24,13 @@ public class EngineGrpcService {
 
     public CompletableFuture<EngineRpcService.WorkerStatusPB> getWorkerStatusAsync(
             String ip, int grpcPort, long finishedTaskVersion, long requestTimeoutMs,
-            RoleType roleType) {
+            RoleType roleType, long waitTimeoutMs) {
         EngineRpcService.StatusVersionPB request = EngineRpcService.StatusVersionPB.newBuilder()
                 .setLatestFinishedVersion(finishedTaskVersion)
+                // Long-poll: > 0 lets the engine hold the request until a new
+                // completion event or this timeout. Engines without long-poll
+                // support ignore the field and respond immediately.
+                .setWaitTimeoutMs(waitTimeoutMs)
                 .build();
 
         if (RoleType.VIT.equals(roleType)) {

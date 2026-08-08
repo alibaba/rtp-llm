@@ -352,6 +352,13 @@ message RemoteStoreResponsePB {
 message StatusVersionPB {
     int64 latest_cache_version = 1;
     int64 latest_finished_version = 2;
+    // Long-poll support for GetWorkerStatus: when > 0, the engine MAY hold this
+    // request until a new completion event advances its completion version beyond
+    // latest_finished_version, or until wait_timeout_ms elapses, whichever comes
+    // first. 0 / absent keeps the original immediate-response behavior. Engines
+    // that do not implement long-poll simply ignore this field and respond
+    // immediately, so the field is fully backward compatible.
+    int64 wait_timeout_ms = 3;
 }
 
 message CacheVersionPB {

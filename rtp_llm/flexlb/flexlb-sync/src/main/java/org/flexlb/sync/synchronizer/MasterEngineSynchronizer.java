@@ -15,6 +15,7 @@ import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.runner.EngineSyncRunner;
+import org.flexlb.sync.runner.StatusLongPollConfig;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.IdUtils;
@@ -43,6 +44,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
     private final Long syncEngineStatusInterval;
+    private final StatusLongPollConfig statusLongPollConfig;
     private volatile int completedSyncCount = 0;
 
     public MasterEngineSynchronizer(WorkerAddressService workerAddressService,
@@ -71,6 +73,18 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                 : 5000;  // 5s default for gRPC calls, must not fallback to sync interval (20ms) which is too short
         this.scheduler = new ScheduledThreadPoolExecutor(5, new NamedThreadFactory("sync-status-scheduler"),
                 new ThreadPoolExecutor.AbortPolicy());
+        // Long-poll (scheduler upgrade A): when enabled, each worker's status
+        // chain re-arms itself on response arrival (see GrpcWorkerStatusRunner),
+        // and the fixed-rate loop below only handles service discovery, new /
+        // recovered workers (in-progress CAS skips workers with an active chain)
+        // and cache checks. When disabled, this degrades to plain fixed-interval
+        // polling.
+        this.statusLongPollConfig = new StatusLongPollConfig(
+                flexlbConfig.isFlexlbStatusLongPollEnabled(),
+                flexlbConfig.getFlexlbStatusLongPollTimeoutMs(),
+                this.scheduler);
+        logger.info("getWorkerStatus long-poll: enabled={}, waitTimeoutMs={}, syncIntervalMs={}",
+                statusLongPollConfig.enabled(), statusLongPollConfig.timeoutMs(), syncEngineStatusInterval);
         this.scheduler.scheduleAtFixedRate(this::syncEngineStatus, 0, syncEngineStatusInterval, TimeUnit.MILLISECONDS);
 
         // Get environment variable
@@ -111,7 +125,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                                batchScheduler, endpointRegistry
+                                batchScheduler, endpointRegistry, statusLongPollConfig
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);
