@@ -421,6 +421,7 @@ def _replicated_row_weight(
     tp_size: int,
     cache: dict[str, torch.Tensor],
     cache_key: str,
+
 ) -> torch.Tensor:
     """Gather a row-sharded ``[in/tp, out]`` weight on every TP rank."""
 
@@ -431,6 +432,70 @@ def _replicated_row_weight(
         full_weight = all_gather(local_weight.contiguous(), group=Group.TP)
         cache[cache_key] = full_weight
     return full_weight
+
+
+def _sp_transient_shared_weights_enabled() -> bool:
+    """Re-gather shared-expert weights per layer and free them after use.
+
+    The retained SP path keeps every layer's gathered full weight alive in
+    ``_full_column_weights``/``_full_row_weights`` for the whole process, which
+    costs 7/8 of the full shared expert on all 92 MoE layers (~19.8 GiB/rank).
+    Prefill only needs the full weight while that layer runs, so this opt-in
+    path re-gathers per layer and releases immediately.  Decode must NOT enable
+    it: one forward per token would pay 92 AllGathers per decode step.
+    """
+
+    return _env_flag("KIMI_K3_SP_TRANSIENT_SHARED_WEIGHTS")
+
+
+def _transient_full_column_weight(
+    local_weight: torch.Tensor,
+    tp_size: int,
+) -> torch.Tensor:
+    """Gather an ``[in, out/tp]`` column shard without retaining it anywhere.
+
+    Same collective and same result as :func:`_replicated_column_weight`, but
+    the caller owns the only reference so the replica dies with it.  The
+    original TP shard stays in ``weights`` and is never replaced.
+    """
+
+    if tp_size <= 1:
+        return local_weight
+    return (
+        all_gather(local_weight.transpose(0, 1).contiguous(), group=Group.TP)
+        .transpose(0, 1)
+        .contiguous()
+    )
+
+
+def _transient_full_row_weight(
+    local_weight: torch.Tensor,
+    tp_size: int,
+) -> torch.Tensor:
+    """Gather an ``[in/tp, out]`` row shard without retaining it anywhere."""
+
+    if tp_size <= 1:
+        return local_weight
+    return all_gather(local_weight.contiguous(), group=Group.TP)
+
+
+# Proves per-layer release instead of inferring it: without an enclosing
+# no_grad the autograd graph would keep every gathered replica alive, so the
+# "after" reading would climb layer after layer.
+_SP_TRANSIENT_AUDIT_REMAINING = 6
+
+
+def _sp_transient_audit(tag: str, device: torch.device) -> None:
+    global _SP_TRANSIENT_AUDIT_REMAINING
+    if _SP_TRANSIENT_AUDIT_REMAINING <= 0:
+        return
+    _SP_TRANSIENT_AUDIT_REMAINING -= 1
+    logging.info(
+        "[K3_SP_TRANSIENT] %s allocated=%.3fGiB reserved=%.3fGiB",
+        tag,
+        torch.cuda.memory_allocated(device) / float(1 << 30),
+        torch.cuda.memory_reserved(device) / float(1 << 30),
+    )
 
 
 def _sequence_parallel_column_weight(
@@ -5030,48 +5095,71 @@ class KimiK3LatentMoE(nn.Module):
             record_accuracy_tensor(
                 f"{self.trace_prefix}.routed_output", routed_output, token_dim=0
             )
-        shared_gate_weight = _sequence_parallel_column_weight(
-            self.weights,
-            K3W.MOE_SHARED_GATE,
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_column_weights,
-            "sp_shared_gate",
-            sequence_parallel=sp_active,
-        )
-        shared_up_weight = _sequence_parallel_column_weight(
-            self.weights,
-            K3W.MOE_SHARED_UP,
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_column_weights,
-            "sp_shared_up",
-            sequence_parallel=sp_active,
-        )
-        if sp_active:
+        transient_shared = sp_active and _sp_transient_shared_weights_enabled()
+        if transient_shared:
+            # Gather, use, free one matrix at a time so the transient peak is a
+            # single [hidden, shared_inter] replica instead of a whole layer's
+            # worth retained in _full_column_weights for the whole process.
             with _perf_profile(
-                f"{self.trace_prefix}.shared_expert_replicated_gate_up_gemm",
+                f"{self.trace_prefix}.shared_expert_transient_gate_up_gemm",
                 hidden_states,
             ):
+                _sp_transient_audit(
+                    f"{self.trace_prefix}.before_gate_gather", hidden_states.device
+                )
+                shared_gate_weight = _transient_full_column_weight(
+                    self.weights[K3W.MOE_SHARED_GATE], self.ffn_tp_size
+                )
                 shared_gate = _linear(hidden_states, shared_gate_weight)
+                del shared_gate_weight
+                shared_up_weight = _transient_full_column_weight(
+                    self.weights[K3W.MOE_SHARED_UP], self.ffn_tp_size
+                )
                 shared_up = _linear(hidden_states, shared_up_weight)
+                del shared_up_weight
         else:
-            shared_gate = _column_parallel_linear(
-                hidden_states,
-                shared_gate_weight,
+            shared_gate_weight = _sequence_parallel_column_weight(
+                self.weights,
+                K3W.MOE_SHARED_GATE,
                 self.ffn_tp_size,
                 self.ffn_tp_rank,
                 self._full_column_weights,
-                "shared_gate",
+                "sp_shared_gate",
+                sequence_parallel=sp_active,
             )
-            shared_up = _column_parallel_linear(
-                hidden_states,
-                shared_up_weight,
+            shared_up_weight = _sequence_parallel_column_weight(
+                self.weights,
+                K3W.MOE_SHARED_UP,
                 self.ffn_tp_size,
                 self.ffn_tp_rank,
                 self._full_column_weights,
-                "shared_up",
+                "sp_shared_up",
+                sequence_parallel=sp_active,
             )
+            if sp_active:
+                with _perf_profile(
+                    f"{self.trace_prefix}.shared_expert_replicated_gate_up_gemm",
+                    hidden_states,
+                ):
+                    shared_gate = _linear(hidden_states, shared_gate_weight)
+                    shared_up = _linear(hidden_states, shared_up_weight)
+            else:
+                shared_gate = _column_parallel_linear(
+                    hidden_states,
+                    shared_gate_weight,
+                    self.ffn_tp_size,
+                    self.ffn_tp_rank,
+                    self._full_column_weights,
+                    "shared_gate",
+                )
+                shared_up = _column_parallel_linear(
+                    hidden_states,
+                    shared_up_weight,
+                    self.ffn_tp_size,
+                    self.ffn_tp_rank,
+                    self._full_column_weights,
+                    "shared_up",
+                )
         with _perf_profile(f"{self.trace_prefix}.shared_expert_situ", shared_gate):
             shared_activation = _situ(
                 shared_gate,
@@ -5095,24 +5183,35 @@ class KimiK3LatentMoE(nn.Module):
             f"{self.trace_prefix}.shared_expert_replicated_down_no_collective",
             shared_activation,
         ):
-            shared_down_weight = _sequence_parallel_row_weight(
-                self.weights,
-                K3W.MOE_SHARED_DOWN,
-                self.ffn_tp_size,
-                self.ffn_tp_rank,
-                self._full_row_weights,
-                "sp_shared_down",
-                sequence_parallel=sp_active,
-            )
-            shared_output = (
-                _linear(shared_activation, shared_down_weight)
-                if sp_active
-                else _row_parallel_linear(
-                    shared_activation,
-                    shared_down_weight,
-                    self.parallelism_config.get_ffn_tp_size(),
+            if transient_shared:
+                shared_down_weight = _transient_full_row_weight(
+                    self.weights[K3W.MOE_SHARED_DOWN], self.ffn_tp_size
                 )
-            )
+                shared_output = _linear(shared_activation, shared_down_weight)
+                del shared_down_weight
+                _sp_transient_audit(
+                    f"{self.trace_prefix}.after_shared_release",
+                    shared_output.device,
+                )
+            else:
+                shared_down_weight = _sequence_parallel_row_weight(
+                    self.weights,
+                    K3W.MOE_SHARED_DOWN,
+                    self.ffn_tp_size,
+                    self.ffn_tp_rank,
+                    self._full_row_weights,
+                    "sp_shared_down",
+                    sequence_parallel=sp_active,
+                )
+                shared_output = (
+                    _linear(shared_activation, shared_down_weight)
+                    if sp_active
+                    else _row_parallel_linear(
+                        shared_activation,
+                        shared_down_weight,
+                        self.parallelism_config.get_ffn_tp_size(),
+                    )
+                )
         if trace_enabled:
             record_accuracy_tensor(
                 f"{self.trace_prefix}.shared_output", shared_output, token_dim=0
