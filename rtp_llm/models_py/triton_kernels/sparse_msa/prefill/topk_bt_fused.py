@@ -134,14 +134,21 @@ def _kv_flat_to_paged_kernel(
     (out[p,h,b,d] = in[p,b,h,d]). One launch for both caches; coalesced read (the
     input page is contiguous [block,nkv,dim]) + coalesced write (nkv contiguous
     [BLOCK_B,dim] chunks). ~4x faster than two aten permute+contiguous copies."""
+    # The process-wide CP scratch grows with the independent historical maxima
+    # of batch size and sequence length.  Long-context traffic can therefore
+    # make the flattened [page, block, head, dim] offset exceed INT32 even when
+    # the current request itself is small.  Promote the page term before the
+    # multiplication; otherwise Triton wraps at 2**31 elements and both the
+    # loads and stores below address memory outside their tensors.
     pid_p = tl.program_id(0)
+    pid_p_i64 = pid_p.to(tl.int64)
     b0 = tl.program_id(1) * BLOCK_B
     offs_b = b0 + tl.arange(0, BLOCK_B)
     offs_h = tl.arange(0, NKV)
     offs_d = tl.arange(0, DIM)
     mask_b = offs_b < block
     in_off = (
-        pid_p * (block * nkv * dim)
+        pid_p_i64 * (block * nkv * dim)
         + offs_b[:, None, None] * (nkv * dim)
         + offs_h[None, :, None] * dim
         + offs_d[None, None, :]
@@ -149,7 +156,7 @@ def _kv_flat_to_paged_kernel(
     k_tile = tl.load(k_in + in_off, mask=mask_b[:, None, None], other=0)
     v_tile = tl.load(v_in + in_off, mask=mask_b[:, None, None], other=0)
     out_off = (
-        pid_p * (nkv * block * dim)
+        pid_p_i64 * (nkv * block * dim)
         + offs_h[None, :, None] * (block * dim)
         + offs_b[:, None, None] * dim
         + offs_d[None, None, :]
@@ -542,6 +549,7 @@ def _topk_to_block_table_kernel(
             mask=off_t < topk,
         )
 
+
 _MULTIROW_BLOCK_Q = 16
 _MULTIROW_NUM_WARPS = 4
 _MULTIROW_MIN_KV_BLOCKS = 128
@@ -897,8 +905,8 @@ def _sparse_attn_chunked(
     bounded by chunk_size; per-chunk CSR/schedule rebuild + small H2D copies are
     the accepted trade-off of this opt-in mode. Chunks never span requests.
     """
-    from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
     from interface import sparse_atten_func
+    from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
 
     p = sparse_attn_plan
     dev = q.device
