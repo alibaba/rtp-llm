@@ -17,6 +17,7 @@ to catch arithmetic bugs; the live NCCL path is exercised by Stage 6 PD
 smoke under real CP=2/4 deployment.
 """
 
+import contextlib
 import importlib.util
 import sys
 import types
@@ -56,6 +57,9 @@ def _stub_distributed():
     ):
         if p not in sys.modules:
             sys.modules[p] = types.ModuleType(p)
+    profiler = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
+    profiler.record_function_range = lambda _: contextlib.nullcontext()
+    sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler
 
 
 def _import_cp():

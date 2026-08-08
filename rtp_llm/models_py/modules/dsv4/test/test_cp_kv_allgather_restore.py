@@ -9,6 +9,7 @@ the formula but in Python loops, so the production vectorized path is
 verified end-to-end without any kernel dependency.
 """
 
+import contextlib
 import importlib.util
 import sys
 import types
@@ -41,6 +42,9 @@ def _stub_distributed():
     ):
         if p not in sys.modules:
             sys.modules[p] = types.ModuleType(p)
+    profiler = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
+    profiler.record_function_range = lambda _: contextlib.nullcontext()
+    sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler
 
 
 def _import_cp():

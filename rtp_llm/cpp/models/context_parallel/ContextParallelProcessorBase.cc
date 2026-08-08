@@ -21,8 +21,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     // mirrors here, then publish mutated model inputs back to CUDA.
     auto total_input_tokens =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
-    auto& total_hidden_states      = model_input.last_hidden_states;
-    auto input_lengths =
+    auto& total_hidden_states = model_input.last_hidden_states;
+    auto  input_lengths =
         model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
     auto& sequence_lengths         = model_input.sequence_lengths;
     auto  input_lengths_cpu_tensor = input_lengths.clone().pin_memory();
@@ -52,28 +52,23 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         torch::empty({(int64_t)(num_decode_stream + prefill_cp_split_tokens_size)}, pinned_i32);
     auto prefill_shuffle_indices = torch::empty({(int64_t)prefill_cp_split_tokens_size}, pinned_i32);
 
-    const bool has_hidden_states = total_hidden_states.defined() && total_hidden_states.numel() > 0;
-    bool       split_hidden_states = false;
+    const bool has_hidden_states          = total_hidden_states.defined() && total_hidden_states.numel() > 0;
+    const bool should_split_hidden_states = has_hidden_states && split_hidden_states_;
     if (has_hidden_states) {
-        RTP_LLM_CHECK_WITH_INFO(total_hidden_states.dim() == 2,
-                                "CP MTP hidden states must be 2-D, got dim=%ld",
-                                total_hidden_states.dim());
-        const int64_t global_token_num = total_input_tokens.numel();
-        const int64_t local_token_num  = cp_split_input_tokens.numel();
-        if (total_hidden_states.size(0) == global_token_num) {
-            split_hidden_states = true;
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == local_token_num,
-                                    "CP MTP hidden states row count mismatch: rows=%ld, global_tokens=%ld, "
-                                    "local_tokens=%ld",
-                                    total_hidden_states.size(0),
-                                    global_token_num,
-                                    local_token_num);
-        }
+        RTP_LLM_CHECK_WITH_INFO(
+            total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
+        const int64_t global_token_num   = total_input_tokens.numel();
+        const int64_t local_token_num    = cp_split_input_tokens.numel();
+        const int64_t expected_token_num = split_hidden_states_ ? global_token_num : local_token_num;
+        RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == expected_token_num,
+                                "CP MTP hidden states row count mismatch: rows=%ld, expected=%ld, layout=%s",
+                                total_hidden_states.size(0),
+                                expected_token_num,
+                                split_hidden_states_ ? "global" : "local");
     }
     std::vector<int64_t> hidden_select_indices;
     std::vector<uint8_t> hidden_valid_mask;
-    if (split_hidden_states) {
+    if (should_split_hidden_states) {
         hidden_select_indices.reserve(cp_split_input_tokens.numel());
         hidden_valid_mask.reserve(cp_split_input_tokens.numel());
     }
@@ -89,7 +84,7 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         std::memcpy(input_token_ptr,
                     total_input_tokens.data_ptr<int32_t>() + total_input_token_idx,
                     num_decode_stream * sizeof(int));
-        if (split_hidden_states) {
+        if (should_split_hidden_states) {
             for (size_t i = 0; i < num_decode_stream; ++i) {
                 hidden_select_indices.push_back(static_cast<int64_t>(i));
                 hidden_valid_mask.push_back(1);
@@ -123,7 +118,7 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         std::memcpy(prefill_shuffle_indices_ptr + input_token_idx - num_decode_stream,
                     shuffle_index.data(),
                     input_chunk_length * sizeof(int));
-        if (split_hidden_states) {
+        if (should_split_hidden_states) {
             for (int i = 0; i < input_chunk_length; ++i) {
                 const int src_idx = shuffle_index[i];
                 if (src_idx >= 0 && src_idx < input_length) {
@@ -140,15 +135,14 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         input_length_ptr[num_decode_stream + p] = input_chunk_length;
     }
 
-    if (split_hidden_states) {
+    if (should_split_hidden_states) {
         auto select_indices = torch::from_blob(hidden_select_indices.data(),
                                                {(int64_t)hidden_select_indices.size()},
                                                torch::TensorOptions(torch::kInt64))
                                   .clone();
-        auto valid_mask = torch::from_blob(
-                              hidden_valid_mask.data(),
-                              {(int64_t)hidden_valid_mask.size()},
-                              torch::TensorOptions(torch::kUInt8))
+        auto valid_mask = torch::from_blob(hidden_valid_mask.data(),
+                                           {(int64_t)hidden_valid_mask.size()},
+                                           torch::TensorOptions(torch::kUInt8))
                               .clone()
                               .to(torch::kBool);
         if (total_hidden_states.is_cuda()) {

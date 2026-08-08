@@ -119,6 +119,10 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
     return result.cast<torch::Tensor>();
 }
 
+bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
+    return has_mtp_hidden_buffer_;
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -628,10 +632,10 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         fusedCopy(d2d_copies_);
     }
 
-    graph_state_         = CudaGraphState();
-    auto empty_tensor    = torch::Tensor();
-    auto py_model_inputs = PyModelInputs(
-        empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{}, inputs.dspark_call_phase);
+    graph_state_      = CudaGraphState();
+    auto empty_tensor = torch::Tensor();
+    auto py_model_inputs =
+        PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{}, inputs.dspark_call_phase);
 
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
@@ -733,8 +737,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // and combo_tokens above used direct .to(non_blocking=true). Both are async on
         // the current stream and will be ordered correctly with the kernels below.
 
-        auto py_model_inputs = PyModelInputs(
-            token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs, inputs.dspark_call_phase);
+        auto py_model_inputs =
+            PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs, inputs.dspark_call_phase);
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -777,7 +781,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // downstream Sampler::forward fail with a narrow OOB.  Detect
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
-        const bool has_context_request   = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        const bool has_context_request  = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         auto       attach_draft_outputs = [&py_model_outputs](GptModelOutputs outputs) {
             outputs.draft_tokens = py_model_outputs.draft_tokens;
             return outputs;

@@ -225,6 +225,7 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             rank_local_hidden,
             0,
             2,
+            split_hidden_states=False,
         )
 
         self.assertTrue(
@@ -237,6 +238,30 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         # The features already follow this rank's target-prefill layout. The
         # ordinary CP input processor must not apply the shuffle a second time.
         self.assertTrue(torch.equal(hidden, rank_local_hidden))
+
+    def test_configured_local_hidden_is_not_split_when_row_counts_are_ambiguous(self):
+        # The processor layout policy is fixed at construction. Even when
+        # global_tokens == local_padded_tokens, rank-local hidden states must
+        # not be split again.
+        total_tokens = torch.tensor([10, 11], dtype=torch.int32)
+        input_lengths = torch.tensor([2], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        local_hidden = torch.tensor([[11.0, 11.5], [99.0, 99.5]], dtype=torch.float32)
+
+        tokens, lengths, hidden, shuffle = cp_test.handle_inputs_with_hidden(
+            total_tokens,
+            input_lengths,
+            sequence_lengths,
+            local_hidden,
+            1,
+            2,
+            split_hidden_states=False,
+        )
+
+        self.assertTrue(torch.equal(tokens, torch.tensor([11, 0], dtype=torch.int32)))
+        self.assertTrue(torch.equal(lengths, torch.tensor([2], dtype=torch.int32)))
+        self.assertTrue(torch.equal(shuffle, torch.tensor([1, 2], dtype=torch.int32)))
+        self.assertTrue(torch.equal(hidden, local_hidden))
 
 
 class TestGenerateQKVRestoreIndices(unittest.TestCase):

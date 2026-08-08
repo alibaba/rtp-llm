@@ -64,6 +64,7 @@ public:
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool            hasMtpTargetHiddenBuffer() const override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
@@ -124,6 +125,7 @@ private:
     bool                               enable_cuda_graph_{false};
     bool                               is_prefill_cuda_graph_mode_{false};
     bool                               use_spec_decoding_{false};
+    bool                               has_mtp_hidden_buffer_{false};
     bool                               enable_device_perf_{false};
     bool                               check_nan_{false};
     std::shared_ptr<ModelInputsLogger> model_inputs_logger_;
@@ -410,10 +412,29 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
 
     cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
 
+    if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
+        has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();
+    }
+
+    // Speculative prefill CP needs every target rank to retain the complete
+    // rank-local hidden sequence for the following draft prefill. The normal
+    // CP output contains only the selected last-token rows, so reject the
+    // configuration while initializing the target model if that hand-off is
+    // unavailable.
+    if (enable_prefill_cp_ && use_spec_decoding_ && !hasMtpTargetHiddenBuffer()) {
+        throw std::runtime_error(
+            "speculative prefill CP requires the target model to provide a rank-local MTP hidden buffer");
+    }
+
     if (enable_prefill_cp_) {
-        context_parallel_processor_ =
-            ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
-        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");
+        // MTP hidden buffer is a DeepSeek-specific hand-off. It is written after
+        // CP token splitting and already contains rank-local rows, so it must not
+        // be split by the context-parallel processor again.
+        const bool split_hidden_states = !has_mtp_hidden_buffer_;
+        context_parallel_processor_    = ContextParallelProcessorFactory::create(
+            ProcessorType::ZIG_ZAG, params.parallelism_config, split_hidden_states);
+        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, split_hidden_states=%d.",
+                         static_cast<int>(split_hidden_states));
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");

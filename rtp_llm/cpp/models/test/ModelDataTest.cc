@@ -84,6 +84,16 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
     EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t1.data_ptr());
 }
 
+TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
+    ParallelismConfig prefill_config;
+    prefill_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    EXPECT_TRUE(buildExecProperties(prefill_config, DeviceResourceConfig{}).enable_prefill_cp);
+
+    ParallelismConfig decode_config;
+    decode_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    EXPECT_FALSE(buildExecProperties(decode_config, DeviceResourceConfig{}).enable_prefill_cp);
+}
+
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     GptModelInputs inputs;
     // expand() preserves the logical DSpARK aux shape without allocating the

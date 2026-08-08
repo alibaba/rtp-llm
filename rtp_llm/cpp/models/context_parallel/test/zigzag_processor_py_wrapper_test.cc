@@ -61,11 +61,12 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                              const torch::Tensor& sequence_lengths,
                              const torch::Tensor& hidden_states,
                              int                  cp_rank,
-                             int                  cp_size) {
+                             int                  cp_size,
+                             bool                 split_hidden_states) {
     ParallelismConfig parallelism_config;
     parallelism_config.tp_rank = cp_rank;
     parallelism_config.tp_size = cp_size;
-    ZigZagProcessor processor(parallelism_config);
+    ZigZagProcessor processor(parallelism_config, split_hidden_states);
 
     GptModelInputs model_input;
     model_input.combo_tokens       = total_input_tokens.contiguous().clone();
@@ -139,6 +140,7 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("hidden_states"),
           py::arg("cp_rank"),
           py::arg("cp_size"),
+          py::arg("split_hidden_states") = true,
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
 
     m.def("compute_local_last_hidden",
