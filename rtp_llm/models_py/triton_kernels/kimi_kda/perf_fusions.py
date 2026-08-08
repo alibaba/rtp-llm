@@ -489,6 +489,199 @@ def kimi_k3_two_way_attn_res(
 
 
 @triton.jit
+def _attn_res_multi_score_kernel(
+    bank,
+    prefix,
+    norm_weight,
+    projection_weight,
+    scores,
+    bank_rows,
+    stride_bank_token,
+    stride_bank_row,
+    stride_prefix_token,
+    stride_score_token,
+    hidden_size: tl.constexpr,
+    block_hidden: tl.constexpr,
+    eps: tl.constexpr,
+):
+    """Score one AttnRes candidate row without materializing [T,R,H]."""
+
+    token = tl.program_id(0)
+    candidate = tl.program_id(1)
+    sumsq = 0.0
+    dot = 0.0
+    for h0 in tl.static_range(0, hidden_size, block_hidden):
+        offsets = h0 + tl.arange(0, block_hidden)
+        mask = offsets < hidden_size
+        bank_value = tl.load(
+            bank
+            + token * stride_bank_token
+            + candidate * stride_bank_row
+            + offsets,
+            mask=mask & (candidate < bank_rows),
+            other=0.0,
+        ).to(tl.float32)
+        prefix_value = tl.load(
+            prefix + token * stride_prefix_token + offsets,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        value = tl.where(candidate < bank_rows, bank_value, prefix_value)
+        norm = tl.load(norm_weight + offsets, mask=mask, other=0.0).to(tl.float32)
+        projection = tl.load(
+            projection_weight + offsets, mask=mask, other=0.0
+        ).to(tl.float32)
+        sumsq += tl.sum(value * value, axis=0)
+        dot += tl.sum(value * norm * projection, axis=0)
+    score = dot / tl.sqrt(sumsq / hidden_size + eps)
+    tl.store(scores + token * stride_score_token + candidate, score)
+
+
+@triton.jit
+def _attn_res_multi_combine_kernel(
+    bank,
+    prefix,
+    scores,
+    output,
+    bank_rows,
+    stride_bank_token,
+    stride_bank_row,
+    stride_prefix_token,
+    stride_score_token,
+    stride_output_token,
+    hidden_size: tl.constexpr,
+    block_hidden: tl.constexpr,
+    max_rows: tl.constexpr,
+):
+    """Softmax and sum AttnRes rows directly from the persistent bank."""
+
+    token = tl.program_id(0)
+    h0 = tl.program_id(1) * block_hidden
+    offsets = h0 + tl.arange(0, block_hidden)
+    mask = offsets < hidden_size
+    row_offsets = tl.arange(0, max_rows)
+    valid = row_offsets <= bank_rows
+    raw = tl.load(
+        scores + token * stride_score_token + row_offsets,
+        mask=valid,
+        other=float("-inf"),
+    )
+    maximum = tl.max(raw, axis=0)
+    exponentials = tl.where(valid, tl.exp(raw - maximum), 0.0)
+    probabilities = exponentials / tl.sum(exponentials, axis=0)
+    result = tl.zeros((block_hidden,), dtype=tl.float32)
+    for row in tl.static_range(0, max_rows):
+        bank_value = tl.load(
+            bank + token * stride_bank_token + row * stride_bank_row + offsets,
+            mask=mask & (row < bank_rows),
+            other=0.0,
+        ).to(tl.float32)
+        prefix_value = tl.load(
+            prefix + token * stride_prefix_token + offsets,
+            mask=mask,
+            other=0.0,
+        ).to(tl.float32)
+        value = tl.where(row < bank_rows, bank_value, prefix_value)
+        # Triton does not support constexpr indexing into this register
+        # vector on every compiler version.  Select the scalar through a
+        # masked reduction instead; ``row_offsets`` is a power-of-two tile.
+        probability = tl.sum(
+            tl.where(row_offsets == row, probabilities, 0.0), axis=0
+        )
+        result += probability * value
+    tl.store(
+        output + token * stride_output_token + offsets,
+        result,
+        mask=mask,
+    )
+
+
+@torch.compiler.disable
+def kimi_k3_multi_way_attn_res(
+    prefix_sum: torch.Tensor,
+    block_residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    projection_weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """K3 AttnRes over up to eight anchors without ``torch.cat``.
+
+    This follows the SGLang K3 fused path's storage discipline: the anchor
+    bank is read in place, scores are only ``[tokens, rows]`` FP32, and the
+    weighted BF16 output is produced directly.  In particular, it never
+    materializes the eager ``[tokens, rows + 1, hidden]`` candidate tensor.
+    """
+
+    if not prefix_sum.is_cuda:
+        raise ValueError("K3 fused AttnRes is a CUDA performance-only kernel")
+    if (
+        prefix_sum.ndim != 2
+        or block_residual.ndim != 3
+        or block_residual.shape[0] != prefix_sum.shape[0]
+        or block_residual.shape[2] != prefix_sum.shape[1]
+    ):
+        raise ValueError("K3 fused AttnRes tensor shape mismatch")
+    rows = int(block_residual.shape[1])
+    if rows <= 0 or rows > 8:
+        raise ValueError(f"K3 fused AttnRes supports 1..8 anchors, got {rows}")
+    hidden_size = int(prefix_sum.shape[1])
+    if hidden_size != 7168 or hidden_size % 1024:
+        raise ValueError(
+            "K3 fused multi-way AttnRes currently requires hidden_size=7168"
+        )
+    if prefix_sum.stride(-1) != 1 or block_residual.stride(-1) != 1:
+        raise ValueError("K3 fused AttnRes requires contiguous hidden rows")
+    if norm_weight.numel() != hidden_size or projection_weight.numel() != hidden_size:
+        raise ValueError("K3 fused AttnRes weight width mismatch")
+
+    max_rows = 9  # eight frozen anchors plus the current prefix candidate.
+    # ``tl.arange`` requires a power-of-two extent.  Keep the logical score
+    # matrix compact (nine rows), but run the reduction through a masked
+    # 16-row tile.  Rows 9..15 never dereference ``scores`` because ``valid``
+    # is false for them in the combine kernel.
+    row_tile = 16
+    scores = torch.empty(
+        (prefix_sum.shape[0], max_rows), dtype=torch.float32, device=prefix_sum.device
+    )
+    output = torch.empty_like(prefix_sum)
+    _attn_res_multi_score_kernel[(prefix_sum.shape[0], rows + 1)](
+        block_residual,
+        prefix_sum,
+        norm_weight.reshape(-1),
+        projection_weight.reshape(-1),
+        scores,
+        rows,
+        block_residual.stride(0),
+        block_residual.stride(1),
+        prefix_sum.stride(0),
+        scores.stride(0),
+        hidden_size=hidden_size,
+        block_hidden=1024,
+        eps=float(eps),
+        num_warps=8,
+    )
+    _attn_res_multi_combine_kernel[
+        (prefix_sum.shape[0], triton.cdiv(hidden_size, 1024))
+    ](
+        block_residual,
+        prefix_sum,
+        scores,
+        output,
+        rows,
+        block_residual.stride(0),
+        block_residual.stride(1),
+        prefix_sum.stride(0),
+        scores.stride(0),
+        output.stride(0),
+        hidden_size=hidden_size,
+        block_hidden=1024,
+        max_rows=row_tile,
+        num_warps=4,
+    )
+    return output
+
+
+@triton.jit
 def _linear_cache_store_kernel(
     recurrent,
     q_state,

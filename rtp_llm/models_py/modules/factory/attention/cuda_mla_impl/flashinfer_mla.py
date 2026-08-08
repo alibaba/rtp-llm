@@ -349,12 +349,20 @@ class MlaFlashInferPrefillOp(object):
         qo_indptr = self.qo_indptr
         batch_reuse_info = self.batch_reuse_info_vec
 
-        # 计算总长度
-        total_reuse_len = num_blocks * self.token_per_block
+        # Use the exact ragged KV length.  The number of cache pages includes
+        # a padded final page, so ``num_blocks * token_per_block`` can be larger
+        # than the real prefix and leaves an uninitialized tail in the gathered
+        # tensor.
+        total_final_len = self.total_kv_lens
+        total_reuse_len = total_final_len - compressed_kv.size(0)
+        if total_reuse_len < 0:
+            raise RuntimeError(
+                "invalid MLA reuse metadata: total KV length "
+                f"{total_final_len} is smaller than query KV length "
+                f"{compressed_kv.size(0)}"
+            )
         if total_reuse_len == 0:
             return compressed_kv, k_pe
-
-        total_final_len = compressed_kv.size(0) + total_reuse_len
 
         # 创建输出 tensor
         final_compressed_kv = torch.empty(
@@ -390,22 +398,19 @@ class MlaFlashInferPrefillOp(object):
             self.num_heads,
             self.qk_nope_head_dim + self.qk_rope_head_dim,
         )
+        k = k_nope.new_empty(*k_shape)
         if (
             is_cuda()
             and (self.num_heads == 128)
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
         ):
-            k = k_nope.new_empty(*k_shape)
             rtp_llm_ops.mla_k_merge(k, k_nope, k_pe)
         elif is_cuda() and self._is_triton_compatible():
             # Triton kernel requires dimensions to be power of 2
-            attn_dtype = k_nope.dtype
-            k = k_nope.new_empty(*k_shape, dtype=attn_dtype)
             concat_and_cast_mha_k_triton(k, k_nope, k_pe)
         else:
             # Fallback to PyTorch native operations for non-power-of-2 dimensions
-            k = k_nope.new_empty(*k_shape)
             k[..., : self.qk_nope_head_dim] = k_nope
             k[..., self.qk_nope_head_dim :] = k_pe
         return k

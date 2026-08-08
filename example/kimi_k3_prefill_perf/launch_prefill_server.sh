@@ -16,6 +16,16 @@ enable_cuda_graph="${ENABLE_CUDA_GRAPH:-0}"
 enable_cuda_graph_debug_mode="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
 decode_capture_config="${DECODE_CAPTURE_CONFIG:-}"
 prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
+max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-524289}"
+max_batch_tokens_size="${KIMI_K3_MAX_BATCH_TOKENS_SIZE:-524288}"
+kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-8192}"
+reuse_cache="${KIMI_K3_REUSE_CACHE:-0}"
+linear_step="${KIMI_K3_LINEAR_STEP:-1}"
+seq_size_per_block="${KIMI_K3_SEQ_SIZE_PER_BLOCK:-4096}"
+kernel_seq_size_per_block="${KIMI_K3_KERNEL_SEQ_SIZE_PER_BLOCK:-128}"
+prefill_chunk_tokens="${KIMI_K3_PREFILL_CHUNK_TOKENS:-0}"
+prefill_static_attn_res_bank="${KIMI_K3_PREFILL_STATIC_ATTN_RES_BANK:-0}"
+whole_chunk_mla_absorb_kv_tokens="${KIMI_K3_WHOLE_CHUNK_MLA_ABSORB_KV_TOKENS:-786432}"
 
 for flag_name in enable_cuda_graph enable_cuda_graph_debug_mode; do
   flag_value="${!flag_name}"
@@ -24,6 +34,36 @@ for flag_name in enable_cuda_graph enable_cuda_graph_debug_mode; do
     exit 2
   fi
 done
+if [[ "${reuse_cache}" != "0" && "${reuse_cache}" != "1" ]]; then
+  echo "KIMI_K3_REUSE_CACHE must resolve to 0 or 1, got ${reuse_cache}" >&2
+  exit 2
+fi
+if (( linear_step < 1 )); then
+  echo "KIMI_K3_LINEAR_STEP must be >= 1, got ${linear_step}" >&2
+  exit 2
+fi
+if (( prefill_chunk_tokens < 0 )); then
+  echo "KIMI_K3_PREFILL_CHUNK_TOKENS must be >= 0, got ${prefill_chunk_tokens}" >&2
+  exit 2
+fi
+if [[ "${prefill_static_attn_res_bank}" != "0" && "${prefill_static_attn_res_bank}" != "1" ]]; then
+  echo "KIMI_K3_PREFILL_STATIC_ATTN_RES_BANK must resolve to 0 or 1, got ${prefill_static_attn_res_bank}" >&2
+  exit 2
+fi
+if [[ "${prefill_static_attn_res_bank}" == "1" && "${prefill_chunk_tokens}" == "0" ]]; then
+  echo "KIMI_K3_PREFILL_STATIC_ATTN_RES_BANK=1 requires KIMI_K3_PREFILL_CHUNK_TOKENS>0" >&2
+  exit 2
+fi
+if (( prefill_chunk_tokens > 0 && whole_chunk_mla_absorb_kv_tokens <= 0 )); then
+  echo "KIMI_K3_WHOLE_CHUNK_MLA_ABSORB_KV_TOKENS must be positive when whole-model Prefill chunking is enabled" >&2
+  exit 2
+fi
+if (( seq_size_per_block <= 0 || kernel_seq_size_per_block <= 0
+      || seq_size_per_block % kernel_seq_size_per_block != 0 )); then
+  echo "K3 cache blocks require positive seq/kernel sizes with seq divisible by kernel: " \
+       "seq=${seq_size_per_block}, kernel=${kernel_seq_size_per_block}" >&2
+  exit 2
+fi
 if [[ "${enable_cuda_graph_debug_mode}" == "1" && "${enable_cuda_graph}" != "1" ]]; then
   echo "ENABLE_CUDA_GRAPH_DEBUG_MODE=1 requires ENABLE_CUDA_GRAPH=1" >&2
   exit 2
@@ -82,14 +122,17 @@ export LOAD_METHOD=fastsafetensors
 export KIMI_K3_EXECUTION_MODE=optimized
 export KIMI_K3_PERF_MODE="${KIMI_K3_PERF_MODE:-1}"
 export KIMI_K3_PERF_FUSIONS=1
-export KIMI_K3_USE_HOST_METADATA=1
+export KIMI_K3_USE_HOST_METADATA="${KIMI_K3_USE_HOST_METADATA:-1}"
 export KIMI_K3_SP_MOE=1
 export KIMI_K3_KDA_BACKEND="${KIMI_K3_KDA_BACKEND:-cula}"
 export KIMI_K3_KDA_COMM_BACKEND="${kda_comm_backend}"
+export KIMI_K3_PREFILL_CHUNK_TOKENS="${prefill_chunk_tokens}"
+export KIMI_K3_PREFILL_STATIC_ATTN_RES_BANK="${prefill_static_attn_res_bank}"
+export KIMI_K3_WHOLE_CHUNK_MLA_ABSORB_KV_TOKENS="${whole_chunk_mla_absorb_kv_tokens}"
 export KIMI_K3_MOE_BACKEND=deep_gemm_mega
 export KIMI_K3_MLA_BACKEND="${KIMI_K3_MLA_BACKEND:-flashmla}"
 export KIMI_K3_DEEPGEMM_EXPECTED_PATH="${OPS_OVERLAY}"
-export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK=8192
+export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK="${KIMI_K3_MEGA_MAX_TOKENS_PER_RANK:-8192}"
 export KIMI_K3_ACCURACY_ALLOW_TOKEN_IDS=1
 export KIMI_K3_ACCURACY_CANONICAL_TP=0
 export KIMI_K3_ACCURACY_CANONICAL_EP=0
@@ -128,7 +171,10 @@ mkdir -p \
 echo \
   "[K3_PERF_CONFIG] kda_comm=${KIMI_K3_KDA_COMM_BACKEND} " \
   "kda=${KIMI_K3_KDA_BACKEND} moe=${KIMI_K3_MOE_BACKEND} " \
-  "mla=${KIMI_K3_MLA_BACKEND} graph=${enable_cuda_graph}" \
+  "mla=${KIMI_K3_MLA_BACKEND} graph=${enable_cuda_graph} " \
+  "cache_seq=${seq_size_per_block} linear_step=${linear_step} reuse_cache=${reuse_cache} " \
+  "whole_prefill_chunk=${prefill_chunk_tokens} static_attn_res_bank=${prefill_static_attn_res_bank} " \
+  "whole_chunk_mla_absorb_kv_tokens=${whole_chunk_mla_absorb_kv_tokens}" \
   >&2
 cd "${RUN_ROOT}/work"
 
@@ -139,15 +185,16 @@ server_args=(
   --ep_size 8 \
   --world_size 8 \
   --local_world_size 8 \
-  --max_seq_len 524289 \
+  --max_seq_len "${max_seq_len}" \
   --max_context_batch_size 1 \
-  --max_batch_tokens_size 524288 \
-  --seq_size_per_block 4096 \
-  --kernel_seq_size_per_block 128 \
-  --kv_cache_mem_mb 8192 \
+  --max_batch_tokens_size "${max_batch_tokens_size}" \
+  --seq_size_per_block "${seq_size_per_block}" \
+  --kernel_seq_size_per_block "${kernel_seq_size_per_block}" \
+  --kv_cache_mem_mb "${kv_cache_mem_mb}" \
+  --linear_step "${linear_step}" \
   --ssm_state_dtype fp32 \
   --warm_up 0 \
-  --reuse_cache 0 \
+  --reuse_cache "${reuse_cache}" \
   --enable_device_cache 1 \
   --concurrency_limit 1 \
   --use_deepep_moe 1 \

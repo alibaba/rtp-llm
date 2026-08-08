@@ -17,6 +17,7 @@ precision comparison against the framework/Triton kernels.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 import os
@@ -70,6 +71,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     is_kimi_kda_short_conv_paged_decode_supported,
     kimi_k3_a2a_unpack_rms_norm_sigmoid_gate,
     kimi_k3_interleave_tp_hidden,
+    kimi_k3_multi_way_attn_res,
     kimi_k3_pack_a2a_projection,
     kimi_k3_rms_norm_strided,
     kimi_k3_situ,
@@ -113,6 +115,33 @@ def _perf_mode_enabled() -> bool:
     """Enable strict validation and profiler annotations, not model math."""
 
     return _env_flag("KIMI_K3_PERF_MODE")
+
+
+def _prefill_chunk_tokens() -> int:
+    """Return the opt-in whole-model Prefill chunk size.
+
+    This is deliberately *not* a scheduler micro-batch setting.  When set for
+    a single long prefill request, :class:`KimiK3Model` advances one contiguous
+    token range through every decoder layer before starting the next range.
+    That lets the paged KDA/MLA cache carry the prefix while old activations are
+    released.  The default (zero) preserves the regular one-forward request
+    behaviour exactly.
+    """
+
+    raw = os.environ.get("KIMI_K3_PREFILL_CHUNK_TOKENS", "0").strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "KIMI_K3_PREFILL_CHUNK_TOKENS must be a non-negative integer, "
+            f"got {raw!r}"
+        ) from exc
+    if value < 0:
+        raise ValueError(
+            "KIMI_K3_PREFILL_CHUNK_TOKENS must be non-negative, "
+            f"got {value}"
+        )
+    return value
 
 
 def _perf_fusions_enabled() -> bool:
@@ -196,6 +225,58 @@ def _kda_comm_backend() -> str:
 
 def _decode_sp_debug_enabled() -> bool:
     return os.environ.get("KIMI_K3_DECODE_SP_DEBUG", "0").strip() == "1"
+
+
+def _static_memory_audit_enabled() -> bool:
+    """Enable a one-shot, deduplicated model-vs-runtime allocator audit.
+
+    This is deliberately an experiment-only diagnostic.  Unlike a MemoryViz
+    snapshot, it gives the ready-time accounting a stable semantic boundary:
+    CUDA storage directly reachable from ``KimiK3Model`` versus allocator
+    allocations owned by cache/runtime/communicators/workspaces.
+    """
+
+    return os.environ.get("KIMI_K3_STATIC_MEMORY_AUDIT", "0").strip() == "1"
+
+
+def _reachable_cuda_storage_bytes(value: Any) -> int:
+    """Return deduplicated CUDA Tensor storage reachable from ``value``.
+
+    K3 holds weights in nested dictionaries rather than exclusively as
+    ``nn.Parameter`` fields, so ``model.parameters()`` undercounts heavily.
+    This walker is only called at startup under an explicit audit flag.
+    """
+
+    seen_objects: set[int] = set()
+    seen_storages: set[tuple[int, int, str]] = set()
+
+    def walk(current: Any) -> int:
+        object_id = id(current)
+        if object_id in seen_objects:
+            return 0
+        seen_objects.add(object_id)
+        if isinstance(current, torch.Tensor):
+            if not current.is_cuda:
+                return 0
+            storage = current.untyped_storage()
+            key = (
+                int(storage.data_ptr()),
+                int(storage.nbytes()),
+                str(current.device),
+            )
+            if key in seen_storages:
+                return 0
+            seen_storages.add(key)
+            return int(storage.nbytes())
+        if isinstance(current, dict):
+            return sum(walk(item) for item in current.values())
+        if isinstance(current, (list, tuple, set, nn.ModuleList, nn.ModuleDict)):
+            return sum(walk(item) for item in current)
+        if isinstance(current, nn.Module):
+            return walk(vars(current))
+        return 0
+
+    return walk(value)
 
 
 def _flash_kda_workspace(
@@ -572,15 +653,16 @@ def _sequence_parallel_row_weight(
 class _KimiK3SplitQKVAProjection(nn.Module):
     """Preserve K3's two independent MLA down-projection rounding points."""
 
-    def __init__(self, q_a_weight: torch.Tensor, kv_a_weight: torch.Tensor) -> None:
+    def __init__(
+        self,
+        q_a_weight: torch.Tensor,
+        kv_a_weight: torch.Tensor,
+        fused_weight: Optional[torch.Tensor] = None,
+    ) -> None:
         super().__init__()
         self.q_a_weight = q_a_weight
         self.kv_a_weight = kv_a_weight
-        self.fused_weight = (
-            torch.cat((q_a_weight, kv_a_weight), dim=-1).contiguous()
-            if _perf_fusions_enabled()
-            else None
-        )
+        self.fused_weight = fused_weight if _perf_fusions_enabled() else None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.fused_weight is not None:
@@ -863,6 +945,14 @@ def _attention_residual(
         )
     if _perf_fusions_enabled() and prefix_sum.is_cuda and block_residual.shape[1] == 1:
         return kimi_k3_two_way_attn_res(
+            prefix_sum,
+            block_residual,
+            norm_weight,
+            projection_weight,
+            eps,
+        )
+    if _perf_fusions_enabled() and prefix_sum.is_cuda and block_residual.shape[1] <= 8:
+        return kimi_k3_multi_way_attn_res(
             prefix_sum,
             block_residual,
             norm_weight,
@@ -1175,17 +1265,24 @@ class KimiK3LinearCacheAdapter:
 
     @staticmethod
     def _block_map(attention_inputs: PyAttentionInputs) -> list[list[int]]:
-        if _host_metadata_enabled():
-            # Linear KDA uses one state per physical block. The selected
-            # physical host table is therefore the exact map it needs.
-            block_map = attention_inputs.kv_cache_block_id_host
-            if block_map is None or block_map.numel() == 0:
-                block_map = attention_inputs.kv_cache_kernel_block_id_host
-        else:
+        # Linear KDA has one recurrent/conv state per *physical* cache block
+        # (4096 tokens in the long-context configuration), not per MLA kernel
+        # page (128 tokens).  ``select_block_map_for_layer`` has already
+        # selected this layer's group-specific table.  Prefer its pinned
+        # physical map even when the performance host-metadata optimisation is
+        # disabled: the latter controls scalar/group lookup, not the cache ABI.
+        block_map = getattr(attention_inputs, "kv_cache_block_id_host", None)
+        if block_map is None or block_map.numel() == 0:
+            block_map = getattr(attention_inputs, "kv_cache_block_id_device", None)
+        if block_map is None or block_map.numel() == 0:
+            # Compatibility fallback for old bindings with only the legacy
+            # kernel table.  It is not suitable for a KDA long-Prefill path.
+            block_map = attention_inputs.kv_cache_kernel_block_id_host
+        if block_map is None or block_map.numel() == 0:
             block_map = attention_inputs.kv_cache_kernel_block_id_device
         if block_map is None or block_map.numel() == 0 or block_map.ndim != 2:
             raise ValueError("KDA cache requires a two-dimensional kernel block map")
-        return [
+        resolved = [
             [int(value) for value in row]
             for row in (
                 block_map.tolist()
@@ -1193,6 +1290,18 @@ class KimiK3LinearCacheAdapter:
                 else block_map.detach().cpu().tolist()
             )
         ]
+        # Capacity-only diagnostic for the explicit whole-prefill experiment.
+        # Physical block tables are owned by the scheduler; logging their small
+        # first row lets us distinguish a missing materialization from a wrong
+        # KDA/MLA group selection without changing the default serving path.
+        if os.environ.get("KIMI_K3_PREFILL_CHUNK_DEBUG", "0") == "1":
+            logging.info(
+                "[K3_WHOLE_CHUNK_CACHE_MAP] source=%s shape=%s first_row=%s",
+                "host" if block_map.device.type == "cpu" else "device",
+                tuple(block_map.shape),
+                resolved[0][:16] if resolved else [],
+            )
+        return resolved
 
     @staticmethod
     def _block_id(
@@ -2683,6 +2792,19 @@ class KimiK3KDA(nn.Module):
         sequence_parallel: bool = False,
     ) -> tuple[torch.Tensor, Optional[KimiKDAState]]:
         trace_enabled = _accuracy_trace_enabled()
+        # ``KIMI_K3_PREFILL_CHUNK_TOKENS`` is an opt-in *capacity* path.  The
+        # normal HybridCache policy deliberately materializes only sparse KDA
+        # checkpoint blocks when prefix reuse is disabled.  A whole-model
+        # 16K chunk therefore cannot reload its immediately preceding 16K
+        # state from the (intentionally sparse) block table.  Keep exactly one
+        # compact local KDA state per KDA layer between consecutive chunks;
+        # this is GPU-resident [H,K,V] FP32 plus three short-conv histories,
+        # not an activation history or an alternate KV cache.  The outer
+        # chunk runner owns the lifetime and clears it after the request.
+        whole_chunk_state_active = bool(
+            getattr(self, "_whole_chunk_prefill_state_active", False)
+            and mode == "prefill"
+        )
         if state is not None and kv_cache is not None:
             raise ValueError(
                 "pass either an explicit KDA state or LayerKVCache, not both"
@@ -2693,7 +2815,22 @@ class KimiK3KDA(nn.Module):
             attention_inputs,
             mode=mode,
         )
-        if kv_cache is not None and paged_decode_cache is None:
+        if whole_chunk_state_active:
+            state = getattr(self, "_whole_chunk_prefill_state", None)
+            # The first chunk has no predecessor.  Keep the existing cache
+            # adapter's zero-state construction instead of duplicating its
+            # ABI details here; it never dereferences a sparse block for a
+            # zero prefix length.
+            if state is None and kv_cache is not None:
+                if attention_inputs is None:
+                    raise ValueError("attention_inputs are required with a KDA cache")
+                with _perf_profile(
+                    f"{self.trace_prefix}.whole_chunk_initial_zero_state"
+                ):
+                    state = self.cache_adapter.load(
+                        kv_cache, attention_inputs, cu_seqlens, mode=mode
+                    )
+        elif kv_cache is not None and paged_decode_cache is None:
             if attention_inputs is None:
                 raise ValueError("attention_inputs are required with a KDA cache")
             with _perf_profile(
@@ -3109,7 +3246,15 @@ class KimiK3KDA(nn.Module):
                 )
         if trace_enabled:
             record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
-        if (
+        if whole_chunk_state_active:
+            # ``final_state`` is already the canonical [H,K,V] FP32 state
+            # produced by cuLA/FLA.  Retaining it is bounded by the number of
+            # KDA layers (not prompt length) and lets the next contiguous
+            # chunk continue the recurrence without forcing every 4K slot to
+            # be materialized in the sparse HybridCache.
+            assert final_state is not None
+            self._whole_chunk_prefill_state = final_state
+        elif (
             kv_cache is not None
             and not stored_page_states
             and paged_decode_cache is None
@@ -3205,8 +3350,11 @@ class KimiK3MLA(MlaAttention):
         # use these views -- it goes through the linears built by
         # ``MlaAttention.__init__``.)
         fused_qkv_a = weights[W.mla_fusedqkrope_w]
-        self._q_a_w = fused_qkv_a[:, : self.q_lora_rank].contiguous()
-        self._kv_a_w = fused_qkv_a[:, self.q_lora_rank :].contiguous()
+        # Kernel/FlashMLA use the checkpoint-native fused layout.  Keep the
+        # reference projections as views so the optimized path does not hold
+        # an additional split pair and then concatenate a third fused copy.
+        self._q_a_w = fused_qkv_a[:, : self.q_lora_rank]
+        self._kv_a_w = fused_qkv_a[:, self.q_lora_rank :]
         self._q_a_norm = weights[W.mla_q_a_ln_gamma]
         self._q_b_w = weights[W.mla_q_b_w]
         self._kv_a_norm = weights[W.mla_kv_a_ln_gamma]
@@ -3222,7 +3370,11 @@ class KimiK3MLA(MlaAttention):
         # not, and the wider fused BF16 GEMM is numerically observably
         # different on SM10x.  Keep the framework cache/FMHA path, but restore
         # the source model's two GEMM boundaries.
-        self.fused_qkv_a_proj = _KimiK3SplitQKVAProjection(self._q_a_w, self._kv_a_w)
+        self.fused_qkv_a_proj = _KimiK3SplitQKVAProjection(
+            self._q_a_w,
+            self._kv_a_w,
+            fused_weight=fused_qkv_a,
+        )
         self._sp_active_for_forward = False
         self._sp_padded_for_forward = False
 
@@ -5256,6 +5408,7 @@ class KimiK3DecoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         block_residual: torch.Tensor,
+        block_residual_count: int,
         cu_seqlens: torch.Tensor,
         *,
         mode: KDAExecutionMode,
@@ -5263,7 +5416,7 @@ class KimiK3DecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         fmha_impl: Any = None,
         sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
         trace_prefix = f"layer.{self.layer_idx}"
         trace_enabled = _accuracy_trace_enabled()
         decode_sp = sequence_parallel and mode == "decode"
@@ -5272,28 +5425,45 @@ class KimiK3DecoderLayer(nn.Module):
         tp_size = int(self.self_attn.parallelism_config.get_attn_tp_size())
         tp_rank = int(self.self_attn.parallelism_config.get_attn_tp_rank())
         local_valid_tokens: Optional[int] = None
+        if block_residual_count < 0 or block_residual_count > block_residual.shape[1]:
+            raise ValueError(
+                "K3 AttnRes valid-row count is outside its preallocated bank: "
+                f"count={block_residual_count}, capacity={block_residual.shape[1]}"
+            )
+        active_block_residual = block_residual[:, :block_residual_count, :]
         if decode_sp_debug:
             logging.info(
                 "[K3_DECODE_SP_DEBUG] rank=%d layer=%d enter hidden=%s block=%s",
                 tp_rank,
                 self.layer_idx,
                 tuple(hidden_states.shape),
-                tuple(block_residual.shape),
+                tuple(active_block_residual.shape),
             )
         if trace_enabled:
             record_accuracy_tensor(f"{trace_prefix}.input", hidden_states, token_dim=0)
         prefix_sum: Optional[torch.Tensor] = hidden_states
-        if block_residual.shape[1] > 0:
+        if block_residual_count > 0:
             with _perf_profile(f"{trace_prefix}.self_attn_residual_mix", prefix_sum):
                 hidden_states = _attention_residual(
                     prefix_sum,
-                    block_residual,
+                    active_block_residual,
                     self.weights[K3W.SELF_ATTN_RES_NORM],
                     self.weights[K3W.SELF_ATTN_RES_PROJ],
                     self.eps,
                 )
         if self.layer_idx % self.attn_res_block_size == 0:
-            block_residual = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
+            if block_residual_count == block_residual.shape[1]:
+                # Ordinary serving uses a zero-width dynamic tensor and keeps
+                # its historical cat behaviour.  The long-Prefill path passes
+                # a fixed eight-row bank, so it never materializes old+new
+                # anchor banks simultaneously.
+                block_residual = torch.cat(
+                    (block_residual, prefix_sum.unsqueeze(1)), dim=1
+                )
+            else:
+                block_residual[:, block_residual_count, :].copy_(prefix_sum)
+            block_residual_count += 1
+            active_block_residual = block_residual[:, :block_residual_count, :]
             prefix_sum = None
         with _perf_profile(f"{trace_prefix}.attention_input_rmsnorm", hidden_states):
             attention_input = _rms_norm(
@@ -5360,8 +5530,8 @@ class KimiK3DecoderLayer(nn.Module):
                     tp_size,
                     tp_rank,
                 )
-            block_residual, block_valid_tokens = _padded_token_shard(
-                block_residual,
+            active_block_residual, block_valid_tokens = _padded_token_shard(
+                active_block_residual,
                 logical_tokens,
                 tp_size,
                 tp_rank,
@@ -5372,6 +5542,8 @@ class KimiK3DecoderLayer(nn.Module):
                 raise RuntimeError(
                     "K3 Decode token-SP residual shards disagree on valid rows"
                 )
+            block_residual = active_block_residual
+            block_residual_count = int(block_residual.shape[1])
         if decode_sp_debug:
             logging.info(
                 "[K3_DECODE_SP_DEBUG] rank=%d layer=%d residual_shard_done valid=%s",
@@ -5388,7 +5560,7 @@ class KimiK3DecoderLayer(nn.Module):
         with _perf_profile(f"{trace_prefix}.mlp_attn_residual_mix", prefix_sum):
             mlp_input = _attention_residual(
                 prefix_sum,
-                block_residual,
+                active_block_residual,
                 self.weights[K3W.MLP_RES_NORM],
                 self.weights[K3W.MLP_RES_PROJ],
                 self.eps,
@@ -5430,10 +5602,11 @@ class KimiK3DecoderLayer(nn.Module):
             ):
                 output = all_gather_trim(output, logical_tokens, group=Group.TP)
                 block_residual = all_gather_trim(
-                    block_residual,
+                    active_block_residual,
                     logical_tokens,
                     group=Group.TP,
                 )
+                block_residual_count = int(block_residual.shape[1])
         if decode_sp_debug:
             logging.info(
                 "[K3_DECODE_SP_DEBUG] rank=%d layer=%d exit output=%s block=%s",
@@ -5447,7 +5620,7 @@ class KimiK3DecoderLayer(nn.Module):
             record_accuracy_tensor(
                 f"{trace_prefix}.block_residual", block_residual, token_dim=0
             )
-        return output, block_residual
+        return output, block_residual, block_residual_count
 
 
 class KimiK3Model(GptModelBase):
@@ -5489,7 +5662,39 @@ class KimiK3Model(GptModelBase):
         self.output_attn_res_proj = weights.get_global_weight(K3W.OUTPUT_ATTN_RES_PROJ)
         self._layer_group_ids: Optional[tuple[int, ...]] = None
         self._kda_a2a_weights_materialized = False
+        self._static_memory_audit_pending = _static_memory_audit_enabled()
+        self._prefill_static_attn_res_bank: Optional[torch.Tensor] = None
+        static_chunk_tokens = _prefill_chunk_tokens()
+        if (
+            static_chunk_tokens > 0
+            and _env_flag("KIMI_K3_PREFILL_STATIC_ATTN_RES_BANK")
+        ):
+            tp_size = int(parallelism_config.get_attn_tp_size())
+            if static_chunk_tokens % tp_size:
+                raise ValueError(
+                    "KIMI_K3_PREFILL_CHUNK_TOKENS must be divisible by TP for "
+                    "the static AttnRes bank"
+                )
+            bank_rows = (self.layer_num + model_config.k3_runtime_config.attn_res_block_size - 1) // model_config.k3_runtime_config.attn_res_block_size
+            self._prefill_static_attn_res_bank = torch.empty(
+                (
+                    static_chunk_tokens // tp_size,
+                    bank_rows,
+                    int(model_config.hidden_size),
+                ),
+                dtype=self.embedding_weight.dtype,
+                device=self.embedding_weight.device,
+            )
+            logging.info(
+                "[K3_PREFILL_ATTN_RES_BANK] allocated shape=%s bytes=%.3fGiB",
+                tuple(self._prefill_static_attn_res_bank.shape),
+                self._prefill_static_attn_res_bank.numel()
+                * self._prefill_static_attn_res_bank.element_size()
+                / float(1 << 30),
+            )
         _validate_perf_environment()
+        if self._static_memory_audit_pending:
+            self._log_static_memory_audit("model_constructed")
 
     # ``prepare_fmha_impl`` is inherited from ``GptModelBase``: it builds the
     # framework MLA impl via ``AttnImplFactory.get_fmha_impl`` (identical to the
@@ -5642,6 +5847,204 @@ class KimiK3Model(GptModelBase):
     def _forward_impl(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> PyModelOutputs:
+        """Run regular Prefill or the explicit, whole-model long-prefill loop.
+
+        ``KIMI_K3_PREFILL_CHUNK_TOKENS`` is intentionally a model-side escape
+        hatch for capacity experiments, not a generic scheduler feature.  The
+        chunks are contiguous and each invokes every layer before the next
+        begins.  KDA receives its prior recurrent/conv state from the paged
+        cache and MLA reads the preceding latent pages, so the cache—not a
+        retained 1M-token activation—carries the prefix between chunks.
+        """
+
+        attention_inputs = inputs.attention_inputs
+        chunk_tokens = _prefill_chunk_tokens()
+        input_ids = inputs.input_ids.reshape(-1)
+        if (
+            chunk_tokens == 0
+            or attention_inputs is None
+            or not attention_inputs.is_prefill
+            or input_ids.numel() <= chunk_tokens
+        ):
+            return self._forward_impl_one(inputs, fmha_impl)
+        return self._forward_whole_chunk_prefill(inputs, fmha_impl, chunk_tokens)
+
+    def _validate_whole_chunk_prefill(
+        self,
+        inputs: PyModelInputs,
+        chunk_tokens: int,
+    ) -> None:
+        """Fail closed for the first capacity-only whole-model chunk path."""
+
+        attention_inputs = inputs.attention_inputs
+        assert attention_inputs is not None
+        input_ids = inputs.input_ids.reshape(-1)
+        tp_size = int(self.parallelism_config.get_attn_tp_size())
+        ep_size = int(self.parallelism_config.ep_size)
+        if chunk_tokens <= 0 or chunk_tokens % tp_size:
+            raise RuntimeError(
+                "KIMI_K3_PREFILL_CHUNK_TOKENS must be divisible by attention TP; "
+                f"chunk={chunk_tokens}, TP={tp_size}"
+            )
+        if input_ids.numel() % tp_size:
+            raise RuntimeError(
+                "whole-model K3 Prefill chunking requires total tokens divisible "
+                f"by attention TP; tokens={input_ids.numel()}, TP={tp_size}"
+            )
+        if ep_size != tp_size or not _sp_moe_enabled():
+            raise RuntimeError(
+                "whole-model K3 Prefill chunking requires TP == EP Sequence "
+                f"Parallel; TP={tp_size}, EP={ep_size}, SP={_sp_moe_enabled()}"
+            )
+        if _kda_comm_backend() != "rs_ag":
+            raise RuntimeError(
+                "whole-model K3 Prefill chunking initially supports only the "
+                "standard RS/AG KDA path; set KIMI_K3_KDA_COMM_BACKEND=rs_ag"
+            )
+        if _accuracy_trace_enabled() or _accuracy_canonical_tp_enabled():
+            raise RuntimeError(
+                "whole-model K3 Prefill chunking is a capacity path and cannot "
+                "run with accuracy trace or canonical TP enabled"
+            )
+        if bool(getattr(attention_inputs, "is_cuda_graph", False)):
+            raise RuntimeError(
+                "whole-model K3 Prefill chunking does not support CUDA Graph"
+            )
+        prefix_lengths = attention_inputs.prefix_lengths
+        if prefix_lengths is not None and prefix_lengths.numel():
+            # Reading a one-element CPU mirror would be preferable here, but the
+            # capacity path deliberately rejects prefix reuse rather than adding
+            # an accidental CUDA-to-host synchronization to every chunk.
+            if bool(torch.any(prefix_lengths != 0).item()):
+                raise RuntimeError(
+                    "whole-model K3 Prefill chunking currently requires a fresh "
+                    "request (prefix_lengths must be zero)"
+                )
+
+    @staticmethod
+    def _chunk_attention_inputs(
+        attention_inputs: PyAttentionInputs,
+        *,
+        start: int,
+        end: int,
+        device: torch.device,
+    ) -> PyAttentionInputs:
+        """Clone one fresh-request metadata view at an absolute token offset."""
+
+        length = end - start
+        if length <= 0:
+            raise ValueError(f"invalid whole-model Prefill chunk [{start}, {end})")
+        chunk = copy.copy(attention_inputs)
+        cpu_i32 = torch.tensor
+        # KDA consumes cu_seqlens for the *new* contiguous segment; FlashInfer
+        # consumes prefix_lengths + input_lengths for its absolute KV extent.
+        chunk.cu_seqlens = cpu_i32([0, length], dtype=torch.int32, device=device)
+        chunk.cu_kv_seqlens = cpu_i32([0, end], dtype=torch.int32, device=device)
+        chunk.input_lengths = cpu_i32([length], dtype=torch.int32, device=device)
+        chunk.prefix_lengths = cpu_i32([start], dtype=torch.int32, device=device)
+        chunk.sequence_lengths = cpu_i32([end], dtype=torch.int32, device=device)
+        chunk.sequence_lengths_plus_1_d = torch.arange(
+            start + 1, end + 1, dtype=torch.int32, device=device
+        )
+        # The normal service path exposes pinned CPU mirrors for scalar/cache
+        # metadata.  Whole-prefill replaces the device metadata per segment,
+        # therefore it must replace the mirrors as well; otherwise KDA/MLA
+        # would accidentally read the original 1M request lengths.  These are
+        # tiny, request-local CPU tensors and do not affect activation memory.
+        chunk.cu_seqlens_host = cpu_i32([0, length], dtype=torch.int32)
+        chunk.input_lengths_host = cpu_i32([length], dtype=torch.int32)
+        chunk.prefix_lengths_host = cpu_i32([start], dtype=torch.int32)
+        chunk.sequence_lengths_host = cpu_i32([end], dtype=torch.int32)
+        chunk.total_tokens = int(length)
+        chunk.context_total_kv_length = int(end)
+        chunk.is_prefill = True
+        chunk.is_cuda_graph = False
+        chunk.cache_store_inputs = None
+        return chunk
+
+    def _forward_whole_chunk_prefill(
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any,
+        chunk_tokens: int,
+    ) -> PyModelOutputs:
+        """Advance a long fresh Prefill through all layers one range at a time."""
+
+        self._validate_whole_chunk_prefill(inputs, chunk_tokens)
+        input_ids = inputs.input_ids.reshape(-1)
+        attention_inputs = inputs.attention_inputs
+        assert attention_inputs is not None
+        total_tokens = int(input_ids.numel())
+        final_output: Optional[PyModelOutputs] = None
+        logging.info(
+            "[K3_WHOLE_CHUNK_PREFILL] enabled total_tokens=%d chunk_tokens=%d "
+            "TP=%d EP=%d backend=%s",
+            total_tokens,
+            chunk_tokens,
+            int(self.parallelism_config.get_attn_tp_size()),
+            int(self.parallelism_config.ep_size),
+            os.environ.get("KIMI_K3_KDA_BACKEND", "kernel"),
+        )
+        # Sparse LinearKVCache groups retain only selected reusable KDA page
+        # boundaries.  Whole-model chunking needs the immediately preceding
+        # KDA state at *every* chunk boundary, so retain one compact state per
+        # KDA layer on device for the duration of this request.  This has no
+        # effect on ordinary Prefill requests and is cleared even on failure.
+        kda_modules = [
+            layer.self_attn
+            for layer in self.layers
+            if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA)
+        ]
+        for module in kda_modules:
+            module._whole_chunk_prefill_state_active = True
+            module._whole_chunk_prefill_state = None
+        try:
+            for start in range(0, total_tokens, chunk_tokens):
+                end = min(start + chunk_tokens, total_tokens)
+                chunk_attention = self._chunk_attention_inputs(
+                    attention_inputs,
+                    start=start,
+                    end=end,
+                    device=input_ids.device,
+                )
+                chunk_inputs = PyModelInputs()
+                chunk_inputs.input_ids = input_ids.narrow(0, start, end - start)
+                chunk_inputs.attention_inputs = chunk_attention
+                # K3 text Prefill does not consume model-input position IDs,
+                # but retaining their absolute range keeps downstream
+                # diagnostics and future RoPE-enabled variants honest.
+                chunk_inputs.combo_position_ids = torch.arange(
+                    start, end, dtype=torch.int32, device=input_ids.device
+                )
+                with _perf_profile(
+                    f"model.whole_prefill_chunk[{start}:{end}]", chunk_inputs.input_ids
+                ):
+                    final_output = self._forward_impl_one(chunk_inputs, fmha_impl)
+                # The capacity path replaces CUDA-resident attention metadata on
+                # every outer segment.  A few CUDA extensions consume those
+                # raw metadata pointers on auxiliary streams without retaining
+                # a Python Tensor reference.  Synchronize at the explicit
+                # segment boundary before releasing this segment's tensors;
+                # this path is opt-in and capacity-only, so correctness and
+                # bounded activation lifetime take precedence over overlap.
+                if input_ids.is_cuda:
+                    torch.cuda.synchronize(input_ids.device)
+                # Every old chunk owns only transient activations.  Keep
+                # exactly the final output needed for the next-token LM head;
+                # KDA carries its next-chunk state in the bounded module-local
+                # state above and MLA uses the existing paged cache.
+                del chunk_inputs
+                del chunk_attention
+        finally:
+            for module in kda_modules:
+                module._whole_chunk_prefill_state_active = False
+                module._whole_chunk_prefill_state = None
+        assert final_output is not None
+        return final_output
+
+    def _forward_impl_one(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
         attention_inputs = inputs.attention_inputs
         if attention_inputs is None:
             raise ValueError("Kimi K3 requires PyAttentionInputs")
@@ -5652,6 +6055,9 @@ class KimiK3Model(GptModelBase):
         if not attention_inputs.is_prefill and self.kv_cache is None:
             raise RuntimeError("Kimi K3 decode requires an initialized hybrid cache")
         input_ids = inputs.input_ids.reshape(-1)
+        if self._static_memory_audit_pending:
+            self._log_static_memory_audit("before_first_forward")
+            self._static_memory_audit_pending = False
         trace_enabled = _accuracy_trace_enabled()
         tp_size = int(self.parallelism_config.get_attn_tp_size())
         sp_requested = _sp_moe_enabled() and tp_size > 1
@@ -5771,9 +6177,21 @@ class KimiK3Model(GptModelBase):
                 hidden_states = hidden_states.narrow(
                     0, tp_rank * local_tokens, local_tokens
                 ).contiguous()
-        block_residual = hidden_states.new_empty(
-            hidden_states.shape[0], 0, hidden_states.shape[1]
-        )
+        static_bank = self._prefill_static_attn_res_bank
+        if (
+            prefill_sp
+            and static_bank is not None
+            and static_bank.device == hidden_states.device
+            and static_bank.dtype == hidden_states.dtype
+            and hidden_states.shape[0] <= static_bank.shape[0]
+            and hidden_states.shape[1] == static_bank.shape[2]
+        ):
+            block_residual = static_bank[: hidden_states.shape[0]]
+        else:
+            block_residual = hidden_states.new_empty(
+                hidden_states.shape[0], 0, hidden_states.shape[1]
+            )
+        block_residual_count = 0
         mode: KDAExecutionMode = "prefill" if attention_inputs.is_prefill else "decode"
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
@@ -5828,6 +6246,14 @@ class KimiK3Model(GptModelBase):
                         selected_kernel_blocks,
                     )
             if not layer.is_kda and fmha_impl is not None:
+                # cuLA/DeepGEMM and the MLA planner use auxiliary CUDA/NCCL
+                # streams.  A whole-prefill segment changes prefix metadata
+                # immediately after the preceding KDA layers.  Wait only on
+                # this capacity-only MLA boundary so cache writes from those
+                # layers are visible before FlashInfer replans the prefix.
+                # Ordinary serving remains fully asynchronous.
+                if attention_inputs.is_prefill and _prefill_chunk_tokens() > 0:
+                    torch.cuda.synchronize(hidden_states.device)
                 prepared_mla_group_id = _prepare_mla_fmha_for_group(
                     fmha_impl,
                     attention_inputs,
@@ -5860,9 +6286,10 @@ class KimiK3Model(GptModelBase):
             with _perf_profile(
                 f"layer.{layer_idx}.decoder_layer_complete", hidden_states
             ):
-                hidden_states, block_residual = layer(
+                hidden_states, block_residual, block_residual_count = layer(
                     hidden_states,
                     block_residual,
+                    block_residual_count,
                     cu_seqlens,
                     mode=mode,
                     kv_cache=layer_cache,
@@ -5892,7 +6319,7 @@ class KimiK3Model(GptModelBase):
         with _perf_profile("model.output_attn_residual_mix", hidden_states):
             hidden_states = _attention_residual(
                 hidden_states,
-                block_residual,
+                block_residual[:, :block_residual_count, :],
                 self.output_attn_res_norm,
                 self.output_attn_res_proj,
                 self.config.layernorm_eps,
@@ -5916,6 +6343,35 @@ class KimiK3Model(GptModelBase):
             PyModelOutputs(hidden_states, fmha_params)
             if fmha_params is not None
             else PyModelOutputs(hidden_states)
+        )
+
+    def _log_static_memory_audit(self, tag: str) -> None:
+        """Log model-owned CUDA storage and the residual runtime allocation."""
+
+        device = self.embedding_weight.device
+        model_storage = _reachable_cuda_storage_bytes(self)
+        allocated = int(torch.cuda.memory_allocated(device))
+        reserved = int(torch.cuda.memory_reserved(device))
+        free, total = torch.cuda.mem_get_info(device)
+        static_bank = self._prefill_static_attn_res_bank
+        bank_bytes = (
+            int(static_bank.untyped_storage().nbytes())
+            if static_bank is not None and static_bank.is_cuda
+            else 0
+        )
+        logging.info(
+            "[K3_STATIC_RUNTIME_AUDIT] tag=%s rank=%d model_storage=%.3fGiB "
+            "attn_res_bank=%.3fGiB non_model_allocated=%.3fGiB "
+            "allocated=%.3fGiB reserved=%.3fGiB driver_free=%.3fGiB total=%.3fGiB",
+            tag,
+            int(self.parallelism_config.world_rank),
+            model_storage / float(1 << 30),
+            bank_bytes / float(1 << 30),
+            max(0, allocated - model_storage) / float(1 << 30),
+            allocated / float(1 << 30),
+            reserved / float(1 << 30),
+            int(free) / float(1 << 30),
+            int(total) / float(1 << 30),
         )
 
 

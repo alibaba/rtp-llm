@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
@@ -132,6 +133,20 @@ class MlaFlashInferImplBase(MlaImplBase):
             if input_lengths is not None and input_lengths.numel()
             else attn_inputs.input_lengths
         )
+        if use_host_metadata and input_lengths is not None and input_lengths.numel():
+            input_values = [int(value) for value in input_lengths.tolist()]
+            prefix_values = (
+                [int(value) for value in prefix_lengths.tolist()]
+                if prefix_lengths is not None and prefix_lengths.numel()
+                else [0] * len(input_values)
+            )
+            # Whole-model Prefill replaces the request metadata for every
+            # segment.  Refresh this host-side hint together with the planner;
+            # retaining the initial full-request length makes the first 64K
+            # segment gather and expand the entire 1M cache capacity.
+            self.fmha_impl.total_kv_lens_hint = sum(input_values) + sum(
+                prefix_values
+            )
         self.fmha_params.fill_params(
             prefix_lengths,
             sequence_lengths,
@@ -311,6 +326,23 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         self.absorb_opt_len = (
             fmha_config.absorb_opt_len if fmha_config is not None else 1024
         )
+        whole_chunk_tokens = int(
+            os.environ.get("KIMI_K3_PREFILL_CHUNK_TOKENS", "0")
+        )
+        self.whole_chunk_absorb_kv_tokens = (
+            int(
+                os.environ.get(
+                    "KIMI_K3_WHOLE_CHUNK_MLA_ABSORB_KV_TOKENS", "786432"
+                )
+            )
+            if whole_chunk_tokens > 0
+            else 0
+        )
+        if whole_chunk_tokens > 0 and self.whole_chunk_absorb_kv_tokens <= 0:
+            raise ValueError(
+                "KIMI_K3_WHOLE_CHUNK_MLA_ABSORB_KV_TOKENS must be positive "
+                "when whole-model Prefill chunking is enabled"
+            )
         input_host = (
             getattr(attn_inputs, "input_lengths_host", None)
             if use_host_metadata
@@ -322,9 +354,10 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             else attn_inputs.input_lengths.sum().item()
         )
         self.absorb_fmha: Optional[MlaFlashInferDecodeOp] = None
+        use_short_suffix_absorb = q_len < self.absorb_opt_len and self.has_reuse_cache
+        use_whole_chunk_absorb = self.whole_chunk_absorb_kv_tokens > 0
         if (
-            q_len < self.absorb_opt_len
-            and self.has_reuse_cache
+            (use_short_suffix_absorb or use_whole_chunk_absorb)
             and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
         ):
             self.absorb_fmha = MlaFlashInferDecodeOp(
@@ -339,6 +372,12 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
                 weights,
             )
             self.absorb_fmha.plan(self.fmha_params)
+
+    def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False):
+        super().prepare(attn_inputs, forbid_realloc)
+        absorb_fmha = getattr(self, "absorb_fmha", None)
+        if absorb_fmha is not None:
+            absorb_fmha.plan(self.fmha_params)
 
     @classmethod
     def support(
@@ -387,7 +426,50 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     ):
         """Compute prefill context with optimized cache reuse logic."""
 
-        if self.absorb_fmha is not None:
+        # total_kv_lens is published by the FlashInfer impl's prepare() from the
+        # hint this wrapper pushes. MlaFlashMLAPrefillOp never consumes that hint
+        # and defines no such attribute, so reading it unconditionally kills the
+        # whole flashmla Prefill path with an AttributeError on the first forward.
+        # Fall back to the hint, then to 0, which leaves use_whole_chunk_absorb
+        # False and keeps the pre-existing short-suffix decision untouched.
+        total_kv_lens_raw = getattr(self.fmha_impl, "total_kv_lens", None)
+        if total_kv_lens_raw is None:
+            total_kv_lens_raw = getattr(self.fmha_impl, "total_kv_lens_hint", None)
+        capacity_len_known = total_kv_lens_raw is not None
+        total_kv_lens = int(total_kv_lens_raw) if capacity_len_known else 0
+        if self.whole_chunk_absorb_kv_tokens > 0 and not capacity_len_known:
+            if not getattr(self, "_warned_capacity_len_unavailable", False):
+                logging.warning(
+                    "[K3_WHOLE_CHUNK_MLA_ROUTE] %s publishes no KV length; "
+                    "whole-chunk capacity routing (threshold=%d) is inactive, "
+                    "falling back to ragged MHA",
+                    type(self.fmha_impl).__name__,
+                    self.whole_chunk_absorb_kv_tokens,
+                )
+                self._warned_capacity_len_unavailable = True
+        use_whole_chunk_absorb = (
+            self.whole_chunk_absorb_kv_tokens > 0
+            and capacity_len_known
+            and total_kv_lens >= self.whole_chunk_absorb_kv_tokens
+        )
+        use_short_suffix_absorb = (
+            self.whole_chunk_absorb_kv_tokens == 0
+            and self.absorb_fmha is not None
+        )
+        use_absorb = use_whole_chunk_absorb or use_short_suffix_absorb
+        route = "paged_absorb" if use_absorb else "ragged_mha"
+        route_key = (route, total_kv_lens)
+        if getattr(self, "_last_capacity_route", None) != route_key:
+            logging.warning(
+                "[K3_WHOLE_CHUNK_MLA_ROUTE] route=%s total_kv_tokens=%d "
+                "absorb_threshold=%d",
+                route,
+                total_kv_lens,
+                self.whole_chunk_absorb_kv_tokens,
+            )
+            self._last_capacity_route = route_key
+        if use_absorb:
+            assert self.absorb_fmha is not None
             return self._handle_short_sequence(q, kv_cache, layer_id)
         else:
             return self._handle_long_sequence(
@@ -476,6 +558,13 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
         self.has_reuse_cache = False
         self.absorb_opt_len = 0
         self.absorb_fmha = None
+        # This subclass calls MlaFlashInferImplBase.__init__ directly and so
+        # skips MlaFlashInferPrefillImpl.__init__, yet it inherits that class's
+        # compute_prefill_context. Every attribute that method reads has to be
+        # defaulted here — the two above plus the whole-chunk capacity
+        # threshold. 0 disables the paged-absorb route, which with
+        # absorb_fmha=None reproduces the dense FlashMLA path exactly.
+        self.whole_chunk_absorb_kv_tokens = 0
 
     @classmethod
     def support(

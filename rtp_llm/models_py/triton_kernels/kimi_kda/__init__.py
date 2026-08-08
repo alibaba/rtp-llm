@@ -6,6 +6,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.gate import fused_kda_gate
 from rtp_llm.models_py.triton_kernels.kimi_kda.perf_fusions import (
     kimi_k3_a2a_unpack_rms_norm_sigmoid_gate,
     kimi_k3_interleave_tp_hidden,
+    kimi_k3_multi_way_attn_res,
     kimi_k3_pack_a2a_projection,
     kimi_k3_rms_norm_strided,
     kimi_k3_situ,
@@ -28,6 +29,7 @@ __all__ = [
     "fused_recurrent_kda",
     "kimi_k3_a2a_unpack_rms_norm_sigmoid_gate",
     "kimi_k3_interleave_tp_hidden",
+    "kimi_k3_multi_way_attn_res",
     "kimi_k3_pack_a2a_projection",
     "kimi_k3_rms_norm_strided",
     "kimi_k3_situ",

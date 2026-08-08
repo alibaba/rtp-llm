@@ -30,7 +30,13 @@ def post_json(url: str, payload: dict, timeout: int) -> dict:
     return json.loads(body) if body.strip() else {}
 
 
-def run_prefill(base_url: str, ids: list[int], timeout: int) -> tuple[float, list[int]]:
+def run_prefill(
+    base_url: str,
+    ids: list[int],
+    timeout: int,
+    *,
+    reuse_cache: bool = False,
+) -> tuple[float, list[int]]:
     payload = {
         "prompt": PERF_PROMPT,
         "kimi_k3_accuracy_input_ids": ids,
@@ -50,7 +56,7 @@ def run_prefill(base_url: str, ids: list[int], timeout: int) -> tuple[float, lis
             "return_input_ids": False,
             "aux_info": True,
             "can_use_pd_separation": False,
-            "reuse_cache": False,
+            "reuse_cache": reuse_cache,
             "random_seed": 20260722,
             "timeout_ms": timeout * 1000,
             "ttft_timeout_ms": timeout * 1000,
@@ -148,6 +154,16 @@ def main() -> None:
     parser.add_argument("--stability-window", type=int, default=5)
     parser.add_argument("--stability-percent", type=float, default=3.0)
     parser.add_argument("--profile-repeats", type=int, default=1)
+    parser.add_argument(
+        "--single-shot",
+        action="store_true",
+        help="Submit exactly one request; intended for capacity diagnostics, not profiling.",
+    )
+    parser.add_argument(
+        "--reuse-cache",
+        action="store_true",
+        help="Request engine cache allocation/reuse for chunked capacity experiments.",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--trace-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -175,7 +191,7 @@ def main() -> None:
         "input_ids_sha256": hashlib.sha256(ids_bytes).hexdigest(),
         "max_new_tokens": 1,
         "ignore_eos": True,
-        "reuse_cache": False,
+        "reuse_cache": args.reuse_cache,
         "kda_backend": args.backend,
         "kda_comm_backend": args.kda_comm_backend,
         "mla_backend": args.mla_backend,
@@ -191,15 +207,37 @@ def main() -> None:
         "profile_repeats": args.profile_repeats,
     }
 
+    if args.single_shot:
+        elapsed, output = run_prefill(
+            args.base_url, ids, args.timeout, reuse_cache=args.reuse_cache
+        )
+        print(
+            json.dumps(
+                {
+                    "length": args.length,
+                    "elapsed_seconds": elapsed,
+                    "output_ids": output,
+                    "reuse_cache": args.reuse_cache,
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        return
+
     print(f"[materialize] length={args.length}", flush=True)
-    elapsed, output = run_prefill(args.base_url, ids, args.timeout)
+    elapsed, output = run_prefill(
+        args.base_url, ids, args.timeout, reuse_cache=args.reuse_cache
+    )
     manifest["materialize_seconds"] = elapsed
     manifest["materialize_output_ids"] = output
     print(f"[materialize] elapsed={elapsed:.6f}s output={output}", flush=True)
 
     warmups: list[float] = []
     for iteration in range(1, args.max_warmups + 1):
-        elapsed, output = run_prefill(args.base_url, ids, args.timeout)
+        elapsed, output = run_prefill(
+            args.base_url, ids, args.timeout, reuse_cache=args.reuse_cache
+        )
         warmups.append(elapsed)
         print(
             f"[warmup] iteration={iteration} elapsed={elapsed:.6f}s output={output}",
@@ -245,7 +283,9 @@ def main() -> None:
     print(f"[profile-arm] {profile_response}", flush=True)
     time.sleep(2)
 
-    elapsed, output = run_prefill(args.base_url, ids, args.timeout)
+    elapsed, output = run_prefill(
+        args.base_url, ids, args.timeout, reuse_cache=args.reuse_cache
+    )
     profile_warmup = {
         "seconds": elapsed,
         "output_ids": output,
@@ -258,7 +298,9 @@ def main() -> None:
 
     profiles: list[dict] = []
     for repeat in range(1, args.profile_repeats + 1):
-        elapsed, output = run_prefill(args.base_url, ids, args.timeout)
+        elapsed, output = run_prefill(
+            args.base_url, ids, args.timeout, reuse_cache=args.reuse_cache
+        )
         print(
             f"[profile] repeat={repeat} elapsed={elapsed:.6f}s output={output}",
             flush=True,
