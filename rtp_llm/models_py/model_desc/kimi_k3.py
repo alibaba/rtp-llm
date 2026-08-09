@@ -4048,14 +4048,12 @@ class KimiK3LatentMoE(nn.Module):
             )
         world_size = int(dist.get_world_size())
         if (
-            self.ep_size != 8
-            or self.attn_tp_size != 8
-            or world_size != 8
-            or self.local_expert_count != 112
+            world_size <= 1
+            or self.ep_size != world_size
+            or self.attn_tp_size != world_size
         ):
             raise RuntimeError(
-                "K3 DeepGEMM MegaMoE is fixed to "
-                "TP8/EP8/world8/112-local-experts; got "
+                "K3 DeepGEMM MegaMoE requires TP=EP=world with world > 1; got "
                 f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
                 f"local_experts={self.local_expert_count}"
             )
@@ -5581,7 +5579,8 @@ class KimiK3Model(GptModelBase):
         if _perf_mode_enabled():
             if not prefill_sp:
                 raise RuntimeError(
-                    "K3 performance profiling requires divisible TP8/EP8 "
+                    "K3 performance profiling requires a TP-divisible "
+                    "full-TP/full-EP "
                     f"Prefill Sequence Parallel; tokens={input_ids.numel()}, "
                     f"TP={tp_size}, is_prefill={attention_inputs.is_prefill}"
                 )
@@ -5647,7 +5646,7 @@ class KimiK3Model(GptModelBase):
         ):
             raise RuntimeError(
                 "KIMI_K3_KDA_COMM_BACKEND=a2a is Prefill-only and requires "
-                "divisible TP8/EP8 Sequence Parallel input"
+                "TP-divisible full-TP/full-EP Sequence Parallel input"
             )
         if trace_enabled:
             mark_accuracy_fake_stream(

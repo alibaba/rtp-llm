@@ -102,6 +102,13 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_pd_launcher_test",
+    srcs = ["kimi_k3_pd_launcher_test.py"],
+    data = ["//example:start_kimi_k3_pd.sh"],
+    timeout = "short",
+)
+
+py_test(
     name = "xgrammar_bootstrap_test",
     srcs = ["xgrammar_bootstrap_test.py"],
     deps = ["//rtp_llm:testlib"],

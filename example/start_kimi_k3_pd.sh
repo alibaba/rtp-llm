@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# Start one side of the validated Kimi K3 PD topology:
-#   Prefill: TP8 / DP1 / EP8
-#   Decode:  TP8 / DP1 / EP8 (default), or TP1 / DP8 / EP8 (legacy)
+# Start one side of a Kimi K3 PD topology. The default is TP8 / DP1 / EP8;
+# smaller full-TP topologies such as TP4 / DP1 / EP4 are also supported.
 #
 # The script incrementally builds its Bazel launcher with CUDA13/SM10x.  It
 # does not install or replace a system rtp-llm wheel.
@@ -79,25 +78,32 @@ Optional environment variables:
                                          GENERATION_WORKERS value
   MAX_CONTEXT_BATCH_SIZE                defaults to 1
   KIMI_K3_DECODE_CPU_OFFLOAD_START      defaults to auto; integer or none
-  KIMI_K3_DECODE_TOPOLOGY               defaults to tp8_ep8; one of:
-                                         tp8_ep8, dp8_ep8
+  KIMI_K3_WORLD_SIZE                    defaults to 8, or TP_SIZE * DP_SIZE
+                                         when either size is explicitly set
+  KIMI_K3_LOCAL_WORLD_SIZE              defaults to WORLD_SIZE
+  KIMI_K3_TP_SIZE                       defaults to WORLD_SIZE
+  KIMI_K3_DP_SIZE                       defaults to 1
+  KIMI_K3_EP_SIZE                       defaults to WORLD_SIZE
+  KIMI_K3_DECODE_TOPOLOGY               compatibility alias accepting generic
+                                         tpN_epM or dpN_epM spellings; numeric
+                                         topology variables take precedence
   KIMI_K3_EXECUTION_MODE                defaults to optimized; one of:
                                          optimized, accuracy
   KIMI_K3_USE_HOST_METADATA             optimized defaults to 1; accuracy to 0
-  KIMI_K3_SP_MOE                        optimized TP8/EP8 defaults to 1;
+  KIMI_K3_SP_MOE                        optimized full-TP/full-EP defaults to 1;
                                          all other modes/topologies default to 0
   KIMI_K3_KDA_BACKEND                   optimized Prefill defaults to cula;
                                          accuracy Prefill defaults to kernel;
-                                         Decode tp8_ep8 defaults to kernel;
-                                         Decode dp8_ep8 defaults to
+                                         full-TP Decode defaults to kernel;
+                                         data-parallel Decode defaults to
                                          fla37_precompiled
-  KIMI_K3_MOE_BACKEND                   optimized TP8/EP8 defaults to
+  KIMI_K3_MOE_BACKEND                   optimized full-TP/full-EP defaults to
                                          deep_gemm_mega; otherwise deepep
   KIMI_K3_MLA_BACKEND                   optimized Prefill defaults to
                                          flashmla; Decode defaults to kernel
-  KIMI_K3_PERF_FUSIONS                  optimized TP8/EP8 defaults to 1;
+  KIMI_K3_PERF_FUSIONS                  optimized full-TP/full-EP defaults to 1;
                                          all other modes/topologies default to 0
-  KIMI_K3_BATCHED_KDA_DECODE            optimized TP8/EP8 Decode defaults to 1;
+  KIMI_K3_BATCHED_KDA_DECODE            optimized full-TP Decode defaults to 1;
                                          all other modes/topologies default to 0
   KIMI_K3_PERF_MODE                     strict performance-path validation only
   KIMI_K3_KDA_FLA37_PRECOMPILED_DIR     defaults to the bundled SM103 image
@@ -138,9 +144,15 @@ die() {
     exit 2
 }
 
-role="${1^^}"
-case "${role}" in
-    PREFILL | DECODE) ;;
+case "$1" in
+    prefill | PREFILL)
+        role=PREFILL
+        role_lower=prefill
+        ;;
+    decode | DECODE)
+        role=DECODE
+        role_lower=decode
+        ;;
     *)
         usage
         die "role must be prefill or decode"
@@ -179,11 +191,121 @@ prefill_port="$(endpoint_port "${PREFILL_ENDPOINT}")"
 decode_port="$(endpoint_port "${DECODE_ENDPOINT}")"
 prefill_host="${PREFILL_ENDPOINT%:*}"
 decode_host="${DECODE_ENDPOINT%:*}"
-decode_topology="${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}"
-case "${decode_topology}" in
-    tp8_ep8 | dp8_ep8) ;;
-    *) die "unsupported KIMI_K3_DECODE_TOPOLOGY=${decode_topology}" ;;
-esac
+
+require_positive_integer() {
+    local name="$1"
+    local value="$2"
+    [[ "${value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "${name} must be a positive integer, got ${value}"
+}
+
+# Preserve the old Decode topology spelling, but parse it generically. Numeric
+# variables are the primary interface and can describe topologies without
+# adding another launcher case for every TP size.
+legacy_decode_topology="${KIMI_K3_DECODE_TOPOLOGY:-tp8_ep8}"
+legacy_world_size=8
+legacy_tp_size=8
+legacy_dp_size=1
+legacy_ep_size=8
+if [[ "${legacy_decode_topology}" =~ ^tp([1-9][0-9]*)_ep([1-9][0-9]*)$ ]]; then
+    legacy_tp_size="${BASH_REMATCH[1]}"
+    legacy_dp_size=1
+    legacy_world_size="${legacy_tp_size}"
+    legacy_ep_size="${BASH_REMATCH[2]}"
+elif [[ "${legacy_decode_topology}" =~ ^dp([1-9][0-9]*)_ep([1-9][0-9]*)$ ]]; then
+    legacy_tp_size=1
+    legacy_dp_size="${BASH_REMATCH[1]}"
+    legacy_world_size="${legacy_dp_size}"
+    legacy_ep_size="${BASH_REMATCH[2]}"
+else
+    die "KIMI_K3_DECODE_TOPOLOGY must match tpN_epM or dpN_epM, got ${legacy_decode_topology}"
+fi
+
+if [[ "${role}" == "DECODE" ]]; then
+    default_world_size="${legacy_world_size}"
+    default_tp_size="${legacy_tp_size}"
+    default_dp_size="${legacy_dp_size}"
+    default_ep_size="${legacy_ep_size}"
+else
+    default_world_size=8
+    default_tp_size=8
+    default_dp_size=1
+    default_ep_size=8
+fi
+
+world_size="${KIMI_K3_WORLD_SIZE:-}"
+tp_size="${KIMI_K3_TP_SIZE:-}"
+dp_size="${KIMI_K3_DP_SIZE:-}"
+if [[ -n "${world_size}" || -n "${tp_size}" || -n "${dp_size}" ]]; then
+    for topology_pair in \
+        "KIMI_K3_WORLD_SIZE:${world_size}" \
+        "KIMI_K3_TP_SIZE:${tp_size}" \
+        "KIMI_K3_DP_SIZE:${dp_size}"; do
+        topology_name="${topology_pair%%:*}"
+        topology_value="${topology_pair#*:}"
+        if [[ -n "${topology_value}" ]]; then
+            require_positive_integer "${topology_name}" "${topology_value}"
+        fi
+    done
+    if [[ -z "${world_size}" ]]; then
+        tp_size="${tp_size:-1}"
+        dp_size="${dp_size:-1}"
+        world_size="$((tp_size * dp_size))"
+    elif [[ -z "${tp_size}" && -z "${dp_size}" ]]; then
+        tp_size="${world_size}"
+        dp_size=1
+    elif [[ -z "${tp_size}" ]]; then
+        (( world_size % dp_size == 0 )) \
+            || die "WORLD_SIZE=${world_size} must be divisible by DP_SIZE=${dp_size}"
+        tp_size="$((world_size / dp_size))"
+    elif [[ -z "${dp_size}" ]]; then
+        (( world_size % tp_size == 0 )) \
+            || die "WORLD_SIZE=${world_size} must be divisible by TP_SIZE=${tp_size}"
+        dp_size="$((world_size / tp_size))"
+    fi
+else
+    world_size="${default_world_size}"
+    tp_size="${default_tp_size}"
+    dp_size="${default_dp_size}"
+fi
+ep_size="${KIMI_K3_EP_SIZE:-${default_ep_size}}"
+if [[ -n "${KIMI_K3_WORLD_SIZE:-}" \
+    || -n "${KIMI_K3_TP_SIZE:-}" \
+    || -n "${KIMI_K3_DP_SIZE:-}" ]]; then
+    ep_size="${KIMI_K3_EP_SIZE:-${world_size}}"
+fi
+local_world_size="${KIMI_K3_LOCAL_WORLD_SIZE:-${world_size}}"
+
+for topology_pair in \
+    "WORLD_SIZE:${world_size}" \
+    "LOCAL_WORLD_SIZE:${local_world_size}" \
+    "TP_SIZE:${tp_size}" \
+    "DP_SIZE:${dp_size}" \
+    "EP_SIZE:${ep_size}"; do
+    require_positive_integer "${topology_pair%%:*}" "${topology_pair#*:}"
+done
+(( tp_size * dp_size == world_size )) \
+    || die "TP_SIZE * DP_SIZE must equal WORLD_SIZE; got TP=${tp_size} DP=${dp_size} world=${world_size}"
+(( ep_size <= world_size && world_size % ep_size == 0 )) \
+    || die "EP_SIZE must divide WORLD_SIZE; got EP=${ep_size} world=${world_size}"
+(( local_world_size <= world_size && world_size % local_world_size == 0 )) \
+    || die "LOCAL_WORLD_SIZE must divide WORLD_SIZE; got local=${local_world_size} world=${world_size}"
+
+full_tp_ep=0
+if (( dp_size == 1 && tp_size == world_size && ep_size == world_size )); then
+    full_tp_ep=1
+fi
+data_parallel_decode=0
+if (( tp_size == 1 && dp_size == world_size && dp_size > 1 )); then
+    data_parallel_decode=1
+fi
+if (( dp_size == 1 )); then
+    decode_topology="tp${tp_size}_ep${ep_size}"
+elif (( tp_size == 1 )); then
+    decode_topology="dp${dp_size}_ep${ep_size}"
+else
+    decode_topology="tp${tp_size}_dp${dp_size}_ep${ep_size}"
+fi
 execution_mode="${KIMI_K3_EXECUTION_MODE:-optimized}"
 case "${execution_mode}" in
     optimized | accuracy) ;;
@@ -221,7 +343,7 @@ service_id="${KIMI_K3_SERVICE_ID:-kimi-k3-pd}"
 run_root="${KIMI_K3_RUN_ROOT:-${SMOKE_ROLE_RUNTIME_DIR:-${TMPDIR:-/tmp}/${service_id}}}"
 # CpuTpBroadcaster appends a long per-rank UDS name.  Keep the default runtime
 # path short even when RUN_ROOT is an archival path.
-runtime_tmpdir="${KIMI_K3_TMPDIR:-/tmp/${service_id}-${role,,}}"
+runtime_tmpdir="${KIMI_K3_TMPDIR:-/tmp/${service_id}-${role_lower}}"
 # Wheel overlays are prepared before the final service environment below.
 # Export the short/writable runtime directory now so pip does not spill its
 # temporary extraction tree into a possibly inode-constrained account home.
@@ -242,9 +364,9 @@ export FLASHINFER_WORKSPACE_BASE="${flashinfer_workspace_base}"
 export FLASHINFER_CUDA_ARCH_LIST="${KIMI_K3_FLASHINFER_CUDA_ARCH_LIST:-10.3a}"
 mkdir -p "${FLASHINFER_WORKSPACE_BASE}"
 
-# Optimized TP8/EP8 uses DeepGEMM MegaMoE, whose dispatch/combine is fused
+# Optimized full-TP/full-EP uses DeepGEMM MegaMoE, whose dispatch/combine is fused
 # inside the symmetric-memory kernel.  Do not require or install DeepEP on
-# that path.  Accuracy mode, legacy DP8, or an explicit deepep selection still
+# that path. Accuracy mode, a data-parallel topology, or an explicit deepep selection still
 # resolves the pinned wheel exactly as before.
 requested_moe_backend="${KIMI_K3_MOE_BACKEND:-}"
 need_deep_ep=0
@@ -252,7 +374,7 @@ if [[ "${requested_moe_backend}" == "deepep" ]] \
     || { [[ -z "${requested_moe_backend}" ]] \
         && { [[ "${execution_mode}" == "accuracy" ]] \
             || { [[ "${role}" == "DECODE" ]] \
-                && [[ "${decode_topology}" == "dp8_ep8" ]]; }; }; }; then
+                && [[ "${full_tp_ep}" != "1" ]]; }; }; }; then
     need_deep_ep=1
 fi
 if [[ "${need_deep_ep}" == "1" && -z "${KIMI_K3_DEEP_EP_PYTHONPATH:-}" ]]; then
@@ -315,10 +437,10 @@ case "${execution_mode}" in
     optimized)
         default_accuracy_mode=native
         if [[ "${role}" == "DECODE" ]]; then
-            if [[ "${decode_topology}" == "tp8_ep8" ]]; then
+            if [[ "${full_tp_ep}" == "1" ]]; then
                 # The bundled FLA 3.7 cubin is specialized for the TP1
-                # 96-head state.  TP8 owns 12 heads per rank and therefore
-                # uses the shape-generic recurrent Triton kernel.
+                # 96-head state. Full TP owns a head partition per rank and
+                # therefore uses the shape-generic recurrent Triton kernel.
                 default_kda_backend=kernel
                 # MegaMoE owns the EP dispatch/combine and consumes the
                 # checkpoint-native MXFP4 experts directly.  The old
@@ -359,7 +481,7 @@ case "${execution_mode}" in
         default_accuracy_mode=native
         if [[ "${role}" == "DECODE" ]]; then
             default_kv_cache_mem_mb=8192
-            if [[ "${decode_topology}" == "tp8_ep8" ]]; then
+            if [[ "${full_tp_ep}" == "1" ]]; then
                 default_kda_backend=kernel
                 default_sp_moe=1
                 default_decode_offload_start=none
@@ -491,8 +613,8 @@ esac
 case "${moe_backend}" in
     deepep) ;;
     deep_gemm_mega)
-        if [[ "${role}" == "DECODE" && "${decode_topology}" != "tp8_ep8" ]]; then
-            die "KIMI_K3_MOE_BACKEND=deep_gemm_mega Decode requires tp8_ep8"
+        if [[ "${full_tp_ep}" != "1" ]]; then
+            die "KIMI_K3_MOE_BACKEND=deep_gemm_mega requires TP=EP=world and DP=1; got TP=${tp_size} DP=${dp_size} EP=${ep_size} world=${world_size}"
         fi
         [[ -n "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]] \
             || die "deep_gemm_mega requires KIMI_K3_OPERATOR_PYTHONPATH"
@@ -537,11 +659,11 @@ for flag_name in canonical_tp canonical_ep canonical_mla; do
         || die "${flag_name} must resolve to 0 or 1, got ${flag_value}"
 done
 
-if [[ "${role}" == "DECODE" && "${decode_topology}" == "tp8_ep8" ]]; then
+if [[ "${role}" == "DECODE" && "${full_tp_ep}" == "1" ]]; then
     [[ "${sp_moe}" == "1" ]] \
-        || die "Decode TP8/EP8 requires KIMI_K3_SP_MOE=1"
+        || die "full-TP/full-EP Decode requires KIMI_K3_SP_MOE=1"
     [[ "${canonical_tp}" == "0" ]] \
-        || die "Decode TP8/EP8 token-SP requires native TP projections"
+        || die "full-TP/full-EP Decode token-SP requires native TP projections"
 fi
 
 if [[ "${role}" == "PREFILL" ]]; then
@@ -549,20 +671,11 @@ if [[ "${role}" == "PREFILL" ]]; then
     remote_endpoint="${DECODE_ENDPOINT}"
     start_port="${prefill_port}"
     remote_port="${decode_port}"
-    tp_size=8
-    dp_size=1
 else
     local_endpoint="${DECODE_ENDPOINT}"
     remote_endpoint="${PREFILL_ENDPOINT}"
     start_port="${decode_port}"
     remote_port="${prefill_port}"
-    if [[ "${decode_topology}" == "tp8_ep8" ]]; then
-        tp_size=8
-        dp_size=1
-    else
-        tp_size=1
-        dp_size=8
-    fi
 fi
 
 model_service_config="$(
@@ -574,14 +687,17 @@ model_service_config="$(
         "${DECODE_ENDPOINT}"
 )"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    CUDA_VISIBLE_DEVICES="$(seq -s, 0 "$((local_world_size - 1))")"
+fi
+export CUDA_VISIBLE_DEVICES
 export PYTHONUNBUFFERED=1
 export PYTHONFAULTHANDLER=1
 export TMPDIR="${runtime_tmpdir}"
 export RTP_LLM_STARTUP_TIMEOUT_S="${RTP_LLM_STARTUP_TIMEOUT_S:-14400}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export LOG_LEVEL="${LOG_LEVEL:-INFO}"
-export LOG_PATH="${LOG_PATH:-${run_root}/logs/${role,,}}"
+export LOG_PATH="${LOG_PATH:-${run_root}/logs/${role_lower}}"
 export START_PORT="${start_port}"
 export FRONTEND_SERVER_COUNT="${FRONTEND_SERVER_COUNT:-1}"
 export MODEL_TYPE=kimi_k3
@@ -724,8 +840,8 @@ print(config["num_hidden_layers"])
         fi
     fi
     if [[ "${offload_start}" != "none" ]]; then
-        [[ "${decode_topology}" == "dp8_ep8" ]] \
-            || die "Decode TP8/EP8 does not support CPU expert offload"
+        [[ "${data_parallel_decode}" == "1" ]] \
+            || die "CPU expert offload requires TP1 data-parallel Decode"
         [[ "${offload_start}" =~ ^[0-9]+$ ]] \
             || die "KIMI_K3_DECODE_CPU_OFFLOAD_START must be auto, an integer, or none"
         export KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START="${offload_start}"
@@ -736,14 +852,14 @@ print(config["num_hidden_layers"])
     fi
 fi
 
-mkdir -p "${LOG_PATH}" "${run_root}/work/${role,,}" "${TMPDIR}"
+mkdir -p "${LOG_PATH}" "${run_root}/work/${role_lower}" "${TMPDIR}"
 
 echo "Kimi K3 ${role} configuration:"
 echo "  local endpoint:  ${local_endpoint}"
 echo "  remote endpoint: ${remote_endpoint}"
 echo "  PD no-proxy:      ${pd_no_proxy_hosts}"
 echo "  checkpoint:      ${CHECKPOINT_PATH}"
-echo "  topology:        TP${tp_size}/DP${dp_size}/EP8"
+echo "  topology:        TP${tp_size}/DP${dp_size}/EP${ep_size}/world${world_size}/local${local_world_size}"
 if [[ "${role}" == "DECODE" ]]; then
     echo "  decode topology: ${decode_topology}"
 fi
@@ -777,9 +893,9 @@ server_args=(
     --role_type "${role}"
     --tp_size "${tp_size}"
     --dp_size "${dp_size}"
-    --ep_size 8
-    --world_size 8
-    --local_world_size 8
+    --ep_size "${ep_size}"
+    --world_size "${world_size}"
+    --local_world_size "${local_world_size}"
     --remote_server_port "${remote_port}"
     --max_seq_len "${max_seq_len}"
     --max_context_batch_size "${max_context_batch_size}"
@@ -833,5 +949,5 @@ if [[ "${skip_build}" == "0" ]]; then
 fi
 [[ -x "${server_binary}" ]] || die "missing Bazel launcher ${server_binary}"
 
-cd "${run_root}/work/${role,,}"
+cd "${run_root}/work/${role_lower}"
 exec "${server_binary}" "${server_args[@]}"
