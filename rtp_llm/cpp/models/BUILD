@@ -231,7 +231,14 @@ cc_library(
     srcs = ["SamplingOps.cc"],
     deps = [":sampling_ops"],
     alwayslink = True,
-    visibility = ["//rtp_llm/cpp/pybind:__pkg__"],
+    visibility = [
+        "//rtp_llm/cpp/api_server/test:__pkg__",
+        "//rtp_llm/cpp/cache/connector/p2p/test:__pkg__",
+        "//rtp_llm/cpp/disaggregate/cache_store/test:__pkg__",
+        "//rtp_llm/cpp/model_rpc/test:__pkg__",
+        "//rtp_llm/cpp/pybind:__pkg__",
+        "//rtp_llm/cpp/test:__pkg__",
+    ],
 )
 
 # Expert statistics - monitoring component
