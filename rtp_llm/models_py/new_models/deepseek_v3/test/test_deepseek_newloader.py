@@ -256,6 +256,57 @@ def _dense_checkpoint_weights():
     }
 
 
+def _glm4_moe_lite_checkpoint_weights():
+    values = _deterministic_values
+    weights = {
+        "model.embed_tokens.weight": values((32, 32), 0),
+        "model.norm.weight": values((32,), 3) + 1.0,
+        "lm_head.weight": values((32, 32), 5),
+    }
+    for layer_idx in range(2):
+        prefix = f"model.layers.{layer_idx}."
+        offset = 11 + layer_idx * 100
+        weights.update(
+            {
+                prefix + "input_layernorm.weight": values((32,), offset) + 1.0,
+                prefix + "self_attn.q_a_proj.weight": values((32, 32), offset + 3),
+                prefix
+                + "self_attn.q_a_layernorm.weight": values((32,), offset + 5)
+                + 1.0,
+                prefix + "self_attn.q_b_proj.weight": values((32, 32), offset + 7),
+                prefix
+                + "self_attn.kv_a_proj_with_mqa.weight": values((36, 32), offset + 11),
+                prefix
+                + "self_attn.kv_a_layernorm.weight": values((32,), offset + 13)
+                + 1.0,
+                prefix + "self_attn.kv_b_proj.weight": values((32, 32), offset + 17),
+                prefix + "self_attn.o_proj.weight": values((32, 16), offset + 19),
+                prefix
+                + "post_attention_layernorm.weight": values((32,), offset + 23)
+                + 1.0,
+            }
+        )
+    weights.update(
+        {
+            "model.layers.0.mlp.gate_proj.weight": values((32, 32), 31),
+            "model.layers.0.mlp.up_proj.weight": values((32, 32), 37),
+            "model.layers.0.mlp.down_proj.weight": values((32, 32), 41),
+            "model.layers.1.mlp.gate.weight": values((4, 32), 131),
+            "model.layers.1.mlp.gate.e_score_correction_bias": values((4,), 137),
+            "model.layers.1.mlp.shared_experts.gate_proj.weight": values((32, 32), 139),
+            "model.layers.1.mlp.shared_experts.up_proj.weight": values((32, 32), 149),
+            "model.layers.1.mlp.shared_experts.down_proj.weight": values((32, 32), 151),
+        }
+    )
+    for expert_id in range(4):
+        prefix = f"model.layers.1.mlp.experts.{expert_id}."
+        offset = 157 + expert_id * 17
+        weights[prefix + "gate_proj.weight"] = values((32, 32), offset)
+        weights[prefix + "up_proj.weight"] = values((32, 32), offset + 3)
+        weights[prefix + "down_proj.weight"] = values((32, 32), offset + 5)
+    return weights
+
+
 def _mtp_loader_model_config(checkpoint_path):
     config = _model_config()
     config.model_type = "deepseek-v3-mtp"
@@ -532,6 +583,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             "deepseek_v31",
             "deepseek_v32",
             "glm_5",
+            "glm4_moe_lite",
             "kimi_k2",
         ):
             with self.subTest(model_type=model_type):
@@ -558,6 +610,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 "deepseek_v31",
                 "deepseek_v32",
                 "glm_5",
+                "glm4_moe_lite",
                 "kimi_k2",
             ):
                 with self.subTest(model_type=model_type):
@@ -576,6 +629,174 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                         model.embed_tokens.weight,
                         weights["model.embed_tokens.weight"],
                     )
+
+    def test_glm4_moe_lite_official_config_contract(self):
+        model_config = _model_config()
+        model_config.model_type = "glm4_moe_lite"
+        model_config.hidden_size = 2048
+        model_config.num_layers = 47
+        model_config.vocab_size = 154880
+        model_config.max_seq_len = 8192
+        model_config.layernorm_eps = 1e-5
+        model_config.expert_num = 64
+        model_config.moe_k = 4
+        # The official checkpoint omits scoring_func; do not rely on the
+        # legacy GLM adapter changing this otherwise incorrect input value.
+        model_config.scoring_func = 0
+        model_config.routed_scaling_factor = 1.8
+        model_config.moe_n_group = 1
+        model_config.moe_topk_group = 1
+        model_config.attn_config.head_num = 20
+        model_config.attn_config.q_lora_rank = 768
+        model_config.attn_config.kv_lora_rank = 512
+        model_config.attn_config.nope_head_dim = 192
+        model_config.attn_config.rope_head_dim = 64
+        model_config.attn_config.v_head_dim = 256
+        model_config.attn_config.is_sparse = False
+
+        config_json = {
+            "model_type": "glm4_moe_lite",
+            "architectures": ["Glm4MoeLiteForCausalLM"],
+            "hidden_size": 2048,
+            "intermediate_size": 10240,
+            "max_position_embeddings": 202752,
+            "moe_intermediate_size": 1536,
+            "topk_method": "noaux_tc",
+            "norm_topk_prob": True,
+            "num_attention_heads": 20,
+            "n_group": 1,
+            "topk_group": 1,
+            "n_routed_experts": 64,
+            "n_shared_experts": 1,
+            "routed_scaling_factor": 1.8,
+            "num_experts_per_tok": 4,
+            "first_k_dense_replace": 1,
+            "num_hidden_layers": 47,
+            "num_nextn_predict_layers": 1,
+            "rms_norm_eps": 1e-5,
+            "rope_scaling": None,
+            "rope_theta": 1000000,
+            "tie_word_embeddings": False,
+            "dtype": "bfloat16",
+            "q_lora_rank": 768,
+            "kv_lora_rank": 512,
+            "qk_nope_head_dim": 192,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 256,
+            "vocab_size": 154880,
+        }
+
+        cfg = extract_config_values(model_config, _load_config(), config_json)
+        self.assertEqual(cfg["scoring_func"], 1)
+        self.assertEqual(cfg["topk_method"], "noaux_tc")
+        self.assertTrue(cfg["has_e_score_correction"])
+        self.assertTrue(cfg["has_moe_norm"])
+        self.assertEqual(cfg["moe_layer_index"], list(range(1, 47)))
+        self.assertEqual(cfg["dense_intermediate_size"], 10240)
+        self.assertEqual(cfg["moe_intermediate_size"], 1536)
+        self.assertEqual(cfg["shared_expert_intermediate_size"], 1536)
+        self.assertEqual(cfg["q_lora_rank"], 768)
+        self.assertEqual(cfg["kv_lora_rank"], 512)
+        self.assertFalse(cfg["is_sparse"])
+
+        rope_cache = build_rope_cache(
+            config_json,
+            max_seq_len=32,
+            device=torch.device("cpu"),
+        )
+        self.assertEqual(rope_cache.shape, (32, 64))
+        self.assertEqual(rope_cache.dtype, torch.float32)
+
+    def _gpu_glm4_moe_lite_loads_without_legacy_config_adapter(self):
+        weights = _glm4_moe_lite_checkpoint_weights()
+        # Official GLM-4.7-Flash checkpoints append one MTP layer after the
+        # score model. The score-model filter must ignore it without weakening
+        # unknown-tensor validation inside the two owned layers.
+        weights["model.layers.2.embed_tokens.weight"] = _deterministic_values(
+            (32, 32), 211
+        )
+        config_json = {
+            "model_type": "glm4_moe_lite",
+            "architectures": ["Glm4MoeLiteForCausalLM"],
+            "hidden_size": 32,
+            "intermediate_size": 32,
+            "max_position_embeddings": 128,
+            "moe_intermediate_size": 32,
+            "topk_method": "noaux_tc",
+            "norm_topk_prob": True,
+            "num_attention_heads": 4,
+            "n_group": 1,
+            "topk_group": 1,
+            "n_routed_experts": 4,
+            "n_shared_experts": 1,
+            "routed_scaling_factor": 1.8,
+            "num_experts_per_tok": 2,
+            "first_k_dense_replace": 1,
+            "num_hidden_layers": 2,
+            "num_nextn_predict_layers": 1,
+            "rms_norm_eps": 1e-6,
+            "rope_scaling": None,
+            "rope_theta": 1000000,
+            "tie_word_embeddings": False,
+            "dtype": "bfloat16",
+            "q_lora_rank": 32,
+            "kv_lora_rank": 32,
+            "qk_nope_head_dim": 4,
+            "qk_rope_head_dim": 4,
+            "v_head_dim": 4,
+            "vocab_size": 32,
+        }
+
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            with open(
+                f"{checkpoint_path}/config.json",
+                "w",
+                encoding="utf-8",
+            ) as config_file:
+                json.dump(config_json, config_file)
+            save_file(weights, f"{checkpoint_path}/model.safetensors")
+
+            model_config = _model_config(q_lora_rank=32)
+            model_config.model_type = "glm4_moe_lite"
+            model_config.ckpt_path = checkpoint_path
+            model_config.hidden_size = 32
+            model_config.vocab_size = 32
+            model_config.num_layers = 2
+            model_config.expert_num = 4
+            model_config.moe_k = 2
+            model_config.scoring_func = 0
+            model_config.routed_scaling_factor = 1.8
+            model_config.moe_n_group = 1
+            model_config.moe_topk_group = 1
+            model_config.has_moe_norm = True
+            model_config.data_type = "bf16"
+            model_config.attn_config.kv_lora_rank = 32
+            model_config.attn_config.nope_head_dim = 4
+            model_config.attn_config.rope_head_dim = 4
+            model_config.attn_config.v_head_dim = 4
+
+            model = NewModelLoader(
+                model_config=model_config,
+                load_config=NewLoaderConfig(
+                    compute_dtype=torch.bfloat16,
+                    device="cuda",
+                    parallelism_config=_single_rank_parallelism_config(),
+                ),
+                model_path=checkpoint_path,
+            ).load()
+
+        self.assertEqual(model_config.scoring_func, 1)
+        self.assertIsInstance(model.layers[0].mlp, DeepSeekV32MLP)
+        self.assertIsInstance(model.layers[1].mlp, DeepSeekV32MoEBlock)
+        self.assertTrue(model.layers[1].mlp.correction_bias)
+        self.assertIsNotNone(model.layers[1].mlp.experts.fused_moe)
+        torch.testing.assert_close(
+            model.layers[1].mlp.gate.e_score_correction_bias.cpu(),
+            weights["model.layers.1.mlp.gate.e_score_correction_bias"],
+        )
+        torch.testing.assert_close(
+            model.lm_head.weight.cpu(), weights["lm_head.weight"].bfloat16()
+        )
 
     def test_new_model_loader_safetensors_forward_matches_reference(self):
         weights = _dense_checkpoint_weights()
