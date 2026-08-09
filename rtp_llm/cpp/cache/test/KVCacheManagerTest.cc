@@ -15,7 +15,6 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -154,12 +153,15 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
 static void setGroupBlockNumsForTest(CacheConfig& config, const std::unordered_map<std::string, uint32_t>& block_nums) {
     const auto             topology_groups = config.topology().groups();
     std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
+    uint32_t               global_block_num = 0;
     for (auto& group : groups) {
         const auto it = block_nums.find(group.tag);
         ASSERT_NE(it, block_nums.end());
-        group.block_num = it->second;
+        group.policy.explicit_block_num = it->second;
+        global_block_num                = std::max(global_block_num, it->second);
     }
     config.setTopology(std::move(groups), config.topology().layers());
+    config.finalizeBlockNums(global_block_num, RuntimeConfig{});
 }
 
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {

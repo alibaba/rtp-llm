@@ -4,6 +4,7 @@ from unittest import TestCase, main
 from unittest.mock import patch
 
 import rtp_llm.config.model_config as model_config_module
+from rtp_llm.config.kv_cache_config import DEFAULT_KV_CACHE_TAG, INDEXER_KV_CACHE_TAG
 from rtp_llm.config.model_config import (
     ModelConfig,
     build_model_config,
@@ -17,6 +18,8 @@ from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
+from rtp_llm.ops import DEFAULT_KV_CACHE_TAG as CPP_DEFAULT_KV_CACHE_TAG
+from rtp_llm.ops import INDEXER_KV_CACHE_TAG as CPP_INDEXER_KV_CACHE_TAG
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
@@ -32,6 +35,13 @@ from rtp_llm.ops import (
 
 
 class HybridKVCacheSpecTest(TestCase):
+    def test_cache_group_tags_are_exported_from_cpp(self):
+        self.assertEqual(DEFAULT_KV_CACHE_TAG, CPP_DEFAULT_KV_CACHE_TAG)
+        self.assertEqual(INDEXER_KV_CACHE_TAG, CPP_INDEXER_KV_CACHE_TAG)
+        self.assertEqual(
+            (DEFAULT_KV_CACHE_TAG, INDEXER_KV_CACHE_TAG), ("default", "indexer_kv")
+        )
+
     def _build_model_config(self, layer_types):
         config = ModelConfig()
         config.num_layers = len(layer_types)
@@ -553,6 +563,40 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertTrue(legacy.reservable)
         self.assertEqual(legacy.explicit_block_num, 23)
         self.assertFalse(hasattr(legacy, "charge_to_paged_budget"))
+
+    def test_kv_cache_spec_desc_pickle_schema_v1_round_trip(self):
+        desc = KVCacheSpecDesc()
+        desc.tag = "indexer_kv"
+        desc.cache_type = KVCacheSpecType.OPAQUE_KV
+        desc.entry_dtype = DataType.TYPE_UINT8
+        desc.entry_elems = 132
+        desc.explicit_entry_count = 64
+        desc.kernel_seq_size_per_block = 16
+
+        restored = pickle.loads(pickle.dumps(desc))
+        self.assertEqual(restored.tag, desc.tag)
+        self.assertEqual(restored.cache_type, desc.cache_type)
+        self.assertEqual(restored.entry_dtype, desc.entry_dtype)
+        self.assertEqual(restored.entry_elems, desc.entry_elems)
+        self.assertEqual(restored.explicit_entry_count, desc.explicit_entry_count)
+        self.assertEqual(
+            restored.kernel_seq_size_per_block, desc.kernel_seq_size_per_block
+        )
+
+        state = desc.__getstate__()
+        self.assertEqual((state[0], len(state)), (1, 21))
+
+        invalid = KVCacheSpecDesc.__new__(KVCacheSpecDesc)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "cross-version pickle is unsupported; expected version=1 fields=21 actual version=0 fields=20",
+        ):
+            invalid.__setstate__((None,) * 20)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "expected version=1 actual version=2"
+        ):
+            invalid.__setstate__((2,) + state[1:])
 
 
 if __name__ == "__main__":

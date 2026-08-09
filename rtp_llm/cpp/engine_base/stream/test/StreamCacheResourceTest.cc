@@ -79,7 +79,7 @@ protected:
         ASSERT_TRUE(cache_manager_->init());
         size_t expected_free_blocks = 0;
         for (const auto& group : cache_config.topology().groups()) {
-            expected_free_blocks += group.block_num - 1;
+            expected_free_blocks += cache_config.blockNumForGroup(group.tag) - 1;
         }
         ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_free_blocks);
         ResourceContext resource_context;

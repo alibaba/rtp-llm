@@ -22,6 +22,15 @@ cc_test(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "grouped_cache_replay_policy_test",
+    srcs = ["grouped_cache_replay_policy_test.cc"],
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:grouped_cache_replay_policy",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

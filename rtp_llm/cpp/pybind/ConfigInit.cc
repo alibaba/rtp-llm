@@ -13,12 +13,20 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
 
 namespace py = pybind11;
 using namespace rtp_llm;
+
+namespace {
+
+constexpr int    kKVCacheSpecDescPickleSchemaVersion = 1;
+constexpr size_t kKVCacheSpecDescPickleStateSize     = 21;
+
+}  // namespace
 
 void registerMultimodal(const py::module& m) {
     pybind11::class_<MultimodalInput>(m, "MultimodalInput")
@@ -91,6 +99,9 @@ void registerMultimodal(const py::module& m) {
 }
 
 PYBIND11_MODULE(libth_transformer_config, m) {
+    m.attr("DEFAULT_KV_CACHE_TAG") = std::string(kDefaultKVCacheTag);
+    m.attr("INDEXER_KV_CACHE_TAG") = std::string(kIndexerKVCacheTag);
+
     // Register get_block_cache_keys function
     registerCommon(m);
     registerMultimodal(m);
@@ -467,7 +478,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_disk_size_mb", &KVCacheConfig::memory_cache_disk_size_mb)
         .def_readwrite("memory_cache_disk_buffered_io", &KVCacheConfig::memory_cache_disk_buffered_io)
         .def_readwrite("memory_cache_disk_sync_timeout_ms", &KVCacheConfig::memory_cache_disk_sync_timeout_ms)
-        .def_readwrite("linear_step", &KVCacheConfig::linear_step)
+        .def_property(
+            "linear_step",
+            [](const KVCacheConfig& self) { return self.linear_step; },
+            [](KVCacheConfig& self, int linear_step) {
+                if (linear_step != 1) {
+                    throw std::invalid_argument("KVCacheConfig.linear_step only supports 1");
+                }
+                self.linear_step = linear_step;
+            })
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -573,15 +592,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
-                    c.reuse_cache                          = t[0].cast<bool>();
-                    c.multi_task_prompt                    = t[1].cast<std::string>();
-                    c.multi_task_prompt_str                = t[2].cast<std::string>();
-                    c.multi_task_prompt_tokens             = t[3].cast<std::map<std::string, std::vector<int>>>();
-                    c.reserve_block_ratio                  = t[4].cast<int64_t>();
-                    c.max_block_size_per_item              = t[5].cast<int>();
-                    c.memory_cache_size_mb                 = t[6].cast<int64_t>();
-                    c.memory_cache_sync_timeout_ms         = t[7].cast<int64_t>();
-                    c.linear_step                          = t[8].cast<int>();
+                    c.reuse_cache                  = t[0].cast<bool>();
+                    c.multi_task_prompt            = t[1].cast<std::string>();
+                    c.multi_task_prompt_str        = t[2].cast<std::string>();
+                    c.multi_task_prompt_tokens     = t[3].cast<std::map<std::string, std::vector<int>>>();
+                    c.reserve_block_ratio          = t[4].cast<int64_t>();
+                    c.max_block_size_per_item      = t[5].cast<int>();
+                    c.memory_cache_size_mb         = t[6].cast<int64_t>();
+                    c.memory_cache_sync_timeout_ms = t[7].cast<int64_t>();
+                    c.linear_step                  = t[8].cast<int>();
+                    if (c.linear_step != 1) {
+                        throw std::runtime_error("KVCacheConfig pickle linear_step only supports 1");
+                    }
                     c.fp8_kv_cache                         = t[9].cast<int>();
                     c.kv_cache_mem_mb                      = t[10].cast<int64_t>();
                     c.seq_size_per_block                   = t[11].cast<int>();
@@ -883,13 +905,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
     pybind11::class_<HybridAttentionConfig>(m, "HybridAttentionConfig")
         .def(pybind11::init<>())
-        .def(pybind11::init<bool, bool, std::vector<HybridAttentionType>>(),
+        .def(pybind11::init<bool, std::vector<HybridAttentionType>>(),
              pybind11::arg("enable_hybrid_attention"),
-             pybind11::arg("enable_independent_kv_cache_pools"),
              pybind11::arg("hybrid_attention_types"))
         .def("to_string", &HybridAttentionConfig::to_string)
         .def_readwrite("enable_hybrid_attention", &HybridAttentionConfig::enable_hybrid_attention)
-        .def_readwrite("enable_independent_kv_cache_pools", &HybridAttentionConfig::enable_independent_kv_cache_pools)
         .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types);
 
     // Register SpeculativeType enum
@@ -1790,7 +1810,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
         .def(py::pickle(
             [](const KVCacheSpecDesc& self) {
-                return py::make_tuple(self.tag,
+                // This state is only supported between processes running the same build.
+                return py::make_tuple(kKVCacheSpecDescPickleSchemaVersion,
+                                      self.tag,
                                       self.cache_type,
                                       self.dtype,
                                       self.is_state_cache,
@@ -1813,28 +1835,44 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
-                    throw std::runtime_error("Invalid KVCacheSpecDesc state!");
-                c.tag                                  = t[0].cast<std::string>();
-                c.cache_type                           = t[1].cast<KVCacheSpecType>();
-                c.dtype                                = t[2].cast<DataType>();
-                c.is_state_cache                       = t[3].cast<bool>();
-                c.entry_elems                          = t[4].cast<uint32_t>();
-                c.entry_dtype                          = t[5].cast<DataType>();
-                c.entry_count_mode                     = t[6].cast<OpaqueBlockEntryCountMode>();
-                c.explicit_entry_count                 = t[7].cast<uint32_t>();
-                c.compression_ratio                    = t[8].cast<uint32_t>();
-                c.state_ring_overlap                   = t[9].cast<uint32_t>();
-                c.state_ring_include_gen_num_per_cycle = t[10].cast<bool>();
-                c.block_stride_bytes_override          = t[11].cast<size_t>();
-                c.block_stride_bytes_alignment         = t[12].cast<size_t>();
-                c.block_stride_alignment_min_entries   = t[13].cast<uint32_t>();
-                c.group_type                           = t[14].cast<std::optional<CacheGroupType>>();
-                c.reuse                                = t[15].cast<std::optional<CacheReusePolicyDesc>>();
-                c.capacity                             = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
-                c.tail                                 = t[17].cast<std::optional<CacheTailPolicyDesc>>();
-                c.cp                                   = t[18].cast<std::optional<CacheCpPolicyDesc>>();
-                c.kernel_seq_size_per_block            = t[19].cast<std::optional<uint32_t>>();
+                if (t.size() == 20) {
+                    throw std::runtime_error("KVCacheSpecDesc cross-version pickle is unsupported; expected version="
+                                             + std::to_string(kKVCacheSpecDescPickleSchemaVersion)
+                                             + " fields=" + std::to_string(kKVCacheSpecDescPickleStateSize)
+                                             + " actual version=0 fields=" + std::to_string(t.size()));
+                }
+                if (t.size() != kKVCacheSpecDescPickleStateSize) {
+                    throw std::runtime_error("Invalid KVCacheSpecDesc pickle schema; expected version="
+                                             + std::to_string(kKVCacheSpecDescPickleSchemaVersion)
+                                             + " fields=" + std::to_string(kKVCacheSpecDescPickleStateSize)
+                                             + " actual fields=" + std::to_string(t.size()));
+                }
+                const int actual_version = t[0].cast<int>();
+                if (actual_version != kKVCacheSpecDescPickleSchemaVersion) {
+                    throw std::runtime_error("Invalid KVCacheSpecDesc pickle schema; expected version="
+                                             + std::to_string(kKVCacheSpecDescPickleSchemaVersion)
+                                             + " actual version=" + std::to_string(actual_version));
+                }
+                c.tag                                  = t[1].cast<std::string>();
+                c.cache_type                           = t[2].cast<KVCacheSpecType>();
+                c.dtype                                = t[3].cast<DataType>();
+                c.is_state_cache                       = t[4].cast<bool>();
+                c.entry_elems                          = t[5].cast<uint32_t>();
+                c.entry_dtype                          = t[6].cast<DataType>();
+                c.entry_count_mode                     = t[7].cast<OpaqueBlockEntryCountMode>();
+                c.explicit_entry_count                 = t[8].cast<uint32_t>();
+                c.compression_ratio                    = t[9].cast<uint32_t>();
+                c.state_ring_overlap                   = t[10].cast<uint32_t>();
+                c.state_ring_include_gen_num_per_cycle = t[11].cast<bool>();
+                c.block_stride_bytes_override          = t[12].cast<size_t>();
+                c.block_stride_bytes_alignment         = t[13].cast<size_t>();
+                c.block_stride_alignment_min_entries   = t[14].cast<uint32_t>();
+                c.group_type                           = t[15].cast<std::optional<CacheGroupType>>();
+                c.reuse                                = t[16].cast<std::optional<CacheReusePolicyDesc>>();
+                c.capacity                             = t[17].cast<std::optional<CacheCapacityPolicyDesc>>();
+                c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
+                c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                c.kernel_seq_size_per_block            = t[20].cast<std::optional<uint32_t>>();
                 return c;
             }));
 

@@ -122,9 +122,9 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     auto group =
         test::makeTestGroupForConfig(cache_config, spec, std::move(layer_ids), CacheGroupType::FULL, "default");
-    group.block_num             = kBlockNum;
-    group.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
-    group.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    group.policy.explicit_block_num = kBlockNum;
+    group.kv_block_stride_bytes     = k_block_stride_bytes + v_block_stride_bytes;
+    group.kv_scale_stride_bytes     = k_scale_stride_bytes + v_scale_stride_bytes;
     test::setTestTopology(cache_config, {std::move(group)});
     std::vector<GroupBase> groups;
     for (const auto& group : cache_config.topology().groups()) {

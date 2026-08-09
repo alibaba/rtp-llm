@@ -149,6 +149,20 @@ cc_binary(
     deps = [":cache_config_creator_py_test_lib"],
 )
 
+cc_test(
+    name = "cache_config_creator_test",
+    srcs = ["CacheConfigCreatorTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
 cc_library(
     name = "block_pool_test_helper",
     hdrs = [

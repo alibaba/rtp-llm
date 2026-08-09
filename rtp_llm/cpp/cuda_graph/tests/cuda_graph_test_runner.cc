@@ -1,6 +1,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <map>
+#include <utility>
+
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
@@ -14,13 +17,13 @@ namespace rtp_llm {
 // depending on torch's registered CustomClassHolder type.
 class CudaGraphTestRunner {
 public:
-    void init_prefill(py::object               py_instance,
-                      int64_t                  max_context_batch_size,
-                      int64_t                  max_seq_len,
-                      int64_t                  tokens_per_block,
-                      int64_t                  kernel_tokens_per_block,
-                      std::vector<int>         prefill_capture_seq_lens,
-                      int64_t                  hidden_size,
+    void init_prefill(py::object                                 py_instance,
+                      int64_t                                    max_context_batch_size,
+                      int64_t                                    max_seq_len,
+                      int64_t                                    tokens_per_block,
+                      int64_t                                    kernel_tokens_per_block,
+                      std::vector<int>                           prefill_capture_seq_lens,
+                      int64_t                                    hidden_size,
                       std::vector<std::string>                   group_tags,
                       std::map<std::string, std::pair<int, int>> group_capacities,
                       int64_t                                    sp_steps) {
@@ -42,14 +45,14 @@ public:
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
 
-    void init_decode(py::object               py_instance,
-                     int64_t                  hidden_size,
-                     int64_t                  max_seq_len,
-                     int64_t                  tokens_per_block,
-                     int64_t                  kernel_tokens_per_block,
-                     std::vector<int>         decode_capture_batch_sizes,
-                     std::vector<std::string> group_tags,
-                     bool                     is_target_verify,
+    void init_decode(py::object                                 py_instance,
+                     int64_t                                    hidden_size,
+                     int64_t                                    max_seq_len,
+                     int64_t                                    tokens_per_block,
+                     int64_t                                    kernel_tokens_per_block,
+                     std::vector<int>                           decode_capture_batch_sizes,
+                     std::vector<std::string>                   group_tags,
+                     bool                                       is_target_verify,
                      int64_t                                    num_tokens_per_bs,
                      std::map<std::string, std::pair<int, int>> group_capacities,
                      int64_t                                    sp_steps) {
@@ -101,6 +104,10 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
 
+    uint64_t groupedCacheFallbackCount() const {
+        return runner_ != nullptr ? runner_->groupedCacheFallbackCount() : 0;
+    }
+
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -115,14 +122,13 @@ private:
         const auto default_capacity = CacheBlockTableCapacity::fromBlockSizes(
             max_seq_len, physical_tokens_per_block, kernel_tokens_per_block, params.sp_steps, "test runner");
         for (const auto& tag : group_tags) {
-            const auto [it, inserted] = params.kv_cache_groups.emplace(tag, CacheGroupType::FULL);
-            (void)it;
-            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate CUDA graph KV cache tag=%s", tag.c_str());
             const auto capacity_it = group_capacities.find(tag);
-            params.kv_cache_block_table_capacities[tag] =
-                capacity_it == group_capacities.end() ?
-                    default_capacity :
+            if (capacity_it == group_capacities.end()) {
+                params.kv_cache_block_table_capacities[tag] = default_capacity;
+            } else {
+                params.kv_cache_block_table_capacities[tag] =
                     CacheBlockTableCapacity{capacity_it->second.first, capacity_it->second.second};
+            }
         }
     }
 
@@ -175,5 +181,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tag"),
              py::arg("device"))
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("groupedCacheFallbackCount", &CudaGraphTestRunner::groupedCacheFallbackCount);
 }

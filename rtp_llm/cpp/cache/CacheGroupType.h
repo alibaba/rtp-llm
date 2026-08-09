@@ -41,15 +41,15 @@ enum class CpBlockSliceMode : int8_t {
 };
 
 struct CacheGroupPolicy {
-    CacheGroupType     group_type             = CacheGroupType::FULL;
-    bool               enable_prefix_reuse    = true;
-    CacheEvictPolicy   evict_policy           = CacheEvictPolicy::CHAIN;
-    bool               reservable             = true;
-    uint32_t           explicit_block_num     = 0;
-    uint32_t           active_tail_blocks     = 0;
-    bool               validate_tail_blocks   = true;
-    CpBlockMappingMode cp_mapping             = CpBlockMappingMode::NONE;
-    CpBlockSliceMode   cp_slice               = CpBlockSliceMode::NONE;
+    CacheGroupType     group_type           = CacheGroupType::FULL;
+    bool               enable_prefix_reuse  = true;
+    CacheEvictPolicy   evict_policy         = CacheEvictPolicy::CHAIN;
+    bool               reservable           = true;
+    uint32_t           explicit_block_num   = 0;
+    uint32_t           active_tail_blocks   = 0;
+    bool               validate_tail_blocks = true;
+    CpBlockMappingMode cp_mapping           = CpBlockMappingMode::NONE;
+    CpBlockSliceMode   cp_slice             = CpBlockSliceMode::NONE;
 };
 
 // One cache-store registration step: pair a cache key from the full logical

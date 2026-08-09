@@ -1,4 +1,23 @@
+import argparse
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _parse_linear_step(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "LINEAR_STEP/--linear_step must be integer 1; "
+            "set LINEAR_STEP=1 or remove it"
+        ) from error
+
+    if value != 1:
+        raise argparse.ArgumentTypeError(
+            "LINEAR_STEP/--linear_step only supports 1; "
+            "set LINEAR_STEP=1 or remove it"
+        )
+    return value
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -91,15 +110,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kernel_seq_size_per_block"),
         type=int,
         default=0,
-        help="Attention算子使用的kernel block大小（token数量）。0表示与seq_size_per_block相同。",
+        help="Attention kernel block 的 token 数；正值使用 KV cache 配置，0 使用模型配置。",
     )
     kv_cache_group.add_argument(
         "--linear_step",
         env_name="LINEAR_STEP",
         bind_to=(kv_cache_config, "linear_step"),
-        type=int,
+        type=_parse_linear_step,
         default=1,
-        help="线性注意力（Linear Attention）缓存重用的步长：每隔 linear_step 个 block 额外保留一个 block（>=1）。",
+        help="线性注意力缓存步长；当前仅支持 1。请设置 LINEAR_STEP=1 或删除该环境变量。",
     )
     kv_cache_group.add_argument(
         "--ssm_state_dtype",

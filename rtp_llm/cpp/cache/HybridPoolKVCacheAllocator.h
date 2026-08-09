@@ -19,10 +19,10 @@ class HybridPoolKVCacheAllocator:
     public std::enable_shared_from_this<HybridPoolKVCacheAllocator> {
 public:
     HybridPoolKVCacheAllocator(const CacheConfig&                 config,
-                               AllocationType                     allocation_type     = AllocationType::DEVICE,
-                               const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
-                               int64_t                            reserve_block_ratio = 0,
-                               RoleType                           role_type           = RoleType::PDFUSION);
+                                        AllocationType                     allocation_type     = AllocationType::DEVICE,
+                                        const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
+                                        int64_t                            reserve_block_ratio = 0,
+                                        RoleType                           role_type           = RoleType::PDFUSION);
 
     void free(const FreeInfo& free_info) override;
     void insertIntoCache(const InsertInfo& insert_info) override;
@@ -54,7 +54,7 @@ public:
     void                    blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) override;
     // Heterogeneous pools are jointly usable only up to the least token capacity;
     // FULL groups alone constrain the logical request length. Topology-wide block
-    // counters and MR fan-out use CoordinatorKVCacheManager's shared implementation.
+    // counters and MR fan-out use KVCacheAllocator's shared implementation.
     size_t                                  totalTokensNum() const override;
     size_t                                  availableTokensNum() const override;
     size_t                                  maxSequenceLength() const override;
@@ -108,7 +108,7 @@ private:
                             const std::unordered_map<std::string, size_t>&              original_sizes,
                             const std::unordered_map<std::string, std::vector<size_t>>& backfilled_positions);
     const KVCacheGroupPtr& cacheGroupForTag(std::string_view tag, const char* context) const;
-    const BlockPoolPtr&    blockPoolForTag(std::string_view tag, const char* context) const;
+    const BlockPoolPtr&                blockPoolForTag(std::string_view tag, const char* context) const;
 
     size_t maxSequenceLengthForGroups(bool full_groups_only) const;
     size_t minPoolTokens(bool use_available_blocks) const;
@@ -117,11 +117,11 @@ private:
     reserveBlocksForPool(std::string_view tag, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
 
     std::unordered_map<std::string, KVCacheGroupPtr> kv_cache_groups_;
-    std::vector<std::string>                         full_group_tags_;
-    std::vector<std::string>                         linear_group_tags_;
-    std::vector<std::string>                         swa_group_tags_;
-    std::unordered_map<std::string, BlockPoolPtr>    group_block_pools_;
-    RoleType                                         role_type_{RoleType::PDFUSION};
+    std::vector<std::string>                                     full_group_tags_;
+    std::vector<std::string>                                     linear_group_tags_;
+    std::vector<std::string>                                     swa_group_tags_;
+    std::unordered_map<std::string, BlockPoolPtr>                group_block_pools_;
+    RoleType                                                     role_type_{RoleType::PDFUSION};
 };
 
 using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;

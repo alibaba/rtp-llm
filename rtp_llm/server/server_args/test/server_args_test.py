@@ -1,7 +1,9 @@
 import importlib
+import io
 import json
 import os
 import sys
+from contextlib import redirect_stderr
 from unittest import TestCase, main
 
 
@@ -19,6 +21,100 @@ class ServerArgsSetTest(TestCase):
         os.environ.clear()
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
+
+    def test_linear_step_setter_rejects_two(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        config = KVCacheConfig()
+        self.assertEqual(config.linear_step, 1)
+        with self.assertRaises(ValueError):
+            config.linear_step = 2
+
+    def test_linear_step_pickle_restore_rejects_two(self):
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+
+        config = KVCacheConfig()
+        state = list(config.__getstate__())
+        state[8] = 2
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        with self.assertRaisesRegex(RuntimeError, "pickle linear_step only supports 1"):
+            restored.__setstate__(tuple(state))
+
+    def _assert_setup_rejects_linear_step(self, expected_error: str):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+        error = stderr.getvalue()
+        self.assertIn("--linear_step", error)
+        self.assertIn(expected_error, error)
+        self.assertIn("set LINEAR_STEP=1 or remove it", error)
+
+    def test_linear_step_pure_env_rejects_two(self):
+        os.environ["LINEAR_STEP"] = "2"
+        sys.argv = ["prog"]
+        self._assert_setup_rejects_linear_step("only supports 1")
+
+    def test_linear_step_pure_cli_rejects_two(self):
+        sys.argv = ["prog", "--linear_step", "2"]
+        self._assert_setup_rejects_linear_step("only supports 1")
+
+    def test_linear_step_pure_env_rejects_non_integer(self):
+        os.environ["LINEAR_STEP"] = "abc"
+        sys.argv = ["prog"]
+        self._assert_setup_rejects_linear_step("must be integer 1")
+
+    def test_linear_step_pure_cli_rejects_non_integer(self):
+        sys.argv = ["prog", "--linear_step", "abc"]
+        self._assert_setup_rejects_linear_step("must be integer 1")
+
+    def test_linear_step_mixed_cli_env_rejects_two(self):
+        os.environ["LINEAR_STEP"] = "2"
+        sys.argv = ["prog", "--model_type", "qwen"]
+        self._assert_setup_rejects_linear_step("only supports 1")
+
+    def test_linear_step_mixed_cli_env_rejects_non_integer(self):
+        os.environ["LINEAR_STEP"] = "abc"
+        sys.argv = ["prog", "--model_type", "qwen"]
+        self._assert_setup_rejects_linear_step("must be integer 1")
+
+    def _reload_server_args(self):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        return rtp_llm.server.server_args.server_args
+
+    def test_empty_env_is_ignored_pure_env(self):
+        os.environ["MAX_SEQ_LEN"] = ""
+        sys.argv = ["prog"]
+        configs = self._reload_server_args().setup_args()
+        self.assertIsNotNone(configs)
+
+    def test_empty_env_is_ignored_mixed_cli_env(self):
+        os.environ["MAX_SEQ_LEN"] = ""
+        sys.argv = ["prog", "--model_type", "qwen"]
+        configs = self._reload_server_args().setup_args()
+        self.assertIsNotNone(configs)
+
+    def test_non_empty_invalid_env_still_fails_mixed_cli_env(self):
+        os.environ["MAX_SEQ_LEN"] = "abc"
+        sys.argv = ["prog", "--model_type", "qwen"]
+        module = self._reload_server_args()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            module.setup_args()
+        self.assertIn("invalid int value", stderr.getvalue())
+
+    def test_env_injected_invalid_choice_fails_mixed_cli_env(self):
+        os.environ["SSM_STATE_DTYPE"] = "fp64"
+        sys.argv = ["prog", "--model_type", "qwen"]
+        module = self._reload_server_args()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            module.setup_args()
+        self.assertIn("invalid choice", stderr.getvalue())
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""

@@ -23,7 +23,6 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(type);
     group.layer_ids = {0};
-    group.block_num = 16;
     return group;
 }
 
@@ -257,7 +256,7 @@ TEST(CacheConfigTest, SetTopologyDerivesSparseFromOpaqueKv) {
     auto spec                 = std::make_shared<OpaqueKVCacheSpec>(8, 2);
     spec->tag                 = "opaque";
 
-    GroupTopology group;
+    GroupBase group;
     group.tag       = spec->tag;
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);

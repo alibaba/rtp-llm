@@ -21,7 +21,6 @@ struct GroupBase {
     CacheGroupPolicy                   policy;
     std::vector<int>                   layer_ids;
 
-    uint32_t block_num             = 0;
     uint32_t local_kv_head_num     = 1;
     size_t   kv_block_stride_bytes = 0;
     size_t   kv_scale_stride_bytes = 0;

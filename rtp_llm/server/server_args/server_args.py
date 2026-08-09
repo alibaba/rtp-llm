@@ -192,9 +192,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
     def _register_config_binding(
         self,
         action: argparse.Action,
-        bind_to: Union[
-            Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]
-        ],
+        bind_to: Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]],
     ) -> None:
         """注册参数到配置对象的绑定关系"""
         binding = ConfigBinding(action, bind_to)
@@ -269,6 +267,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 # Read values from environment variables for all registered arguments
                 for dest, env_name in self._env_mappings.items():
                     env_value = os.environ.get(env_name)
+                    if env_value == "":
+                        logging.warning(
+                            "Ignoring empty environment variable %s", env_name
+                        )
+                        continue
                     if env_value is not None:
                         # Find the action for this dest
                         action = None
@@ -339,10 +342,16 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     i += 1
 
             # Now fill in missing values from environment variables
+            env_injected_dests = set()
             for dest, env_name in self._env_mappings.items():
                 # Only set from environment if the value wasn't provided via command line
                 if dest not in provided_args:
                     env_value = os.environ.get(env_name)
+                    if env_value == "":
+                        logging.warning(
+                            "Ignoring empty environment variable %s", env_name
+                        )
+                        continue
                     if env_value is not None:
                         # Find the action to get the type converter
                         action = None
@@ -358,14 +367,30 @@ class EnvArgumentParser(argparse.ArgumentParser):
                             # Convert the value using the action's type
                             if action.type is not None:
                                 try:
-                                    converted_value = action.type(env_value)
-                                    setattr(parsed_args, dest, converted_value)
-                                except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
-                                    pass
+                                    converted_value = self._get_value(action, env_value)
+                                except argparse.ArgumentError as error:
+                                    self.error(str(error))
+                                setattr(parsed_args, dest, converted_value)
                             else:
                                 # No type converter, use as string
                                 setattr(parsed_args, dest, env_value)
+                            env_injected_dests.add(dest)
+
+            # Values injected via setattr above bypass argparse's normal choices
+            # validation; values parsed from argv or the env-built args list were
+            # already validated, so only re-check the env-injected dests.
+            for action in self._actions:
+                if action.choices is None or action.dest not in env_injected_dests:
+                    continue
+                value = getattr(parsed_args, action.dest)
+                if value is None:
+                    continue
+                values = value if isinstance(value, list) else [value]
+                for choice_value in values:
+                    try:
+                        self._check_value(action, choice_value)
+                    except argparse.ArgumentError as error:
+                        self.error(str(error))
 
         # 应用所有配置绑定
         if self._root_config is not None:

@@ -32,7 +32,7 @@ namespace test {
 
 namespace {
 
-KVCacheSpecPtr makeFakeSpec(const std::string& tag, CacheGroupType group_type = CacheGroupType::FULL) {
+KVCacheSpecPtr makeFakeSpec(const std::string& tag, CacheGroupType group_type) {
     AttentionConfigs attn_config;
     attn_config.kv_head_num             = 1;
     attn_config.size_per_head           = 1;
@@ -68,17 +68,17 @@ KVCacheSpecPtr makeFakeSpec(const std::string& tag, CacheGroupType group_type = 
 class FakeKVCacheAllocator: public KVCacheAllocator {
 public:
     FakeKVCacheAllocator(const CacheConfig&              config,
-                         const std::vector<std::string>& full_group_tags,
-                         const std::vector<std::string>& other_group_tags,
-                         size_t                          per_group_layer_num):
+                                  const std::vector<std::string>& full_group_tags,
+                                  const std::vector<std::string>& other_group_tags,
+                                  size_t                          per_group_layer_num):
         KVCacheAllocator(config) {
         const auto group_count = full_group_tags.size() + other_group_tags.size();
         if (group_count > 0) {
             CacheConfig fake_config;
             fake_config.layer_num = static_cast<uint32_t>(group_count * per_group_layer_num);
             std::vector<GroupBase> groups;
-            int                    next_layer_id = 0;
-            const auto             append_group  = [&](const std::string& tag, CacheGroupType group_type) {
+            int                        next_layer_id = 0;
+            const auto                 append_group  = [&](const std::string& tag, CacheGroupType group_type) {
                 std::vector<int> layer_ids;
                 for (size_t i = 0; i < per_group_layer_num; ++i) {
                     layer_ids.push_back(next_layer_id++);
@@ -113,7 +113,7 @@ public:
         return {};
     }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
-        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
+        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake coordinator cache manager has no cache topology");
         GroupedCacheLayerLayout::GroupLayouts groups;
         for (const auto& group : topology_->groups()) {
             std::vector<BlockBufferPtrInfo> layers(topology_->layers().size());
@@ -262,8 +262,20 @@ public:
                          uint32_t                        linear_attention_write_interval = 0,
                          size_t                          sink_size                       = 0,
                          size_t                          sw_size                         = 0) {
-        allocator_ =
-            std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, per_group_layer_num);
+        allocator_ = std::make_shared<FakeKVCacheAllocator>(
+            config_, full_group_tags, other_group_tags, per_group_layer_num);
+        const auto fake_manager = std::dynamic_pointer_cast<FakeKVCacheAllocator>(allocator_);
+        ASSERT_NE(fake_manager, nullptr);
+        for (const auto& tag : full_group_tags) {
+            const auto& group = fake_manager->topology()->group(tag);
+            EXPECT_EQ(group.policy.group_type, CacheGroupType::FULL);
+            EXPECT_EQ(group.spec->type, KVCacheSpecType::MultiHeadAttention);
+        }
+        for (const auto& tag : other_group_tags) {
+            const auto& group = fake_manager->topology()->group(tag);
+            EXPECT_EQ(group.policy.group_type, CacheGroupType::LINEAR);
+            EXPECT_EQ(group.spec->type, KVCacheSpecType::LinearAttention);
+        }
         switch (group_mode) {
             case RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT: {
                 group_policy_ = std::make_shared<remote_connector::DefaultLayerGroupPolicy>(
@@ -332,9 +344,9 @@ public:
 private:
     void setResourceBlocks(KVCacheResource&                                                     resource,
                            std::initializer_list<std::pair<std::string_view, BlockIndicesType>> group_blocks) {
-        const auto allocator = std::dynamic_pointer_cast<FakeKVCacheAllocator>(allocator_);
-        ASSERT_NE(allocator, nullptr);
-        resource.initGroups(allocator->topology());
+        const auto fake_manager = std::dynamic_pointer_cast<FakeKVCacheAllocator>(allocator_);
+        ASSERT_NE(fake_manager, nullptr);
+        resource.initGroups(fake_manager->topology());
         for (const auto& [tag, blocks] : group_blocks) {
             resource.mutableBlockIds(tag).assign(blocks);
         }
@@ -640,8 +652,8 @@ private:
 
 private:
     std::shared_ptr<KVCacheAllocator> allocator_;
-    std::shared_ptr<GroupPolicy>      group_policy_;
-    CacheConfig                       config_;
+    std::shared_ptr<GroupPolicy>               group_policy_;
+    CacheConfig                                config_;
 };
 
 TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_single_tp) {
@@ -748,15 +760,17 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_full_gr
 TEST_F(GroupPolicyTest, test_init_DefaultLayerGroupPolicy_fail_for_duplicate_group) {
     std::vector<std::string> full_group_tags  = {"0", "1"};
     std::vector<std::string> other_group_tags = {"0", "1"};
-    EXPECT_ANY_THROW((void)std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10));
+    EXPECT_ANY_THROW(
+        (void)std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10));
 }
 
 TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_empty_full_group) {
     std::vector<std::string> full_group_tags;
     std::vector<std::string> other_group_tags;
-    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
-    group_policy_ =
-        std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_group_tags, other_group_tags);
+    allocator_ =
+        std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
+    group_policy_ = std::make_shared<remote_connector::FullLayerGroupPolicy>(
+        allocator_, full_group_tags, other_group_tags);
     ASSERT_FALSE(group_policy_->init());
 }
 
@@ -783,9 +797,10 @@ TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_success_for_multiple_full
 TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_not_empty_other_group) {
     std::vector<std::string> full_group_tags  = {"0"};
     std::vector<std::string> other_group_tags = {"1"};
-    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
-    group_policy_ =
-        std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_group_tags, other_group_tags);
+    allocator_ =
+        std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
+    group_policy_ = std::make_shared<remote_connector::FullLayerGroupPolicy>(
+        allocator_, full_group_tags, other_group_tags);
     ASSERT_FALSE(group_policy_->init());
 }
 
@@ -793,7 +808,8 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_fail_for_not_empty_
     {
         std::vector<std::string> full_group_tags;
         std::vector<std::string> other_group_tags = {"1"};
-        allocator_    = std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
+        allocator_ =
+            std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
         group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
             allocator_, full_group_tags, other_group_tags, 0);
         ASSERT_FALSE(group_policy_->init());
@@ -801,7 +817,8 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_fail_for_not_empty_
     {
         std::vector<std::string> full_group_tags = {"0"};
         std::vector<std::string> other_group_tags;
-        allocator_    = std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
+        allocator_ =
+            std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
         group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
             allocator_, full_group_tags, other_group_tags, 0);
         ASSERT_FALSE(group_policy_->init());

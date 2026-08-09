@@ -344,7 +344,7 @@ def h20_oss_suites():
             smoke_test(
                 name="next_long_reuse_memcache",
                 task_info="data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_cache.json",
-                smoke_args="--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1",
+                smoke_args="--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 --write_cache_sync 1",
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -443,7 +443,7 @@ def h20_oss_suites():
             smoke_test(
                 name="kimi_long_reuse_memcache",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2_long_input_reuse_cache.json",
-                smoke_args="--tp_size 2 --act_type BF16 --max_seq_len 16384 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 2048 --write_cache_sync 1 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                smoke_args="--tp_size 2 --act_type BF16 --max_seq_len 16384 --seq_size_per_block 2048 --linear_step 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 2048 --write_cache_sync 1 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
                 envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type=["H20"],
             ),

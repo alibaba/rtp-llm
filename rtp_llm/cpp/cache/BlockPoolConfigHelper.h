@@ -16,7 +16,7 @@ public:
 
         BlockPoolConfig config;
         config.pool_name = group.tag;
-        config.block_num = group.block_num;
+        config.block_num = cache_config.blockNumForGroup(tag);
         RTP_LLM_LOG_INFO("createConfigForGroup: pool_name=%s block_num=%d groupNums=%d",
                          config.pool_name.c_str(),
                          config.block_num,
