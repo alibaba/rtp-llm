@@ -189,6 +189,7 @@ for _deepseek_model_type in (
     "deepseek_v31",
     "deepseek_v32",
     "glm_5",
+    "glm4_moe_lite",
     "kimi_k2",
 ):
     register_lazy_model(

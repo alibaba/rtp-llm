@@ -596,6 +596,18 @@ def extract_config_values(
                 scoring_func = 1
             else:
                 raise ValueError(f"unsupported scoring_func={raw_scoring_func!r}")
+        elif config_json.get("model_type") == "glm4_moe_lite":
+            # GLM-4.7-Flash's official config omits scoring_func because its
+            # reference router is unconditionally sigmoid-based. Resolve that
+            # checkpoint contract here instead of depending on the legacy
+            # Glm4MoeLite config adapter to patch ModelConfig. FusedMoe also
+            # consumes ModelConfig, so keep its view of the routing contract in
+            # sync with the newloader-owned value.
+            scoring_func = 1
+            if isinstance(model_config, dict):
+                model_config["scoring_func"] = scoring_func
+            else:
+                model_config.scoring_func = scoring_func
         n_group = config_json.get("n_group", n_group)
         topk_group = config_json.get("topk_group", topk_group)
         has_moe_norm = config_json.get("norm_topk_prob", has_moe_norm)
