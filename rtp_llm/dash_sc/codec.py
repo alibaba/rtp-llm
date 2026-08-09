@@ -81,15 +81,25 @@ DASH_ERROR_UNSUPPORTED = DashErrorSpec(
     status_code=422,
     status_name="InvalidParameter",
 )
+# NOTE: finish_reason must be USE_PARAMETER_STATUS for any spec whose
+# status_code differs from what the DashScope api-server would derive via
+# LlmFinishReasonUtils.finishReasonToStatusCode().  The api-server only
+# passes the explicit status_code (from the error_msg JSON) through verbatim
+# when finish_reason == USE_PARAMETER_STATUS (1000); otherwise it re-derives
+# HTTP from the finish_reason code, which maps most non-trivial codes to
+# InternalError.EngineAbort/500.  error_no is kept at the semantic value for
+# downstream metric/labelling; only finish_reason is remapped.
+# Mirrors the STOP_ENGINE_PARAM→USE_PARAMETER_STATUS translation that
+# dashllm's processor.py (L1438-1442) applies at the wire boundary.
 DASH_ERROR_CAPACITY = DashErrorSpec(
     error_no=LLMFinishReason.TASK_LIST_FULL,
-    finish_reason=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=429,
     status_name="TooManyRequests",
 )
 DASH_ERROR_TIMEOUT = DashErrorSpec(
     error_no=LLMFinishReason.STOP_TIMEOUT,
-    finish_reason=LLMFinishReason.STOP_TIMEOUT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=504,
     status_name="GatewayTimeout",
 )
@@ -101,7 +111,7 @@ DASH_ERROR_INVALID_OUTPUT = DashErrorSpec(
 )
 DASH_ERROR_ABORT = DashErrorSpec(
     error_no=LLMFinishReason.ABORT,
-    finish_reason=LLMFinishReason.ABORT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=499,
     status_name="ClientClosedRequest",
 )

@@ -413,7 +413,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error_no, 5)
         self.assertEqual(payload["status_code"], 429)
         self.assertIn("route failed", payload["status_message"])
-        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
         self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
     async def test_engine_task_list_full_ft_exception_mapped_to_429(self) -> None:
@@ -446,7 +448,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 429)
         self.assertEqual(payload["status_name"], "TooManyRequests")
         self.assertIn("TASK_LIST_FULL", payload["status_message"])
-        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
 
     async def test_engine_task_list_full_generic_exception_mapped_to_429(self) -> None:
         """Engine abort with TASK_LIST_FULL arriving as a generic Exception
@@ -477,7 +481,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 429)
         self.assertEqual(payload["status_name"], "TooManyRequests")
         self.assertIn("TASK_LIST_FULL", payload["status_message"])
-        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
