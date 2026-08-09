@@ -71,20 +71,20 @@ class PrefillQueueManagerTest {
     }
 
     @Test
-    void auto_tpm_order_breaks_arrival_ties_by_deadline_then_request_id() {
+    void auto_tpm_order_breaks_arrival_ties_by_request_id() {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
-        // Same priority + same arrival: deadline asc decides
+        // Same priority + same arrival: requestId asc decides (deadline is
+        // no longer part of the ordering rule — PR-B removed it).
         assertTrue(batcher.tryOffer(item(1, 50, now + 9_000, now, 128)));
         assertTrue(batcher.tryOffer(item(2, 50, now + 1_000, now, 128)));
-        // Same priority + arrival + deadline: requestId asc decides
         assertTrue(batcher.tryOffer(item(4, 50, now + 9_000, now, 128)));
         assertTrue(batcher.tryOffer(item(3, 50, now + 9_000, now, 128)));
 
         List<Long> order = batcher.queueManager().snapshot().items().stream()
                 .map(QueuedRequestSnapshot::requestId).toList();
-        assertEquals(List.of(2L, 1L, 3L, 4L), order);
+        assertEquals(List.of(1L, 2L, 3L, 4L), order);
     }
 
     @Test

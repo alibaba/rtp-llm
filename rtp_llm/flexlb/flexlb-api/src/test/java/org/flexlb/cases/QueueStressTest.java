@@ -7,6 +7,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.flexlb.util.PriorityOrdering;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.reactive.function.BodyInserters;
@@ -14,11 +15,10 @@ import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.lang.reflect.Field;
 import java.time.Duration;
-import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -61,8 +61,14 @@ public class QueueStressTest {
         try {
             Field queueField = QueueManager.class.getDeclaredField("queue");
             queueField.setAccessible(true);
-            BlockingDeque<BalanceContext> newQueue = new LinkedBlockingDeque<>(size);
+            PriorityBlockingQueue<BalanceContext> newQueue =
+                    new PriorityBlockingQueue<>(64, PriorityOrdering.<BalanceContext>strict());
             queueField.set(queueManager, newQueue);
+
+            Field maxSizeField = QueueManager.class.getDeclaredField("maxQueueSize");
+            maxSizeField.setAccessible(true);
+            maxSizeField.setInt(queueManager, size);
+
             log.info("Queue reset to size: {}", size);
             return this;
         } catch (Exception e) {

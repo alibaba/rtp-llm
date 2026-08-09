@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -156,8 +157,9 @@ public class BatcherContext {
 
     /**
      * Items in active queue order (legacy: {@link BatchItem#sortKey()};
-     * Auto-TPM: {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER}), suitable for
-     * greedy-fill iteration in dispatch algorithms.
+     * Auto-TPM: {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER}, which delegates
+     * to {@link PriorityOrdering#STRICT}), suitable for greedy-fill iteration
+     * in dispatch algorithms.
      */
     List<BatchItem> sortedItems() {
         List<BatchItem> candidates = new ArrayList<>(queue);

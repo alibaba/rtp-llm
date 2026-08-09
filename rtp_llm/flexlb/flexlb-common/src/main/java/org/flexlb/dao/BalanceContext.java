@@ -6,6 +6,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.util.Prioritized;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -17,7 +18,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @Data
 @ToString
-public class BalanceContext {
+public class BalanceContext implements Prioritized {
 
     //======================== Basic =======================//
 
@@ -143,9 +144,34 @@ public class BalanceContext {
      * Normalized Auto-TPM priority of the request (1-100, higher = more
      * important). Delegates to {@link #budget} when set; falls back to
      * {@code request.getPriority()} on the legacy path (Auto-TPM off).
+     *
+     * <p>Satisfies {@link Prioritized#priority()} for the top-level request
+     * queue ({@code QueueManager}'s {@code PriorityBlockingQueue}).
+     */
+    @Override
+    public int priority() {
+        return budget != null ? budget.priority() : request.getPriority();
+    }
+
+    /**
+     * Convenience accessor for the normalized priority (same as
+     * {@link #priority()}). Retained for call-site compatibility with
+     * Lombok-style getter naming.
      */
     public int getPriority() {
-        return budget != null ? budget.priority() : request.getPriority();
+        return priority();
+    }
+
+    /**
+     * Monotonic enqueue sequence used as the same-priority FIFO tie-break in
+     * {@link org.flexlb.util.PriorityOrdering#STRICT}. Set once at enqueue
+     * time by {@code QueueManager} via {@code setSequenceId} and never
+     * mutated — a re-offer (retry / rescue) keeps the original sequence so
+     * the item sorts back to its priority-correct position.
+     */
+    @Override
+    public long enqueueSeq() {
+        return sequenceId;
     }
 
     /**

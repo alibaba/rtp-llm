@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.util.Prioritized;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -21,7 +22,7 @@ import java.util.concurrent.CompletableFuture;
  * <p>{@link #sortKey} is mutable — the {@link BatcherAlgorithm} computes it
  * inside {@link WorkerBatcher#offer(BatchItem)} via {@link BatcherAlgorithm#computeSortKey}.
  */
-public final class BatchItem {
+public final class BatchItem implements Prioritized {
 
     private final BalanceContext ctx;
     private final CompletableFuture<Response> future;
@@ -85,9 +86,24 @@ public final class BatchItem {
      * Auto-TPM normalized priority; delegates to {@code ctx.budget()}.
      * Returns 0 on the legacy path (budget = null), so legacy items
      * never participate in any priority mechanism.
+     *
+     * <p>Satisfies {@link Prioritized#priority()} for the per-worker batcher
+     * queue's {@code PriorityBlockingQueue}.
      */
+    @Override
     public int priority() {
         return ctx != null && ctx.budget() != null ? ctx.budget().priority() : 0;
+    }
+
+    /**
+     * Monotonic enqueue timestamp used as the same-priority FIFO tie-break
+     * in {@link org.flexlb.util.PriorityOrdering#STRICT}. Delegates to the
+     * immutable {@link #enqueuedAtMs} field so a re-offer (retry / rescue)
+     * keeps the original enqueue order.
+     */
+    @Override
+    public long enqueueSeq() {
+        return enqueuedAtMs;
     }
 
     /** Auto-TPM admission deadline (epoch ms); delegates to {@code ctx.budget()}. */

@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -33,15 +34,20 @@ import java.util.concurrent.locks.ReentrantLock;
 public class WorkerBatcher {
 
     /**
-     * Auto-TPM queue order (design doc 8.1, FIFO fix): priority desc →
-     * arrival asc (same-priority requests are strictly first-in-first-out) →
-     * deadline asc → requestId asc (deterministic).
+     * Auto-TPM queue order (PR-B unification): delegates to
+     * {@link PriorityOrdering#STRICT} (priority desc → enqueue-seq asc for
+     * same-priority FIFO) with {@code requestId} as the final deterministic
+     * tie-break.
+     *
+     * <p>The previous third key — coarse admission deadline — has been
+     * removed. It was a weak signal that conflicted with FIFO fairness under
+     * bursty arrivals; same-priority FIFO is now the sole tie-break.
+     *
+     * <p>{@link #LEGACY_QUEUE_ORDER} is unchanged.
      */
-    public static final Comparator<BatchItem> AUTO_TPM_QUEUE_ORDER = Comparator
-            .comparingInt(BatchItem::priority).reversed()
-            .thenComparingLong(BatchItem::enqueuedAtMs)
-            .thenComparingLong(BatchItem::deadlineMs)
-            .thenComparingLong(BatchItem::requestId);
+    public static final Comparator<BatchItem> AUTO_TPM_QUEUE_ORDER =
+            PriorityOrdering.<BatchItem>strict()
+                    .thenComparingLong(BatchItem::requestId);
 
     /** Legacy order: algorithm-computed sort key (unchanged behavior). */
     public static final Comparator<BatchItem> LEGACY_QUEUE_ORDER =

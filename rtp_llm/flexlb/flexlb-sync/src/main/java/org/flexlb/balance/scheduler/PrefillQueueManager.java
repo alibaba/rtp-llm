@@ -2,6 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.scheduler.priority.PrefillQueueSnapshot;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
+import org.flexlb.util.Prioritized;
+import org.flexlb.util.PriorityOrdering;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -99,20 +101,26 @@ public final class PrefillQueueManager {
 
     /**
      * Whether a queued item is ordered before an incoming probe under
-     * {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER} (priority desc → arrival asc
-     * → deadline asc → requestId asc). The probe's arrival is "now" — it has
-     * not been enqueued yet.
+     * {@link WorkerBatcher#AUTO_TPM_QUEUE_ORDER} (priority desc → enqueue-seq
+     * asc → requestId asc). The probe's enqueue-seq is its would-be arrival
+     * time ({@code now}) — it has not been enqueued yet.
+     *
+     * <p>Delegates the priority + enqueue-seq comparison to
+     * {@link PriorityOrdering#STRICT} via a temporary {@link Prioritized}
+     * view of the probe, then breaks residual ties by {@code requestId}.
+     * The {@code deadlineMs} parameter is retained for call-site stability
+     * but is no longer part of the ordering rule (PR-B removed the deadline
+     * key).
      */
     private static boolean ordersBefore(BatchItem item, int priority, long deadlineMs,
                                         long arrivalMs, long requestId) {
-        if (item.priority() != priority) {
-            return item.priority() > priority;
-        }
-        if (item.enqueuedAtMs() != arrivalMs) {
-            return item.enqueuedAtMs() < arrivalMs;
-        }
-        if (item.deadlineMs() != deadlineMs) {
-            return item.deadlineMs() < deadlineMs;
+        Prioritized probe = new Prioritized() {
+            @Override public int priority() { return priority; }
+            @Override public long enqueueSeq() { return arrivalMs; }
+        };
+        int cmp = PriorityOrdering.STRICT.compare(item, probe);
+        if (cmp != 0) {
+            return cmp < 0;
         }
         return item.requestId() < requestId;
     }
