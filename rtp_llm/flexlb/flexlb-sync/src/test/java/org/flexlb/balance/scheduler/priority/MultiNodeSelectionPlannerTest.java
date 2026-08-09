@@ -312,13 +312,13 @@ class MultiNodeSelectionPlannerTest {
     private static QueuedRequestSnapshot snap(long requestId, int priority,
                                               long deadlineMs, long arrivalMs) {
         return new QueuedRequestSnapshot(requestId, priority, deadlineMs, arrivalMs,
-                128, 0, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
+                128, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
     }
 
     private static PriorityRequestEnvelope envelope(long requestId, int priority) {
         long now = System.currentTimeMillis();
         return new PriorityRequestEnvelope(requestId, priority, 128, 8,
-                now, 60_000, now + 60_000, 128, 136, 0);
+                now, 60_000, now + 60_000, 128, 136);
     }
 
     private static DecodeEndpointSnapshot endpoint(String id, long version,
@@ -340,7 +340,7 @@ class MultiNodeSelectionPlannerTest {
     private static PriorityRequestEnvelope incoming(int priority, long seqLen) {
         return new PriorityRequestEnvelope(999, priority, seqLen, 8,
                 System.currentTimeMillis(), 10_000, System.currentTimeMillis() + 10_000,
-                seqLen, seqLen + 8, 0);
+                seqLen, seqLen + 8);
     }
 
     private static PrefillEvictionProposal proposal(String endpointId, int victimCount,

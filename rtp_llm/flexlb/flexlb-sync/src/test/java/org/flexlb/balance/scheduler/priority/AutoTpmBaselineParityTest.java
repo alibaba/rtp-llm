@@ -172,10 +172,9 @@ class AutoTpmBaselineParityTest {
         List<Consumer<FlexlbConfig>> matrix = List.of(
                 cfg -> cfg.setAutoTpmPrefillQueueEvictEnabled(true),
                 cfg -> cfg.setAutoTpmDecodeReservedEvictEnabled(true),
-                cfg -> cfg.setAutoTpmDeadlineRescueEnabled(true),
                 cfg -> {
                     cfg.setAutoTpmPrefillQueueEvictEnabled(true);
-                    cfg.setAutoTpmDeadlineRescueEnabled(true);
+                    cfg.setAutoTpmDecodeReservedEvictEnabled(true);
                 });
         for (Consumer<FlexlbConfig> combo : matrix) {
             Harness h = new Harness(cfg -> {
@@ -266,7 +265,7 @@ class AutoTpmBaselineParityTest {
             cfg.setAutoTpmEnabled(true);
             cfg.setAutoTpmPrefillQueueEvictEnabled(true);
             cfg.setAutoTpmDecodeReservedEvictEnabled(true);
-            cfg.setAutoTpmDeadlineRescueEnabled(true);
+            // PR-D: rescue removed — orTimeout + AdmissionLease handle stuck/deadline requests
         }
 
         private FlexlbBatchScheduler getScheduler() {

@@ -309,6 +309,31 @@ public class WorkerBatcher {
         }
     }
 
+    /**
+     * Version-agnostic idempotent removal (PR-D §2.7): same as
+     * {@link #tryRemoveAtVersion} but skips the version check. Used by
+     * {@code AdmissionLease.close()} for deadline-timeout cleanup.
+     */
+    List<BatchItem> tryRemoveNoVersion(List<Long> requestIds, String reason) {
+        queueLock.lock();
+        try {
+            List<BatchItem> removed = new ArrayList<>(requestIds.size());
+            for (long requestId : requestIds) {
+                BatchItem item = findQueued(requestId);
+                if (item != null && ctx.remove(item)) {
+                    removed.add(item);
+                }
+            }
+            if (!removed.isEmpty()) {
+                Logger.info("[auto-tpm] queue remove (version-agnostic): worker={} reason={} removed={}",
+                        key, reason, removed.size());
+            }
+            return removed;
+        } finally {
+            queueLock.unlock();
+        }
+    }
+
     private BatchItem findQueued(long requestId) {
         for (BatchItem item : queue) {
             if (item.requestId() == requestId) {

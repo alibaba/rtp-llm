@@ -51,7 +51,7 @@ import static org.mockito.Mockito.when;
 /**
  * Task34 类别二：高并发决策冲突压力测试 —— 8 线程 × 25 请求 × 20 轮
  * （固定随机种子，失败输出可复现 seed），混合执行并发 schedule（混合优先级）、
- * P 队列驱逐、decode reserved 驱逐、deadline rescue tick、calibrate /
+ * P 队列驱逐、decode reserved 驱逐、orTimeout 超时释放、calibrate /
  * WorkerStatus 更新、TTL 清理和随机 preempt 注入。
  *
  * <p>断言的不变式：
@@ -163,7 +163,10 @@ class PriorityConcurrencyStressTest {
                         decodeEp.evictExpiredRequests(300_000);
                         h.endpointRegistry.getPrefill(PREFILL_IP_PORT).evictExpiredBatches(300_000);
                     } else if (op == 2) {
-                        h.rescueService.rescueTick(System.currentTimeMillis());
+                        // PR-D: rescue tick replaced by orTimeout-based admission timeout.
+                        // The mixer's settlement loop above already simulates the
+                        // timeout path by settling successfully-dispatched requests.
+                        decodeEp.evictExpiredRequests(300_000);
                     } else if (op == 3) {
                         // 随机注入 accepted-preempt（8429 的唯一合法来源）
                         long id = idBase + rnd.nextInt(THREADS) * 1_000L
@@ -273,7 +276,6 @@ class PriorityConcurrencyStressTest {
         final EndpointRegistry endpointRegistry;
         final FlexlbBatchScheduler scheduler;
         final DefaultBatchDispatcher dispatcher;
-        final DeadlineRescueService rescueService;
         final WorkerStatus decodeWs;
 
         Harness() {
@@ -291,7 +293,7 @@ class PriorityConcurrencyStressTest {
             config.setAutoTpmEnabled(true);
             config.setAutoTpmPrefillQueueEvictEnabled(true);
             config.setAutoTpmDecodeReservedEvictEnabled(true);
-            config.setAutoTpmDeadlineRescueEnabled(true);
+            // PR-D: rescue removed — orTimeout on submit() handles stuck requests
             // 有限 decode 槽位：并发下持续触发 slot-full 仲裁
             config.setDecodeConcurrencyLimit(6);
             when(configService.loadBalanceConfig()).thenReturn(config);
@@ -318,8 +320,6 @@ class PriorityConcurrencyStressTest {
             };
             scheduler = new FlexlbBatchScheduler(configService, router,
                     endpointRegistry, dispatcher, reporter, priorityScheduler, null);
-            rescueService = new DeadlineRescueService(configService, endpointRegistry,
-                    priorityScheduler, scheduler, priorityReporter);
 
             registerPrefill(PREFILL_IP_PORT, "10.0.0.1");
             registerPrefill(PREFILL2_IP_PORT, "10.0.0.3");
@@ -377,7 +377,6 @@ class PriorityConcurrencyStressTest {
         }
 
         void close() {
-            rescueService.stop();
             scheduler.shutdown();
             // 每轮独立 Harness：dispatcher 线程池（生产由 Spring @PreDestroy 管理）
             // 必须显式回收，否则多轮狩猎会耗尽 native 线程

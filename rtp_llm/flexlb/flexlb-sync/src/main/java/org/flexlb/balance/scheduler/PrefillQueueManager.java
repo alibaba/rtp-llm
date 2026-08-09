@@ -56,7 +56,7 @@ public final class PrefillQueueManager {
                 items.add(new QueuedRequestSnapshot(
                         item.requestId(), item.priority(), item.deadlineMs(),
                         item.enqueuedAtMs(), item.seqLen(), item.hitCache(),
-                        item.transferCount(), QueuedRequestSnapshot.PREFILL_QUEUED));
+                        QueuedRequestSnapshot.PREFILL_QUEUED));
             }
             return new PrefillQueueSnapshot(ctx.key(), batcher.queueVersion(),
                     ctx.cfg().getFlexlbBatchQueueMaxSize(), items);
@@ -140,6 +140,17 @@ public final class PrefillQueueManager {
      */
     public List<BatchItem> tryRemove(List<Long> requestIds, long expectedVersion, String reason) {
         return batcher.tryRemoveAtVersion(requestIds, expectedVersion, reason);
+    }
+
+    /**
+     * Version-agnostic idempotent removal (PR-D §2.7): removes the given
+     * request from the queue without a version precondition. Used by
+     * {@code AdmissionLease.close()} for deadline-timeout cleanup where the
+     * snapshot version is long stale. No-op when the item is not queued
+     * (already dispatched / evicted / removed).
+     */
+    public void tryRemove(long requestId, String reason) {
+        batcher.tryRemoveNoVersion(List.of(requestId), reason);
     }
 
     /**

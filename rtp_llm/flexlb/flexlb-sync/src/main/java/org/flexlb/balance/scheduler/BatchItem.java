@@ -36,9 +36,6 @@ public final class BatchItem implements Prioritized {
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
 
-    /** Auto-TPM cross-endpoint rescue transfer count (Phase 6); 0 = never migrated. */
-    private volatile int transferCount;
-
     /**
      * Auto-TPM accepted-eviction CANCEL_REQUESTED mark (Phase 5): non-null
      * once a preemption cancel was issued for this request, so an
@@ -110,9 +107,6 @@ public final class BatchItem implements Prioritized {
     public long deadlineMs() {
         return ctx != null && ctx.budget() != null ? ctx.budget().deadlineMs() : 0;
     }
-
-    public int transferCount() { return transferCount; }
-    public void setTransferCount(int transferCount) { this.transferCount = transferCount; }
 
     public String preemptCancelDetail() { return preemptCancelDetail; }
     public void setPreemptCancelDetail(String preemptCancelDetail) {

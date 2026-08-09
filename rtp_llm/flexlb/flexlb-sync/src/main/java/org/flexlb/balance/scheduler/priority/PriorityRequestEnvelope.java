@@ -16,7 +16,6 @@ package org.flexlb.balance.scheduler.priority;
  *                         arrival + SLO - predicted prefill time on the target endpoint
  * @param hardKvTokens     minimum KV demand (= seqLen, prompt must fit)
  * @param expectedKvTokens expected KV demand: min(seqLen + maxNewTokens, decode KV total)
- * @param transferCount    completed cross-endpoint rescue transfers (0 = never migrated)
  */
 public record PriorityRequestEnvelope(
         long requestId,
@@ -27,6 +26,5 @@ public record PriorityRequestEnvelope(
         long requestSloMs,
         long deadlineMs,
         long hardKvTokens,
-        long expectedKvTokens,
-        int transferCount) {
+        long expectedKvTokens) {
 }

@@ -220,12 +220,12 @@ class EvictionPlannerTest {
     private static QueuedRequestSnapshot snap(long requestId, int priority,
                                               long deadlineMs, long arrivalMs) {
         return new QueuedRequestSnapshot(requestId, priority, deadlineMs, arrivalMs,
-                128, 0, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
+                128, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
     }
 
     private static PriorityRequestEnvelope envelope(long requestId, int priority) {
         long now = System.currentTimeMillis();
         return new PriorityRequestEnvelope(requestId, priority, 128, 8,
-                now, 60_000, now + 60_000, 128, 136, 0);
+                now, 60_000, now + 60_000, 128, 136);
     }
 }

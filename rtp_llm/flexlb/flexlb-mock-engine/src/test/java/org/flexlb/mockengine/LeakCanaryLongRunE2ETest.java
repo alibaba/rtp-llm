@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Task35 场景 D：泄漏金丝雀长跑（≥60s）—— 混合优先级流量 + 队列驱逐 +
- * deadline rescue 全程开启，中途注入两轮瞬态故障（enqueue 延迟 / enqueue
+ * orTimeout 超时释放全程生效，中途注入两轮瞬态故障（enqueue 延迟 / enqueue
  * 拒绝），结束后强断言：
  * <ul>
  *   <li>全部请求到达明确终态，且终态码只落在已知集合内；</li>
@@ -37,15 +37,13 @@ class LeakCanaryLongRunE2ETest {
     void d_long_run_mixed_traffic_with_transient_faults_leaks_nothing() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, false)) {
             h.config.setAutoTpmPrefillQueueEvictEnabled(true);
-            h.config.setAutoTpmDeadlineRescueEnabled(true);
-            h.config.setAutoTpmRescueScanIntervalMs(50);
+            // PR-D: rescue removed — orTimeout + AdmissionLease handle deadline expiry
             // 小队列制造真实驱逐压力；小批次 + 快派发形成持续流转
             h.config.setFlexlbBatchQueueMaxSize(64);
             h.config.setFlexlbBatchSizeMax(4);
             h.config.setFlexlbBatchFixedWaitMs(5);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
             h.startAutoPump(10);
-            h.rescueService.start();
 
             JavaMockEngineCluster.FastRpcService faultTarget = h.prefillEngines.get(0);
             List<CompletableFuture<Response>> futures = new ArrayList<>(5_000);
@@ -99,7 +97,6 @@ class LeakCanaryLongRunE2ETest {
             }
 
             // 排空：引擎全部归零后再过泄漏金丝雀
-            h.rescueService.stop();
             for (JavaMockEngineCluster.FastRpcService svc : h.services.values()) {
                 AutoTpmE2EHarness.await(() -> svc.getRunningCount() == 0, 15_000,
                         "engine " + svc.getGrpcPort() + " must drain to zero running");

@@ -113,13 +113,6 @@ public class BalanceContext implements Prioritized {
     private int victimCount;
 
     /**
-     * Completed cross-endpoint rescue transfers for this request (Phase 6
-     * deadline rescue). 0 = never migrated; a rescue re-entry keeps the
-     * original arrival/deadline and bumps this counter.
-     */
-    private int transferCount;
-
-    /**
      * Prefill endpoint ("ip:httpPort") that the committed plan placed this
      * request on. Empty until a plan commits; used by rescue logging to
      * report the migration target.

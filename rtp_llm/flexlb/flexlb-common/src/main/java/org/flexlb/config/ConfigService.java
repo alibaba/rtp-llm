@@ -293,17 +293,11 @@ public class ConfigService {
             config.isAutoTpmEnabled(), config.getAutoTpmDefaultPriority());
         log.info("autoTpmSloLengthBuckets={}, autoTpmPrioritySloMultipliers={}",
             config.getAutoTpmSloLengthBuckets(), config.getAutoTpmPrioritySloMultipliers());
-        log.info("autoTpmPrefillQueueEvictEnabled={}, autoTpmDecodeReservedEvictEnabled={}, autoTpmDangerThresholdMs={}",
-            config.isAutoTpmPrefillQueueEvictEnabled(), config.isAutoTpmDecodeReservedEvictEnabled(),
-            config.getAutoTpmDangerThresholdMs());
+        log.info("autoTpmPrefillQueueEvictEnabled={}, autoTpmDecodeReservedEvictEnabled={}",
+            config.isAutoTpmPrefillQueueEvictEnabled(), config.isAutoTpmDecodeReservedEvictEnabled());
         log.info("autoTpmPlanCacheHitBenefitCap={}", config.getAutoTpmPlanCacheHitBenefitCap());
-        log.info("autoTpmPriorityLevels={}, autoTpmDecodeAcceptedEvictEnabled={}",
-            config.getAutoTpmPriorityLevels(), config.isAutoTpmDecodeAcceptedEvictEnabled());
-        log.info("autoTpmDeadlineRescueEnabled={}, autoTpmRescueScanIntervalMs={}, autoTpmMaxRescuePerTick={}, "
-                + "autoTpmMaxRescuePerEndpointPerTick={}, autoTpmMaxTransferCount={}",
-            config.isAutoTpmDeadlineRescueEnabled(), config.getAutoTpmRescueScanIntervalMs(),
-            config.getAutoTpmMaxRescuePerTick(), config.getAutoTpmMaxRescuePerEndpointPerTick(),
-            config.getAutoTpmMaxTransferCount());
+        log.info("autoTpmDecodeAcceptedEvictEnabled={}",
+            config.isAutoTpmDecodeAcceptedEvictEnabled());
         log.info("autoTpmCommitWaitReleaseTimeoutMs={}",
             config.getAutoTpmCommitWaitReleaseTimeoutMs());
         log.info("autoTpmCommitStrategy={}, autoTpmVictimGuardMode={}",

@@ -9,7 +9,6 @@ import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.Router;
-import org.flexlb.balance.scheduler.priority.DeadlineRescueService;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.PlanCommitter;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
@@ -63,7 +62,7 @@ import static org.mockito.Mockito.when;
 /**
  * Shared E2E harness (task35): a REAL FlexLB scheduler stack (FlexlbBatchScheduler
  * + PriorityAdmissionScheduler + EndpointRegistry + DefaultBatchDispatcher +
- * DeadlineRescueService) wired to an in-process Java mock engine cluster.
+ * AdmissionLease) wired to an in-process Java mock engine cluster.
  *
  * <p>The E2E loop: the mocked {@link EngineGrpcClient#batchEnqueueAsync} answer
  * bridges into the real {@link JavaMockEngineCluster.FastRpcService#enqueueBatch}
@@ -96,7 +95,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     final EndpointRegistry endpointRegistry;
     final FlexlbBatchScheduler scheduler;
     final PriorityAdmissionScheduler priorityScheduler;
-    final DeadlineRescueService rescueService;
 
     /** requestIds in the order the mock engines actually received them via enqueueBatch. */
     final List<Long> engineArrivalOrder = new CopyOnWriteArrayList<>();
@@ -238,8 +236,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         scheduler = new FlexlbBatchScheduler(configService, router,
                 endpointRegistry, dispatcher, reporter, priorityScheduler, null);
         schedulerRef.set(scheduler);
-        rescueService = new DeadlineRescueService(configService, endpointRegistry,
-                priorityScheduler, scheduler, priorityReporter);
 
         for (JavaMockEngineCluster.FastRpcService svc : prefillEngines) {
             registerEndpoint(RoleType.PREFILL, svc);
@@ -538,7 +534,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     @Override
     public void close() {
         stopAutoPump();
-        rescueService.stop();
         scheduler.shutdown();
         for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
             svc.shutdown();

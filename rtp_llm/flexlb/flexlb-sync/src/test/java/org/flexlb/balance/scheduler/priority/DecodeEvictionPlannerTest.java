@@ -244,6 +244,6 @@ class DecodeEvictionPlannerTest {
     private static PriorityRequestEnvelope incoming(int priority, long seqLen) {
         return new PriorityRequestEnvelope(999, priority, seqLen, 8,
                 System.currentTimeMillis(), 10_000, System.currentTimeMillis() + 10_000,
-                seqLen, seqLen + 8, 0);
+                seqLen, seqLen + 8);
     }
 }

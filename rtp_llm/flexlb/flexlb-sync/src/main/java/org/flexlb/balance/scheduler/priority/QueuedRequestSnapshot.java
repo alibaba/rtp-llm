@@ -10,7 +10,6 @@ package org.flexlb.balance.scheduler.priority;
  * @param arrivalTimeMs  batcher enqueue timestamp (epoch ms)
  * @param seqLen         prompt sequence length in tokens
  * @param cacheHitTokens cache-hit tokens on the assigned prefill endpoint
- * @param transferCount  completed cross-endpoint rescue transfers (0 = never migrated)
  * @param state          scheduling stage; queued items are always
  *                       {@link #PREFILL_QUEUED}
  */
@@ -21,7 +20,6 @@ public record QueuedRequestSnapshot(
         long arrivalTimeMs,
         long seqLen,
         long cacheHitTokens,
-        int transferCount,
         String state) {
 
     public static final String PREFILL_QUEUED = "PREFILL_QUEUED";

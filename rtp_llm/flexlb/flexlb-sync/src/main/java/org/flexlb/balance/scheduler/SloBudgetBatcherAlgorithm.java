@@ -54,15 +54,30 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
         }
         long now = ctx.now();
         long budgetMs = head.sortKey() - now;
+        PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
 
-        // 1. expired → drop unless Auto-TPM owns this request's protection.
-        //    Design doc 8.3: Auto-TPM never drops requests silently — the
-        //    expired head falls through to the deadline_guard dispatch below
-        //    (entry rejection/rescue/eviction cover it); deadline rescue
-        //    is a later phase. When Auto-TPM is off, the legacy drop stays.
-        if (budgetMs < 0 && !ctx.cfg().isAutoTpmEnabled()) {
-            dropHead(ctx, head, now, budgetMs, "deadline_expired");
-            return;
+        // 1. expired → drop. When Auto-TPM is off the legacy drop stays.
+        //    PR-D §2.3 fail-fast: when Auto-TPM is on and the head's dispatch
+        //    deadline has passed, check whether the remaining coarse budget
+        //    can still cover the estimated prefill time. If not, the request
+        //    cannot meet its SLO — drive it to BATCH_SLO_EXPIRED via onExpired
+        //    (the AdmissionLease.close() is an idempotent no-op here). If the
+        //    coarse budget still has room, fall through to the deadline_guard
+        //    dispatch below.
+        if (budgetMs < 0) {
+            if (!ctx.cfg().isAutoTpmEnabled()) {
+                dropHead(ctx, head, now, budgetMs, "deadline_expired");
+                return;
+            }
+            long remainingBudgetMs = head.deadlineMs() > 0
+                    ? head.deadlineMs() - now : budgetMs;
+            long estimatedPrefillMs = Math.max(1,
+                    (long) predictor.estimateMs(head.seqLen(), head.hitCache()));
+            if (remainingBudgetMs < estimatedPrefillMs) {
+                dropHead(ctx, head, now, budgetMs, "deadline_expired_failfast");
+                return;
+            }
+            // Still has enough coarse budget — fall through to dispatch.
         }
 
         if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
@@ -86,7 +101,6 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             return;
         }
 
-        PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
         long baseGuardMs = dispatchGuardMs(ctx, emergencyBudgetMs);
         BatchPick pick = pickWithinIncrementalBudget(
                 ctx, head, predictor, Math.max(0, budgetMs - baseGuardMs), maxScan,

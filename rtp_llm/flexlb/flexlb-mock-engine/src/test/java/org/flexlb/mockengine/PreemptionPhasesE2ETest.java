@@ -4,7 +4,6 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
@@ -38,7 +37,6 @@ import static org.mockito.Mockito.verify;
  *   <li>A2 decode reserved 驱逐 — victim 8400，影子账目正确移交；</li>
  *   <li>A3 accepted 让位 — 真实 MockEngineCancelChannel，victim 8429，
  *       cancel→确认→派发顺序 + cancel 超时不泄漏（铁律4）；</li>
- *   <li>A4 deadline rescue — 危险区请求迁移 transferCount=1，P30 不迁移；</li>
  *   <li>A5 同优不抢占 — 同优请求满载时绝不驱逐同优 victim。</li>
  * </ul>
  */
@@ -245,61 +243,6 @@ class PreemptionPhasesE2ETest {
         }
     }
 
-    // ==================== A4 deadline rescue ====================
-
-    @Test
-    @Timeout(30)
-    void a4_danger_zone_request_migrates_once_and_p30_never_migrates() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 40, 2, 1, "50", 1.0, false)) {
-            h.config.setAutoTpmEnabled(true);
-            h.config.setAutoTpmDeadlineRescueEnabled(true);
-            h.config.setAutoTpmRescueScanIntervalMs(5);
-            h.config.setFlexlbBatchWindowMs(10_000);
-            h.config.setFlexlbBatchSizeMax(100);
-
-            long now = System.currentTimeMillis();
-            // task40 后：过期 deadline 在入口直接拒绝，rescue 只救未过期请求。
-            // 用显式 requestSloMs 让准入 deadline 未过期，并放宽危险区阈值，
-            // 保持“P70 迁移一次 / P30 永不迁移”的用例意图。
-            h.config.setAutoTpmDangerThresholdMs(60_000);
-            CompletableFuture<Response> urgent = submitWithDeadline(h, 401, 70, now + 5_000);
-            // P30 是最低优先级 —— 无论多接近 deadline 都从不迁移
-            CompletableFuture<Response> lowest = submitWithDeadline(h, 402, 30, now + 5_000);
-            assertEquals(2, h.prefillEndpoint(0).getBatcher().queueSize());
-            // 记录准入 deadline；迁移必须原样保留（rescue 不得延长 SLO，设计文档 14.3）
-            long admittedDeadline = h.prefillEndpoint(0).getBatcher().queueManager()
-                    .snapshot().items().stream()
-                    .filter(s -> s.requestId() == 401)
-                    .findFirst().orElseThrow().deadlineMs();
-
-            // 迁移落点换到第二个 prefill，用真实扫描线程驱动 rescue
-            h.prefillSelector = ctx -> 1;
-            h.rescueService.start();
-            AutoTpmE2EHarness.await(
-                    () -> h.prefillEndpoint(1).getBatcher().queueSize() == 1, 3_000,
-                    "P70 danger-zone request migrates to the second prefill");
-
-            assertEquals(1, h.prefillEndpoint(0).getBatcher().queueSize(),
-                    "P30 stays on the original endpoint");
-
-            var rescued = h.prefillEndpoint(1).getBatcher().queueManager()
-                    .snapshot().items().get(0);
-            assertEquals(401, rescued.requestId());
-            assertEquals(1, rescued.transferCount(), "transferCount bumps to 1 after migration");
-            assertEquals(admittedDeadline, rescued.deadlineMs(),
-                    "SLO deadline preserved across migration (rescue must not extend the SLO)");
-            assertFalse(urgent.isDone());
-            assertFalse(lowest.isDone());
-
-            // transferCount 封顶（默认 1）：继续扫描不重复迁移、P30 始终不动
-            Thread.sleep(100);
-            assertEquals(1, h.prefillEndpoint(0).getBatcher().queueSize());
-            assertEquals(1, h.prefillEndpoint(1).getBatcher().queueSize());
-            assertEquals(401, h.prefillEndpoint(1).getBatcher().queueManager()
-                    .snapshot().items().get(0).requestId());
-        }
-    }
-
     // ==================== A5 同优不抢占 ====================
 
     @Test
@@ -339,18 +282,6 @@ class PreemptionPhasesE2ETest {
     }
 
     // ==================== helpers ====================
-
-    private static CompletableFuture<Response> submitWithDeadline(AutoTpmE2EHarness h,
-                                                                  long requestId, int priority,
-                                                                  long deadlineMs) {
-        BalanceContext ctx = h.context(requestId, priority);
-        // Construct a budget with the given deadline and a 5-second SLO
-        // (task40: explicit SLO so the admission-rebuilt deadline is in the
-        // same magnitude as the submitted value, avoiding the extremely
-        // short base SLO for seqLen=128 expiring before rescue scan).
-        ctx.setBudget(ScheduleBudget.forDeadline(priority, deadlineMs - 5_000, deadlineMs));
-        return h.scheduler.submit(ctx);
-    }
 
     /** 把 victim 作为长跑 decode 任务放进 decode mock（KV 已分配、可被 Cancel）。 */
     private static void startDecodeTask(JavaMockEngineCluster.FastRpcService decodeEngine,

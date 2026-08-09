@@ -558,17 +558,6 @@ public class FlexlbConfig {
     private boolean autoTpmDecodeReservedEvictEnabled = false;
 
     /**
-     * Deadline-rescue danger-zone threshold in milliseconds (Phase 6).
-     * <p>When a queued request's remaining time-to-deadline drops below this
-     * value, the {@code DeadlineRescueService} marks it as a danger-zone
-     * candidate and attempts to migrate it to a less loaded endpoint before
-     * the deadline is breached. 100 ms balances between acting early enough
-     * to help and avoiding premature rescues.
-     * <p>Only effective when {@code autoTpmDeadlineRescueEnabled} is true.
-     */
-    private long autoTpmDangerThresholdMs = 100;
-
-    /**
      * Upper bound (in plan-cost units) of the cache-hit benefit an eviction
      * plan may subtract from its raw cost. The effective benefit is further
      * clamped to half of the minimum adjacent-priority cost gap so cache
@@ -579,32 +568,8 @@ public class FlexlbConfig {
 
     // ---- Auto-TPM reserved config (design doc §18) — future phases, not wired yet ----
 
-    /**
-     * Informational priority levels string (Phase 5+, reserved). The actual
-     * validation is in {@link org.flexlb.util.PriorityNormalizer#isValid},
-     * which accepts any value 1-100. This field is not consumed by current
-     * scheduling logic; it is kept for forward compatibility and config
-     * observability.
-     */
-    private String autoTpmPriorityLevels = "30,40,50,60,70";
-
     /** Decode accepted-entry eviction switch (Phase 5, reserved). */
     private boolean autoTpmDecodeAcceptedEvictEnabled = false;
-
-    /** Deadline-rescue background scanner switch (Phase 6). */
-    private boolean autoTpmDeadlineRescueEnabled = false;
-
-    /** Deadline-rescue scan interval in ms (Phase 6). */
-    private long autoTpmRescueScanIntervalMs = 20;
-
-    /** Max rescue migrations applied per scan tick (Phase 6). */
-    private int autoTpmMaxRescuePerTick = 32;
-
-    /** Max rescue migrations pulled from one source endpoint per scan tick (Phase 6). */
-    private int autoTpmMaxRescuePerEndpointPerTick = 8;
-
-    /** Max cross-endpoint transfers per request lifetime (Phase 6). */
-    private int autoTpmMaxTransferCount = 1;
 
     /** Max wait for victim KV release before commit gives up, ms (Phase 5, reserved). */
     private long autoTpmCommitWaitReleaseTimeoutMs = 50;

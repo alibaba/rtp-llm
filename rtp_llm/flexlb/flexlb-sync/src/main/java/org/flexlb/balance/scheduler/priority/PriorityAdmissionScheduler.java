@@ -69,7 +69,7 @@ import java.util.concurrent.TimeUnit;
  * | autoTpmDecodeAcceptedEvictEnabled           | Phase 5 accepted-layer victims join the decode plan pool    |
  * |   + cancelChannel.isSupported(endpoint)     | (both required, per endpoint — EvictionPlanner gate) and    |
  * |                                             | commitAcceptedEviction() cancel-wait-confirm path           |
- * | autoTpmDeadlineRescueEnabled                | DeadlineRescueService scanner thread start / rescueTick()   |
+ * | (removed) DeadlineRescueService            | PR-D replaced by AdmissionLease + orTimeout fail-fast        |
  * </pre>
  *
  * <p><b>Plan-commit redesign switches</b> (N3, both default to the new
@@ -236,6 +236,7 @@ public class PriorityAdmissionScheduler {
             PlanCommitter.CommitResult result = planCommitter.commit(outcome.plan, registrar, lockfree);
             if (result == PlanCommitter.CommitResult.SUCCESS) {
                 onCommitted(ctx, outcome.plan);
+                bindAdmissionLease(outcome.plan, registrar);
                 return;
             }
 
@@ -263,6 +264,7 @@ public class PriorityAdmissionScheduler {
                 switch (eviction) {
                     case COMMITTED -> {
                         onCommitted(ctx, outcome.plan);
+                        bindAdmissionLease(outcome.plan, registrar);
                         return;
                     }
                     case INFEASIBLE -> {
@@ -534,7 +536,7 @@ public class PriorityAdmissionScheduler {
         PriorityRequestEnvelope planEnvelope = new PriorityRequestEnvelope(
                 ctx.getRequestId(), ctx.getPriority(), seqLen, maxNewTokens,
                 ctx.getStartTime(), ctx.getRequestSloMs(), ctx.getDeadlineMs(),
-                seqLen, seqLen + maxNewTokens, ctx.getTransferCount());
+                seqLen, seqLen + maxNewTokens);
 
         List<DecodeEndpointSnapshot> decodes = new ArrayList<>(snapshot.decodes().values());
         Map<String, String> failures = new HashMap<>();
@@ -907,7 +909,6 @@ public class PriorityAdmissionScheduler {
         BatchItem item = new BatchItem(ctx, future, routeResponse,
                 FlexlbBatchScheduler.copyOf(prefill), FlexlbBatchScheduler.copyOf(decode),
                 prefillEp, decodeEp, System.currentTimeMillis());
-        item.setTransferCount(envelope.transferCount());
 
         NormalPlacementPlan plan = new NormalPlacementPlan(envelope, item, routeResponse,
                 prefillEp.getBatcher().queueVersion(), decodeEp.admissionVersion());
@@ -920,6 +921,7 @@ public class PriorityAdmissionScheduler {
                 isLockfreeCommit(config));
         if (result == PlanCommitter.CommitResult.SUCCESS) {
             onCommitted(ctx, plan);
+            bindAdmissionLease(plan, registrar);
             return DecodeEvictionOutcome.COMMITTED;
         }
         if (result == PlanCommitter.CommitResult.VERSION_MISMATCH) {
@@ -935,6 +937,7 @@ public class PriorityAdmissionScheduler {
             switch (eviction) {
                 case COMMITTED -> {
                     onCommitted(ctx, plan);
+                    bindAdmissionLease(plan, registrar);
                     return DecodeEvictionOutcome.COMMITTED;
                 }
                 case CONFLICT -> {
@@ -1042,7 +1045,6 @@ public class PriorityAdmissionScheduler {
         BatchItem item = new BatchItem(ctx, future, routeResponse,
                 FlexlbBatchScheduler.copyOf(prefill), FlexlbBatchScheduler.copyOf(decode),
                 prefillEp, decodeEp, System.currentTimeMillis());
-        item.setTransferCount(envelope.transferCount());
 
         // Prefill queue version comes from the snapshot (pre-route) when
         // available; decode admission version is captured post-reserve so only
@@ -1071,10 +1073,10 @@ public class PriorityAdmissionScheduler {
         long requestSloMs = ctx.getRequestSloMs() > 0
                 ? ctx.getRequestSloMs()
                 : sloPolicy.requestSloMs(seqLen, priority);
-        // A rescue re-entry must not extend the SLO: keep the deadline the
-        // request carried when it was first admitted (design doc 14.3).
-        // getDeadlineMs() delegates to ctx.budget() (coarse deadline).
-        long deadlineMs = ctx.getTransferCount() > 0 && ctx.getDeadlineMs() > 0
+        // The admission deadline is always the coarse budget deadline
+        // (admittedAtMs + requestSloMs). getDeadlineMs() delegates to
+        // ctx.budget() (coarse deadline).
+        long deadlineMs = ctx.getDeadlineMs() > 0
                 ? ctx.getDeadlineMs()
                 : PrioritySloPolicy.deadlineMs(ctx.getStartTime(), requestSloMs, predictedPrefillMs);
         long kvTotal = decodeEp != null ? decodeEp.realKvTotal() : 0;
@@ -1083,11 +1085,30 @@ public class PriorityAdmissionScheduler {
                 : seqLen + maxNewTokens;
         return new PriorityRequestEnvelope(
                 ctx.getRequestId(), ctx.getPriority(), seqLen, maxNewTokens,
-                ctx.getStartTime(), requestSloMs, deadlineMs, seqLen, expectedKvTokens,
-                ctx.getTransferCount());
+                ctx.getStartTime(), requestSloMs, deadlineMs, seqLen, expectedKvTokens);
     }
 
     // ==================== Outcome handling ====================
+
+    /**
+     * Create an {@link AdmissionLease} and bind it to the request future
+     * (PR-D §2.4). Called at every plan-commit success point after
+     * {@link #onCommitted}. The lease is the single ownership boundary:
+     * success → {@code handoverToEngine} (seal, no resource release);
+     * failure/timeout → {@code close} (tryRemove + release + unregister).
+     * <p>Legacy path ({@code budget == null}) never creates a lease.
+     */
+    private static void bindAdmissionLease(NormalPlacementPlan plan,
+                                            InflightRegistrar registrar) {
+        BalanceContext ctx = plan.item().ctx();
+        if (ctx.budget() == null) {
+            return;
+        }
+        PrefillQueueManager prefillQueue = plan.prefillEp().getBatcher().queueManager();
+        AdmissionLease lease = new AdmissionLease(
+                plan.item(), plan.decodeEp(), prefillQueue, registrar);
+        lease.bindTo(plan.item().future());
+    }
 
     private void onCommitted(BalanceContext ctx, NormalPlacementPlan plan) {
         ctx.setRouteSubmittedNanos(System.nanoTime());

@@ -34,6 +34,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -133,6 +134,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             // when Auto-TPM is enabled; no separate hasPriority gate needed.
             if (configService.loadBalanceConfig().isAutoTpmEnabled() && priorityScheduler != null) {
                 priorityScheduler.schedule(ctx, future, this);
+                // PR-D §2.2: attach the admission deadline as an orTimeout so a
+                // request stuck in the prefill queue past its SLO is released by
+                // the AdmissionLease instead of holding its decode reservation.
+                attachAdmissionTimeout(ctx, future);
                 return future;
             }
 
@@ -200,6 +205,29 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     "Submit failed: " + t.getMessage());
         }
         return future;
+    }
+
+    /**
+     * PR-D §2.2: attach the admission deadline as an orTimeout on the future.
+     * When the deadline fires before the dispatch pipeline completes the
+     * request, the AdmissionLease bound inside schedule() catches the
+     * TimeoutException and releases the stuck reservation (tryRemove +
+     * release + unregisterInflight). Legacy path (budget == null) is not
+     * timed out — the existing TTL cleanup covers it.
+     */
+    private static void attachAdmissionTimeout(BalanceContext ctx,
+                                               CompletableFuture<Response> future) {
+        if (ctx.budget() == null) {
+            return;
+        }
+        long remainingMs = ctx.budget().remainingMs(System.currentTimeMillis());
+        if (remainingMs <= 0) {
+            // Already expired — the scheduler's SLO check should have rejected
+            // it; a defensive 1ms timeout keeps the invariant regardless.
+            future.orTimeout(1, TimeUnit.MILLISECONDS);
+        } else {
+            future.orTimeout(remainingMs, TimeUnit.MILLISECONDS);
+        }
     }
 
     // ==================== InflightRegistrar (Auto-TPM commit protocol) ====================

@@ -123,13 +123,11 @@ class ConfigServiceTest {
         assertFalse(config.isAutoTpmPrefillQueueEvictEnabled());
         assertFalse(config.isAutoTpmDecodeReservedEvictEnabled());
         assertEquals(50, config.getAutoTpmDefaultPriority());
-        // §18 reserved fields (future phases, not wired yet): defaults
-        assertEquals("30,40,50,60,70", config.getAutoTpmPriorityLevels());
+        // PR-D removed rescue fields (autoTpmPriorityLevels, autoTpmDeadlineRescueEnabled,
+        // autoTpmRescueScanIntervalMs, autoTpmMaxRescuePerTick, autoTpmMaxRescuePerEndpointPerTick,
+        // autoTpmMaxTransferCount, autoTpmDangerThresholdMs) — replaced by AdmissionLease + orTimeout.
+        // Remaining reserved fields:
         assertFalse(config.isAutoTpmDecodeAcceptedEvictEnabled());
-        assertFalse(config.isAutoTpmDeadlineRescueEnabled());
-        assertEquals(20L, config.getAutoTpmRescueScanIntervalMs());
-        assertEquals(32, config.getAutoTpmMaxRescuePerTick());
-        assertEquals(1, config.getAutoTpmMaxTransferCount());
         assertEquals(50L, config.getAutoTpmCommitWaitReleaseTimeoutMs());
     }
 
@@ -141,8 +139,7 @@ class ConfigServiceTest {
                 "AUTO_TPM_SLO_LENGTH_BUCKETS", "512:200,*:3000",
                 "AUTO_TPM_PRIORITY_SLO_MULTIPLIERS", "30:3.0,50:1.0",
                 "AUTO_TPM_PREFILL_QUEUE_EVICT_ENABLED", "true",
-                "AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED", "true",
-                "AUTO_TPM_DANGER_THRESHOLD_MS", "250"));
+                "AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED", "true"));
 
         FlexlbConfig config = configService.loadBalanceConfig();
         assertTrue(config.isAutoTpmEnabled());
@@ -151,28 +148,17 @@ class ConfigServiceTest {
         assertEquals("30:3.0,50:1.0", config.getAutoTpmPrioritySloMultipliers());
         assertTrue(config.isAutoTpmPrefillQueueEvictEnabled());
         assertTrue(config.isAutoTpmDecodeReservedEvictEnabled());
-        assertEquals(250L, config.getAutoTpmDangerThresholdMs());
     }
 
     @Test
     void should_override_auto_tpm_reserved_fields_with_environment() {
-        // Spot-check of the §18 reserved fields via env override
+        // PR-D removed rescue fields; spot-check the remaining reserved fields via env override
         ConfigService configService = new ConfigService(Map.of(
-                "AUTO_TPM_PRIORITY_LEVELS", "10,20,30",
                 "AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED", "true",
-                "AUTO_TPM_DEADLINE_RESCUE_ENABLED", "true",
-                "AUTO_TPM_RESCUE_SCAN_INTERVAL_MS", "40",
-                "AUTO_TPM_MAX_RESCUE_PER_ENDPOINT_PER_TICK", "4",
-                "AUTO_TPM_MAX_TRANSFER_COUNT", "2",
                 "AUTO_TPM_COMMIT_WAIT_RELEASE_TIMEOUT_MS", "100"));
 
         FlexlbConfig config = configService.loadBalanceConfig();
-        assertEquals("10,20,30", config.getAutoTpmPriorityLevels());
         assertTrue(config.isAutoTpmDecodeAcceptedEvictEnabled());
-        assertTrue(config.isAutoTpmDeadlineRescueEnabled());
-        assertEquals(40L, config.getAutoTpmRescueScanIntervalMs());
-        assertEquals(4, config.getAutoTpmMaxRescuePerEndpointPerTick());
-        assertEquals(2, config.getAutoTpmMaxTransferCount());
         assertEquals(100L, config.getAutoTpmCommitWaitReleaseTimeoutMs());
     }
 
@@ -195,14 +181,8 @@ class ConfigServiceTest {
                 "dumpEffectiveConfig should log autoTpmEnabled");
         assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmSloLengthBuckets=")),
                 "dumpEffectiveConfig should log autoTpmSloLengthBuckets");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmDangerThresholdMs=")),
-                "dumpEffectiveConfig should log autoTpmDangerThresholdMs");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmPriorityLevels=")),
-                "dumpEffectiveConfig should log autoTpmPriorityLevels");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmDeadlineRescueEnabled=")),
-                "dumpEffectiveConfig should log autoTpmDeadlineRescueEnabled");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmMaxRescuePerEndpointPerTick=")),
-                "dumpEffectiveConfig should log autoTpmMaxRescuePerEndpointPerTick");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmDecodeAcceptedEvictEnabled=")),
+                "dumpEffectiveConfig should log autoTpmDecodeAcceptedEvictEnabled");
         assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmCommitWaitReleaseTimeoutMs=")),
                 "dumpEffectiveConfig should log autoTpmCommitWaitReleaseTimeoutMs");
     }
