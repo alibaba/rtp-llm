@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -215,9 +216,10 @@ class SloBudgetBatcherAlgorithmTest {
         request.setSeqLen(seqLen);
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(request);
+        balanceContext.setBudget(ScheduleBudget.forDeadline(priority, enqueuedAtMs,
+                enqueuedAtMs + 30_000));
         BatchItem item = new BatchItem(
                 balanceContext, null, null, null, null, null, null, enqueuedAtMs);
-        item.setPriority(priority);
         return item;
     }
 

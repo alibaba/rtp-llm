@@ -86,17 +86,11 @@ public class BalanceContext {
     //===================== Auto-TPM =================//
 
     /**
-     * Per-request SLO in ms derived from PrioritySloPolicy (seqLen bucket x
-     * priority multiplier). 0 when the Auto-TPM path did not compute it.
+     * Immutable per-request schedule budget (normalized priority, SLO, coarse
+     * deadline). {@code null} when Auto-TPM is disabled — every accessor that
+     * delegates to budget performs a null check and returns a legacy default.
      */
-    private long requestSloMs;
-
-    /**
-     * Latest admission deadline (epoch ms) for this request. 0 when unset.
-     * The priority scheduler may overwrite it with a more precise value once
-     * the target prefill endpoint (and its predictor) is known.
-     */
-    private long deadlineMs;
+    private ScheduleBudget budget;
 
     /**
      * Number of Auto-TPM plan attempts consumed for this request (1-based).
@@ -147,11 +141,32 @@ public class BalanceContext {
 
     /**
      * Normalized Auto-TPM priority of the request (1-100, higher = more
-     * important). Always set to 1-100 by {@code PriorityNormalizer.normalize()}
-     * upstream; 0 only appears before normalization.
+     * important). Delegates to {@link #budget} when set; falls back to
+     * {@code request.getPriority()} on the legacy path (Auto-TPM off).
      */
     public int getPriority() {
-        return request.getPriority();
+        return budget != null ? budget.priority() : request.getPriority();
+    }
+
+    /**
+     * Coarse admission deadline (epoch ms). Delegates to {@link #budget};
+     * returns 0 on the legacy path.
+     */
+    public long getDeadlineMs() {
+        return budget != null ? budget.deadlineMs() : 0;
+    }
+
+    /**
+     * Per-request SLO in ms. Delegates to {@link #budget}; returns 0 on the
+     * legacy path.
+     */
+    public long getRequestSloMs() {
+        return budget != null ? budget.requestSloMs() : 0;
+    }
+
+    /** Direct accessor for the schedule budget (may be {@code null}). */
+    public ScheduleBudget budget() {
+        return budget;
     }
 
     /**

@@ -16,6 +16,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -306,7 +307,8 @@ class PlanCommitConcurrencyRedesignTest {
     @Test
     void b1_slo_deadline_rejection_carries_reason_tag() throws Exception {
         BalanceContext ctx = context(300);
-        ctx.setDeadlineMs(System.currentTimeMillis() - 1_000);
+        ctx.setBudget(ScheduleBudget.forDeadline(50,
+                ctx.getStartTime(), System.currentTimeMillis() - 1_000));
 
         Response response = scheduler.submit(ctx).get(1, TimeUnit.SECONDS);
 

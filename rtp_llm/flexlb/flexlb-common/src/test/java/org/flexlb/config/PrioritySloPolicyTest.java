@@ -68,7 +68,7 @@ class PrioritySloPolicyTest {
         assertEquals("*", policy.bucketLabel(20000));
     }
 
-    // ==================== priority multipliers ====================
+    // ==================== priority multipliers (TreeMap interpolation) ====================
 
     @ParameterizedTest
     @CsvSource({
@@ -82,10 +82,24 @@ class PrioritySloPolicyTest {
         assertEquals(expected, defaults().multiplier(priority));
     }
 
-    @Test
-    void multiplier_defaults_to_one_for_unknown_priority() {
-        assertEquals(1.0, defaults().multiplier(45));
-        assertEquals(1.0, defaults().multiplier(0));
+    @ParameterizedTest
+    @CsvSource({
+            // Exact midpoints interpolate linearly
+            "35, 1.75",  // 2.0 + 0.5*(1.5-2.0)
+            "45, 1.25",  // 1.5 + 0.5*(1.0-1.5)
+            "55, 0.875", // 1.0 + 0.5*(0.75-1.0)
+            "65, 0.625", // 0.75 + 0.5*(0.5-0.75)
+            // Below minimum anchor clamps to highest multiplier
+            "0, 2.0",
+            "10, 2.0",
+            "29, 2.0",
+            // Above maximum anchor clamps to lowest multiplier
+            "71, 0.5",
+            "80, 0.5",
+            "100, 0.5",
+    })
+    void multiplier_interpolates_between_anchors_and_clamps_at_edges(int priority, double expected) {
+        assertEquals(expected, defaults().multiplier(priority), 1e-9);
     }
 
     @ParameterizedTest
@@ -95,7 +109,9 @@ class PrioritySloPolicyTest {
             "1024, 60, 225",   // 300 * 0.75
             "4096, 40, 900",   // 600 * 1.5
             "20000, 50, 2400", // catch-all * 1.0
-            "256, 60, 113",    // 150 * 0.75 = 112.5 → rounds to 113
+            "256, 60, 113",    // 150 * 0.75 = 112.5 -> rounds to 113
+            // Interpolated multiplier (45 -> 1.25): 150 * 1.25 = 187.5 -> 188
+            "256, 45, 188",
     })
     void requestSloMs_is_base_times_multiplier_rounded(long seqLen, int priority, long expected) {
         assertEquals(expected, defaults().requestSloMs(seqLen, priority));

@@ -6,9 +6,9 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Auto-TPM SLO model: per-request SLO derived from a sequence-length bucket
@@ -36,7 +36,7 @@ public class PrioritySloPolicy {
 
     /** Sorted (bound asc) list of {bound, baseSloMs}; catch-all bound = Long.MAX_VALUE. */
     private final List<long[]> buckets;
-    private final Map<Integer, Double> multipliers;
+    private final TreeMap<Integer, Double> multipliers;
 
     @Autowired
     public PrioritySloPolicy(ConfigService configService) {
@@ -59,9 +59,40 @@ public class PrioritySloPolicy {
         return buckets.get(buckets.size() - 1)[1];
     }
 
-    /** SLO multiplier for a priority level; 1.0 for unknown levels. */
+    /**
+     * SLO multiplier for a priority level, using piecewise-linear
+     * interpolation between anchor points.
+     *
+     * <p>Anchors are stored in a {@link TreeMap}; for a priority that falls
+     * between two anchors, the multiplier is linearly interpolated. Priorities
+     * below the minimum anchor clamp to its multiplier (the largest, e.g.
+     * 2.0); priorities above the maximum anchor clamp to its multiplier (the
+     * smallest, e.g. 0.5). This guarantees monotonic non-increasing
+     * behaviour and eliminates the inversion where a higher priority
+     * accidentally received a looser SLO than a lower one.
+     */
     public double multiplier(int priority) {
-        return multipliers.getOrDefault(priority, 1.0);
+        Double exact = multipliers.get(priority);
+        if (exact != null) {
+            return exact;
+        }
+        Map.Entry<Integer, Double> floor = multipliers.floorEntry(priority);
+        Map.Entry<Integer, Double> ceiling = multipliers.ceilingEntry(priority);
+        if (floor == null && ceiling == null) {
+            return 1.0;
+        }
+        if (floor == null) {
+            // Below the minimum anchor: clamp to the highest multiplier.
+            return ceiling.getValue();
+        }
+        if (ceiling == null) {
+            // Above the maximum anchor: clamp to the lowest multiplier.
+            return floor.getValue();
+        }
+        // Linear interpolation between floor and ceiling anchors.
+        double ratio = (double) (priority - floor.getKey())
+                / (ceiling.getKey() - floor.getKey());
+        return floor.getValue() + ratio * (ceiling.getValue() - floor.getValue());
     }
 
     /** Per-request SLO: baseSloMs(seqLen) * multiplier(priority). */
@@ -148,8 +179,8 @@ public class PrioritySloPolicy {
         return result;
     }
 
-    private static Map<Integer, Double> parseMultipliers(String spec) {
-        Map<Integer, Double> parsed = doParseMultipliers(spec);
+    private static TreeMap<Integer, Double> parseMultipliers(String spec) {
+        TreeMap<Integer, Double> parsed = doParseMultipliers(spec);
         if (parsed == null) {
             log.warn("Invalid autoTpmPrioritySloMultipliers '{}', falling back to default '{}'",
                     spec, DEFAULT_PRIORITY_SLO_MULTIPLIERS);
@@ -178,11 +209,11 @@ public class PrioritySloPolicy {
         return spec;
     }
 
-    private static Map<Integer, Double> doParseMultipliers(String spec) {
+    private static TreeMap<Integer, Double> doParseMultipliers(String spec) {
         if (spec == null || spec.isBlank()) {
             return null;
         }
-        Map<Integer, Double> result = new HashMap<>();
+        TreeMap<Integer, Double> result = new TreeMap<>();
         for (String entry : spec.split(",")) {
             String[] kv = entry.trim().split(":");
             if (kv.length != 2) {

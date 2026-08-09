@@ -12,6 +12,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -405,14 +406,12 @@ class DeadlineRescueServiceTest {
         String prefillIp = prefillIpPort.split(":")[0];
         Response route = successRoute(requestId, prefillIp);
         BalanceContext ctx = context(requestId, priority);
-        ctx.setDeadlineMs(deadlineMs);
+        ctx.setBudget(ScheduleBudget.forDeadline(priority, ctx.getStartTime(), deadlineMs));
         BatchItem item = new BatchItem(ctx, new CompletableFuture<>(), route,
                 FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
                 FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
                 prefill(prefillIpPort), endpointRegistry.getDecode(DECODE_IP_PORT),
                 System.currentTimeMillis());
-        item.setPriority(priority);
-        item.setDeadlineMs(deadlineMs);
         return item;
     }
 

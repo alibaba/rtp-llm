@@ -903,13 +903,10 @@ public class PriorityAdmissionScheduler {
         routeResponse.setServerStatus(List.of(prefill, decode));
 
         PriorityRequestEnvelope envelope = buildEnvelope(ctx, prefill, prefillEp, decodeEp);
-        ctx.setDeadlineMs(envelope.deadlineMs());
 
         BatchItem item = new BatchItem(ctx, future, routeResponse,
                 FlexlbBatchScheduler.copyOf(prefill), FlexlbBatchScheduler.copyOf(decode),
                 prefillEp, decodeEp, System.currentTimeMillis());
-        item.setPriority(envelope.priority());
-        item.setDeadlineMs(envelope.deadlineMs());
         item.setTransferCount(envelope.transferCount());
 
         NormalPlacementPlan plan = new NormalPlacementPlan(envelope, item, routeResponse,
@@ -1041,14 +1038,10 @@ public class PriorityAdmissionScheduler {
         }
 
         PriorityRequestEnvelope envelope = buildEnvelope(ctx, prefill, prefillEp, decodeEp);
-        // Overwrite the coarse deadline with the endpoint-aware one.
-        ctx.setDeadlineMs(envelope.deadlineMs());
 
         BatchItem item = new BatchItem(ctx, future, routeResponse,
                 FlexlbBatchScheduler.copyOf(prefill), FlexlbBatchScheduler.copyOf(decode),
                 prefillEp, decodeEp, System.currentTimeMillis());
-        item.setPriority(envelope.priority());
-        item.setDeadlineMs(envelope.deadlineMs());
         item.setTransferCount(envelope.transferCount());
 
         // Prefill queue version comes from the snapshot (pre-route) when
@@ -1072,11 +1065,15 @@ public class PriorityAdmissionScheduler {
         long maxNewTokens = ctx.getRequest().getMaxNewTokens();
         long hitCache = prefill.getDebugInfo() != null ? prefill.getDebugInfo().getHitCacheLen() : 0;
         long predictedPrefillMs = prefillEp.getPredictor().estimateMs(seqLen, hitCache);
+        // Priority and SLO are read from the immutable budget (single source
+        // of truth); getPriority() / getRequestSloMs() delegate to ctx.budget().
+        int priority = ctx.getPriority();
         long requestSloMs = ctx.getRequestSloMs() > 0
                 ? ctx.getRequestSloMs()
-                : sloPolicy.requestSloMs(seqLen, ctx.getPriority());
+                : sloPolicy.requestSloMs(seqLen, priority);
         // A rescue re-entry must not extend the SLO: keep the deadline the
         // request carried when it was first admitted (design doc 14.3).
+        // getDeadlineMs() delegates to ctx.budget() (coarse deadline).
         long deadlineMs = ctx.getTransferCount() > 0 && ctx.getDeadlineMs() > 0
                 ? ctx.getDeadlineMs()
                 : PrioritySloPolicy.deadlineMs(ctx.getStartTime(), requestSloMs, predictedPrefillMs);

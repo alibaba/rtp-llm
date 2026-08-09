@@ -18,6 +18,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -344,6 +345,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         ctx.setRequest(request);
         ctx.setConfig(new FlexlbConfig());
         ctx.setGenerateInputPbBytes(generateInputBytes(requestId, (int) seqLen, maxNewTokens));
+        // Mirror production admission: set a ScheduleBudget so that
+        // item.priority() / item.deadlineMs() delegate correctly.
+        // 30 s SLO avoids accidental expiry during eviction tests.
+        ctx.setBudget(ScheduleBudget.forDeadline(priority, ctx.getStartTime(), ctx.getStartTime() + 30_000));
         return ctx;
     }
 

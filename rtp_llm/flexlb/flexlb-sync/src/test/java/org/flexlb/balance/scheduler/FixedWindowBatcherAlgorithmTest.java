@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -360,8 +361,7 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
-        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
-        head.setPriority(50);
+        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100, 50);
         BatcherContext context = context(
                 "test", endpoint, config, handler, queueWith(head),
                 mock(BatchSchedulerReporter.class));
@@ -395,8 +395,7 @@ class FixedWindowBatcherAlgorithmTest {
         // has no effect — the legacy drop applies to everyone.
         FlexlbConfig config = sloCaseConfig();
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
-        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100);
-        head.setPriority(50);
+        BatchItem head = enqueuedItem(1, System.currentTimeMillis() - 11_000, 100, 50);
         BatcherContext context = context(
                 "test", null, config, handler, queueWith(head),
                 mock(BatchSchedulerReporter.class));
@@ -427,11 +426,19 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs, long seqLen) {
+        return enqueuedItem(requestId, enqueuedAtMs, seqLen, 0);
+    }
+
+    private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs, long seqLen, int priority) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(request);
+        if (priority > 0) {
+            balanceContext.setBudget(ScheduleBudget.forDeadline(
+                    priority, enqueuedAtMs, enqueuedAtMs + 30_000));
+        }
         BatchItem item = new BatchItem(
                 balanceContext, null, null, null, null, null, null, enqueuedAtMs);
         item.setSortKey(enqueuedAtMs);

@@ -5,6 +5,7 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -279,24 +280,24 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
 
-        // Auto-TPM: normalize priority (proto valid value > metadata header > default)
-        // and derive the per-request SLO / coarse deadline for observability.
-        // normalize() always returns 1-100 (never NO_PRIORITY/0): a request
-        // carrying no priority gets the default (50) and participates in
-        // Auto-TPM at the normal level, so the SLO block runs unconditionally.
-        int priority = PriorityNormalizer.normalize(pb.getPriority(),
+        // Auto-TPM: construct the immutable ScheduleBudget in one shot —
+        // PriorityNormalizer.normalize + PrioritySloPolicy.requestSloMs +
+        // coarse deadline — and wire it onto the context.  normalize()
+        // always returns 1-100 (never NO_PRIORITY/0): a request carrying no
+        // priority gets the default (50) and participates in Auto-TPM at the
+        // normal level, so the budget is always constructed.
+        ScheduleBudget budget = ScheduleBudget.of(
+                pb.getPriority(),
                 GrpcQosHeaderInterceptor.get(),
-                configService.loadBalanceConfig().getAutoTpmDefaultPriority());
-        request.setPriority(priority);
+                pb.getSeqLen(),
+                ctx.getStartTime(),
+                configService.loadBalanceConfig().getAutoTpmDefaultPriority(),
+                prioritySloPolicy);
+        request.setPriority(budget.priority());
         ctx.setRequest(request);
-
-        long requestSloMs = prioritySloPolicy.requestSloMs(pb.getSeqLen(), priority);
-        ctx.setRequestSloMs(requestSloMs);
-        // Coarse deadline (no predicted prefill time yet); the priority
-        // scheduler overwrites it once the target prefill endpoint is known.
-        ctx.setDeadlineMs(ctx.getStartTime() + requestSloMs);
-        prioritySchedulerReporter.reportRequest(priority,
-                prioritySloPolicy.bucketLabel(pb.getSeqLen()), requestSloMs);
+        ctx.setBudget(budget);
+        prioritySchedulerReporter.reportRequest(budget.priority(),
+                prioritySloPolicy.bucketLabel(pb.getSeqLen()), budget.requestSloMs());
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());

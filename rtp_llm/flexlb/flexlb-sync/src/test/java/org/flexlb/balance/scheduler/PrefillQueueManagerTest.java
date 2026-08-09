@@ -4,6 +4,7 @@ import org.flexlb.balance.scheduler.priority.PrefillQueueSnapshot;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
@@ -170,10 +171,9 @@ class PrefillQueueManagerTest {
         request.setPriority(priority);
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
+        ctx.setBudget(ScheduleBudget.forDeadline(priority, enqueuedAtMs, deadlineMs));
         BatchItem item = new BatchItem(ctx, new CompletableFuture<>(), null,
                 null, null, null, null, enqueuedAtMs);
-        item.setPriority(priority);
-        item.setDeadlineMs(deadlineMs);
         return item;
     }
 }

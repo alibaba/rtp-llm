@@ -12,6 +12,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -208,7 +209,8 @@ class PriorityAdmissionSchedulerTest {
     @Test
     void expired_deadline_is_rejected_with_8400_and_reason() throws Exception {
         BalanceContext ctx = context(71);
-        ctx.setDeadlineMs(System.currentTimeMillis() - 1_000);
+        ctx.setBudget(ScheduleBudget.forDeadline(50,
+                ctx.getStartTime(), System.currentTimeMillis() - 1_000));
 
         Response response = scheduler.submit(ctx).get(1, TimeUnit.SECONDS);
 
@@ -223,7 +225,8 @@ class PriorityAdmissionSchedulerTest {
     void expired_deadline_is_not_checked_when_switch_off() throws Exception {
         config.setAutoTpmEnabled(false);
         BalanceContext ctx = context(72);
-        ctx.setDeadlineMs(System.currentTimeMillis() - 1_000);
+        ctx.setBudget(ScheduleBudget.forDeadline(50,
+                ctx.getStartTime(), System.currentTimeMillis() - 1_000));
 
         Response response = scheduler.submit(ctx).get(2, TimeUnit.SECONDS);
 

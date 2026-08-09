@@ -10,6 +10,7 @@ import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -212,10 +213,8 @@ class CostBasedPrefillMultiNodeSelectionTest {
             req.setPriority(priority);
             BalanceContext ctx = new BalanceContext();
             ctx.setRequest(req);
-            ctx.setDeadlineMs(now + 30_000);
+            ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 30_000));
             BatchItem item = new BatchItem(ctx, null, null, null, null, ep, null, now);
-            item.setPriority(priority);
-            item.setDeadlineMs(now + 30_000);
             ep.getBatcher().offer(item);
         }
         assertEquals(count, ep.getBatcher().queueSize(),
@@ -225,7 +224,8 @@ class CostBasedPrefillMultiNodeSelectionTest {
     private BalanceContext priorityContext(long requestId, int priority) {
         BalanceContext ctx = buildContext(requestId);
         ctx.getRequest().setPriority(priority);
-        ctx.setDeadlineMs(System.currentTimeMillis() + 60_000);
+        long now = System.currentTimeMillis();
+        ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 60_000));
         return ctx;
     }
 

@@ -35,16 +35,6 @@ public final class BatchItem {
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
 
-    /**
-     * Auto-TPM normalized priority (30/40/50/60/70); 0 = no priority (legacy
-     * request, task40) — such items never participate in any priority
-     * mechanism. Not used for ordering yet.
-     */
-    private volatile int priority = 0;
-
-    /** Auto-TPM admission deadline (epoch ms); 0 means unset. Not used for ordering yet. */
-    private volatile long deadlineMs;
-
     /** Auto-TPM cross-endpoint rescue transfer count (Phase 6); 0 = never migrated. */
     private volatile int transferCount;
 
@@ -91,11 +81,19 @@ public final class BatchItem {
     /** Set by {@link WorkerBatcher#offer} after {@link BatcherAlgorithm#computeSortKey}. */
     public void setSortKey(long sortKey) { this.sortKey = sortKey; }
 
-    public int priority() { return priority; }
-    public void setPriority(int priority) { this.priority = priority; }
+    /**
+     * Auto-TPM normalized priority; delegates to {@code ctx.budget()}.
+     * Returns 0 on the legacy path (budget = null), so legacy items
+     * never participate in any priority mechanism.
+     */
+    public int priority() {
+        return ctx != null && ctx.budget() != null ? ctx.budget().priority() : 0;
+    }
 
-    public long deadlineMs() { return deadlineMs; }
-    public void setDeadlineMs(long deadlineMs) { this.deadlineMs = deadlineMs; }
+    /** Auto-TPM admission deadline (epoch ms); delegates to {@code ctx.budget()}. */
+    public long deadlineMs() {
+        return ctx != null && ctx.budget() != null ? ctx.budget().deadlineMs() : 0;
+    }
 
     public int transferCount() { return transferCount; }
     public void setTransferCount(int transferCount) { this.transferCount = transferCount; }

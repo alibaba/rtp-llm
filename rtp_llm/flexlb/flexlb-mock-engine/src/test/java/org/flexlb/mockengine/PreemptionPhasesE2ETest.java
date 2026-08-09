@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.TaskInfo;
@@ -343,10 +344,11 @@ class PreemptionPhasesE2ETest {
                                                                   long requestId, int priority,
                                                                   long deadlineMs) {
         BalanceContext ctx = h.context(requestId, priority);
-        ctx.setDeadlineMs(deadlineMs);
-        // task40：显式 SLO 让准入重建的 deadline 与提交值同量级（未过期），
-        // 避免 seqLen=128 的极短基础 SLO 在 rescue 扫描前就过期。
-        ctx.setRequestSloMs(5_000);
+        // Construct a budget with the given deadline and a 5-second SLO
+        // (task40: explicit SLO so the admission-rebuilt deadline is in the
+        // same magnitude as the submitted value, avoiding the extremely
+        // short base SLO for seqLen=128 expiring before rescue scan).
+        ctx.setBudget(ScheduleBudget.forDeadline(priority, deadlineMs - 5_000, deadlineMs));
         return h.scheduler.submit(ctx);
     }
 
