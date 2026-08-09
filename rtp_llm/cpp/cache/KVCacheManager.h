@@ -72,9 +72,9 @@ public:
 
     // 地址转换和缓冲区访问
     BlockAddrInfo          convertIndexToAddr(int block_index, int layer_id, const std::string& tag) const;
-    std::vector<BlockInfo> convertIndexToBuffer(int block_index, int layer_id, const std::string& tag) const;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& tag, int block_index) const;
     std::vector<BlockInfo> convertIndexToBuffer(
-        int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const;
+        int layer_id, const std::string& tag, int block_index, int partition_count, int partition_id) const;
 
     GroupedCacheLayerLayout allLayerCacheBase() const;
 

@@ -266,14 +266,12 @@ cc_library(
     srcs = [
         "HybridKVCacheAllocator.cc",
         "HybridPoolKVCacheAllocator.cc",
-        "HybridTypeKVCacheAllocator.cc",
         "KVCacheAllocator.cc",
         "SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
         "HybridKVCacheAllocator.h",
         "HybridPoolKVCacheAllocator.h",
-        "HybridTypeKVCacheAllocator.h",
         "KVCacheAllocator.h",
         "SingleTypeKVCacheAllocator.h",
     ],
@@ -386,5 +384,10 @@ cc_library(
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
-    ] + torch_deps(),
+    ] + torch_deps() + select({
+        "//:using_remote_kv_cache": [
+            "//rtp_llm/cpp/cache/connector/remote_connector",
+        ],
+        "//conditions:default": [],
+    }),
 )

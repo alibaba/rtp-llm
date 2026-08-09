@@ -11,6 +11,8 @@ namespace rtp_llm {
 
 class HybridPoolKVCacheAllocator: public HybridKVCacheAllocator {
 public:
+    using HybridKVCacheAllocator::getBlockPool;
+
     HybridPoolKVCacheAllocator(const CacheConfig&                 config,
                                AllocationType                     allocation_type     = AllocationType::DEVICE,
                                const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
@@ -45,6 +47,11 @@ public:
     // Per-pool access for diagnostics / per-pool metrics reporting.
     const std::unordered_map<std::string, BlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;
+    }
+
+    BlockPoolPtr getBlockPool(std::string_view tag) const override {
+        const auto it = group_block_pools_.find(std::string(tag));
+        return it == group_block_pools_.end() ? nullptr : it->second;
     }
 
 private:

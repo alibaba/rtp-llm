@@ -201,26 +201,14 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     RTP_LLM_CHECK_WITH_INFO(
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 
-    // Physical address stride and logical transfer length differ for a shared pool:
-    // blocks use the allocation-wide stride, while each tag transfers only its group-local bytes.
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
-    const size_t seq_size_per_block             = cache_config.seqSizePerBlockForGroup(layer_kv.tag);
-    const bool   use_group_local_storage_layout = cache_config.use_independent_block_pools;
-    size_t       shared_kv_block_stride_bytes   = 0;
-    size_t       shared_kv_scale_stride_bytes   = 0;
-    if (!use_group_local_storage_layout) {
-        for (const auto& pool_group : cache_config.topology().groups()) {
-            shared_kv_block_stride_bytes = std::max(shared_kv_block_stride_bytes, pool_group.kv_block_stride_bytes);
-            shared_kv_scale_stride_bytes = std::max(shared_kv_scale_stride_bytes, pool_group.kv_scale_stride_bytes);
-        }
-    }
-    const size_t kv_block_stride_bytes           = use_group_local_storage_layout ?
-                                                       cache_config.kvBlockStrideBytesForGroup(layer_kv.tag) :
-                                                       shared_kv_block_stride_bytes;
-    const size_t kv_scale_stride_bytes           = use_group_local_storage_layout ?
-                                                       cache_config.kvScaleStrideBytesForGroup(layer_kv.tag) :
-                                                       shared_kv_scale_stride_bytes;
-    const size_t kv_block_transfer_bytes         = cache_config.kvBlockStrideBytesForGroup(layer_kv.tag);
+    // The group owns the physical row stride, while its spec describes the logical payload.
+    const size_t seq_size_per_block      = cache_config.seqSizePerBlockForGroup(layer_kv.tag);
+    const size_t kv_block_stride_bytes   = cache_config.kvBlockStrideBytesForGroup(layer_kv.tag);
+    const size_t kv_scale_stride_bytes   = cache_config.kvScaleStrideBytesForGroup(layer_kv.tag);
+    const size_t kv_block_transfer_bytes = group.spec->block_size_bytes();
+    // Sparse-MLA scale rows still carry the packed indexer; keep row-stride scale
+    // transfers until the indexer moves to its own pool.
     const size_t kv_scale_transfer_bytes         = cache_config.kvScaleStrideBytesForGroup(layer_kv.tag);
     const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1;
 

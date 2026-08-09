@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#ifdef USE_REMOTE_KV_CACHE
+#include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -13,7 +16,6 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
@@ -233,6 +235,11 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!allocator_ && !coordinator_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
+#ifdef USE_REMOTE_KV_CACHE
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
+        RemoteConnector::validateConfig(config_);
+    }
+#endif
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     shared_cache->setPrefixTreeEnabled(kv_cache_config_.enable_gpu_prefix_tree);
@@ -240,16 +247,13 @@ bool KVCacheManager::init() {
                                                    && kv_cache_config_.enable_prefix_tree_memory_cache
                                                    && kv_cache_config_.enable_independent_group_eviction;
 
-    const bool is_hybrid = config_.groupNums() > 1;
-    if (config_.use_independent_block_pools) {
+    const bool use_group_pools = config_.use_independent_block_pools || config_.groupNums() > 1;
+    if (use_group_pools) {
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
                                                                            AllocationType::DEVICE,
                                                                            metrics_reporter_,
                                                                            kv_cache_config_.reserve_block_ratio,
                                                                            pd_sep_config_.role_type);
-    } else if (is_hybrid) {
-        allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
     } else {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
@@ -374,12 +378,12 @@ BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, 
 }
 
 std::vector<BlockInfo>
-KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, const std::string& tag) const {
+KVCacheManager::convertIndexToBuffer(int layer_id, const std::string& tag, int block_index) const {
     return allocator_->convertIndexToBuffer(layer_id, tag, block_index);
 }
 
 std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
-    int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const {
+    int layer_id, const std::string& tag, int block_index, int partition_count, int partition_id) const {
     return allocator_->convertIndexToBuffer(layer_id, tag, block_index, partition_count, partition_id);
 }
 
