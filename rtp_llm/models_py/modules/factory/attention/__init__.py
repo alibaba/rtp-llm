@@ -134,7 +134,7 @@ elif device_type == DeviceType.Cuda:
     )
 
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
-else:
+elif device_type == DeviceType.Ppu:
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeImpl,
         PyFlashinferHybridPrefillImpl,
