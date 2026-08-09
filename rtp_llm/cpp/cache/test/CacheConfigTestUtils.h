@@ -102,7 +102,6 @@ inline GroupBase makeTestGroupForConfig(const CacheConfig&              config,
                             static_cast<int>(group.policy.group_type),
                             static_cast<int>(type));
     group.layer_ids             = std::move(layer_ids);
-    group.block_num             = config.groupNums() > 0 ? config.blockNum() : 0;
     group.kv_block_stride_bytes = group.spec->block_size_bytes();
     group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
     return group;
@@ -183,7 +182,6 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
         group.spec      = std::move(spec);
         group.policy    = defaultCacheGroupPolicy(group_type);
         group.layer_ids = std::move(group_layer_ids[static_cast<size_t>(group_id)]);
-        group.block_num = 16;
         groups.push_back(std::move(group));
     }
     return CacheTopology::create(std::move(groups), std::move(layers));
@@ -602,7 +600,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(layer_num);
     config.seq_size_per_block = tokens_per_block;
-    config.linear_step        = 2;
+    config.linear_step        = 1;
     RTP_LLM_CHECK_WITH_INFO(group_layer_num > 0 && layer_num > 0 && (layer_num % group_layer_num) == 0
                                 && (layer_num / group_layer_num) >= 2,
                             "makeSimpleHybridMhaCacheConfig requires layer_num divisible by group_layer_num into at "

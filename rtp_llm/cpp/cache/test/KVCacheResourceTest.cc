@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -22,7 +23,6 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(type);
     group.layer_ids = {0};
-    group.block_num = 16;
     return group;
 }
 
@@ -247,6 +247,27 @@ TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
     auto group                = makeResourceGroup("full", CacheGroupType::FULL);
     config.setTopology({std::move(group)}, {{0, {"full"}}});
     ASSERT_EQ(config.kernelBlocksPerKvBlockForGroup("full"), 4u);
+}
+
+TEST(CacheConfigTest, SetTopologyDerivesSparseFromOpaqueKv) {
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+    config.layer_num          = 1;
+    auto spec                 = std::make_shared<OpaqueKVCacheSpec>(8, 2);
+    spec->tag                 = "opaque";
+
+    GroupBase group;
+    group.tag       = spec->tag;
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids = {0};
+
+    ASSERT_FALSE(config.isSparse());
+    config.setTopology({std::move(group)}, {{0, {"opaque"}}});
+    ASSERT_TRUE(config.isSparse());
+
+    config.setTopology({makeResourceGroup("full", CacheGroupType::FULL)}, {{0, {"full"}}});
+    EXPECT_FALSE(config.isSparse());
 }
 
 TEST(CacheConfigTest, RejectsInvalidDerivedBlockSubdivision) {

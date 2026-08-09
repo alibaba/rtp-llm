@@ -200,7 +200,7 @@ private:
 
 TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid) {
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                        /*block_num=*/1,
+                                                        /*block_num=*/2,
                                                         /*tokens_per_block=*/4,
                                                         rtp_llm::TYPE_FP16,
                                                         /*local_head_num_kv=*/1,
@@ -262,7 +262,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, InitFailsFastForSingleNonFullRemoteCache
 
 TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndStopsUpdateThread) {
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                        /*block_num=*/1,
+                                                        /*block_num=*/2,
                                                         /*tokens_per_block=*/4,
                                                         rtp_llm::TYPE_FP16,
                                                         /*local_head_num_kv=*/1,
@@ -283,7 +283,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndSto
 
 TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSizeInvalid) {
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                        /*block_num=*/1,
+                                                        /*block_num=*/2,
                                                         /*tokens_per_block=*/4,
                                                         rtp_llm::TYPE_FP16,
                                                         /*local_head_num_kv=*/1,
@@ -307,7 +307,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSiz
 
 TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyPath_AndStopsUpdateThread) {
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                        /*block_num=*/1,
+                                                        /*block_num=*/2,
                                                         /*tokens_per_block=*/4,
                                                         rtp_llm::TYPE_FP16,
                                                         /*local_head_num_kv=*/1,
@@ -346,7 +346,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenStop) {
     CacheConfig cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                        /*block_num=*/1,
+                                                        /*block_num=*/2,
                                                         /*tokens_per_block=*/4,
                                                         rtp_llm::TYPE_FP16,
                                                         /*local_head_num_kv=*/1,
@@ -526,7 +526,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnContextAndEnqueue_WhenHa
 
 TEST_F(KVCacheConnectorCoordinatorTest, AsyncWrite_ReturnNull_WhenStop) {
     CacheConfig cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
-                                                        /*block_num=*/1,
+                                                        /*block_num=*/2,
                                                         /*tokens_per_block=*/4,
                                                         rtp_llm::TYPE_FP16,
                                                         /*local_head_num_kv=*/1,

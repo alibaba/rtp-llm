@@ -18,7 +18,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "autil/LockFreeThreadPool.h"
+#include "autil/StringUtil.h"
 
 using namespace std;
 using namespace autil::legacy;
@@ -201,23 +201,6 @@ void DecodeRpcServer::logReadFailures(int64_t                         request_id
                             static_cast<int>(error_code),
                             error_message.c_str(),
                             debug_info.c_str());
-    }
-}
-
-void DecodeRpcServer::initThreadPool() {
-    if (resource_.workers.size() > 0) {
-        return;
-    }
-    thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
-        resource_.workers.size() * 8, resource_.workers.size() * 8, nullptr, "RemoteCacheLoadPool");
-    RTP_LLM_CHECK_WITH_INFO(thread_pool_->start(), "DecodeRpcServer init ThreadPool failed");
-    RTP_LLM_LOG_INFO("normal cache store init done");
-}
-
-DecodeRpcServer::~DecodeRpcServer() {
-    if (thread_pool_) {
-        thread_pool_->stop();
-        thread_pool_.reset();
     }
 }
 
@@ -753,80 +736,6 @@ ErrorInfo DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_con
     }
     if (!all_success) {
         return ErrorInfo(error_code, error_msg);
-    }
-
-    decode_context.stat_info.load_cache_min_rt_us       = min_response_done_time_us - load_cache_begin_time_us;
-    decode_context.stat_info.load_cache_max_rt_us       = max_response_done_time_us - load_cache_begin_time_us;
-    decode_context.stat_info.load_cache_polling_cost_us = currentTimeUs() - max_response_done_time_us;
-
-    RTP_LLM_LOG_DEBUG("load_cache_min_rt_us = %ld, load_cache_max_rt_us = %ld, load_cache_polling_cost_us = %ld",
-                      decode_context.stat_info.load_cache_min_rt_us,
-                      decode_context.stat_info.load_cache_max_rt_us,
-                      decode_context.stat_info.load_cache_polling_cost_us);
-
-    return ErrorInfo::OkStatus();
-}
-
-ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context) {
-    RTP_LLM_PROFILE_FUNCTION();
-    int64_t                                               load_cache_begin_time_us  = currentTimeUs();
-    int64_t                                               min_response_done_time_us = 1lu << 60;
-    int64_t                                               max_response_done_time_us = 0;
-    std::vector<autil::ThreadPoolBase::Future<ErrorInfo>> futures;
-    auto                                                  local_task = [&] { return this->loadCache(load_context); };
-    futures.emplace_back(thread_pool_->async(local_task));
-
-    for (int i = 0; i < resource_.grpc_workers.size(); i++) {
-        auto& worker      = resource_.grpc_workers[i];
-        auto  remote_task = [&]() {
-            auto connect_status = resource_.rpc_pool.getConnection(worker);
-            if (!connect_status.ok()) {
-                string error_msg = "get grpc connection for ip " + worker + " failed";
-                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
-            }
-            auto                   stub = connect_status.value().stub.get();
-            ClientContext          client_context;
-            BroadcastLoadRequestPB load_request;
-
-            // Same MLA-style single-peer layout for opaque KV stores as above.
-            const auto& load_cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-            if (requiresWholeBlockTransfer(
-                    load_cache_config,
-                    isPageLevelRouting(load_context.prefill_cp_size, load_context.peer_addrs.size()))) {
-                load_request = constructRemoteLoadRequestForMla(load_context, i, decode_context.peer_addrs);
-            } else {
-                load_request = constructRemoteLoadRequest(load_context, i, decode_context.peer_addrs);
-            }
-            BroadcastLoadResponsePB response;
-            auto                    grpc_status      = stub->RemoteLoad(&client_context, load_request, &response);
-            const auto&             pb_error_code    = response.error_info().error_code();
-            const auto&             pb_error_message = response.error_info().error_message();
-            if (!grpc_status.ok()) {
-                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, grpc_status.error_message());
-            } else if (pb_error_code != ErrorCodePB::NONE_ERROR) {
-                auto error_code = transRPCErrorCode(pb_error_code);
-                return ErrorInfo(error_code, pb_error_message);
-            }
-            min_response_done_time_us = std::min(min_response_done_time_us, response.done_time_us());
-            max_response_done_time_us = std::max(max_response_done_time_us, response.done_time_us());
-            return ErrorInfo::OkStatus();
-        };
-        futures.emplace_back(thread_pool_->async(remote_task));
-    }
-
-    std::string err_msg = "failed to load kv cache in rank: ";
-    bool        success = true;
-    for (int i = 0; i < futures.size(); i++) {
-        auto status = futures[i].get();
-        if (!status.ok()) {
-            // TODO(xinfei.sxf) 可以不等待其他rank的结果吗
-            success = false;
-            err_msg += std::to_string(i) + ": " + status.ToString() + ", ";
-        }
-    }
-    if (!success) {
-        RTP_LLM_LOG_WARNING(err_msg);
-        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, err_msg);
     }
 
     decode_context.stat_info.load_cache_min_rt_us       = min_response_done_time_us - load_cache_begin_time_us;

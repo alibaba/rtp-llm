@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 
 #include <algorithm>
+#include <limits>
 #include <c10/util/Exception.h>
 #include <cuda_runtime.h>
 
@@ -14,12 +15,21 @@ __global__ void cudaGraphPrepareFillKernel(CudaGraphPrepareFillParams params) {
 
     for (int32_t region_idx = 0; region_idx < params.region_count; ++region_idx) {
         const auto region = params.regions[region_idx];
-        if (region.ptr == nullptr || region.count <= 0) {
+        if (region.ptr == nullptr || region.row_count <= 0 || region.col_count <= 0) {
             continue;
         }
         const int32_t fill_value = region.value_ptr != nullptr ? *region.value_ptr : region.value;
-        for (int64_t i = tid; i < region.count; i += stride) {
-            region.ptr[i] = fill_value;
+        if (region.row_count == 1) {
+            for (int64_t i = tid; i < region.col_count; i += stride) {
+                region.ptr[i] = fill_value;
+            }
+            continue;
+        }
+        const int64_t count = region.row_count * region.col_count;
+        for (int64_t i = tid; i < count; i += stride) {
+            const int64_t row                         = i / region.col_count;
+            const int64_t col                         = i % region.col_count;
+            region.ptr[row * region.row_stride + col] = fill_value;
         }
     }
 }
@@ -74,7 +84,15 @@ void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, cudaStream_t 
 
     int64_t total_count = 0;
     for (int32_t i = 0; i < params.region_count; ++i) {
-        total_count += params.regions[i].count > 0 ? params.regions[i].count : 0;
+        const auto& region = params.regions[i];
+        if (region.row_count > 0 && region.col_count > 0) {
+            TORCH_CHECK(region.row_count <= std::numeric_limits<int64_t>::max() / region.col_count,
+                        "cuda graph prepare fill region size overflow");
+            const int64_t region_count = region.row_count * region.col_count;
+            TORCH_CHECK(total_count <= std::numeric_limits<int64_t>::max() - region_count,
+                        "cuda graph prepare total fill size overflow");
+            total_count += region_count;
+        }
     }
     if (total_count <= 0) {
         return;

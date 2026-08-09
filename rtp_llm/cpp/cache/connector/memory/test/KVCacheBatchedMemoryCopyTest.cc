@@ -15,7 +15,6 @@
 
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -151,15 +150,15 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     std::vector<GroupBase> groups;
     groups.reserve(kDsv4PoolNum);
     for (size_t gid = 0; gid < kDsv4PoolNum; ++gid) {
-        auto group                  = makeTestGroupForConfig(config,
+        auto group                      = makeTestGroupForConfig(config,
                                             make_spec(gid),
                                             std::move(layers_by_group[gid]),
                                             group_types[gid],
                                             group_tags[gid],
                                             group_policies.at(group_tags[gid]));
-        group.block_num             = group_block_nums[gid];
-        group.kv_block_stride_bytes = group_kv_block_stride_bytes[gid];
-        group.kv_scale_stride_bytes = group_kv_scale_stride_bytes[gid];
+        group.policy.explicit_block_num = group_block_nums[gid];
+        group.kv_block_stride_bytes     = group_kv_block_stride_bytes[gid];
+        group.kv_scale_stride_bytes     = group_kv_scale_stride_bytes[gid];
         groups.push_back(std::move(group));
     }
     setTestTopology(config, std::move(groups));
@@ -175,7 +174,7 @@ CacheConfig makeCanonicalCompositeMemoryCopyConfig() {
         RTP_LLM_CHECK_WITH_INFO(stride % 2 == 0, "test MHA stride must contain equally-sized K/V payloads");
         KVCacheSpecPtr spec  = makeResolvedMhaSpec(TYPE_UINT8, 1, stride / 2, 1, tag);
         auto           group = makeTestGroupForConfig(config, std::move(spec), std::move(layers), group_type, tag);
-        group.block_num      = 8;
+        group.policy.explicit_block_num = 8;
         return group;
     };
 
@@ -271,8 +270,9 @@ public:
                     continue;
                 }
                 const bool host_group = host_groups_.count(group.tag) > 0;
-                auto       tensor = torch::empty({static_cast<int64_t>(group.block_num), static_cast<int64_t>(stride)},
-                                           host_group ? host_options : cuda_options);
+                auto       tensor     = torch::empty(
+                    {static_cast<int64_t>(config.blockNumForGroup(group.tag)), static_cast<int64_t>(stride)},
+                    host_group ? host_options : cuda_options);
                 if (host_group) {
                     tensor = tensor.pin_memory();
                 }
@@ -295,7 +295,7 @@ public:
         const auto tensor_it = tensors_.find(k);
         const auto stride_it = strides_.find(k);
         if (tensor_it == tensors_.end() || stride_it == strides_.end() || block_id < 0
-            || static_cast<uint32_t>(block_id) >= config_.group(tag).block_num) {
+            || static_cast<uint32_t>(block_id) >= config_.blockNumForGroup(tag)) {
             return {};
         }
         const auto& tensor       = tensor_it->second;

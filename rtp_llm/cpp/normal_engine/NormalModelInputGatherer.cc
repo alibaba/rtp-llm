@@ -365,6 +365,8 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
             physical_numel += total_batch_size * width.first;
             kernel_numel += total_batch_size * width.second;
         }
+        // CUDA graph grouped-table validation relies on these views staying 2D int32 with unit last-dimension stride.
+        // Runtime widths may still exceed a captured graph and deliberately fall back to eager execution.
         auto   physical_backing = torch::zeros({static_cast<int64_t>(physical_numel)}, pinned_i32);
         auto   kernel_backing   = torch::zeros({static_cast<int64_t>(kernel_numel)}, pinned_i32);
         size_t physical_offset  = 0;

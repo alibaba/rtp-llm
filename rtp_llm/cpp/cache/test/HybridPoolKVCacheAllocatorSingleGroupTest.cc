@@ -315,7 +315,8 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MallocMultipleBatches) {
     for (int i = 0; i < batch_size; ++i) {
         EXPECT_EQ(batch_resource->blocksNum(i, "default"), 3);
     }
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.blockNum() - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
+    EXPECT_EQ(allocator_->freeBlocksNum(),
+              config.blockNum() - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
 }
 
 // TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MallocWithInsufficientBlocks) {
@@ -432,6 +433,8 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, PrefixReuseDisabledSkipsMatchA
     std::unordered_map<std::string, CacheGroupPolicy> policies{{"default", config.policyForGroup("default")}};
     policies.at("default").enable_prefix_reuse = false;
     config.setGroupPolicies(policies);
+    // setGroupPolicies goes through setTopology, which clears the finalized block count.
+    config.finalizeBlockNums(/*global_block_num=*/12, RuntimeConfig{});
 
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator_        = std::make_shared<HybridPoolKVCacheAllocator>(config);
@@ -555,7 +558,7 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigSlicesDesc
     EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types[0], HybridAttentionType::SLIDING_WINDOW);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigRejectsMissingHybridAttentionTypes) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {};
@@ -563,23 +566,16 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigSupportsDe
     second_desc.tag                                        = "layer1_state";
     config.kv_cache_spec_descs[1].push_back(second_desc);
 
-    const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
-
-    ASSERT_EQ(single_layer.num_layers, 1);
-    ASSERT_EQ(single_layer.kv_cache_spec_descs.size(), 1u);
-    ASSERT_EQ(single_layer.kv_cache_spec_descs[0].size(), 2u);
-    EXPECT_EQ(single_layer.kv_cache_spec_descs[0][1].tag, "layer1_state");
-    EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
+    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/1), std::runtime_error);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigDoesNotRequireAttentionTypes) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, MtpModulePlanRejectsMissingHybridAttentionTypes) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {};
 
-    const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/0);
-    EXPECT_EQ(single_layer.kv_cache_spec_descs.size(), 1u);
-    EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
+    EXPECT_THROW(buildMTPModuleConfigPlan(config, /*weight_count=*/1, /*gen_num_per_cycle=*/1, SP_TYPE_MTP),
+                 std::runtime_error);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
@@ -853,7 +849,7 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockBatchCopyCopiesCompleteSp
         model_config, parallelism_config, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
     config.finalizeBlockNums(4, RuntimeConfig{});
 
-    ASSERT_TRUE(config.is_sparse);
+    ASSERT_TRUE(config.isSparse());
     ASSERT_EQ(config.groupNums(), 2);
     ASSERT_EQ(config.kvBlockStrideBytesForGroup("indexer_kv"), 4u * 264u);
 
@@ -1047,7 +1043,8 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, IncrKVCacheRefReferencesMatche
     EXPECT_EQ(ref_resource->reuseBlockNum(), resource.reuseBlockNum());
 
     block_pool->requestFree(blocks);
-    EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
+    EXPECT_EQ(allocator_->freeBlocksNum(),
+              total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
     // incrKVCacheRef returns a resource with a custom deleter that calls decrKVCacheRef().
     // Release it to drop ref-counts and unblock the pending frees.
     ref_resource.reset();

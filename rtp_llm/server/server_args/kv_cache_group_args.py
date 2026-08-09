@@ -91,7 +91,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kernel_seq_size_per_block"),
         type=int,
         default=0,
-        help="Attention算子使用的kernel block大小（token数量）。0表示与seq_size_per_block相同。",
+        help="Attention kernel block 的 token 数；正值使用 KV cache 配置，0 使用模型配置。",
     )
     kv_cache_group.add_argument(
         "--linear_step",

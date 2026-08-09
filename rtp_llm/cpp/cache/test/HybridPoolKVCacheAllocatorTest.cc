@@ -19,7 +19,6 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -49,12 +48,11 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                                  uint32_t       full_block_num   = 8,
                                                  CacheGroupType second_type      = CacheGroupType::FULL) {
     CacheConfig config;
-    config.layer_num                   = 4;
-    config.seq_size_per_block          = 4;
-    config.linear_step                 = 1;
-    config.use_independent_block_pools = true;
-    config.enable_hybrid_attention     = true;
-    constexpr auto dtype               = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num               = 4;
+    config.seq_size_per_block      = 4;
+    config.linear_step             = 1;
+    config.enable_hybrid_attention = true;
+    constexpr auto dtype           = rtp_llm::DataType::TYPE_FP16;
 
     auto linear_spec = makeResolvedLinearSpec(
         dtype, 1, 1, 1, 1, 2, static_cast<uint32_t>(config.seq_size_per_block), dtype, dtype, "linear");
@@ -115,6 +113,46 @@ static ModelConfig makeTinyDSV4ModelConfig() {
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(mc, {4, 128, 4, 128, 0});
     return mc;
+}
+
+TEST(CacheConfigHybridFlagTest, SparseMlaGroupsDoNotImplyHybridAttention) {
+    ModelConfig mc;
+    mc.num_layers                          = 2;
+    mc.attn_config.use_mla                 = true;
+    mc.attn_config.is_sparse               = true;
+    mc.attn_config.kv_lora_rank            = 16;
+    mc.attn_config.rope_head_dim           = 8;
+    mc.attn_config.tokens_per_block        = 8;
+    mc.attn_config.kernel_tokens_per_block = 8;
+
+    KVCacheSpecDesc mla_desc;
+    mla_desc.tag                       = "default";
+    mla_desc.cache_type                = KVCacheSpecType::MultiHeadLatentAttention;
+    mla_desc.kernel_seq_size_per_block = 8;
+
+    KVCacheSpecDesc indexer_desc;
+    indexer_desc.tag                       = "indexer_kv";
+    indexer_desc.cache_type                = KVCacheSpecType::OpaqueKV;
+    indexer_desc.entry_dtype               = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems               = 16;
+    indexer_desc.explicit_entry_count      = 8;
+    indexer_desc.kernel_seq_size_per_block = 8;
+    mc.kv_cache_spec_descs.assign(2, {mla_desc, indexer_desc});
+
+    ParallelismConfig pc;
+    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
+    config.finalizeBlockNums(/*global_block_num=*/8, RuntimeConfig{});
+
+    ASSERT_GT(config.groupNums(), 1);
+    EXPECT_TRUE(config.use_mla);
+    EXPECT_TRUE(config.usesOpaqueKVCacheStore());
+    EXPECT_FALSE(config.enable_hybrid_attention);
+    for (const auto& group : config.topology().groups()) {
+        const auto pool_config = BlockPoolConfigHelper::createConfigForGroup(config, group.tag);
+        ASSERT_EQ(pool_config.memory_layouts.size(), 1u);
+        EXPECT_FALSE(pool_config.memory_layouts.front().enable_hybrid_attention);
+        EXPECT_TRUE(pool_config.memory_layouts.front().is_mla);
+    }
 }
 
 static ModelConfig makeProModelConfig() {
@@ -759,9 +797,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockCacheFreeIgnoresDuplicateAndNullBloc
 // ---------------------------------------------------------------------------
 
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksAreDistributedAcrossGroupsForInitMalloc) {
-    // Group 0 (linear) gets 6 blocks (5 free), group 1 (full) gets 4 blocks (3 free).
-    // total_available = 8. Set reserve = 4.
-    // Expected per-group reserve: floor(4 * 5/8) = 2 for gid=0, floor(4 * 3/8) = 1 for gid=1.
+    // Both dynamic groups get global N=6 (5 allocatable blocks each). A reserve
+    // of 4 is split evenly, leaving room for one requested block per group.
     auto config    = makeTinyDynamicMultiPoolHybridConfig(/*block_num=*/6);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
@@ -827,7 +864,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
-    allocator->setReserveBlocksNum(1);
+    allocator->setReserveBlocksNum(2);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 104, 105, 106, 107});
@@ -1215,45 +1252,31 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
     EXPECT_EQ(config.explicitlySizedPoolReserveBytes(), expected_reserve);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
+TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksUseGlobalBlockNum) {
     auto mc                                            = makeProModelConfig();
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config        = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
-    config.linear_step = 4;
+    config.linear_step = 1;
 
     RuntimeConfig rt;
     config.finalizeBlockNums(/*global_block_num=*/128, rt);
 
     for (const auto& group : config.topology().groups()) {
-        const uint32_t expected = config.typeForGroup(group.tag) == CacheGroupType::SWA ? 32u : 128u;
-        EXPECT_EQ(config.blockNumForGroup(group.tag), expected) << "tag=" << group.tag;
+        EXPECT_EQ(config.blockNumForGroup(group.tag), 128u) << "tag=" << group.tag;
     }
     EXPECT_EQ(config.explicitlySizedPoolReserveBytes(), 0u);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, FinalizeNonExplicitSwaBlocksUsesCeilDivision) {
+TEST_F(HybridPoolKVCacheAllocatorTest, FinalizeAppliesNonUnitLinearStepToSwaPool) {
     auto config        = makeTinyDynamicMultiPoolHybridConfig(/*block_num=*/8, CacheGroupType::SWA);
-    config.linear_step = 4;
+    config.linear_step = 2;
     RuntimeConfig rt;
 
-    config.finalizeBlockNums(/*global_block_num=*/1, rt);
-    EXPECT_EQ(config.blockNumForGroup(kLinearTag), 1u);
-    EXPECT_EQ(config.blockNumForGroup(kSwaTag), 1u);
-
-    config.finalizeBlockNums(/*global_block_num=*/8, rt);
-    EXPECT_EQ(config.blockNumForGroup(kLinearTag), 8u);
-    EXPECT_EQ(config.blockNumForGroup(kSwaTag), 2u);
-
     config.finalizeBlockNums(/*global_block_num=*/9, rt);
     EXPECT_EQ(config.blockNumForGroup(kLinearTag), 9u);
-    EXPECT_EQ(config.blockNumForGroup(kSwaTag), 3u);
-
-    config.linear_step = 1;
-    config.finalizeBlockNums(/*global_block_num=*/9, rt);
-    EXPECT_EQ(config.blockNumForGroup(kLinearTag), 9u);
-    EXPECT_EQ(config.blockNumForGroup(kSwaTag), 9u);
+    EXPECT_EQ(config.blockNumForGroup(kSwaTag), 5u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConvertIndexToAddrRoutesToCorrectGroupPool) {

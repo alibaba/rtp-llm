@@ -95,7 +95,6 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
         group.policy.explicit_block_num = kPhysicalBlocks;
         group.layer_ids                 = {kLayerId};
-        group.block_num                 = kPhysicalBlocks;
         group.kv_block_stride_bytes     = spec.stride_bytes;
         topology_groups.push_back(std::move(group));
         layer_tags.push_back(spec.tag);

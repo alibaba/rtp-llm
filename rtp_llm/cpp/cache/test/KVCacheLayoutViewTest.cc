@@ -73,7 +73,6 @@ GroupBase makeGroup(const std::string& tag,
     group.spec              = std::move(spec);
     group.policy.group_type = group_type;
     group.layer_ids         = {0};
-    group.block_num         = 4;
     group.local_kv_head_num = local_kv_heads;
     return group;
 }

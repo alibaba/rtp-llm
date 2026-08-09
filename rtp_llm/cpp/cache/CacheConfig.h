@@ -21,18 +21,33 @@
 
 namespace rtp_llm {
 
+class CacheConfigCreator;
+class KVCacheManager;
+
 struct CacheConfig {
 private:
     std::shared_ptr<const CacheTopology> cache_topology;
     std::optional<uint32_t>              finalized_global_block_num_;
+    bool                                 configured_sparse_ = false;
+
+    CacheConfig(uint32_t               main_layer_num,
+                uint32_t               total_layer_num,
+                bool                   mla,
+                bool                   sparse,
+                bool                   hybrid_attention,
+                size_t                 block_seq_size,
+                std::vector<GroupBase> groups,
+                std::vector<LayerBase> layers);
+
+    void publishSentinelOnlyBlockNum();
+
+    friend class CacheConfigCreator;
+    friend class KVCacheManager;
 
 public:
-    bool use_independent_block_pools = false;
-
     uint32_t layer_num               = 0;  // the number of main model layers
     uint32_t layer_all_num           = 0;  // the number of all layers including mtp modules
     bool     use_mla                 = false;
-    bool     is_sparse               = false;
     bool     enable_hybrid_attention = false;
 
     // Block configuration
@@ -70,7 +85,8 @@ public:
     }
 
     // Attention-specific configuration
-    int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
+    // Linear attention keeps one cache block for every linear_step logical blocks.
+    int linear_step = 1;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -97,13 +113,20 @@ public:
     uint32_t          totalLayerNum() const;
     uint32_t          blockNum() const;
     size_t            groupLayerNum() const;
-    size_t            layerBlockStrideBytes(int layer_id) const;
     size_t            explicitReserveBytesForGroup(std::string_view tag) const;
     size_t            explicitlySizedPoolReserveBytes() const;
     bool              usesTypedCacheRegions() const;
     bool              usesOpaqueKVCacheStore() const;
     bool              usesActiveOpaqueKVCacheStore() const;
     rtp_llm::DataType cacheDType() const;
+
+    bool isSparse() const {
+        return configured_sparse_
+               || (cache_topology != nullptr
+                   && std::any_of(cache_topology->groups().begin(),
+                                  cache_topology->groups().end(),
+                                  [](const auto& group) { return group.spec->type == KVCacheSpecType::OpaqueKV; }));
+    }
 
     const CacheTopology& topology() const {
         RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
@@ -163,9 +186,6 @@ public:
     }
 
     void setGroupPolicies(const std::unordered_map<std::string, CacheGroupPolicy>& policies);
-
-    std::shared_ptr<CacheConfig>
-    mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
     uint32_t explicitIndependentBlocks(std::string_view tag) const {
         return policyForGroup(tag).explicit_block_num;

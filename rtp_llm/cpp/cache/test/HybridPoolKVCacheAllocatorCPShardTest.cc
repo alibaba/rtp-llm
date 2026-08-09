@@ -32,7 +32,7 @@ CacheConfig makeCPHybridConfig() {
     CacheConfig config;
     config.layer_num          = 4;
     config.seq_size_per_block = 4;
-    config.linear_step        = 2;
+    config.linear_step        = 1;
     constexpr auto dtype      = rtp_llm::DataType::TYPE_FP16;
 
     auto linear_spec = makeResolvedLinearSpec(

@@ -186,10 +186,12 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
-    if (warmup) {
-        config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
+    if (warmup || parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
+        config_.publishSentinelOnlyBlockNum();
     } else {
-        allocateAndSync();
+        const auto block_num = config_.blockNum();
+        RTP_LLM_CHECK_WITH_INFO(
+            block_num >= 2, "KVCacheManager requires at least 2 total cache slots, got %u", block_num);
     }
 
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
@@ -579,29 +581,6 @@ void KVCacheManager::initConnectorCoordinator() {
                                                                  pd_sep_config_,
                                                                  cache_store_config_);
     RTP_LLM_CHECK_WITH_INFO(coordinator_->init(), "connector coordinator init failed");
-}
-
-void KVCacheManager::allocateAndSync() {
-    uint32_t block_num = config_.blockNum();
-    RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%u", block_num);
-    size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
-    if (world_size > 1) {
-        size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
-        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
-        auto   block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank] = block_num;
-        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
-        execSyncCommunication(false);
-        cudaSyncAndCheck();
-
-        if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            block_num = 1;
-        } else {
-            block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
-        }
-    }
-    config_.finalizeBlockNums(block_num, runtime_config_);
-    RTP_LLM_LOG_INFO("block_num is %u after tp sync", config_.blockNum());
 }
 
 void KVCacheManager::reportMetricsLoop() {

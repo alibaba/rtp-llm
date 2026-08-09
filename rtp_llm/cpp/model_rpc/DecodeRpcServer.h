@@ -12,7 +12,6 @@ namespace rtp_llm {
 class DecodeRpcServer: public RemoteRpcServer {
 public:
     DecodeRpcServer() {}
-    ~DecodeRpcServer();
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine);
@@ -68,7 +67,6 @@ private:
         size_t                  cache_model_id;
     };
 
-    void         initThreadPool();
     void         prepareGenerateContext(DecodeGenerateContext& decode_context);
     void         allocateResource(DecodeGenerateContext& decode_context);
     grpc::Status allocateResourceFunc(DecodeGenerateContext& decode_context);
@@ -78,7 +76,6 @@ private:
     ErrorInfo loadCache(const LoadKVCacheContext& load_context);
     ErrorInfo loadCacheForAllRank(DecodeGenerateContext& decode_context);
     ErrorInfo loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
-    ErrorInfo loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     void fillCommonLoadRequestFields(BroadcastLoadRequestPB& request, const LoadKVCacheContext& load_context) const;
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                       int                             index,
@@ -116,9 +113,8 @@ private:
                                      const std::vector<std::string>& buffer_debug_infos);
 
 private:
-    autil::ThreadPoolBasePtr thread_pool_;
-    std::atomic<size_t>      onflight_load_cache_requests_{0};
-    size_t                   model_id;
+    std::atomic<size_t> onflight_load_cache_requests_{0};
+    size_t              model_id;
 };
 
 }  // namespace rtp_llm

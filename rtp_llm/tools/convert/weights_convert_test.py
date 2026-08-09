@@ -85,8 +85,17 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
             model_config, Qwen3Next, {"HACK_LAYER_NUM": "2"}
         )
 
+        self.assertEqual(
+            [layer_descs[0].tag for layer_descs in result.kv_cache_spec_descs],
+            ["linear", "linear"],
+        )
+        self.assertEqual(
+            [layer_descs[0].cache_type for layer_descs in result.kv_cache_spec_descs],
+            [KVCacheSpecType.LINEAR, KVCacheSpecType.LINEAR],
+        )
         with self.assertRaisesRegex(
-            RuntimeError, "exactly one FULL MHA/MLA cache group"
+            RuntimeError,
+            "linear cache config requires at least one FULL MHA/MLA cache group",
         ):
             validate_basic_config(result)
 

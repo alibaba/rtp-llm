@@ -226,7 +226,6 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
                                     (mla_cache || uses_padded_rows ? KVCacheSpecType::MultiHeadLatentAttention :
                                                                      KVCacheSpecType::MultiHeadAttention));
     target_group.policy                = policy;
-    target_group.block_num             = static_cast<uint32_t>(block_num);
     target_group.kv_block_stride_bytes = physical_kv_stride;
     target_group.kv_scale_stride_bytes = physical_scale_stride;
 
@@ -245,7 +244,6 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
                                         physical_scale_stride,
                                         KVCacheSpecType::MultiHeadAttention);
         dummy_group.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        dummy_group.block_num             = static_cast<uint32_t>(block_num);
         dummy_group.kv_block_stride_bytes = physical_kv_stride;
         dummy_group.kv_scale_stride_bytes = physical_scale_stride;
         for (int i = 0; i < layer_id; ++i) {
@@ -263,6 +261,7 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     layers[static_cast<size_t>(layer_id)].group_tags = {tag};
     groups.push_back(std::move(target_group));
     config.setTopology(std::move(groups), std::move(layers));
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
     return config;
 }
 
@@ -562,7 +561,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {
     auto config       = makeCacheConfig(/*tokens_per_block=*/2,
                                   /*physical_kv_stride=*/64,
                                   /*physical_scale_stride=*/0,
-                                  /*block_num=*/1,
+                                  /*block_num=*/2,
                                   "default",
                                   /*layer_id=*/0,
                                   defaultCacheGroupPolicy(CacheGroupType::FULL),
@@ -974,12 +973,12 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
         group.spec      = makeTestSpec(tag, tokens_per_block, block_stride, 0, KVCacheSpecType::MultiHeadAttention);
         group.policy    = defaultCacheGroupPolicy(type);
         group.layer_ids = {0};
-        group.block_num = block_num;
         group.kv_block_stride_bytes = block_stride;
         return group;
     };
     config.setTopology({make_group("linear", CacheGroupType::LINEAR), make_group("full", CacheGroupType::FULL)},
                        {{0, {"linear", "full"}}});
+    config.finalizeBlockNums(block_num, RuntimeConfig{});
 
     auto                    inputs = makePyCacheStoreInputs(tokens_per_block, block_num);
     torch_ext::LayerKVCache layer_cache;
@@ -1112,7 +1111,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUsesCacheModelIdInKeyNamespace) {
     auto                    config         = makeCacheConfig(/*tokens_per_block=*/2,
                                   /*physical_kv_stride=*/64,
                                   0,
-                                  1,
+                                  2,
                                   "default",
                                   0,
                                   defaultCacheGroupPolicy(CacheGroupType::FULL),

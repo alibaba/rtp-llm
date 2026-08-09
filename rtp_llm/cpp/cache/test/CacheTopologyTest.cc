@@ -19,7 +19,6 @@ GroupBase makeGroup(std::string tag, std::vector<int> layer_ids, CacheGroupType 
     group.spec      = std::move(spec);
     group.policy    = defaultCacheGroupPolicy(type);
     group.layer_ids = std::move(layer_ids);
-    group.block_num = 16;
     return group;
 }
 
