@@ -24,14 +24,13 @@ from rtp_llm.models_py.layers.linear import QKVParallelLinear, RowParallelLinear
 from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
-from rtp_llm.models_py.modules import AttnImplFactory, MultimodalEmbeddingInjector
+from rtp_llm.models_py.modules import MultimodalEmbeddingInjector
 from rtp_llm.models_py.new_models.deepseek_v3.attention import DeepSeekV32MlaAttention
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
-    MlaKernelWeightLayout,
+    MlaRuntimeLayoutMixin,
     _bool_value,
     _partition,
     _positive_float,
-    build_mla_runtime_layout,
     build_rope_cache,
     nonnegative_int,
     positive_int,
@@ -185,6 +184,20 @@ def _extract_config_values(
     )
     v_head_dim = nonnegative_int(raw_config.get("v_head_dim", 128), "v_head_dim")
     if use_mla:
+        mla_dimensions = (
+            ("q_lora_rank", q_lora_rank, attn_config.q_lora_rank),
+            ("kv_lora_rank", kv_lora_rank, attn_config.kv_lora_rank),
+            ("qk_nope_head_dim", nope_head_dim, attn_config.nope_head_dim),
+            ("qk_rope_head_dim", rope_head_dim, attn_config.rope_head_dim),
+            ("v_head_dim", v_head_dim, attn_config.v_head_dim),
+        )
+        for name, checkpoint_value, model_value in mla_dimensions:
+            normalized_model_value = nonnegative_int(model_value, f"ModelConfig {name}")
+            if normalized_model_value != checkpoint_value:
+                raise ValueError(
+                    f"{name} mismatch: ModelConfig({normalized_model_value})/"
+                    f"checkpoint({checkpoint_value})"
+                )
         if kv_lora_rank == 0:
             raise ValueError("MLA requires kv_lora_rank > 0")
         if nope_head_dim == 0 or rope_head_dim == 0 or v_head_dim == 0:
@@ -240,14 +253,7 @@ def _extract_config_values(
     has_moe_norm = _bool_value(
         raw_config.get("norm_topk_prob", False), "norm_topk_prob"
     )
-    topk_method_is_explicit = "topk_method" in raw_config
     topk_method = normalize_topk_method(raw_config.get("topk_method", "greedy")).value
-    if moe_layer_index and scoring_func == 1 and not topk_method_is_explicit:
-        raise ValueError(
-            "DeepSeek-VL2 sigmoid routing requires an explicit topk_method; "
-            "the newloader cannot safely infer whether the checkpoint owns "
-            "e_score_correction_bias"
-        )
     correction_bias = topk_method == "noaux_tc"
     if moe_layer_index and topk_method in {"group_limited_greedy", "noaux_tc"}:
         if num_experts % n_group:
@@ -284,8 +290,22 @@ def _extract_config_values(
     params_dtype = load_config.compute_dtype
     if not isinstance(params_dtype, torch.dtype):
         raise TypeError(f"compute_dtype must be torch.dtype, got {params_dtype!r}")
-    tie_word_embeddings = raw_config.get("tie_word_embeddings", False)
-    tie_word_embeddings = _bool_value(tie_word_embeddings, "tie_word_embeddings")
+    model_tie_word_embeddings = _bool_value(
+        model_config.tie_word_embeddings,
+        "model_config.tie_word_embeddings",
+    )
+    checkpoint_tie_word_embeddings = _bool_value(
+        raw_config.get("tie_word_embeddings", False),
+        "language_config.tie_word_embeddings",
+    )
+    tie_word_embeddings = model_tie_word_embeddings or checkpoint_tie_word_embeddings
+    if tie_word_embeddings and (
+        attn_tp_size != lm_head_tp_size or attn_tp_rank != lm_head_tp_rank
+    ):
+        raise ValueError(
+            "tied DeepSeek-VL2 embeddings require matching attention and "
+            "LM-head TP partitions"
+        )
     enable_fp32_lm_head = model_config.enable_fp32_lm_head
     enable_fp32_lm_head = _bool_value(enable_fp32_lm_head, "enable_fp32_lm_head")
 
@@ -494,7 +514,7 @@ class DeepSeekVLV2DecoderLayer(RtpModule):
         return hidden_states, residual
 
 
-class DeepSeekVLV2ForCausalLM(GptModelBase):
+class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
     """Language backbone with strict VL2 checkpoint filtering and injection."""
 
     WEIGHTS_MAPPER = WeightsMapper(
@@ -569,26 +589,7 @@ class DeepSeekVLV2ForCausalLM(GptModelBase):
         else:
             self.register_buffer("cos_sin_cache", None, persistent=False)
 
-        self._mla_kernel_layout: Optional[MlaKernelWeightLayout] = None
-
-    def _apply(self, fn, recurse: bool = True):
-        source_cos_sin_cache = self.cos_sin_cache
-        result = super()._apply(fn, recurse)
-        if not self.use_mla:
-            return result
-        if source_cos_sin_cache is None or self.cos_sin_cache is None:
-            raise RuntimeError("DeepSeek-VL2 MLA requires a RoPE cos/sin cache")
-        if self.cos_sin_cache.dtype != torch.float32:
-            self.cos_sin_cache = source_cos_sin_cache.to(
-                device=self.cos_sin_cache.device,
-                dtype=torch.float32,
-            )
-        if self._mla_kernel_layout is not None:
-            self._mla_kernel_layout = build_mla_runtime_layout(
-                self.layers,
-                self.cos_sin_cache,
-            )
-        return result
+        self._mla_kernel_layout = None
 
     @staticmethod
     def _checkpoint_layer_index(name: str) -> Optional[int]:
@@ -642,54 +643,6 @@ class DeepSeekVLV2ForCausalLM(GptModelBase):
                 "DeepSeek-VL2 lm_head.weight is absent; tying it to embed_tokens"
             )
             self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
-
-    def runtime_weight_view(self) -> dict[str, torch.Tensor]:
-        return {
-            "embedding": self.embed_tokens.weight,
-            "final_layernorm.gamma": self.norm.weight,
-            "lm_head": self.lm_head.weight,
-        }
-
-    def _ensure_mla_kernel_layout(self) -> None:
-        if not self.use_mla or self._mla_kernel_layout is not None:
-            return
-        if self.cos_sin_cache is None:
-            raise RuntimeError("MLA requires a RoPE cos/sin cache")
-        self._mla_kernel_layout = build_mla_runtime_layout(
-            self.layers,
-            self.cos_sin_cache,
-        )
-
-    def initialize(self, init_resource: Any) -> bool:
-        initialized = super().initialize(init_resource)
-        if not initialized:
-            return initialized
-        self._ensure_mla_kernel_layout()
-        if self.use_mla:
-            if self._keep_mla_checkpoint_weights:
-                logger.info(
-                    "Keeping DeepSeek-VL2 MLA checkpoint-only weights for "
-                    "debugging; GPU memory usage will be higher"
-                )
-            else:
-                for layer in self.layers:
-                    layer.self_attn.release_checkpoint_only_weights()
-        return initialized
-
-    def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
-    ) -> Any:
-        if not self.use_mla:
-            return super().prepare_fmha_impl(inputs, is_cuda_graph)
-        self._ensure_mla_kernel_layout()
-        return AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self._mla_kernel_layout,
-            inputs.attention_inputs,
-            self.fmha_config,
-            is_cuda_graph,
-        )
 
     def _embed_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids = inputs.input_ids

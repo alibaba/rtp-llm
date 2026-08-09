@@ -14,6 +14,8 @@ from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.modules.base.common.moe_topk import group_topk_supported
+from rtp_llm.models_py.modules.base.cuda.select_topk import GroupTopK
 from rtp_llm.models_py.new_models.deepseek_v3.attention import (
     DeepSeekV32MlaAttention,
     _CudaRuntimeFusedFp8Linear,
@@ -696,6 +698,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         ):
             NewModelLoader._validate_loaded_weights(root)
 
+    @unittest.skipIf(
+        torch.version.hip is not None,
+        "ROCm factory construction is covered by the ROCm GPU target",
+    )
     def test_mtp_new_model_loader_reads_only_appended_draft_weights(self):
         weights = _mtp_checkpoint_weights()
         # The test intentionally loads CPU tensors. Preserve their layout while
@@ -973,11 +979,58 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertEqual(cfg["moe_layer_index"], [3])
         self.assertEqual(cfg["topk_method"], "greedy")
 
-    def test_sigmoid_router_requires_explicit_topk_method(self):
+    def test_group_topk_capability_checks_all_kernel_bounds(self):
+        valid = {
+            "num_experts": 64,
+            "n_group": 8,
+            "topk_group": 2,
+            "top_k": 8,
+            "renormalize": False,
+        }
+        self.assertTrue(group_topk_supported(**valid))
+        invalid_overrides = (
+            {"num_experts": 63},
+            {"num_experts": 8, "n_group": 8},
+            {"n_group": 33, "num_experts": 66},
+            {"topk_group": 0},
+            {"topk_group": 9},
+            {"top_k": 0},
+            {"top_k": 33},
+            {"top_k": 1, "renormalize": True},
+            {"num_experts": 8, "n_group": 4, "topk_group": 1, "top_k": 3},
+        )
+        for overrides in invalid_overrides:
+            case = dict(valid)
+            case.update(overrides)
+            with self.subTest(**overrides):
+                self.assertFalse(group_topk_supported(**case))
+
+    def test_group_topk_forward_rejects_invalid_group_count_before_kernel(self):
+        with mock.patch(
+            "rtp_llm.models_py.modules.base.cuda.select_topk.compute_ops.GroupTopKOp",
+            create=True,
+        ) as op_type:
+            group_topk = GroupTopK()
+            with self.assertRaisesRegex(ValueError, "topk_group=0"):
+                group_topk(
+                    topk_weights=torch.empty(1, 2),
+                    topk_ids=torch.empty(1, 2, dtype=torch.int32),
+                    scores=torch.zeros(1, 4),
+                    correction_bias=torch.zeros(4),
+                    n_group=2,
+                    topk_group=0,
+                    topk=2,
+                    renormalize=False,
+                    routed_scaling_factor=1.0,
+                )
+            op_type.return_value.forward.assert_not_called()
+
+    def test_sigmoid_router_without_topk_method_preserves_greedy_compatibility(self):
         raw = _raw_config()
         del raw["topk_method"]
-        with self.assertRaisesRegex(ValueError, "explicit config.json topk_method"):
-            extract_config_values(_model_config(), _load_config(), raw)
+        cfg = extract_config_values(_model_config(), _load_config(), raw)
+        self.assertEqual(cfg["topk_method"], "greedy")
+        self.assertFalse(cfg["has_e_score_correction"])
 
     def test_config_rejects_eplb_before_module_construction(self):
         config = _model_config()

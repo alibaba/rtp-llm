@@ -413,6 +413,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             and group_topk_supported(
                 num_experts=num_experts,
                 n_group=n_group,
+                topk_group=topk_group,
                 top_k=top_k,
                 renormalize=has_moe_norm,
             )

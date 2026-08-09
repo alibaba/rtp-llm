@@ -18,6 +18,7 @@ from rtp_llm.models_py.model_loader import (
     NewModelLoader,
 )
 from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.registry import register_model
 
 
 @contextlib.contextmanager
@@ -376,6 +377,7 @@ class DeepSeekVLV2VisionModel(RtpModule):
         return next(self.vision.parameters()).dtype
 
 
+@register_model("deepseek_vl2_vision")
 class DeepSeekVLV2ForVisionEmbedding(DeepSeekVLV2VisionModel):
     def __init__(self, model_config: Mapping[str, Any], load_config: Any) -> None:
         super().__init__(model_config, load_config.compute_dtype)

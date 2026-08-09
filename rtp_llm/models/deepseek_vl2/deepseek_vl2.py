@@ -202,7 +202,6 @@ class DeepSeekVLV2(BaseModel):
             if i >= first_k_dense_replace and i % moe_step == 0
         ]
 
-        config.max_seq_len = config_json.get("max_position_embeddings", 4096)
         config.config_dtype = config_json.get("torch_dtype", None)
 
         if config.special_tokens is None:

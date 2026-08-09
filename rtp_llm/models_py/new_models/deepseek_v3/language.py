@@ -75,7 +75,11 @@ class MlaRuntimeLayoutMixin:
     """Shared MLA runtime-layout lifecycle for score and MTP models."""
 
     def _apply(self, fn, recurse: bool = True):
+        if not getattr(self, "use_mla", True):
+            return super()._apply(fn, recurse)
         source_cos_sin_cache = self.cos_sin_cache
+        if source_cos_sin_cache is None:
+            raise RuntimeError("DeepSeek MLA requires a RoPE cos/sin cache")
         result = super()._apply(fn, recurse)
         # The score/MTP model and every sparse IndexerOp intentionally share
         # one RoPE cache. RtpModule restores aliases after recursively applying
@@ -116,7 +120,7 @@ class MlaRuntimeLayoutMixin:
 
     def initialize(self, init_resource):
         ok = super().initialize(init_resource)
-        if not ok:
+        if not ok or not getattr(self, "use_mla", True):
             return ok
         self._ensure_mla_kernel_layout()
         if self._keep_mla_checkpoint_weights:
@@ -130,6 +134,8 @@ class MlaRuntimeLayoutMixin:
         return ok
 
     def _ensure_mla_kernel_layout(self) -> None:
+        if not getattr(self, "use_mla", True):
+            return
         if self._mla_kernel_layout is None:
             self._mla_kernel_layout = build_mla_runtime_layout(
                 self.layers,
@@ -139,6 +145,8 @@ class MlaRuntimeLayoutMixin:
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
+        if not getattr(self, "use_mla", True):
+            return super().prepare_fmha_impl(inputs, is_cuda_graph)
         self._ensure_mla_kernel_layout()
         return AttnImplFactory.get_fmha_impl(
             self.config,
@@ -599,7 +607,6 @@ def extract_config_values(
         routed_scaling_factor = config_json.get(
             "routed_scaling_factor", routed_scaling_factor
         )
-    topk_method_is_explicit = bool(config_json) and "topk_method" in config_json
     topk_method = config_json.get("topk_method", "greedy") if config_json else "greedy"
     topk_method = normalize_topk_method(topk_method)
     # has_e_score_correction is not a ModelConfig field — the legacy loader
@@ -705,12 +712,6 @@ def extract_config_values(
     scoring_func = nonnegative_int(scoring_func, "scoring_func")
     if scoring_func not in (0, 1):
         raise ValueError(f"unsupported scoring_func={scoring_func}")
-    if moe_layer_index and scoring_func == 1 and not topk_method_is_explicit:
-        raise ValueError(
-            "DeepSeek sigmoid routing requires an explicit config.json "
-            "topk_method; the newloader cannot safely infer whether the "
-            "checkpoint owns e_score_correction_bias"
-        )
     routed_scaling_factor = _positive_float(
         routed_scaling_factor, "routed_scaling_factor"
     )

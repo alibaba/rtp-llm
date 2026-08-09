@@ -38,9 +38,7 @@ class DeepSeekVLV2GpuTest(unittest.TestCase):
                     device="cuda",
                 )
             )
-            self.assertEqual(output.shape[0], 1)
-            self.assertGreater(output.shape[1], 1)
-            self.assertEqual(output.shape[2], 4)
+            self.assertEqual(output.shape, (1, 196, 4))
             self.assertTrue(torch.isfinite(output).all())
         finally:
             del vision

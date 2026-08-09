@@ -42,13 +42,15 @@ class GroupTopK(nn.Module):
         if not group_topk_supported(
             num_experts=num_experts,
             n_group=n_group,
+            topk_group=topk_group,
             top_k=topk,
             renormalize=renormalize,
         ):
             raise ValueError(
                 "unsupported fused GroupTopK routing: "
                 f"num_experts={num_experts}, n_group={n_group}, "
-                f"top_k={topk}, renormalize={renormalize}"
+                f"topk_group={topk_group}, top_k={topk}, "
+                f"renormalize={renormalize}"
             )
         scores = scores.sigmoid()
         scores_with_bias = scores + correction_bias.unsqueeze(0)
