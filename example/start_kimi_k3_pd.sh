@@ -78,6 +78,8 @@ Optional environment variables:
   CONCURRENCY_LIMIT                     defaults to 2; set this to the GPQA
                                          GENERATION_WORKERS value
   MAX_CONTEXT_BATCH_SIZE                defaults to 1
+  KIMI_K3_REUSE_CACHE                   defaults to 0; set both PD roles to 1
+                                         to validate prefix-cache reuse
   KIMI_K3_DECODE_CPU_OFFLOAD_START      defaults to auto; integer or none
   KIMI_K3_DECODE_TOPOLOGY               defaults to tp8_ep8; one of:
                                          tp8_ep8, dp8_ep8
@@ -308,10 +310,12 @@ if [[ -n "${runtime_pythonpath}" ]]; then
 fi
 
 max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-16384}"
+max_batch_tokens_size="${MAX_BATCH_TOKENS_SIZE:-}"
 seq_size_per_block="${SEQ_SIZE_PER_BLOCK:-4096}"
 kernel_seq_size_per_block="${KERNEL_SEQ_SIZE_PER_BLOCK:-128}"
 concurrency_limit="${CONCURRENCY_LIMIT:-2}"
 max_context_batch_size="${MAX_CONTEXT_BATCH_SIZE:-1}"
+reuse_cache="${KIMI_K3_REUSE_CACHE:-0}"
 default_batched_kda_decode=0
 case "${execution_mode}" in
     optimized)
@@ -451,6 +455,7 @@ for flag_name in \
     perf_fusions \
     batched_kda_decode \
     perf_mode \
+    reuse_cache \
     enable_cuda_graph \
     enable_cuda_graph_debug_mode; do
     flag_value="${!flag_name}"
@@ -767,6 +772,10 @@ echo "  fused AG/GEMM:   ${fused_ag_gemm}"
 echo "  batched KDA:     ${batched_kda_decode}"
 echo "  perf validation: ${perf_mode}"
 echo "  concurrency:     generate=${concurrency_limit}, context=${max_context_batch_size}"
+if [[ -n "${max_batch_tokens_size}" ]]; then
+    echo "  batch tokens:    ${max_batch_tokens_size}"
+fi
+echo "  reuse cache:     ${reuse_cache}"
 echo "  cache blocks:    seq=${seq_size_per_block}, kernel=${kernel_seq_size_per_block}"
 echo "  CUDA Graph:      enabled=${enable_cuda_graph}, debug=${enable_cuda_graph_debug_mode}"
 if [[ -n "${decode_capture_config}" ]]; then
@@ -795,7 +804,7 @@ server_args=(
     --kv_cache_mem_mb "${kv_cache_mem_mb}"
     --ssm_state_dtype fp32
     --warm_up 0
-    --reuse_cache 0
+    --reuse_cache "${reuse_cache}"
     --enable_device_cache 1
     --concurrency_limit "${concurrency_limit}"
     --use_deepep_moe "${use_deepep_moe}"
@@ -811,6 +820,12 @@ server_args=(
     --ft_core_dump_on_exception 0
     --shutdown_timeout 5
 )
+
+if [[ -n "${max_batch_tokens_size}" ]]; then
+    [[ "${max_batch_tokens_size}" =~ ^[1-9][0-9]*$ ]] \
+        || die "MAX_BATCH_TOKENS_SIZE must be a positive integer"
+    server_args+=(--max_batch_tokens_size "${max_batch_tokens_size}")
+fi
 
 if [[ -n "${decode_capture_config}" ]]; then
     server_args+=(--decode_capture_config "${decode_capture_config}")
