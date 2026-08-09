@@ -995,9 +995,9 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                     const bool             use_kv_key_prefix = use_mla || use_opaque_kv_store || use_hybrid;
                     std::vector<BlockInfo> parts;
                     if (use_whole_kv_block) {
-                        parts = cache_manager->convertIndexToBuffer(block_id, layer_id, tag);
+                        parts = cache_manager->convertIndexToBuffer(layer_id, tag, block_id);
                     } else {
-                        parts = cache_manager->convertIndexToBuffer(block_id, layer_id, tag, peer_cnt, i);
+                        parts = cache_manager->convertIndexToBuffer(layer_id, tag, block_id, peer_cnt, i);
                     }
 
                     parts            = sliceCpDestinationForPeer(std::move(parts), cache_config, tag, i);
@@ -1111,10 +1111,10 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 requiresWholeBlockTransfer(mtp_cache_cfg, is_page_level_rr);
                             std::vector<BlockInfo> parts;
                             if (mtp_use_whole_kv_block) {
-                                parts = cache_manager->convertIndexToBuffer(block_id, global_layer_id, tag);
+                                parts = cache_manager->convertIndexToBuffer(global_layer_id, tag, block_id);
                             } else {
                                 parts =
-                                    cache_manager->convertIndexToBuffer(block_id, global_layer_id, tag, peer_cnt, i);
+                                    cache_manager->convertIndexToBuffer(global_layer_id, tag, block_id, peer_cnt, i);
                             }
 
                             parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, tag, i);

@@ -142,11 +142,8 @@ protected:
         runtime_config_.worker_grpc_addrs = server_addrs_;
     }
 
-    UriStrVec genUris(const CacheKeysType&       cache_keys,
-                      const std::vector<size_t>& other_pos_vec = {},
-                      const std::string&         uri_prefix    = "") {
+    UriStrVec genFullUris(const CacheKeysType& cache_keys, const std::string& uri_prefix = "") {
         UriStrVec res;
-        size_t    pos_idx = 0;
         for (size_t i = 0; i < cache_keys.size(); i++) {
             for (const auto& tag : full_group_tags_) {
                 std::string full_group_name = "F" + tag;
@@ -156,26 +153,12 @@ protected:
                     res.push_back(uri);
                 }
             }
-            if (!other_pos_vec.empty()) {
-                if (i == other_pos_vec[pos_idx]) {
-                    for (const auto& tag : other_group_tags_) {
-                        std::string other_group_name = "L" + tag;
-                        for (int r = 0; r < tp_size_; r++) {
-                            std::string uri = uri_prefix + "uri_" + other_group_name + "_" + std::to_string(r) + "_"
-                                              + std::to_string(cache_keys[i]);
-                            res.push_back(uri);
-                        }
-                    }
-                    pos_idx++;
-                }
-            }
         }
         return res;
     }
 
-    kv_cache_manager::Locations genFullotherLocations(const CacheKeysType&       cache_keys,
-                                                      const std::vector<size_t>& other_pos_vec = {},
-                                                      const std::string&         uri_prefix    = "") const {
+    kv_cache_manager::Locations genFullLocations(const CacheKeysType& cache_keys,
+                                                 const std::string&   uri_prefix = "") const {
         kv_cache_manager::Locations locations;
         locations.resize(cache_keys.size(), {});
         for (size_t i = 0; i < cache_keys.size(); i++) {
@@ -186,17 +169,6 @@ protected:
                                       + std::to_string(cache_keys[i]);
                     locations[i].push_back(
                         kv_cache_manager::LocationSpecUnit({genLocationSpecName(r, full_group_name), uri}));
-                }
-            }
-        }
-        for (auto pos : other_pos_vec) {
-            for (const auto& tag : other_group_tags_) {
-                std::string other_group_name = "L" + tag;
-                for (int r = 0; r < tp_size_; r++) {
-                    std::string uri = uri_prefix + "uri_" + other_group_name + "_" + std::to_string(r) + "_"
-                                      + std::to_string(cache_keys[pos]);
-                    locations[pos].push_back(
-                        kv_cache_manager::LocationSpecUnit({genLocationSpecName(r, other_group_name), uri}));
                 }
             }
         }
@@ -214,9 +186,8 @@ protected:
     std::vector<std::string>                            server_addrs_;
     inline static MockClientFactory*                    mock_client_factory_ = nullptr;
     std::vector<kv_cache_manager::MockMetaClient*>      meta_clients_;
-    inline static kv_cache_manager::MockTransferClient* transfer_client_  = nullptr;
-    std::vector<std::string>                            full_group_tags_  = {"default"};
-    std::vector<std::string>                            other_group_tags_ = {};
+    inline static kv_cache_manager::MockTransferClient* transfer_client_ = nullptr;
+    std::vector<std::string>                            full_group_tags_ = {"default"};
 
     constexpr static const char* fake_address_ = "fake_address";
     using MatchLocationReturnType              = std::pair<ClientErrorCode, Locations>;

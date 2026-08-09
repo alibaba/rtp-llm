@@ -79,6 +79,11 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.debugString().c_str(),
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
+#ifdef USE_REMOTE_KV_CACHE
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
+        RemoteConnector::validateConfig(cache_config_);
+    }
+#endif
     if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
@@ -234,10 +239,11 @@ std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryC
 
 std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
 #ifdef USE_REMOTE_KV_CACHE
-    RTP_LLM_CHECK_WITH_INFO(!cache_config_.use_independent_block_pools,
-                            "remote connector does not support independent KV cache block pools");
-    const auto block_pool = allocator_->getBlockPool();
-    RTP_LLM_CHECK_WITH_INFO(block_pool != nullptr, "remote connector requires a contiguous KV cache block pool");
+    RemoteConnector::validateConfig(cache_config_);
+    const auto& group_tag  = cache_config_.topology().groups().front().tag;
+    const auto  block_pool = allocator_->getBlockPool(group_tag);
+    RTP_LLM_CHECK_WITH_INFO(
+        block_pool != nullptr, "remote connector requires a block pool for group tag=%s", group_tag.c_str());
     // TODO : get lora info map
     auto remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,
                                                                kv_cache_config_,

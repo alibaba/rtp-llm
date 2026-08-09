@@ -13,6 +13,41 @@
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 
 namespace rtp_llm {
+
+namespace {
+
+std::string groupTags(const std::vector<GroupTopology>& groups) {
+    std::ostringstream stream;
+    for (size_t i = 0; i < groups.size(); ++i) {
+        if (i != 0) {
+            stream << ",";
+        }
+        stream << groups[i].tag;
+    }
+    return stream.str();
+}
+
+}  // namespace
+
+void RemoteConnector::validateConfig(const CacheConfig& cache_config) {
+    const auto&      groups           = cache_config.topology().groups();
+    size_t           full_group_count = 0;
+    const GroupBase* full_group       = nullptr;
+    for (const auto& group : groups) {
+        if (group.policy.group_type == CacheGroupType::FULL) {
+            ++full_group_count;
+            full_group = &group;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(groups.size() == 1 && full_group_count == 1,
+                            "remote cache supports exactly one FULL KV cache group; got groups=%zu full_groups=%zu "
+                            "tags=[%s]. Disable enable_remote_cache or configure a single FULL group.",
+                            groups.size(),
+                            full_group_count,
+                            groupTags(groups).c_str());
+    RTP_LLM_CHECK_WITH_INFO(full_group != nullptr && !full_group->layer_ids.empty(),
+                            "remote connector FULL group must own at least one layer");
+}
 namespace {
 
 struct MatchMetricsHelper {
@@ -180,23 +215,11 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_addr,
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
-    RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0,
-                            "remote connector requires an initialized cache topology with at least one group");
-    std::vector<std::string> full_group_tags, linear_group_tags;
-    for (const auto& group : cache_config.topology().groups()) {
-        if (cache_config.typeForGroup(group.tag) == CacheGroupType::FULL) {
-            full_group_tags.push_back(group.tag);
-        } else {
-            linear_group_tags.push_back(group.tag);
-        }
-    }
-    if (linear_group_tags.empty()) {
-        group_policy_ =
-            std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_tags, linear_group_tags);
-    } else {
-        group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator, full_group_tags, linear_group_tags, std::max(1, cache_config.linear_step));
-    }
+    validateConfig(cache_config);
+    // Do not select the future-only multi-group policies here until the production protocol is restored end to end.
+    const auto& group_tag = cache_config.topology().groups().front().tag;
+    group_policy_         = std::make_unique<remote_connector::FullLayerGroupPolicy>(
+        allocator, std::vector<std::string>{group_tag}, std::vector<std::string>{});
 }
 
 RemoteConnector::~RemoteConnector() {

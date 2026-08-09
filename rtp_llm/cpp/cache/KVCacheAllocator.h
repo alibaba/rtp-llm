@@ -83,6 +83,11 @@ public:
         return block_pool_;
     }
 
+    virtual BlockPoolPtr getBlockPool(std::string_view tag) const {
+        (void)tag;
+        return block_pool_;
+    }
+
     SharedBlockCachePtr sharedBlockCache() const {
         return shared_block_cache_;
     }

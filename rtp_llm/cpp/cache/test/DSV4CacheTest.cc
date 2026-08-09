@@ -1944,7 +1944,7 @@ TEST(CacheConfigTest, DebugStringIsSafeBeforeFinalize) {
     EXPECT_EQ(finalized.find("<unfinalized>"), std::string::npos) << finalized;
 }
 
-TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
+TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSingleAndHybridPools) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 8;
     runtime_config.fifo_scheduler_config.max_context_batch_size = 4;
