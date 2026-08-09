@@ -416,6 +416,69 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
         self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
+    async def test_engine_task_list_full_ft_exception_mapped_to_429(self) -> None:
+        """Engine abort with TASK_LIST_FULL arrives as FtRuntimeException(UNKNOWN_ERROR)
+        which would normally map to 500 (INTERNAL). The error message carries the
+        TASK_LIST_FULL marker, so the servicer should remap to 429 (CAPACITY)."""
+        req = self._minimal_request()
+
+        class _TaskListFullVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    "Inference engine abort. Finish reason: [TASK_LIST_FULL].",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _TaskListFullVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "TooManyRequests")
+        self.assertIn("TASK_LIST_FULL", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
+
+    async def test_engine_task_list_full_generic_exception_mapped_to_429(self) -> None:
+        """Engine abort with TASK_LIST_FULL arriving as a generic Exception
+        (e.g. gRPC RpcError without grpc-status-details-bin) should also map
+        to 429, not 500."""
+        req = self._minimal_request()
+
+        class _TaskListFullGenericVisitor:
+            async def enqueue(self, _gi):
+                raise RuntimeError(
+                    "Inference engine abort. Finish reason: [TASK_LIST_FULL]."
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _TaskListFullGenericVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "TooManyRequests")
+        self.assertIn("TASK_LIST_FULL", payload["status_message"])
+        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
+
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
         visitor = _FakeVisitor(_FakeAsyncStream([], raise_after=0))

@@ -102,6 +102,25 @@ def _dash_error_spec_for_ft_exception(exc: FtRuntimeException) -> DashErrorSpec:
     return _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exc.exception_type.category]
 
 
+_TASK_LIST_FULL_MARKER = "TASK_LIST_FULL"
+
+
+def _is_engine_capacity_backpressure(e: BaseException) -> bool:
+    """Detect engine task-list-full backpressure from the exception message.
+
+    The C++ engine reports TASK_LIST_FULL via an ErrorCode that maps to
+    ExceptionType.UNKNOWN_ERROR (category=INTERNAL→500) because there is no
+    dedicated TASK_LIST_FULL entry in the ExceptionType enum.  The finish-reason
+    marker "TASK_LIST_FULL" survives in the error *message*, so a string check
+    is the only reliable signal at this layer.
+
+    Only match when the category-based spec would have returned 500 — existing
+    CAPACITY errors (8400/8515/8500 etc.) already map to 429 and must not be
+    touched.
+    """
+    return _TASK_LIST_FULL_MARKER in str(e)
+
+
 _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
     ExceptionCategory.BAD_REQUEST: DASH_ERROR_BAD_REQUEST,
     ExceptionCategory.TOO_LONG: DASH_ERROR_TOO_LONG,
@@ -980,6 +999,12 @@ async def iter_real_model_stream_infer(
     except FtRuntimeException as e:
         _set_access_backend_error_code(access_agg, e)
         error_spec = _dash_error_spec_for_ft_exception(e)
+        # Engine task-list-full backpressure: the C++ engine reports
+        # TASK_LIST_FULL via an ErrorCode that maps to UNKNOWN_ERROR
+        # (category=INTERNAL→500).  Remap to 429 so callers see a
+        # capacity error, not an internal failure.
+        if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
+            error_spec = DASH_ERROR_CAPACITY
         status_message = str(e)
         if error_spec.status_code == 500:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
@@ -1006,6 +1031,11 @@ async def iter_real_model_stream_infer(
             error_spec = _dash_error_spec_for_ft_exception(e)
         else:
             error_spec = DASH_ERROR_INTERNAL
+        # Same TASK_LIST_FULL remap as above — covers generic Exception paths
+        # (e.g. gRPC RpcError without grpc-status-details-bin metadata) where
+        # the error message still carries the TASK_LIST_FULL marker.
+        if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
+            error_spec = DASH_ERROR_CAPACITY
         response = build_dash_error_response(
             str(request.id),
             request.model_name,
