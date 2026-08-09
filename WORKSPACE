@@ -1,5 +1,25 @@
 workspace(name = "rtp_llm")
 
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "tokenspeed_mla_py",
+    build_file_content = """
+py_library(
+    name = "tokenspeed_mla",
+    srcs = glob(["tokenspeed_mla/**/*.py"]),
+    data = glob(["LICENSE*", "THIRDPARTYNOTICES*"]),
+    imports = ["."],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "c8840cb46238cae00304a04f76fc0882827aacd2a4089b087fa27e440e66d12f",
+    type = "zip",
+    urls = [
+        "https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp_llm/tokenspeed_mla/cuda13/c8840cb46238cae00304a04f76fc0882827aacd2a4089b087fa27e440e66d12f/tokenspeed_mla-0.2.3-py3-none-any.whl",
+    ],
+)
+
 load("//3rdparty/cuda_config:cuda_configure.bzl", "cuda_configure")
 load("//3rdparty/gpus:rocm_configure.bzl", "rocm_configure")
 load("//3rdparty/py:python_configure.bzl", "python_configure")

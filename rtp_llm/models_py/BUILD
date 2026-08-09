@@ -50,9 +50,13 @@ py_library(
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
+        "@tokenspeed_mla_py//:tokenspeed_mla",
     ] + select({
-        # cuda13 lock omits flashinfer-python and deep_ep → only deep_gemm.
-        "@//:using_cuda13_x86": ["deep_gemm"],
+        # CUDA13 omits deep_ep; TokenSpeed additionally needs the CuTe DSL.
+        "@//:using_cuda13_x86": [
+            "//rtp_llm:nvidia-cutlass-dsl",
+            "deep_gemm",
+        ],
         "@//:using_cuda13_arm": ["deep_gemm"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,

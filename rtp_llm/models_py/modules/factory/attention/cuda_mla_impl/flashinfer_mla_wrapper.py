@@ -9,6 +9,9 @@ from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.paged_mla_decode import (
+    get_mla_decode_kernel,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
 from rtp_llm.ops import AttentionConfigs, FMHAConfig, KvCacheDataType, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
@@ -561,6 +564,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
             attn_configs.use_mla
             and not attn_inputs.is_prefill
             and not attn_configs.is_sparse
+            and get_mla_decode_kernel() in ("auto", "flashinfer")
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):

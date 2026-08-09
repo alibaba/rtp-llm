@@ -14,17 +14,24 @@ from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 
 class MlaKVCacheWriteOp:
-    """Write compressed KV cache for Multi-Latent Attention."""
+    """Write compressed KV cache for Multi-Latent Attention.
+
+    ``clear_page_on_boundary`` clears a physical page before writing its first
+    token. Graph decode backends that use a static capture shape can read the
+    unwritten tail of a newly allocated page, so they must opt into this mode.
+    """
 
     def __init__(
         self,
         kv_cache_dtype: KvCacheDataType,
+        clear_page_on_boundary: bool = False,
     ) -> None:
         self.kv_cache_type = (
             "fp8_ds_mla" if kv_cache_dtype == KvCacheDataType.FP8 else "auto"
         )
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
         self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        self.clear_page_on_boundary = clear_page_on_boundary
 
     def forward(
         self,
@@ -59,4 +66,5 @@ class MlaKVCacheWriteOp:
                 ),
                 self.kv_cache_type,
                 self.scale,
+                self.clear_page_on_boundary,
             )

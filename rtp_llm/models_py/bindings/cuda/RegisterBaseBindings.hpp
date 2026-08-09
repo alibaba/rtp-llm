@@ -327,7 +327,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("kv_cache"),
                   py::arg("slot_mapping"),
                   py::arg("kv_cache_dtype"),
-                  py::arg("scale"));
+                  py::arg("scale"),
+                  py::arg("clear_page_on_boundary") = false);
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {

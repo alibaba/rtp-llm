@@ -92,7 +92,17 @@ else:
             MlaFlashInferPrefillImpl,
             MlaFlashMLAPrefillImpl,
         )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.tokenspeed_mla_impl import (
+            TokenSpeedMlaDecodeImpl,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.trtllm_gen_mla_impl import (
+            TrtllmGenMlaDecodeImpl,
+        )
 
+        # Optimized decode implementations are explicitly env-gated. When
+        # disabled, selection falls through to the default FlashInfer path.
+        DECODE_MLA_IMPS.append(TokenSpeedMlaDecodeImpl)
+        DECODE_MLA_IMPS.append(TrtllmGenMlaDecodeImpl)
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
         PREFILL_MLA_IMPS.append(MlaFlashMLAPrefillImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
