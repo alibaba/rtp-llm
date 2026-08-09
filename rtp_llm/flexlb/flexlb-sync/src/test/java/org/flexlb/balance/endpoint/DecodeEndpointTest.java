@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DecodeEndpointTest {
 
@@ -200,6 +201,38 @@ class DecodeEndpointTest {
         setQueuedPhaseCount(100);
         // inflight=2, queued clamped from 100 to 2 → engineLoad = 0 + max(0,2-2) = 0
         assertEquals(0, endpoint.getEngineLoad());
+    }
+
+    // ==================== P1-6: evictExpiredRequests counter (PR-C) ====================
+
+    /**
+     * evictExpiredRequests must prune queuedPhase entries that are no longer in
+     * inflightRequests and decrement queuedPhaseCount accordingly, so that
+     * getEngineLoad() returns 0 after all entries are evicted.
+     */
+    @Test
+    void evictExpiredRequests_prunesQueuedPhase_andRestoresEngineLoad() throws InterruptedException {
+        updateStatus(null, null, 10000);
+        endpoint.reserve(100L, 500, 500);
+        endpoint.reserve(101L, 500, 500);
+        endpoint.reserve(102L, 500, 500);
+        endpoint.markQueuedPhase(100L);
+        endpoint.markQueuedPhase(101L);
+        endpoint.markQueuedPhase(102L);
+
+        assertEquals(3, endpoint.getInflightCount());
+        assertEquals(0, endpoint.getEngineLoad());
+        assertEquals(3, endpoint.getTotalLoad());
+        assertEquals(3, endpoint.layeredAdmissionView().queued().size());
+
+        Thread.sleep(20);
+        int evicted = endpoint.evictExpiredRequests(5);
+
+        assertEquals(3, evicted);
+        assertEquals(0, endpoint.getInflightCount());
+        assertTrue(endpoint.layeredAdmissionView().queued().isEmpty());
+        assertEquals(0, endpoint.getEngineLoad());
+        assertEquals(0, endpoint.getTotalLoad());
     }
 
     /** Directly mutate the private counter to simulate drift. */

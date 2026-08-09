@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -7,17 +9,22 @@ import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -217,5 +224,116 @@ class QueueStressTest {
     void empty_queue_take_returns_null_after_timeout() {
         QueueManager qm = newQueueManager(100);
         assertNull(qm.takeRequest(50));
+    }
+
+    // ==================== P0-2: WorkerBatcher concurrent overshoot (PR-B) ====================
+
+    /**
+     * N threads concurrently tryOffer into a queue with maxSize=10. The CAS-based
+     * {@code reserveQueueSlot} must guarantee that {@code queueDepth} never exceeds
+     * maxSize — no unbounded overshoot is allowed.
+     */
+    @Test
+    void concurrentOffer_queueDepthNeverExceedsMaxSize() throws Exception {
+        int maxSize = 10;
+        int threadCount = 50;
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbBatchAlgorithm("slo_budget");
+        config.setFlexlbBatchQueueMaxSize(maxSize);
+
+        PrefillEndpoint prefillEp = mock(PrefillEndpoint.class);
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(prefillEp.getPredictor()).thenReturn(predictor);
+        when(prefillEp.realWaitTimeMs()).thenReturn(0L);
+        when(prefillEp.getInflightBatchCount()).thenReturn(0);
+        when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(0L);
+
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+
+        WorkerBatcher batcher = new WorkerBatcher("stress-test", prefillEp, config, handler, reporter);
+
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger failureCount = new AtomicInteger(0);
+
+        Thread[] threads = new Thread[threadCount];
+        for (int i = 0; i < threadCount; i++) {
+            final long requestId = i + 1;
+            threads[i] = new Thread(() -> {
+                try {
+                    start.await();
+                    BatchItem item = batchItem(requestId);
+                    if (batcher.tryOffer(item)) {
+                        successCount.incrementAndGet();
+                    } else {
+                        failureCount.incrementAndGet();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            threads[i].start();
+        }
+
+        start.countDown();
+        for (Thread t : threads) {
+            t.join(5_000);
+        }
+
+        // CAS-based reserveQueueSlot guarantees no overshoot
+        assertTrue(batcher.queueSize() <= maxSize,
+                "queueSize=" + batcher.queueSize() + " must never exceed maxSize=" + maxSize);
+        assertEquals(maxSize, successCount.get(),
+                "exactly maxSize offers should succeed");
+        assertEquals(threadCount - maxSize, failureCount.get(),
+                "remaining offers should be rejected");
+
+        batcher.shutdown();
+    }
+
+    private static BatchItem batchItem(long requestId) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(128);
+        BalanceContext ctx = new BalanceContext();
+        ctx.setRequest(request);
+        ctx.setBudget(ScheduleBudget.forDeadline(50, System.currentTimeMillis(),
+                System.currentTimeMillis() + 300_000));
+        return new BatchItem(ctx, new CompletableFuture<>(), null, null, null, null, null,
+                System.currentTimeMillis());
+    }
+
+    // ==================== P1-5: low-priority retry preempted by new high-priority (PR-B) ====================
+
+    /**
+     * A re-offered low-priority retry (offerToHead) is preempted by a newly arrived
+     * high-priority request: the queue is priority-ordered, not insertion-ordered,
+     * so the high-priority item is dequeued first even though the retry was re-offered
+     * earlier in wall-clock time.
+     */
+    @Test
+    void lowPriorityRetry_isPreemptedByNewHighPriorityArrival() {
+        QueueManager qm = newQueueManager(100);
+
+        // 1. Queue a low-priority item
+        BalanceContext low = ctx(1, 30);
+        qm.tryRouteAsync(low);
+
+        // 2. Dequeue and re-offer (retry) — low-priority goes back to queue
+        BalanceContext dequeued = qm.takeRequest(100);
+        assertEquals(1, dequeued.getRequestId());
+        qm.offerToHead(dequeued);
+        assertEquals(1, qm.queueSize());
+
+        // 3. New high-priority arrival
+        BalanceContext high = ctx(2, 70);
+        qm.tryRouteAsync(high);
+        assertEquals(2, qm.queueSize());
+
+        // 4. High-priority is dequeued first despite low-priority retry being re-offered earlier
+        assertEquals(2, qm.takeRequest(100).getRequestId());
+        assertEquals(1, qm.takeRequest(100).getRequestId());
     }
 }

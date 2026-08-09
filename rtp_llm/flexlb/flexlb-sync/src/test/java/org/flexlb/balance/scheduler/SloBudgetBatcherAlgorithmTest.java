@@ -185,6 +185,74 @@ class SloBudgetBatcherAlgorithmTest {
         assertEquals(0, ctx.size());
     }
 
+    // ---- fail-fast overestimate drop (P1-4, PR-D) ----
+
+    /**
+     * Behavioral pin (design decision, not a bug): when Auto-TPM is ON and the
+     * head's dispatch deadline has passed, the fail-fast check compares
+     * {@code remainingBudgetMs} against {@code estimatedPrefillMs}. An
+     * overestimate causes a drop even though the request could theoretically
+     * still meet its SLO — this is the intentional fail-fast trade-off.
+     *
+     * <p>Two cases at the threshold boundary:
+     * <ul>
+     *   <li>remainingBudgetMs(200) &lt; estimatedPrefillMs(250) → drop</li>
+     *   <li>remainingBudgetMs(300) &ge; estimatedPrefillMs(250) → dispatch (deadline_guard)</li>
+     * </ul>
+     */
+    @Test
+    void failFast_dropAndPassThresholdAroundEstimatedPrefill() throws InterruptedException {
+        // Case 1: remainingBudgetMs(200) < estimatedPrefillMs(250) → drop
+        {
+            FlexlbConfig config = autoTpmOnConfig();
+            PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+            PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+            when(endpoint.getPredictor()).thenReturn(predictor);
+            when(endpoint.getInflightBatchCount()).thenReturn(0);
+            when(endpoint.realWaitTimeMs()).thenReturn(0L);
+            when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(250L);
+            when(predictor.predictBatchMs(anyList())).thenReturn(250.0);
+            when(predictor.predictBatchMsUncached(anyList())).thenReturn(250.0);
+            BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+            long now = System.currentTimeMillis();
+            BatchItem head = item(1L, now - 500, 100, 50);
+            head.ctx().setBudget(ScheduleBudget.forDeadline(50, now - 500, now + 200));
+            head.setSortKey(now - 100);
+            BatcherContext ctx = context(endpoint, config, handler, queueWith(head));
+
+            new SloBudgetBatcherAlgorithm().processQueue(ctx);
+
+            verify(handler).onExpired(head);
+            assertEquals(0, ctx.size(), "fail-fast must drop the head");
+        }
+
+        // Case 2: remainingBudgetMs(300) >= estimatedPrefillMs(250) → pass (deadline_guard)
+        {
+            FlexlbConfig config = autoTpmOnConfig();
+            PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+            PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+            when(endpoint.getPredictor()).thenReturn(predictor);
+            when(endpoint.getInflightBatchCount()).thenReturn(0);
+            when(endpoint.realWaitTimeMs()).thenReturn(0L);
+            when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(250L);
+            when(predictor.predictBatchMs(anyList())).thenReturn(250.0);
+            when(predictor.predictBatchMsUncached(anyList())).thenReturn(250.0);
+            BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+            long now = System.currentTimeMillis();
+            BatchItem head = item(2L, now - 500, 100, 50);
+            head.ctx().setBudget(ScheduleBudget.forDeadline(50, now - 500, now + 300));
+            head.setSortKey(now - 100);
+            BatcherContext ctx = context(endpoint, config, handler, queueWith(head));
+
+            new SloBudgetBatcherAlgorithm().processQueue(ctx);
+
+            verify(handler, never()).onExpired(any(BatchItem.class));
+            ArgumentCaptor<DispatchMeta> meta = ArgumentCaptor.forClass(DispatchMeta.class);
+            verify(handler).onBatchReady(anyList(), meta.capture());
+            assertEquals("deadline_guard", meta.getValue().reason());
+        }
+    }
+
     // ---- helpers ----
 
     private static FlexlbConfig autoTpmOnConfig() {

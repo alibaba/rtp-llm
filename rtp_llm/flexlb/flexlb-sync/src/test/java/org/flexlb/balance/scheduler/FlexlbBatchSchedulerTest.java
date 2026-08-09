@@ -27,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -557,6 +558,55 @@ class FlexlbBatchSchedulerTest {
         ctx.setConfig(new FlexlbConfig());
         ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
         return ctx;
+    }
+
+    // ==================== P0-1: onTimeout terminal handling (PR-D) ====================
+
+    @Test
+    void onTimeout_settlesWithBatchSloExpired_andLateSuccessIsNoop() {
+        // The dispatch timeout path (DispatchCallback.onTimeout) completes the
+        // future with BATCH_SLO_EXPIRED, removes the inflight entry, and a late
+        // onSuccess (stale ack) is a harmless no-op — the entry is already gone.
+        BatchItem item = offerFailureItem(301);
+        assertTrue(scheduler.registerInflight(item));
+
+        scheduler.onTimeout(item, new TimeoutException("test EnqueueBatch deadline"));
+
+        Response response = item.future().getNow(null);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
+
+        // Late ack: entry already removed by finishEntry → entryFor returns null
+        scheduler.onSuccess(item, 1L);
+        Response unchanged = item.future().getNow(null);
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), unchanged.getCode());
+
+        // Idempotent: a second timeout is also a no-op
+        scheduler.onTimeout(item, new TimeoutException("second"));
+        Response stillUnchanged = item.future().getNow(null);
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), stillUnchanged.getCode());
+    }
+
+    // ==================== P0-3: close/handover race (PR-D) ====================
+
+    @Test
+    void concurrentTimeout_exactlyOneTerminalVerb() throws Exception {
+        // Two threads race to time out the same inflight entry. The
+        // synchronized(entry) + RequestLifecycle.isTerminal() guard ensures
+        // exactly one terminal verb settles the future (CAS-like idempotency).
+        BatchItem item = offerFailureItem(302);
+        assertTrue(scheduler.registerInflight(item));
+
+        CompletableFuture<Void> t1 = CompletableFuture.runAsync(() ->
+                scheduler.onTimeout(item, new TimeoutException("first")));
+        CompletableFuture<Void> t2 = CompletableFuture.runAsync(() ->
+                scheduler.onTimeout(item, new TimeoutException("second")));
+        CompletableFuture.allOf(t1, t2).get(3, TimeUnit.SECONDS);
+
+        assertTrue(item.future().isDone());
+        Response response = item.future().getNow(null);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
     }
 
     private static byte[] generateInputBytes(long requestId) {

@@ -1,5 +1,6 @@
 package org.flexlb.config;
 
+import org.flexlb.dao.ScheduleBudget;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -123,6 +124,40 @@ class PrioritySloPolicyTest {
     void deadlineMs_is_arrival_plus_slo_minus_predicted_prefill() {
         assertEquals(1180L, PrioritySloPolicy.deadlineMs(1000L, 300L, 120L));
         assertEquals(950L, PrioritySloPolicy.deadlineMs(1000L, 150L, 200L));
+    }
+
+    // ==================== P2-7: FIRST_ROUTE_ALPHA=0.6 routing deadline (PR-A) ====================
+
+    /**
+     * Per-attempt routing deadline: the first route (attempt ≤ 1) gets a
+     * 60% discount of remaining time to encourage early commitment;
+     * subsequent attempts use the full deadline.
+     */
+    @Test
+    void routeDeadlineMs_appliesAlphaDiscountOnFirstAttemptAndFullOnRetry() {
+        long arrival = 10_000L;
+        long deadline = 10_300L; // arrival + 300
+        ScheduleBudget budget = ScheduleBudget.forDeadline(50, arrival, deadline);
+
+        // attempt=1: 60% of remaining(300) = 180 → 10_180
+        assertEquals(10_180L, budget.routeDeadlineMs(1, 10_000L));
+
+        // attempt=0: ≤1 treated as first route → same 60% discount
+        assertEquals(10_180L, budget.routeDeadlineMs(0, 10_000L));
+
+        // attempt=2: full deadline regardless of now
+        assertEquals(10_300L, budget.routeDeadlineMs(2, 10_000L));
+        assertEquals(10_300L, budget.routeDeadlineMs(2, 10_100L));
+
+        // attempt=1, now=10_100: remaining=200, 60% = 120 → 10_220
+        assertEquals(10_220L, budget.routeDeadlineMs(1, 10_100L));
+
+        // Negative remaining (now past deadline): 60% of -100 = -60 → 10_340
+        // Design quirk: first-route deadline (10_340) is later than full
+        // deadline (10_300) because the alpha discount is applied to a
+        // negative remaining, making it less negative.
+        assertEquals(10_340L, budget.routeDeadlineMs(1, 10_400L));
+        assertEquals(10_300L, budget.routeDeadlineMs(2, 10_400L));
     }
 
     // ==================== invalid spec fallback ====================
