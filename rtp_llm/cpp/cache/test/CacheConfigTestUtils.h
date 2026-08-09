@@ -600,17 +600,17 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.layer_num                   = static_cast<uint32_t>(layer_num);
-    config.seq_size_per_block          = tokens_per_block;
-    config.linear_step                 = 2;
-    const int resolved_group_layer_num = std::max(group_layer_num, 1);
+    config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.seq_size_per_block = tokens_per_block;
+    config.linear_step        = 2;
+    RTP_LLM_CHECK_WITH_INFO(group_layer_num > 0 && layer_num > 0 && (layer_num % group_layer_num) == 0
+                                && (layer_num / group_layer_num) >= 2,
+                            "makeSimpleHybridMhaCacheConfig requires layer_num divisible by group_layer_num into at "
+                            "least 2 groups, got layer_num=%d group_layer_num=%d",
+                            layer_num,
+                            group_layer_num);
 
-    if (layer_num <= 0 || (layer_num % resolved_group_layer_num) != 0 || (layer_num / resolved_group_layer_num) < 2) {
-        return makeSimpleMhaCacheConfig(
-            layer_num, block_num, tokens_per_block, dtype, local_head_num_kv, size_per_head);
-    }
-
-    const int group_cnt = layer_num / resolved_group_layer_num;
+    const int group_cnt = layer_num / group_layer_num;
 
     auto linear_spec = makeLinearSpec("linear", tokens_per_block, dtype, local_head_num_kv, size_per_head);
     auto full_spec   = makeMhaSpec("full", tokens_per_block, dtype, local_head_num_kv, size_per_head);
@@ -620,9 +620,9 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
 
     for (int gid = 0; gid < group_cnt; ++gid) {
         std::vector<int> group_layers;
-        group_layers.reserve(static_cast<size_t>(resolved_group_layer_num));
-        for (int local = 0; local < resolved_group_layer_num; ++local) {
-            group_layers.push_back(gid * resolved_group_layer_num + local);
+        group_layers.reserve(static_cast<size_t>(group_layer_num));
+        for (int local = 0; local < group_layer_num; ++local) {
+            group_layers.push_back(gid * group_layer_num + local);
         }
         if (gid == 0) {
             groups.push_back(

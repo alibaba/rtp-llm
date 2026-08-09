@@ -68,7 +68,6 @@ public:
     std::vector<CacheKeyType> cacheKeys() const;
 
 private:
-    using LayerBlockIds     = std::vector<const BlockIds*>;
     using LayerAttnBlockIds = std::vector<std::unordered_map<std::string, const BlockIds*>>;
 
     struct LayerGroupSlot {
@@ -125,21 +124,12 @@ private:
                                                    const std::vector<LayerGroupSlot>& slots,
                                                    int                                start_index,
                                                    int                                read_num);
-    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType& cache_keys,
-                                                   const LayerBlockIds& layer_block_ids,
-                                                   int                  start_index,
-                                                   int                  read_num);
     std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType&               cache_keys,
                                                     const LayerAttnBlockIds&           layer_attn_block_ids,
                                                     const std::vector<LayerGroupSlot>& slots,
                                                     int                                start_index,
                                                     int                                write_num,
                                                     bool&                              no_need_write);
-    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
-                                                    const LayerBlockIds& layer_block_ids,
-                                                    int                  start_index,
-                                                    int                  write_num,
-                                                    bool&                no_need_write);
     std::shared_ptr<CopyPlan> createCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
                                              const CopyDirection&               direction);
     bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
@@ -155,11 +145,6 @@ private:
                             bool                             is_complete,
                             std::vector<torch::Tensor>&      dst,
                             std::vector<torch::Tensor>&      src);
-    bool prepareLayerCopyBuffers(BlockIdxType                     mem_block,
-                                 const std::vector<BlockIdxType>& gpu_blocks,
-                                 CopyDirection                    direction,
-                                 std::vector<torch::Tensor>&      dst,
-                                 std::vector<torch::Tensor>&      src);
     bool appendCopyBytesToBuffers(const BlockInfo&            mem_block,
                                   const BlockInfo&            gpu_block,
                                   size_t                      byte_off,
@@ -186,26 +171,23 @@ private:
                                                          const std::vector<LayerGroupSlot>&        slots);
     bool                               hasTypedLayerGroupSlots(const std::vector<LayerGroupSlot>& slots) const;
     bool                               supportsTypedPrefixCacheLayout(const std::vector<LayerGroupSlot>& slots) const;
-    bool                      checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
-    LayerBlockIds             resourceLayerBlocks(const KVCacheResource& resource) const;
-    LayerAttnBlockIds         resourceLayerRegionBlocks(const KVCacheResource&             resource,
-                                                        const std::vector<LayerGroupSlot>& slots) const;
-    bool                      checkLayerRegionBlocks(const LayerAttnBlockIds&           layer_attn_block_ids,
-                                                     const std::vector<LayerGroupSlot>& slots,
-                                                     size_t                             required_len) const;
-    bool                      gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
-    bool                      gpuBlocksAllValid(const LayerAttnBlockIds&           layer_attn_block_ids,
-                                                const std::vector<LayerGroupSlot>& slots,
-                                                size_t                             key_index) const;
-    bool                      usePrefixTreeMemoryCache() const;
-    bool                      kindRequiredAt(const LayerAttnBlockIds&           layer_attn_block_ids,
-                                             const std::vector<LayerGroupSlot>& slots,
-                                             size_t                             key_index,
-                                             CacheBlockKind                     kind) const;
-    std::vector<uint8_t>      prefixSlotValidMask(const LayerAttnBlockIds&           layer_attn_block_ids,
-                                                  const std::vector<LayerGroupSlot>& slots,
-                                                  size_t                             key_index,
-                                                  CacheBlockKind                     kind) const;
+    LayerAttnBlockIds                  resourceLayerRegionBlocks(const KVCacheResource&             resource,
+                                                                 const std::vector<LayerGroupSlot>& slots) const;
+    bool                               checkLayerRegionBlocks(const LayerAttnBlockIds&           layer_attn_block_ids,
+                                                              const std::vector<LayerGroupSlot>& slots,
+                                                              size_t                             required_len) const;
+    bool                               gpuBlocksAllValid(const LayerAttnBlockIds&           layer_attn_block_ids,
+                                                         const std::vector<LayerGroupSlot>& slots,
+                                                         size_t                             key_index) const;
+    bool                               usePrefixTreeMemoryCache() const;
+    bool                               kindRequiredAt(const LayerAttnBlockIds&           layer_attn_block_ids,
+                                                      const std::vector<LayerGroupSlot>& slots,
+                                                      size_t                             key_index,
+                                                      CacheBlockKind                     kind) const;
+    std::vector<uint8_t>               prefixSlotValidMask(const LayerAttnBlockIds&           layer_attn_block_ids,
+                                                           const std::vector<LayerGroupSlot>& slots,
+                                                           size_t                             key_index,
+                                                           CacheBlockKind                     kind) const;
     size_t                    prefixKindBlockSize(CacheBlockKind kind, const std::vector<LayerGroupSlot>& slots) const;
     std::shared_ptr<CopyPlan> buildPrefixCopyPlanForRead(const CacheKeysType&               cache_keys,
                                                          const BlockDependenciesType&       dependencies,
@@ -275,7 +257,6 @@ private:
     void                       initBlockPool();
     void                       initDiskBlockPools();
     bool                       diskCacheEnabled() const;
-    bool                       copyItemUsesLayerBlocks(const NormalizedCopyItem& item) const;
     int64_t                    copyPlanTimeoutMs(const std::shared_ptr<CopyPlan>& copy_plan) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
     std::string                blockPoolDebugString() const;

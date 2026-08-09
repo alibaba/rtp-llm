@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 
 namespace rtp_llm {
 
@@ -30,13 +29,8 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
                 cache_config.kernelSeqSizePerBlockForGroup(*kernel_tag);
         }
         for (const auto& group : cache_config.topology().groups()) {
-            const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
-            const auto kv_block_stride_bytes          = use_group_local_storage_layout ?
-                                                            group.kv_block_stride_bytes :
-                                                            BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(cache_config);
-            const auto kv_scale_stride_bytes          = use_group_local_storage_layout ?
-                                                            group.kv_scale_stride_bytes :
-                                                            BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(cache_config);
+            const auto kv_block_stride_bytes = group.kv_block_stride_bytes;
+            const auto kv_scale_stride_bytes = group.kv_scale_stride_bytes;
             RTP_LLM_CHECK(
                 model_input_gatherer_config_.group_kv_block_stride_bytes.emplace(group.tag, kv_block_stride_bytes)
                     .second);

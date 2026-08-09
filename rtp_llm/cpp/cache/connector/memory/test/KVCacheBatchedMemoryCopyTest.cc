@@ -85,12 +85,10 @@ TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
 
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     CacheConfig        config;
-    constexpr auto     dtype           = rtp_llm::DataType::TYPE_UINT8;
-    constexpr uint32_t block_num       = 512;
-    config.layer_num                   = use_flash ? 43 : 61;
-    config.seq_size_per_block          = 256;
-    config.use_independent_block_pools = true;
-
+    constexpr auto     dtype                    = rtp_llm::DataType::TYPE_UINT8;
+    constexpr uint32_t block_num                = 512;
+    config.layer_num                            = use_flash ? 43 : 61;
+    config.seq_size_per_block                   = 256;
     constexpr size_t               kDsv4PoolNum = 7;
     const std::vector<std::string> group_tags   = {
         "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
@@ -164,6 +162,27 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         group.kv_scale_stride_bytes = group_kv_scale_stride_bytes[gid];
         groups.push_back(std::move(group));
     }
+    setTestTopology(config, std::move(groups));
+    return config;
+}
+
+CacheConfig makeCanonicalCompositeMemoryCopyConfig() {
+    CacheConfig config;
+    config.layer_num          = 3;
+    config.seq_size_per_block = 1;
+
+    auto make_group = [&](std::string tag, size_t stride, std::vector<int> layers, CacheGroupType group_type) {
+        RTP_LLM_CHECK_WITH_INFO(stride % 2 == 0, "test MHA stride must contain equally-sized K/V payloads");
+        KVCacheSpecPtr spec  = makeResolvedMhaSpec(TYPE_UINT8, 1, stride / 2, 1, tag);
+        auto           group = makeTestGroupForConfig(config, std::move(spec), std::move(layers), group_type, tag);
+        group.block_num      = 8;
+        return group;
+    };
+
+    std::vector<GroupBase> groups;
+    groups.push_back(make_group("zeta", 32, {0}, CacheGroupType::FULL));
+    groups.push_back(make_group("beta", 24, {1, 2}, CacheGroupType::FULL));
+    groups.push_back(make_group("alpha", 16, {0, 2}, CacheGroupType::FULL));
     setTestTopology(config, std::move(groups));
     return config;
 }
@@ -316,6 +335,10 @@ public:
         return static_cast<int>(config_.seq_size_per_block);
     }
 
+    BlockPoolPtr getBlockPool(std::string_view) const override {
+        return nullptr;
+    }
+
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr&, int, int) const override {
         return 0;
     }
@@ -345,10 +368,6 @@ private:
         return {false, 0};
     }
 
-    int getNeedBlocks(const MallocInfo&) const override {
-        return 0;
-    }
-
     void decrKVCacheRef(const KVCacheResource&, bool) override {}
 
     std::map<std::pair<int, std::string>, torch::Tensor> tensors_;
@@ -357,7 +376,216 @@ private:
     size_t                                               payload_gap_bytes_ = 0;
 };
 
+class FakeDiskBlockIO: public IDiskBlockIO {
+public:
+    bool openAndPreallocate(const std::string&, size_t bytes, bool) override {
+        data_.assign(bytes, 0);
+        return true;
+    }
+
+    bool read(uint64_t offset, void* dst, size_t bytes) override {
+        if (offset + bytes > data_.size()) {
+            return false;
+        }
+        std::memcpy(dst, data_.data() + offset, bytes);
+        return true;
+    }
+
+    bool write(uint64_t offset, const void* src, size_t bytes) override {
+        if (offset + bytes > data_.size()) {
+            return false;
+        }
+        std::memcpy(data_.data() + offset, src, bytes);
+        return true;
+    }
+
+    void close() override {}
+
+    std::string debugString() const override {
+        return "fake-disk-block-io";
+    }
+
+private:
+    std::vector<unsigned char> data_;
+};
+
 }  // namespace
+
+TEST(KVCacheBatchedMemoryCopyTest, CanonicalCompositeSlotsAreSortedAndSizedBySlotSum) {
+    auto config = makeCanonicalCompositeMemoryCopyConfig();
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 1;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+
+    auto connector = std::make_shared<KVCacheMemoryConnector>(
+        config, kv_config, std::shared_ptr<KVCacheAllocator>(), std::vector<std::string>{"127.0.0.1:1"});
+    const auto& slots = connector->layerGroupSlots();
+
+    ASSERT_EQ(slots.size(), 5u);
+    EXPECT_EQ(slots[0].layer_id, 0);
+    EXPECT_EQ(slots[0].tag, "alpha");
+    EXPECT_EQ(slots[0].stride_bytes, 16u);
+    EXPECT_EQ(slots[1].layer_id, 0);
+    EXPECT_EQ(slots[1].tag, "zeta");
+    EXPECT_EQ(slots[1].stride_bytes, 32u);
+    EXPECT_EQ(slots[2].layer_id, 1);
+    EXPECT_EQ(slots[2].tag, "beta");
+    EXPECT_EQ(slots[2].stride_bytes, 24u);
+    EXPECT_EQ(slots[3].layer_id, 2);
+    EXPECT_EQ(slots[3].tag, "alpha");
+    EXPECT_EQ(slots[3].stride_bytes, 16u);
+    EXPECT_EQ(slots[4].layer_id, 2);
+    EXPECT_EQ(slots[4].tag, "beta");
+    EXPECT_EQ(slots[4].stride_bytes, 24u);
+    EXPECT_EQ(connector->memoryCacheBlockSizeBytes(), 112u);
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, CanonicalCompositeMemoryRoundTripPreservesNullSlotOffset) {
+    auto config = makeCanonicalCompositeMemoryCopyConfig();
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 1;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+
+    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(
+        config, /*payload_gap_bytes=*/0, std::set<std::string>{"alpha", "beta", "zeta"});
+    auto connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, std::vector<std::string>{"127.0.0.1:1"});
+    ASSERT_TRUE(connector->init());
+    const auto& slots = connector->layerGroupSlots();
+    ASSERT_EQ(connector->memoryCacheBlockSizeBytes(), 112u);
+
+    auto mem_blocks = connector->block_pool_->malloc(1);
+    ASSERT_EQ(mem_blocks.size(), 1u);
+    const auto mem_block = static_cast<BlockIdxType>(mem_blocks[0]);
+    const auto mem_bufs  = connector->block_pool_->convertIndexToBuffer(0, mem_block);
+    ASSERT_EQ(mem_bufs.size(), 1u);
+    const auto& mem_buffer = mem_bufs[0];
+    setBlockBytes(mem_buffer, 0, connector->memoryCacheBlockSizeBytes(), 'N');
+
+    std::vector<BlockIdxType> gpu_blocks{1, NULL_BLOCK_IDX, 3, 4, 5};
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (isNullBlockIdx(gpu_blocks[i])) {
+            continue;
+        }
+        setBlockInfosContent(allocator->convertIndexToBuffer(slots[i].layer_id, slots[i].tag, gpu_blocks[i]),
+                             static_cast<char>('a' + i));
+    }
+
+    MemoryOperationRequestPB d2h;
+    d2h.set_copy_direction(MemoryOperationRequestPB::D2H);
+    auto* d2h_item = d2h.add_copy_items();
+    d2h_item->set_mem_block(mem_block);
+    d2h_item->set_is_complete(true);
+    d2h_item->set_cache_block_kind(MemoryOperationRequestPB::COMPLETE_KV);
+    addTaggedGpuBlocks(*d2h_item, slots, gpu_blocks);
+    MemoryOperationResponsePB d2h_response;
+    ASSERT_TRUE(connector->copyCache(d2h, d2h_response));
+    ASSERT_TRUE(d2h_response.success());
+
+    size_t byte_offset = 0;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        verifyBlockBytesEq(mem_buffer,
+                           byte_offset,
+                           slots[i].stride_bytes,
+                           isNullBlockIdx(gpu_blocks[i]) ? 'N' : static_cast<char>('a' + i));
+        byte_offset += slots[i].stride_bytes;
+    }
+
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (isNullBlockIdx(gpu_blocks[i])) {
+            continue;
+        }
+        setBlockInfosContent(allocator->convertIndexToBuffer(slots[i].layer_id, slots[i].tag, gpu_blocks[i]), '0');
+    }
+    MemoryOperationRequestPB h2d;
+    h2d.set_copy_direction(MemoryOperationRequestPB::H2D);
+    auto* h2d_item = h2d.add_copy_items();
+    h2d_item->set_mem_block(mem_block);
+    h2d_item->set_is_complete(true);
+    h2d_item->set_cache_block_kind(MemoryOperationRequestPB::COMPLETE_KV);
+    addTaggedGpuBlocks(*h2d_item, slots, gpu_blocks);
+    MemoryOperationResponsePB h2d_response;
+    ASSERT_TRUE(connector->copyCache(h2d, h2d_response));
+    ASSERT_TRUE(h2d_response.success());
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (isNullBlockIdx(gpu_blocks[i])) {
+            continue;
+        }
+        verifyBlockInfosContent(allocator->convertIndexToBuffer(slots[i].layer_id, slots[i].tag, gpu_blocks[i]),
+                                static_cast<char>('a' + i));
+    }
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, CanonicalCompositeSlotsRoundTripThroughInjectedDiskPool) {
+    auto config = makeCanonicalCompositeMemoryCopyConfig();
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb         = 1;
+    kv_config.memory_cache_sync_timeout_ms = 1000;
+
+    auto allocator = std::make_shared<FakeTypedKVCacheAllocator>(
+        config, /*payload_gap_bytes=*/0, std::set<std::string>{"alpha", "beta", "zeta"});
+    auto connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, allocator, std::vector<std::string>{"127.0.0.1:1"});
+    ASSERT_TRUE(connector->init());
+    const auto& slots = connector->layerGroupSlots();
+
+    // This test isolates composite-slot copying with a fake IO-backed pool. Production disk-pool construction and
+    // mount/Posix IO behavior are covered separately by DiskBlockPoolTest.
+    DiskBlockPoolConfig disk_config;
+    disk_config.work_dir           = "/unused/fake-disk";
+    disk_config.disk_size_bytes    = 4096;
+    disk_config.block_size_bytes   = connector->memoryCacheBlockSizeBytes();
+    disk_config.buffered_io        = true;
+    disk_config.pool_kind          = CacheBlockKind::COMPLETE;
+    connector->complete_disk_pool_ = std::make_shared<DiskBlockPool>(disk_config, std::make_unique<FakeDiskBlockIO>());
+    ASSERT_TRUE(connector->complete_disk_pool_->init());
+    ASSERT_EQ(connector->complete_disk_pool_->blockSizeBytes(), 112u);
+    const auto disk_slot = connector->complete_disk_pool_->malloc();
+    ASSERT_TRUE(disk_slot.has_value());
+
+    const std::vector<BlockIdxType> gpu_blocks{1, 2, 3, 4, 5};
+    for (size_t i = 0; i < slots.size(); ++i) {
+        setBlockInfosContent(allocator->convertIndexToBuffer(slots[i].layer_id, slots[i].tag, gpu_blocks[i]),
+                             static_cast<char>('a' + i));
+    }
+
+    MemoryOperationRequestPB d2h;
+    d2h.set_copy_direction(MemoryOperationRequestPB::D2H);
+    auto* d2h_item = d2h.add_copy_items();
+    d2h_item->set_mem_block(NULL_BLOCK_IDX);
+    d2h_item->set_backing_type(MemoryOperationRequestPB::DISK);
+    d2h_item->set_disk_slot(*disk_slot);
+    d2h_item->set_is_complete(true);
+    d2h_item->set_cache_block_kind(MemoryOperationRequestPB::COMPLETE_KV);
+    addTaggedGpuBlocks(*d2h_item, slots, gpu_blocks);
+    MemoryOperationResponsePB d2h_response;
+    ASSERT_TRUE(connector->copyCache(d2h, d2h_response));
+    ASSERT_TRUE(d2h_response.success());
+
+    for (size_t i = 0; i < slots.size(); ++i) {
+        setBlockInfosContent(allocator->convertIndexToBuffer(slots[i].layer_id, slots[i].tag, gpu_blocks[i]), '0');
+    }
+
+    MemoryOperationRequestPB h2d;
+    h2d.set_copy_direction(MemoryOperationRequestPB::H2D);
+    auto* h2d_item = h2d.add_copy_items();
+    h2d_item->set_mem_block(NULL_BLOCK_IDX);
+    h2d_item->set_backing_type(MemoryOperationRequestPB::DISK);
+    h2d_item->set_disk_slot(*disk_slot);
+    h2d_item->set_is_complete(true);
+    h2d_item->set_cache_block_kind(MemoryOperationRequestPB::COMPLETE_KV);
+    addTaggedGpuBlocks(*h2d_item, slots, gpu_blocks);
+    MemoryOperationResponsePB h2d_response;
+    ASSERT_TRUE(connector->copyCache(h2d, h2d_response));
+    ASSERT_TRUE(h2d_response.success());
+    for (size_t i = 0; i < slots.size(); ++i) {
+        verifyBlockInfosContent(allocator->convertIndexToBuffer(slots[i].layer_id, slots[i].tag, gpu_blocks[i]),
+                                static_cast<char>('a' + i));
+    }
+}
 
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
