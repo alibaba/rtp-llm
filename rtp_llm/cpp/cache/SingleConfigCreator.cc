@@ -75,12 +75,9 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(layer_num);
     config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
     config.seq_size_per_block = tokens_per_block;
-
-    config.use_mla   = model_config.attn_config.use_mla;
-    config.dtype     = dtype;
-    config.is_sparse = model_config.attn_config.is_sparse;
+    config.use_mla            = model_config.attn_config.use_mla;
+    config.is_sparse          = model_config.attn_config.is_sparse;
 
     auto [spec, policy] = getDefaultSpecFromRuntimeSpecs(model_config, runtime_specs);
 
@@ -93,31 +90,19 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     group.layer_ids         = layer_ids;
     group.local_kv_head_num = resolveLocalKVHeadNum(
         spec->type, model_config.attn_config, model_config.linear_attention_config, parallelism_config);
-    group.uses_sparse_indexer_scale_layout = config.is_sparse && spec->type == KVCacheSpecType::MultiHeadAttention;
+    group.uses_sparse_indexer_scale_layout =
+        model_config.attn_config.is_sparse && spec->type == KVCacheSpecType::MultiHeadAttention;
 
     // Using spec interface for block size and scale
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
+    group.kv_block_stride_bytes = spec->block_size_bytes();
 
     // scale_block_size_bytes() returns 0 when scales are not used.
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+    group.kv_scale_stride_bytes = spec->scale_block_size_bytes();
 
-    if (config.is_sparse) {
-        auto indexer_dim             = model_config.attn_config.indexer_head_dim;
-        config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
-        config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+    if (model_config.attn_config.is_sparse) {
+        auto indexer_dim            = model_config.attn_config.indexer_head_dim;
+        group.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
     }
-
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.group_layer_num  = layer_num;  // only 1 group for SingleConfig
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
-
-    group.kv_block_stride_bytes = config.kv_block_stride_bytes;
-    group.kv_scale_stride_bytes = config.kv_scale_stride_bytes;
 
     std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
     for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {

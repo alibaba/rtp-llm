@@ -188,11 +188,7 @@ private:
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
         const size_t all_group_num       = full_group_tags_.size() + other_group_tags_.size();
         cache_config_.layer_num          = all_group_num * layer_num;
-        cache_config_.layer_all_num      = all_group_num * layer_num;
-        cache_config_.group_layer_num    = layer_num;
-        cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
-        cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
 
         auto full_spec   = makeTestMhaSpec("full", static_cast<uint32_t>(seq_size_per_block));
         auto linear_spec = makeTestLinearSpec("linear", static_cast<uint32_t>(seq_size_per_block));
@@ -216,20 +212,11 @@ private:
                 makeTestGroupForConfig(cache_config_, linear_spec, std::move(layer_ids), CacheGroupType::LINEAR, tag));
         }
         setTestTopology(cache_config_, std::move(groups));
+        cache_config_.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
 
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
         ASSERT_GE(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
-        cache_config_.kv_block_stride_bytes = full_kv_block_stride_bytes;
-        cache_config_.kv_block_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_block_stride_bytes;
-        cache_config_.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-        cache_config_.kv_scale_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_scale_stride_bytes;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-        const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-        cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
-                                                         static_cast<int>(per_layer_stride_bytes));
     }
 };
 

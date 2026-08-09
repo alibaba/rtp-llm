@@ -354,8 +354,7 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
     prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
-    cache_manager_->config_.disable_decode_first_malloc_device_reuse = true;
-    auto& resource                                                   = stream_->streamCacheResource();
+    auto& resource = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);
 
     // Enable query-level reuse/device cache, but decode initKVBlock should still force device cache off.

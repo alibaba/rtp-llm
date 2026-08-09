@@ -115,15 +115,6 @@ KVCacheSpecPtr representativeSpec(const std::vector<GroupBase>& groups, CacheGro
     return result;
 }
 
-int groupLayerNumForGroups(const std::vector<GroupBase>& groups) {
-    size_t group_layer_num = 0;
-    for (const auto& group : groups) {
-        group_layer_num = std::max(group_layer_num, group.layer_ids.size());
-    }
-    RTP_LLM_CHECK_WITH_INFO(group_layer_num > 0, "hybrid cache groups must not be empty");
-    return static_cast<int>(group_layer_num);
-}
-
 void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups) {
     std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
     for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
@@ -144,29 +135,6 @@ void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups)
 }
 
 }  // namespace
-
-void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
-                                             const KVCacheSpecPtr& full_spec,
-                                             const KVCacheSpecPtr& linear_spec) {
-    RTP_LLM_CHECK_WITH_INFO(full_spec != nullptr || linear_spec != nullptr,
-                            "hybrid config requires at least one cache spec");
-
-    const size_t full_kv_block_stride_bytes   = full_spec == nullptr ? 0 : full_spec->block_size_bytes();
-    const size_t linear_kv_block_stride_bytes = linear_spec == nullptr ? 0 : linear_spec->block_size_bytes();
-
-    if (full_spec != nullptr && linear_spec != nullptr) {
-        // now we only support that linear attention block have padding
-        RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
-                                "not support full attention with padding now");
-    }
-
-    const auto& physical_spec    = full_spec != nullptr ? full_spec : linear_spec;
-    config.kv_block_stride_bytes = std::max(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = physical_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-}
 
 CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       model_config,
                                                     const ParallelismConfig& parallelism_config,
@@ -190,29 +158,23 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     CacheConfig config;
     config.layer_num          = static_cast<uint32_t>(model_config.num_layers);
     config.layer_all_num      = config.layer_num;
-    config.block_num          = 0;
     config.seq_size_per_block = tokens_per_block;
     config.use_mla            = model_config.attn_config.use_mla;
-    config.dtype              = dtype;
     config.linear_step        = 1;
 
     auto cache_groups = buildGroups(runtime_specs, model_config, parallelism_config);
     auto full_spec    = representativeSpec(cache_groups, CacheGroupType::FULL);
     auto linear_spec  = representativeSpec(cache_groups, CacheGroupType::LINEAR);
 
-    config.group_layer_num = groupLayerNumForGroups(cache_groups);
-
-    // Complete scalar and per-layer physical layout before publishing the topology.
-    HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
+    if (full_spec != nullptr && linear_spec != nullptr) {
+        RTP_LLM_CHECK_WITH_INFO(full_spec->block_size_bytes() >= linear_spec->block_size_bytes(),
+                                "not support full attention with padding now");
+    }
 
     for (auto& group : cache_groups) {
         group.kv_block_stride_bytes = group.spec->block_size_bytes();
         group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
     }
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
 
     setupTopologyFromGroups(config, std::move(cache_groups));
 

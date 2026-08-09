@@ -36,8 +36,12 @@ TEST(ModelInputsLoggerTest, DumpsLoadableSnapshot) {
     DumpDirectory dump;
     {
         GptModelInputs inputs{};
-        inputs.combo_tokens   = torch::tensor({1, 2, 3}, torch::kInt32).cuda();
-        inputs.prefix_lengths = torch::tensor({0}, torch::kInt32);
+        inputs.combo_tokens                  = torch::tensor({1, 2, 3}, torch::kInt32).cuda();
+        inputs.prefix_lengths                = torch::tensor({0}, torch::kInt32);
+        inputs.group_kv_block_stride_bytes   = {{"full", 128}};
+        inputs.group_kv_scale_stride_bytes   = {{"full", 16}};
+        inputs.group_kv_block_transfer_bytes = {{"full", 96}};
+        inputs.group_kv_scale_transfer_bytes = {{"full", 8}};
         ModelInputsLogger logger(0, 1, nullptr);
         logger.log(inputs, ModelInputsModelRole::NORMAL, 7);
         inputs.combo_tokens = torch::tensor({4}, torch::kInt32).cuda();
@@ -57,10 +61,15 @@ TEST(ModelInputsLoggerTest, DumpsLoadableSnapshot) {
     const auto records = chunk.at("records").toList();
     ASSERT_EQ(records.size(), 2);
     const auto payload = records.get(0).toGenericDict();
+    EXPECT_EQ(payload.at("schema_version").toInt(), 2);
     EXPECT_EQ(payload.at("model_role").toStringRef(), "normal");
     EXPECT_EQ(payload.at("model_id").toInt(), 7);
     EXPECT_EQ(payload.at("execution_stage").toStringRef(), "prefill");
     EXPECT_TRUE(torch::equal(payload.at("combo_tokens").toTensor(), torch::tensor({1, 2, 3}, torch::kInt32)));
+    EXPECT_EQ(payload.at("group_kv_block_stride_bytes").toGenericDict().at("full").toInt(), 128);
+    EXPECT_EQ(payload.at("group_kv_scale_stride_bytes").toGenericDict().at("full").toInt(), 16);
+    EXPECT_EQ(payload.at("group_kv_block_transfer_bytes").toGenericDict().at("full").toInt(), 96);
+    EXPECT_EQ(payload.at("group_kv_scale_transfer_bytes").toGenericDict().at("full").toInt(), 8);
     EXPECT_EQ(records.get(1).toGenericDict().at("model_id").toInt(), 8);
 }
 }  // namespace

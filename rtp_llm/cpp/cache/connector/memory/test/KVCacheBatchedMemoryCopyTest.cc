@@ -84,27 +84,25 @@ TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
 }
 
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
-    CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
+    CacheConfig        config;
+    constexpr auto     dtype           = rtp_llm::DataType::TYPE_UINT8;
+    constexpr uint32_t block_num       = 512;
     config.layer_num                   = use_flash ? 43 : 61;
-    config.layer_all_num               = config.layer_num;
-    config.block_num                   = 512;
     config.seq_size_per_block          = 256;
     config.use_independent_block_pools = true;
-    config.use_typed_cache_regions     = true;
-    config.use_opaque_kv_cache_store   = true;
-    config.is_sparse                   = true;
 
     constexpr size_t               kDsv4PoolNum = 7;
     const std::vector<std::string> group_tags   = {
         "csa_kv", "hca_kv", "indexer_kv", "indexer_state", "csa_state", "hca_state", "swa_kv"};
-    const std::vector<CacheGroupType>                 group_types = {CacheGroupType::FULL,
-                                                                     CacheGroupType::FULL,
-                                                                     CacheGroupType::FULL,
-                                                                     CacheGroupType::SWA,
-                                                                     CacheGroupType::SWA,
-                                                                     CacheGroupType::SWA,
-                                                                     CacheGroupType::SWA};
+    std::vector<CacheGroupType> group_types;
+    group_types.reserve(kDsv4PoolNum);
+    group_types.push_back(CacheGroupType::FULL);
+    group_types.push_back(CacheGroupType::FULL);
+    group_types.push_back(CacheGroupType::FULL);
+    group_types.push_back(CacheGroupType::SWA);
+    group_types.push_back(CacheGroupType::SWA);
+    group_types.push_back(CacheGroupType::SWA);
+    group_types.push_back(CacheGroupType::SWA);
     std::unordered_map<std::string, CacheGroupPolicy> group_policies;
     for (size_t i = 0; i < group_tags.size(); ++i) {
         group_policies.emplace(group_tags[i], defaultCacheGroupPolicy(group_types[i]));
@@ -121,14 +119,13 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     }
     const std::vector<size_t>     group_kv_block_stride_bytes = {64, 16, 32, 48, 80, 40, 96};
     const std::vector<size_t>     group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
-    const std::vector<uint32_t>   group_block_nums(kDsv4PoolNum, config.block_num);
+    const std::vector<uint32_t>   group_block_nums(kDsv4PoolNum, block_num);
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
-    config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
 
     auto make_spec = [&](size_t gid) -> KVCacheSpecPtr {
         return makeResolvedOpaqueSpec(group_types[gid] != CacheGroupType::FULL,
                                       group_tags[gid],
-                                      config.dtype,
+                                      dtype,
                                       group_kv_block_stride_bytes[gid],
                                       static_cast<uint32_t>(config.seq_size_per_block));
     };
@@ -138,7 +135,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         layers_by_group[static_cast<size_t>(gid)].push_back(static_cast<int>(layer));
     };
 
-    for (size_t layer = 0; layer < config.layer_all_num; ++layer) {
+    for (size_t layer = 0; layer < config.layer_num; ++layer) {
         const bool is_csa = layer >= 2 && layer % 2 == 0;
         const bool is_hca = use_flash ? (layer >= 2 && layer % 2 == 1) : (!is_csa);
         if (is_csa) {
@@ -168,7 +165,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         groups.push_back(std::move(group));
     }
     setTestTopology(config, std::move(groups));
-    config.group_block_layout_initialized = true;
     return config;
 }
 
@@ -184,7 +180,6 @@ void setGroupStridesForConfig(CacheConfig& config, size_t kv_block_stride_bytes,
         group.kv_scale_stride_bytes = kv_scale_stride_bytes;
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
 }
 
 void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) {
@@ -249,7 +244,7 @@ public:
         payload_gap_bytes_(payload_gap_bytes) {
         const auto cuda_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
         const auto host_options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-        for (int layer = 0; layer < static_cast<int>(config.layer_all_num); ++layer) {
+        for (int layer = 0; layer < static_cast<int>(config.totalLayerNum()); ++layer) {
             for (const auto& group_ref : config.groupsForLayer(layer)) {
                 const auto&  group  = group_ref.get();
                 const size_t stride = group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
@@ -257,7 +252,7 @@ public:
                     continue;
                 }
                 const bool host_group = host_groups_.count(group.tag) > 0;
-                auto       tensor = torch::empty({static_cast<int64_t>(config.block_num), static_cast<int64_t>(stride)},
+                auto       tensor = torch::empty({static_cast<int64_t>(group.block_num), static_cast<int64_t>(stride)},
                                            host_group ? host_options : cuda_options);
                 if (host_group) {
                     tensor = tensor.pin_memory();
@@ -281,7 +276,7 @@ public:
         const auto tensor_it = tensors_.find(k);
         const auto stride_it = strides_.find(k);
         if (tensor_it == tensors_.end() || stride_it == strides_.end() || block_id < 0
-            || static_cast<uint32_t>(block_id) >= config_.block_num) {
+            || static_cast<uint32_t>(block_id) >= config_.group(tag).block_num) {
             return {};
         }
         const auto& tensor       = tensor_it->second;
