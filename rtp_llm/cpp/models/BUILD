@@ -232,12 +232,8 @@ cc_library(
     deps = [":sampling_ops"],
     alwayslink = True,
     visibility = [
-        "//rtp_llm/cpp/api_server/test:__pkg__",
-        "//rtp_llm/cpp/cache/connector/p2p/test:__pkg__",
-        "//rtp_llm/cpp/disaggregate/cache_store/test:__pkg__",
-        "//rtp_llm/cpp/model_rpc/test:__pkg__",
         "//rtp_llm/cpp/pybind:__pkg__",
-        "//rtp_llm/cpp/test:__pkg__",
+        "//rtp_llm/models_py/bindings/core:__pkg__",
     ],
 )
 

@@ -19,8 +19,10 @@ def device_test_envs():
 def device_impl_target():
     return select({
         "@//:using_cuda": [
-            "//rtp_llm/cpp/models:sampling_ops_impl",
-            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
         ],
         "//conditions:default": [],
     })

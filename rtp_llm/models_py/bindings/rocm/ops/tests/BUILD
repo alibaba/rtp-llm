@@ -6,7 +6,7 @@ cc_test = cc_test_wrapper
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/testing:base_tests",
-    "//rtp_llm/models_py/bindings/core:sampling_ops_impl",
+    "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
 ] + torch_deps()
 
 cc_test(

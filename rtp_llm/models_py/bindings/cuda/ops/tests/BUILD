@@ -1,4 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
+load("//bazel:device_defs.bzl", "device_impl_target")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
@@ -30,11 +31,10 @@ cc_library(
 )
 
 test_deps = [
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/testing:base_tests",
     ":cuda_test_util",
-] + torch_deps()
+] + device_impl_target() + torch_deps()
 
 
 cc_test(

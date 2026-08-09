@@ -21,7 +21,7 @@ cuda13_torch_link_deps = select({
 
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
     "//rtp_llm/cpp/normal_engine:normal_engine",
     "//rtp_llm/cpp/models:models",
     "//rtp_llm/cpp/config:config_modules",
@@ -80,7 +80,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/models_py/bindings/core:runtime_ops_test_impls",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
         "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
     ] + torch_deps(),
 )

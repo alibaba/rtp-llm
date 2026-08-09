@@ -139,6 +139,40 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "sampling_ops_test_impls",
+    deps = [
+        "//rtp_llm/cpp/models:sampling_ops_impl",
+    ] + select({
+        "@//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        ],
+        "@//:using_rocm": [
+            ":sampling_ops_impl",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//rtp_llm/cpp/api_server/test:__pkg__",
+        "//rtp_llm/cpp/cache/connector/p2p/test:__pkg__",
+        "//rtp_llm/cpp/disaggregate/cache_store/test:__pkg__",
+        "//rtp_llm/cpp/engine_base/schedulers/test:__pkg__",
+        "//rtp_llm/cpp/engine_base/stream/test:__pkg__",
+        "//rtp_llm/cpp/engine_base/system_prompt/test:__pkg__",
+        "//rtp_llm/cpp/model_rpc/test:__pkg__",
+        "//rtp_llm/cpp/models/logits_processor/test:__pkg__",
+        "//rtp_llm/cpp/models/position_ids/test:__pkg__",
+        "//rtp_llm/cpp/models/test:__pkg__",
+        "//rtp_llm/cpp/multimodal_processor/test:__pkg__",
+        "//rtp_llm/cpp/normal_engine/speculative/test:__pkg__",
+        "//rtp_llm/cpp/normal_engine/test:__pkg__",
+        "//rtp_llm/cpp/test:__pkg__",
+        "//rtp_llm/models_py/bindings/core/test:__pkg__",
+        "//rtp_llm/models_py/bindings/cuda/ops/tests:__pkg__",
+        "//rtp_llm/models_py/bindings/rocm/ops/tests:__pkg__",
+    ],
+)
+
 # DeviceData.h - standalone header for DeviceInitParams, DeviceType, etc.
 cc_library(
     name = "device_data",

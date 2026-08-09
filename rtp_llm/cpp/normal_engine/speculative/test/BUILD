@@ -1,4 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
+load("//bazel:device_defs.bzl", "device_impl_target")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
@@ -30,7 +31,7 @@ cc_test(
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + torch_deps(),
+    ] + torch_deps() + device_impl_target(),
     # CPU-only logic but normal_engine links libtorch_cuda; H20 host needed for loader.
     env = {
         "TEST_USING_DEVICE": "CUDA",
@@ -47,7 +48,6 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/normal_engine:normal_engine",
@@ -58,7 +58,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ] + torch_deps() + cuda13_torch_link_deps,
+    ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
@@ -74,7 +74,6 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/normal_engine:normal_engine",
         "//rtp_llm/cpp/models:models",
@@ -84,7 +83,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
-    ] + torch_deps() + cuda13_torch_link_deps,
+    ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

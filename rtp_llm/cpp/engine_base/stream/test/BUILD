@@ -24,7 +24,7 @@ test_deps = [
     "//rtp_llm/cpp/engine_base:engine_base",
     "//rtp_llm/cpp/engine_base/stream:stream",
     "//rtp_llm/cpp/testing:device_test_utils",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+    "//rtp_llm/models_py/bindings/core:sampling_ops_test_impls",
     "//rtp_llm/cpp/config:config_modules",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
