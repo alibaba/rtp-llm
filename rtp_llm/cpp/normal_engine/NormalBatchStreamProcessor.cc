@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 
 namespace rtp_llm {
 
@@ -18,11 +19,10 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.position_id_len_factor    = model_config.attn_config.rope_config.index_factor;
     model_input_gatherer_config_.role_type                 = pd_sep_config.role_type;
     model_input_gatherer_config_.decode_entrance           = pd_sep_config.decode_entrance;
-    model_input_gatherer_config_.block_stride_bytes        = cache_config.kv_block_stride_bytes;
-    model_input_gatherer_config_.scale_stride_bytes        = cache_config.kv_scale_stride_bytes;
     model_input_gatherer_config_.seq_size_per_block        = cache_config.seq_size_per_block;
     model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.seq_size_per_block;
-    model_input_gatherer_config_.use_opaque_kv_cache_store = cache_config.use_opaque_kv_cache_store;
+    model_input_gatherer_config_.use_opaque_kv_cache_store =
+        cache_config.groupNums() > 0 && cache_config.usesOpaqueKVCacheStore();
     if (cache_config.groupNums() > 0) {
         const auto kernel_tag = cache_config.kernelAddressedFullGroupTag();
         if (kernel_tag.has_value()) {
@@ -30,6 +30,25 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
                 cache_config.kernelSeqSizePerBlockForGroup(*kernel_tag);
         }
         for (const auto& group : cache_config.topology().groups()) {
+            const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
+            const auto kv_block_stride_bytes          = use_group_local_storage_layout ?
+                                                            group.kv_block_stride_bytes :
+                                                            BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(cache_config);
+            const auto kv_scale_stride_bytes          = use_group_local_storage_layout ?
+                                                            group.kv_scale_stride_bytes :
+                                                            BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(cache_config);
+            RTP_LLM_CHECK(
+                model_input_gatherer_config_.group_kv_block_stride_bytes.emplace(group.tag, kv_block_stride_bytes)
+                    .second);
+            RTP_LLM_CHECK(
+                model_input_gatherer_config_.group_kv_scale_stride_bytes.emplace(group.tag, kv_scale_stride_bytes)
+                    .second);
+            RTP_LLM_CHECK(model_input_gatherer_config_.group_kv_block_transfer_bytes
+                              .emplace(group.tag, group.kv_block_stride_bytes)
+                              .second);
+            RTP_LLM_CHECK(model_input_gatherer_config_.group_kv_scale_transfer_bytes
+                              .emplace(group.tag, group.kv_scale_stride_bytes)
+                              .second);
             RTP_LLM_CHECK(
                 model_input_gatherer_config_.kv_cache_group_types.emplace(group.tag, group.policy.group_type).second);
             RTP_LLM_CHECK(model_input_gatherer_config_.group_kernel_blocks_per_kv_block

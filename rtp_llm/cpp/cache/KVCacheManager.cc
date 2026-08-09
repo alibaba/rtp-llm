@@ -212,10 +212,9 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         }
     }
 
-    RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
+    RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, seq_size_per_block=%zu",
                      config_.layer_num,
-                     config_.block_num,
-                     config_.block_size_bytes,
+                     config_.blockNum(),
                      config_.seq_size_per_block);
 }
 
@@ -594,25 +593,26 @@ void KVCacheManager::initConnectorCoordinator() {
 }
 
 void KVCacheManager::allocateAndSync() {
-    RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
+    uint32_t block_num = config_.blockNum();
+    RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%u", block_num);
     size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
     if (world_size > 1) {
         size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
         auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
         auto   block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank] = config_.block_num;
+        block_num_ptr[local_rank] = block_num;
         execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
         if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            config_.block_num = 1;
+            block_num = 1;
         } else {
-            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+            block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
         }
     }
-    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
-    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
+    config_.finalizeBlockNums(block_num, runtime_config_);
+    RTP_LLM_LOG_INFO("block_num is %u after tp sync", config_.blockNum());
 }
 
 void KVCacheManager::reportMetricsLoop() {
@@ -723,8 +723,9 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                                          const std::string&   tag,
                                          const torch::Tensor& k_buffer,
                                          const torch::Tensor& v_buffer) {
-    if (block_index < 0 || block_index >= config_.block_num) {
-        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
+    const auto block_num = config_.blockNumForGroup(tag);
+    if (block_index < 0 || block_index >= static_cast<int>(block_num)) {
+        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %u)", block_index, block_num);
         return false;
     }
 

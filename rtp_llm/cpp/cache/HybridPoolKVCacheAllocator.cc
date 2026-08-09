@@ -119,10 +119,10 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
 namespace {
 const GroupBase& validatePoolGroupForLayer(const CacheConfig& config, int layer_id, std::string_view tag) {
-    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config.layer_all_num,
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config.totalLayerNum(),
                             "invalid layer id %d for layer_all_num=%u",
                             layer_id,
-                            config.layer_all_num);
+                            config.totalLayerNum());
     return config.topology().groupForLayer(layer_id, tag);
 }
 }  // namespace

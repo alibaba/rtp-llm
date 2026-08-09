@@ -115,7 +115,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     auto cache_cfg = makeMtpCacheConfigByCreateSpConfig(/*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/4);
 
     ASSERT_GT(cache_cfg.groupNums(), 0);
-    ASSERT_EQ(cache_cfg.layerIdsForGroup("full").size(), static_cast<size_t>(cache_cfg.layer_all_num));
+    ASSERT_EQ(cache_cfg.layerIdsForGroup("full").size(), static_cast<size_t>(cache_cfg.totalLayerNum()));
 
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
@@ -132,9 +132,9 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
 
     RuntimeConfig runtime_config;
     cache_cfg.finalizeBlockNums(/*global_block_num=*/3, runtime_config);
-    EXPECT_EQ(cache_cfg.block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 3u);
-    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 3u);
+    EXPECT_EQ(cache_cfg.blockNum(), 3u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->blockNum(), 3u);
+    EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->blockNum(), 3u);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.memory_layouts.size(), 3u);
@@ -228,12 +228,16 @@ TEST_F(BlockPoolTest, SharedPoolMTPLayoutsUseMainBlockNumAfterTpSync) {
     ASSERT_EQ(cache_cfg.mtp_sub_configs.size(), 2u);
     ASSERT_NE(cache_cfg.mtp_sub_configs[0], nullptr);
     ASSERT_NE(cache_cfg.mtp_sub_configs[1], nullptr);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 4u);
-    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 4u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->blockNum(), 4u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->blockNum(), 4u);
 
-    // Shared default pool follows the main cache_config.block_num after TP sync.
+    // Shared default pool follows the topology-owned main group block count after TP sync.
     // MTP sub-config block_num may still contain the pre-sync local value.
-    cache_cfg.block_num = 3;
+    cache_cfg.finalizeBlockNums(3, RuntimeConfig{});
+    cache_cfg.mtp_sub_configs[0]->finalizeBlockNums(2, RuntimeConfig{});
+    ASSERT_EQ(cache_cfg.blockNum(), 3u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[0]->blockNum(), 2u);
+    ASSERT_EQ(cache_cfg.mtp_sub_configs[1]->blockNum(), 3u);
 
     auto pool_cfg = rtp_llm::BlockPoolConfigHelper::createConfig(cache_cfg);
     ASSERT_EQ(pool_cfg.block_num, 3u);

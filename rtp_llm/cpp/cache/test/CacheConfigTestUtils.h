@@ -102,14 +102,21 @@ inline GroupBase makeTestGroupForConfig(const CacheConfig&              config,
                             static_cast<int>(group.policy.group_type),
                             static_cast<int>(type));
     group.layer_ids             = std::move(layer_ids);
-    group.block_num             = config.block_num;
+    group.block_num             = config.groupNums() > 0 ? config.blockNum() : 0;
     group.kv_block_stride_bytes = group.spec->block_size_bytes();
     group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
     return group;
 }
 
 inline void setTestTopology(CacheConfig& config, std::vector<GroupBase> groups) {
-    const size_t layer_count = config.layer_all_num > 0 ? config.layer_all_num : config.layer_num;
+    size_t layer_count = config.layer_num;
+    for (const auto& group : groups) {
+        for (int layer_id : group.layer_ids) {
+            if (layer_id >= 0) {
+                layer_count = std::max(layer_count, static_cast<size_t>(layer_id + 1));
+            }
+        }
+    }
     RTP_LLM_CHECK_WITH_INFO(layer_count > 0, "test topology requires a positive layer count");
 
     std::vector<LayerBase> layers(layer_count);
@@ -125,7 +132,6 @@ inline void setTestTopology(CacheConfig& config, std::vector<GroupBase> groups) 
             layers[static_cast<size_t>(layer_id)].group_tags.push_back(group.tag);
         }
     }
-    config.group_block_layout_initialized = false;
     config.setTopology(std::move(groups), std::move(layers));
 }
 
@@ -443,16 +449,17 @@ inline void setDsv4KvCacheSpecs(ModelConfig& model_config, const std::vector<int
     const uint32_t head_dim         = static_cast<uint32_t>(model_config.attn_config.size_per_head);
     const uint32_t indexer_head_dim = static_cast<uint32_t>(model_config.attn_config.indexer_head_dim);
 
-    auto       csa_kv     = makeDsv4Desc("csa_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 4);
-    auto       hca_kv     = makeDsv4Desc("hca_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 128);
-    auto       indexer_kv = makeDsv4Desc("indexer_kv", "compressed_kv", indexer_entry_elems, DataType::TYPE_UINT8, 4);
-    auto       indexer_state = makeDsv4Desc("indexer_state", "fixed_state", 4 * indexer_head_dim, DataType::TYPE_FP32);
-    auto       csa_state     = makeDsv4Desc("csa_state", "fixed_state", 4 * head_dim, DataType::TYPE_FP32);
-    auto       hca_state     = makeDsv4Desc("hca_state", "fixed_state", 2 * head_dim, DataType::TYPE_FP32);
-    auto       swa_kv        = makeDsv4Desc("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
-    const auto kernel_seq_size           = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block > 0 ?
-                                                           model_config.attn_config.kernel_tokens_per_block :
-                                                           model_config.attn_config.tokens_per_block);
+    auto csa_kv          = makeDsv4Desc("csa_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 4);
+    auto hca_kv          = makeDsv4Desc("hca_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 128);
+    auto indexer_kv      = makeDsv4Desc("indexer_kv", "compressed_kv", indexer_entry_elems, DataType::TYPE_UINT8, 4);
+    auto indexer_state   = makeDsv4Desc("indexer_state", "fixed_state", 4 * indexer_head_dim, DataType::TYPE_FP32);
+    auto csa_state       = makeDsv4Desc("csa_state", "fixed_state", 4 * head_dim, DataType::TYPE_FP32);
+    auto hca_state       = makeDsv4Desc("hca_state", "fixed_state", 2 * head_dim, DataType::TYPE_FP32);
+    auto swa_kv          = makeDsv4Desc("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
+    auto kernel_seq_size = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    if (model_config.attn_config.kernel_tokens_per_block > 0) {
+        kernel_seq_size = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block);
+    }
     csa_kv.kernel_seq_size_per_block     = kernel_seq_size;
     hca_kv.kernel_seq_size_per_block     = kernel_seq_size;
     indexer_kv.kernel_seq_size_per_block = kernel_seq_size;
@@ -549,33 +556,19 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
 inline CacheConfig
 makeSingleGroupCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int layer_num, int block_num) {
     CacheConfig config;
-    config.dtype              = spec->memoryLayoutDType();
     config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = static_cast<uint32_t>(block_num);
     config.seq_size_per_block = spec->seq_size_per_block;
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     auto group = makeTestGroupForConfig(config, spec, std::move(layer_ids), group_type);
     setTestTopology(config, {std::move(group)});
-
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
     return config;
 }
 
 inline CacheConfig makeSingleLayerCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int block_num = 4) {
-    auto config            = makeSingleGroupCacheConfig(std::move(spec), group_type, /*layer_num=*/1, block_num);
-    config.group_layer_num = 1;
-    return config;
+    return makeSingleGroupCacheConfig(std::move(spec), group_type, /*layer_num=*/1, block_num);
 }
 
 inline CacheConfig makeSimpleMhaCacheConfig(int                layer_num,
@@ -607,20 +600,17 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.dtype              = dtype;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block = tokens_per_block;
-    config.group_layer_num    = std::max(group_layer_num, 1);
-    config.linear_step        = 2;
+    config.layer_num                   = static_cast<uint32_t>(layer_num);
+    config.seq_size_per_block          = tokens_per_block;
+    config.linear_step                 = 2;
+    const int resolved_group_layer_num = std::max(group_layer_num, 1);
 
-    if (layer_num <= 0 || (layer_num % config.group_layer_num) != 0 || (layer_num / config.group_layer_num) < 2) {
+    if (layer_num <= 0 || (layer_num % resolved_group_layer_num) != 0 || (layer_num / resolved_group_layer_num) < 2) {
         return makeSimpleMhaCacheConfig(
             layer_num, block_num, tokens_per_block, dtype, local_head_num_kv, size_per_head);
     }
 
-    const int group_cnt = layer_num / config.group_layer_num;
+    const int group_cnt = layer_num / resolved_group_layer_num;
 
     auto linear_spec = makeLinearSpec("linear", tokens_per_block, dtype, local_head_num_kv, size_per_head);
     auto full_spec   = makeMhaSpec("full", tokens_per_block, dtype, local_head_num_kv, size_per_head);
@@ -630,9 +620,9 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
 
     for (int gid = 0; gid < group_cnt; ++gid) {
         std::vector<int> group_layers;
-        group_layers.reserve(static_cast<size_t>(config.group_layer_num));
-        for (int local = 0; local < config.group_layer_num; ++local) {
-            group_layers.push_back(gid * config.group_layer_num + local);
+        group_layers.reserve(static_cast<size_t>(resolved_group_layer_num));
+        for (int local = 0; local < resolved_group_layer_num; ++local) {
+            group_layers.push_back(gid * resolved_group_layer_num + local);
         }
         if (gid == 0) {
             groups.push_back(
@@ -643,16 +633,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         }
     }
     setTestTopology(config, std::move(groups));
-
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num), RuntimeConfig{});
     return config;
 }
 

@@ -230,15 +230,11 @@ class RemoteConnectorInternalTest: public ::testing::Test {
 public:
     void SetUp() override {
         rtp_llm::initLogger();
-        auto mha_spec                  = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
-        auto linear_spec_1             = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
-        auto linear_spec_2             = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
-        cache_config_.block_num        = 8;
-        cache_config_.layer_num        = layer_num_;
-        cache_config_.layer_all_num    = layer_num_;
-        byte_size_per_block_           = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
-        cache_config_.block_size_bytes = byte_size_per_block_;
-        cache_config_.dtype            = rtp_llm::DataType::TYPE_FP16;
+        auto mha_spec           = makeTestMhaSpec("0", /*seq_size_per_block=*/8);
+        auto linear_spec_1      = makeTestLinearSpec("1", /*seq_size_per_block=*/8);
+        auto linear_spec_2      = makeTestLinearSpec("2", /*seq_size_per_block=*/8);
+        cache_config_.layer_num = layer_num_;
+        byte_size_per_block_    = static_cast<size_t>(mha_spec->block_size_bytes()) * layer_num_;
         std::vector<int> layers(layer_num_);
         std::iota(layers.begin(), layers.end(), 0);
         setTestTopology(cache_config_,
@@ -253,7 +249,6 @@ public:
             group.kv_scale_stride_bytes = 0;
         }
         cache_config_.setTopology(std::move(groups), cache_config_.topology().layers());
-        cache_config_.group_block_layout_initialized = true;
     }
 
     void TearDown() override {}
@@ -336,7 +331,6 @@ TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSize
         group.kv_scale_stride_bytes = 0;
     }
     heterogeneous_config.setTopology(std::move(groups), heterogeneous_config.topology().layers());
-    heterogeneous_config.group_block_layout_initialized = true;
 
     std::vector<std::string> full_group_tags({"0"});
     std::vector<std::string> linear_group_tags({"1", "2"});
@@ -363,12 +357,8 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
     constexpr size_t group_count        = linear_group_count + 1;
 
     CacheConfig config;
-    config.block_num        = 8;
-    config.layer_num        = group_count;
-    config.layer_all_num    = group_count;
-    config.dtype            = rtp_llm::DataType::TYPE_FP16;
-    auto full_spec          = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
-    config.block_size_bytes = full_spec->block_size_bytes();
+    config.layer_num = group_count;
+    auto full_spec   = makeTestMhaSpec("full", /*seq_size_per_block=*/8);
 
     std::vector<GroupBase>   build_groups{makeTestGroupForConfig(config, full_spec, {0}, CacheGroupType::FULL, "full")};
     std::vector<std::string> full_group_tags{"full"};
@@ -391,7 +381,6 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
         group.kv_scale_stride_bytes = 0;
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
 
     auto allocator = std::make_shared<FakeKVCacheAllocator>(
         config, full_group_tags, linear_group_tags, /*per_group_layer_num=*/1);
@@ -418,8 +407,7 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
 
 TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
     CacheConfig first_config;
-    first_config.layer_num     = 1;
-    first_config.layer_all_num = 1;
+    first_config.layer_num = 1;
     setTestTopology(
         first_config,
         {makeTestGroupForConfig(first_config, makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full"),
@@ -431,8 +419,7 @@ TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
     ASSERT_TRUE(first_policy->init());
 
     CacheConfig reversed_config;
-    reversed_config.layer_num     = 1;
-    reversed_config.layer_all_num = 1;
+    reversed_config.layer_num = 1;
     setTestTopology(
         reversed_config,
         {makeTestGroupForConfig(
@@ -458,8 +445,7 @@ TEST(RemoteConnectorTagIdentityTest, GroupNamesDoNotDependOnNumericGroupOrder) {
 
 TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWithoutHotPathLayoutLookup) {
     CacheConfig first_config;
-    first_config.layer_num     = 1;
-    first_config.layer_all_num = 1;
+    first_config.layer_num = 1;
     setTestTopology(
         first_config,
         {makeTestGroupForConfig(first_config, makeTestMhaSpec("full_a", 8), {0}, CacheGroupType::FULL, "full_a"),
@@ -484,8 +470,7 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
     EXPECT_EQ(first_allocator->allLayerCacheBaseCallCount(), 1u);
 
     CacheConfig reversed_config;
-    reversed_config.layer_num     = 1;
-    reversed_config.layer_all_num = 1;
+    reversed_config.layer_num = 1;
     setTestTopology(
         reversed_config,
         {makeTestGroupForConfig(reversed_config, makeTestMhaSpec("full_b", 8), {0}, CacheGroupType::FULL, "full_b"),
@@ -508,8 +493,7 @@ TEST(RemoteConnectorTagIdentityTest, FullOnlyPolicyRoutesSameLayerGroupsByTagWit
 
 TEST(RemoteConnectorBlockBufferValidationTest, RejectsAllocatorBufferSizeThatDoesNotMatchTopology) {
     CacheConfig config;
-    config.layer_num     = 1;
-    config.layer_all_num = 1;
+    config.layer_num = 1;
     setTestTopology(config,
                     {makeTestGroupForConfig(config, makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full")});
 
@@ -527,8 +511,7 @@ TEST(RemoteConnectorBlockBufferValidationTest, RejectsAllocatorBufferSizeThatDoe
 
 TEST(RemoteConnectorBlockBufferValidationTest, RejectsMisalignedOrInvalidTagsWithoutPartialOutput) {
     CacheConfig config;
-    config.layer_num     = 1;
-    config.layer_all_num = 1;
+    config.layer_num = 1;
     setTestTopology(config,
                     {makeTestGroupForConfig(config, makeTestMhaSpec("full", 8), {0}, CacheGroupType::FULL, "full")});
 

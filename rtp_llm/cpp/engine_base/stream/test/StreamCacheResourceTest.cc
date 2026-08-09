@@ -354,7 +354,6 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
     prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
-    cache_manager_->config_.disable_decode_first_malloc_device_reuse = true;
     auto& resource = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);
 
@@ -734,15 +733,15 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
 TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpState) {
     prepareResourceWithInputTokens({1, 2, 3}, /*reuse_cache=*/true);
     stream_->vocab_size_ = 16;
-    auto& resource = stream_->streamCacheResource();
+    auto& resource       = stream_->streamCacheResource();
 
     auto kv_resource = std::make_shared<KVCacheResource>();
     kv_resource->setDeviceReuseBlockNum(1);
     kv_resource->setMemoryReuseBlockNum(1);
 
-    auto server_call_result                             = std::make_shared<PrefillLoadCaller::Result>();
-    server_call_result->side_channel_payload.has_data   = true;
-    server_call_result->side_channel_payload.first_token_id = 0;
+    auto server_call_result                                  = std::make_shared<PrefillLoadCaller::Result>();
+    server_call_result->side_channel_payload.has_data        = true;
+    server_call_result->side_channel_payload.first_token_id  = 0;
     server_call_result->side_channel_payload.total_reuse_len = 2;
     server_call_result->side_channel_payload.local_reuse_len = 2;
     server_call_result->side_channel_payload.propose_tokens  = {0, 7};
@@ -751,17 +750,15 @@ TEST_F(StreamCacheResourceTest, testP2PSideChannelRestoresZeroFirstTokenAndMtpSt
     TensorPbConvert::torchToPb(&server_call_result->side_channel_payload.propose_hidden,
                                torch::tensor({{0.3f, 0.4f}}, torch::kFloat32));
 
-    auto p2p_ctx = std::make_shared<P2PConnectorAsyncReadContext>(
-        kv_resource,
-        std::shared_ptr<P2PBroadcastClient::Result>(),
-        server_call_result,
-        std::shared_ptr<DecodeSchedulerMetricsCollector>(),
-        /*transfer_not_done_hold_ms=*/0);
+    auto p2p_ctx      = std::make_shared<P2PConnectorAsyncReadContext>(kv_resource,
+                                                                  std::shared_ptr<P2PBroadcastClient::Result>(),
+                                                                  server_call_result,
+                                                                  std::shared_ptr<DecodeSchedulerMetricsCollector>(),
+                                                                  /*transfer_not_done_hold_ms=*/0);
     auto read_context = std::make_shared<FusedAsyncReadContext>(
         std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{}), kv_resource, nullptr);
-    read_context->setFusedReadContext(
-        std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{
-            std::static_pointer_cast<AsyncContext>(p2p_ctx)}));
+    read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(
+        std::vector<std::shared_ptr<AsyncContext>>{std::static_pointer_cast<AsyncContext>(p2p_ctx)}));
 
     resource.updateReuseLengthsFromContext(read_context);
 

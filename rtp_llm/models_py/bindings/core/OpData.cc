@@ -19,6 +19,21 @@ std::string combineStrings(const std::vector<std::string>& vec) {
     return result;
 }
 
+std::string sizeMapDebugString(const std::map<std::string, size_t>& values) {
+    std::stringstream result;
+    result << "{";
+    bool first = true;
+    for (const auto& [tag, value] : values) {
+        if (!first) {
+            result << ", ";
+        }
+        result << tag << ": " << value;
+        first = false;
+    }
+    result << "}";
+    return result.str();
+}
+
 OpException::OpException(const OpStatus& status): status_(status) {
     std::stringstream ss;
     ss << "OpException[" << (int32_t)status_.error_type << "]: " << status_.error_message << std::endl;
@@ -66,7 +81,10 @@ std::string GptModelInputs::debugString(bool force) const {
     if (cache_keys.defined()) {
         debug_string << ", cache_keys: " << tb(cache_keys);
     }
-    debug_string << ", kv_block_stride_bytes: " << kv_block_stride_bytes;
+    debug_string << ", group_kv_block_stride_bytes: " << sizeMapDebugString(group_kv_block_stride_bytes);
+    debug_string << ", group_kv_scale_stride_bytes: " << sizeMapDebugString(group_kv_scale_stride_bytes);
+    debug_string << ", group_kv_block_transfer_bytes: " << sizeMapDebugString(group_kv_block_transfer_bytes);
+    debug_string << ", group_kv_scale_transfer_bytes: " << sizeMapDebugString(group_kv_scale_transfer_bytes);
     debug_string << ", pd_separation: " << pd_separation;
     debug_string << "}";
     return debug_string.str();

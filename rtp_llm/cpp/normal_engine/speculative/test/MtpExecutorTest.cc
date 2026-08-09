@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -129,6 +130,7 @@ public:
     }
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
+        forwarded_inputs_.push_back(inputs);
         checkInputs(inputs);
         ++forward_count_;
         return output_holder.get();
@@ -150,6 +152,10 @@ public:
                          inputs.sequence_lengths_plus_1,
                          expected_inputs.sequence_lengths_plus_1);
         checkTensorField("prepared lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
+    }
+
+    const vector<GptModelInputs>& forwardedInputs() const {
+        return forwarded_inputs_;
     }
 
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
@@ -188,6 +194,7 @@ private:
     TestDataHolder<GptModelInputs>  input_holder;
     TestDataHolder<GptModelInputs>  prepare_input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
+    vector<GptModelInputs>          forwarded_inputs_;
     size_t                          forward_count_ = 0;
 };
 
@@ -704,6 +711,11 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     test_config.vocab_size_override = 4;
     auto components                 = createMtpExecutorComponents(test_config);
 
+    auto& mutable_draft_config =
+        const_cast<CacheConfig&>(components.executor->cache_manager_->getMTPModuleCacheConfig(0));
+    auto& mutable_draft_group = const_cast<GroupBase&>(mutable_draft_config.group("full"));
+    mutable_draft_group.kv_block_stride_bytes += 64;
+
     size_t batch_size = 1;
 
     auto stream1_new_tokens        = torch::tensor({{2}}, torch::kInt32);
@@ -835,8 +847,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
 
     // A single active draft model must execute every proposal step, even
     // though the init plan retains one physical slot per configured module.
-    auto* active_draft_model = components.fake_draft_model.get();
-    auto* fake_target_model  = components.fake_target_model.get();
+    auto* active_target_model = components.fake_target_model.get();
+    auto* active_draft_model  = components.fake_draft_model.get();
 
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
@@ -851,7 +863,40 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     ASSERT_TRUE(status.ok());
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step);
     if (components.executor->useAsyncPrepare()) {
-        EXPECT_FALSE(fake_target_model->hasPendingPrepareInputs());
+        EXPECT_FALSE(active_target_model->hasPendingPrepareInputs());
+    }
+
+    const auto expect_layout = [](const GptModelInputs& inputs, const CacheConfig& config) {
+        std::map<std::string, size_t> block_stride;
+        std::map<std::string, size_t> scale_stride;
+        std::map<std::string, size_t> block_transfer;
+        std::map<std::string, size_t> scale_transfer;
+        for (const auto& group : config.topology().groups()) {
+            block_stride.emplace(group.tag,
+                                 config.use_independent_block_pools ?
+                                     group.kv_block_stride_bytes :
+                                     BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(config));
+            scale_stride.emplace(group.tag,
+                                 config.use_independent_block_pools ?
+                                     group.kv_scale_stride_bytes :
+                                     BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(config));
+            block_transfer.emplace(group.tag, group.kv_block_stride_bytes);
+            scale_transfer.emplace(group.tag, group.kv_scale_stride_bytes);
+        }
+        EXPECT_EQ(inputs.group_kv_block_stride_bytes, block_stride);
+        EXPECT_EQ(inputs.group_kv_scale_stride_bytes, scale_stride);
+        EXPECT_EQ(inputs.group_kv_block_transfer_bytes, block_transfer);
+        EXPECT_EQ(inputs.group_kv_scale_transfer_bytes, scale_transfer);
+    };
+    const auto& target_config = components.executor->cache_manager_->cacheConfig();
+    const auto& draft_config  = components.executor->cache_manager_->getMTPModuleCacheConfig(0);
+    ASSERT_NE(BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(target_config),
+              BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(draft_config));
+    ASSERT_EQ(active_target_model->forwardedInputs().size(), 1u);
+    expect_layout(active_target_model->forwardedInputs().front(), target_config);
+    ASSERT_EQ(active_draft_model->forwardedInputs().size(), propose_step);
+    for (const auto& draft_input : active_draft_model->forwardedInputs()) {
+        expect_layout(draft_input, draft_config);
     }
 
     // check stream result

@@ -67,7 +67,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
                                 cache_group.tag.c_str());
 
         auto& local_ids = group_global_layer_to_local_id_[cache_group.tag];
-        local_ids.assign(static_cast<size_t>(config_.layer_all_num), -1);
+        local_ids.assign(static_cast<size_t>(config_.totalLayerNum()), -1);
         for (size_t local_layer_idx = 0; local_layer_idx < cache_group.layer_ids.size(); ++local_layer_idx) {
             const int global_layer_idx = cache_group.layer_ids[local_layer_idx];
             if (global_layer_idx >= 0 && static_cast<size_t>(global_layer_idx) < local_ids.size()) {
@@ -134,10 +134,10 @@ GroupedCacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
 
 namespace {
 const GroupBase& validateGroupForLayer(const CacheConfig& config, int layer_id, std::string_view tag) {
-    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config.layer_all_num,
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < config.totalLayerNum(),
                             "invalid layer id %d for layer_all_num=%u",
                             layer_id,
-                            config.layer_all_num);
+                            config.totalLayerNum());
     const auto& group = config.topology().groupForLayer(layer_id, tag);
     RTP_LLM_CHECK_WITH_INFO(
         group.tag == tag, "layer %d does not own cache group tag=%s", layer_id, std::string(tag).c_str());

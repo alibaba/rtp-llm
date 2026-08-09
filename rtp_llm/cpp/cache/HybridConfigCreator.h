@@ -17,10 +17,6 @@ public:
                                           const ParallelismConfig& parallelism_config,
                                           bool                     is_mtp,
                                           int                      gen_num_per_cycle);
-
-private:
-    static void
-    setupPhysicalSizes(CacheConfig& config, const KVCacheSpecPtr& full_spec, const KVCacheSpecPtr& linear_spec);
 };
 
 }  // namespace rtp_llm
