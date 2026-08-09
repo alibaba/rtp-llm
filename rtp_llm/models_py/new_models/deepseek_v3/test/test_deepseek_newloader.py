@@ -14,6 +14,8 @@ from rtp_llm.device.device_type import DeviceType, get_device_type, is_cuda, is_
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.modules.base.common.moe_topk import group_topk_supported
+from rtp_llm.models_py.modules.base.cuda.select_topk import GroupTopK
 from rtp_llm.models_py.new_models.deepseek_v3.attention import (
     DeepSeekV32MlaAttention,
     _CudaRuntimeFusedFp8Linear,
@@ -696,6 +698,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         ):
             NewModelLoader._validate_loaded_weights(root)
 
+    @unittest.skipIf(
+        torch.version.hip is not None,
+        "ROCm factory construction is covered by the ROCm GPU target",
+    )
     def test_mtp_new_model_loader_reads_only_appended_draft_weights(self):
         weights = _mtp_checkpoint_weights()
         # The test intentionally loads CPU tensors. Preserve their layout while
@@ -973,6 +979,59 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertEqual(cfg["moe_layer_index"], [3])
         self.assertEqual(cfg["topk_method"], "greedy")
 
+    def test_group_topk_capability_checks_all_kernel_bounds(self):
+        valid = {
+            "num_experts": 64,
+            "n_group": 8,
+            "topk_group": 2,
+            "top_k": 8,
+            "renormalize": False,
+        }
+        self.assertTrue(group_topk_supported(**valid))
+        invalid_overrides = (
+            {"num_experts": 63},
+            {"num_experts": 8, "n_group": 8},
+            {"n_group": 33, "num_experts": 66},
+            {"topk_group": 0},
+            {"topk_group": 9},
+            {"top_k": 0},
+            {"top_k": 33},
+            {"top_k": 1, "renormalize": True},
+            {"num_experts": 8, "n_group": 4, "topk_group": 1, "top_k": 3},
+        )
+        for overrides in invalid_overrides:
+            case = dict(valid)
+            case.update(overrides)
+            with self.subTest(**overrides):
+                self.assertFalse(group_topk_supported(**case))
+
+    def test_group_topk_forward_rejects_invalid_group_count_before_kernel(self):
+        with mock.patch(
+            "rtp_llm.models_py.modules.base.cuda.select_topk.compute_ops.GroupTopKOp",
+            create=True,
+        ) as op_type:
+            group_topk = GroupTopK()
+            with self.assertRaisesRegex(ValueError, "topk_group=0"):
+                group_topk(
+                    topk_weights=torch.empty(1, 2),
+                    topk_ids=torch.empty(1, 2, dtype=torch.int32),
+                    scores=torch.zeros(1, 4),
+                    correction_bias=torch.zeros(4),
+                    n_group=2,
+                    topk_group=0,
+                    topk=2,
+                    renormalize=False,
+                    routed_scaling_factor=1.0,
+                )
+            op_type.return_value.forward.assert_not_called()
+
+    def test_sigmoid_router_without_topk_method_preserves_greedy_compatibility(self):
+        raw = _raw_config()
+        del raw["topk_method"]
+        cfg = extract_config_values(_model_config(), _load_config(), raw)
+        self.assertEqual(cfg["topk_method"], "greedy")
+        self.assertFalse(cfg["has_e_score_correction"])
+
     def test_config_rejects_eplb_before_module_construction(self):
         config = _model_config()
         config.eplb_config.eplb_mode = EplbMode.EPLB
@@ -1048,7 +1107,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
     def test_config_rejects_legacy_expanded_mha_fallback(self):
         config = _model_config()
         config.mla_ops_type = "MHA"
-        with self.assertRaisesRegex(ValueError, "requires an MLA attention backend"):
+        with self.assertRaisesRegex(ValueError, "expanded-MHA fallback"):
             extract_config_values(config, _load_config(), _raw_config())
 
     def test_sparse_indexer_fast_and_sparse_call_sequences(self):
@@ -1851,7 +1910,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             block = DeepSeekV32MoEBlock(
                 hidden_size=8,
                 moe_intermediate_size=4,
-                num_experts=64,
+                num_experts=128,
                 top_k=2,
                 layer_idx=3,
                 tp_size=1,
@@ -1859,7 +1918,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 ep_size=1,
                 ep_rank=0,
                 model_config=_router_model_config(
-                    expert_num=64,
+                    expert_num=128,
                     moe_n_group=64,
                     moe_topk_group=2,
                 ),
@@ -1878,6 +1937,88 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertFalse(block._use_fast_group_topk)
         self.assertIsNone(block.group_topk)
         group_topk.assert_not_called()
+
+    def test_noaux_router_single_expert_groups_use_reference_path(self):
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.Cuda,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.GroupTopK"
+            ) as group_topk,
+            torch.device("cpu"),
+        ):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=8,
+                moe_intermediate_size=4,
+                num_experts=4,
+                top_k=2,
+                layer_idx=3,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=_router_model_config(
+                    expert_num=4,
+                    moe_n_group=4,
+                    moe_topk_group=2,
+                ),
+                parallelism_config=_single_rank_parallelism_config(),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=1,
+                routed_scaling_factor=1.0,
+                n_group=4,
+                topk_group=2,
+                topk_method="noaux_tc",
+                correction_bias=True,
+            )
+        self.assertFalse(block._use_fast_group_topk)
+        self.assertIsNone(block.group_topk)
+        group_topk.assert_not_called()
+
+    def test_noaux_router_single_expert_groups_match_scalar_reference(self):
+        logits = torch.tensor(
+            [[-1.0, 0.25, 2.0, 0.5], [1.5, -0.5, 0.0, 0.75]],
+            dtype=torch.float32,
+        )
+        correction_bias = torch.tensor(
+            [0.4, -0.3, 0.2, -0.1],
+            dtype=torch.float32,
+        )
+        actual_weights, actual_ids = _select_deepseek_noaux_topk(
+            logits,
+            correction_bias,
+            top_k=2,
+            n_group=4,
+            topk_group=2,
+            renormalize=True,
+            routed_scaling_factor=1.0,
+        )
+        expected_weights, expected_ids = _manual_noaux_reference(
+            logits,
+            correction_bias,
+            top_k=2,
+            n_group=4,
+            topk_group=2,
+            renormalize=True,
+            routed_scaling_factor=1.0,
+        )
+        actual_order = actual_ids.argsort(dim=-1)
+        expected_order = expected_ids.argsort(dim=-1)
+        self.assertTrue(
+            torch.equal(
+                actual_ids.gather(1, actual_order),
+                expected_ids.gather(1, expected_order),
+            )
+        )
+        torch.testing.assert_close(
+            actual_weights.gather(1, actual_order),
+            expected_weights.gather(1, expected_order),
+        )
 
     def test_greedy_top1_normalization_uses_reference_path_on_cuda(self):
         with (
