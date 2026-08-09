@@ -631,18 +631,6 @@ public class FlexlbConfig {
      */
     private String autoTpmVictimGuardMode = "victim_presence";
 
-    /**
-     * Decode concurrency-gate load mode (redesign N2, review P1-2):
-     * {@code engine_load} — the gate compares the engine-facing load
-     * (confirmed running + non-queued reservations) against the concurrency
-     * limit, so reservations parked in a prefill queue cannot saturate an
-     * idle engine (root cause C of the 8400 storm). {@code total_load} —
-     * the legacy full-shadow gate (queued reservations count too), kept as
-     * an independent gray-release fallback: N2 can be rolled back alone
-     * without touching the N3 commit/guard switches.
-     */
-    private String autoTpmDecodeGateLoadMode = "engine_load";
-
     // ========== Worker Expiration Configuration ==========
 
     /**

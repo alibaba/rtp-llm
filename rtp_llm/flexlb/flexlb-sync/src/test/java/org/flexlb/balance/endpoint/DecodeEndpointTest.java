@@ -116,6 +116,101 @@ class DecodeEndpointTest {
         assertEquals("10.0.0.1:8080", endpoint.ipPort());
     }
 
+    // ==================== PR-C: getEngineLoad O(1) + queuedPhaseCount drift ===========
+
+    @Test
+    void getEngineLoad_o1_tracks_markQueued_and_markDispatched() {
+        updateStatus(null, null, 10000);
+        endpoint.reserve(1L, 100, 100);
+        endpoint.reserve(2L, 200, 200);
+        endpoint.reserve(3L, 300, 300);
+        // No queued phase: engineLoad == totalLoad == inflight(3)
+        assertEquals(3, endpoint.getEngineLoad());
+        assertEquals(endpoint.getTotalLoad(), endpoint.getEngineLoad());
+
+        // mark req 1,2 as queued → engine-facing load drops to 1
+        endpoint.markQueuedPhase(1L);
+        endpoint.markQueuedPhase(2L);
+        assertEquals(1, endpoint.getEngineLoad());
+
+        // dispatch req 1 → back to engine load 2
+        endpoint.markDispatchedPhase(1L);
+        assertEquals(2, endpoint.getEngineLoad());
+
+        // release req 2 (was queued) → inflight=2, queued=0
+        endpoint.release(2L);
+        assertEquals(2, endpoint.getEngineLoad());
+
+        // release req 1 → inflight=1
+        endpoint.release(1L);
+        assertEquals(1, endpoint.getEngineLoad());
+
+        // release req 3 → 0
+        endpoint.release(3L);
+        assertEquals(0, endpoint.getEngineLoad());
+    }
+
+    @Test
+    void getEngineLoad_calibrate_prunes_queued_phase_count() {
+        endpoint.reserve(1L, 100, 100);
+        endpoint.reserve(2L, 100, 100);
+        endpoint.markQueuedPhase(1L);
+        endpoint.markQueuedPhase(2L);
+        assertEquals(0, endpoint.getEngineLoad()); // both queued
+
+        // calibrate: req 1 confirmed → removed from inflight + queued
+        TaskInfo running = task(1L);
+        running.setPhase(TaskPhase.KV_ALLOCATED);
+        updateStatus(Map.of("1", running), null, 10000);
+
+        // req 2 still queued, inflight=1 (req2), confirmed=1 (req1)
+        // engineLoad = confirmed(1) + max(0, inflight(1) - queued(1)) = 1
+        assertEquals(1, endpoint.getEngineLoad());
+    }
+
+    @Test
+    void getEngineLoad_idempotent_markQueued_does_not_double_count() {
+        endpoint.reserve(1L, 100, 100);
+        endpoint.markQueuedPhase(1L);
+        endpoint.markQueuedPhase(1L); // idempotent: add returns false
+        assertEquals(0, endpoint.getEngineLoad());
+    }
+
+    @Test
+    void getEngineLoad_idempotent_markDispatched_does_not_over_decrement() {
+        endpoint.reserve(1L, 100, 100);
+        endpoint.markQueuedPhase(1L);
+        endpoint.markDispatchedPhase(1L);
+        endpoint.markDispatchedPhase(1L); // idempotent: remove returns false
+        assertEquals(1, endpoint.getEngineLoad());
+    }
+
+    @Test
+    void getEngineLoad_clamps_negative_drift_to_zero() throws Exception {
+        endpoint.reserve(1L, 100, 100);
+        setQueuedPhaseCount(-5);
+        // inflight=1, queued clamped from -5 to 0 → engineLoad = 0 + max(0,1-0) = 1
+        assertEquals(1, endpoint.getEngineLoad());
+    }
+
+    @Test
+    void getEngineLoad_clamps_overflow_drift_to_inflight() throws Exception {
+        endpoint.reserve(1L, 100, 100);
+        endpoint.reserve(2L, 100, 100);
+        setQueuedPhaseCount(100);
+        // inflight=2, queued clamped from 100 to 2 → engineLoad = 0 + max(0,2-2) = 0
+        assertEquals(0, endpoint.getEngineLoad());
+    }
+
+    /** Directly mutate the private counter to simulate drift. */
+    private void setQueuedPhaseCount(int value) throws Exception {
+        java.lang.reflect.Field f = DecodeEndpoint.class.getDeclaredField("queuedPhaseCount");
+        f.setAccessible(true);
+        java.util.concurrent.atomic.AtomicInteger counter =
+                (java.util.concurrent.atomic.AtomicInteger) f.get(endpoint);
+        counter.set(value);
+    }
+
     private void updateStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished,
                               long availableKvCacheTokens) {
         status.getAvailableKvCacheTokens().set(availableKvCacheTokens);

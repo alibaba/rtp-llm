@@ -29,7 +29,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private final EngineWorkerStatus engineWorkerStatus;
     private final double decayFactor;
-    private final boolean gateOnTotalLoad;
     private final ResourceMeasureFactory resourceMeasureFactory;
 
     public CostBasedDecodeStrategy(ConfigService configService,
@@ -38,11 +37,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         this.engineWorkerStatus = engineWorkerStatus;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.decayFactor = config.getWeightedCacheDecayFactor();
-        // N2: when gate mode is "engine_load", the hard filter must also use
-        // engine-facing load (excluding queued shadow reservations) — otherwise
-        // the hotspot filter amplifies the death-spiral by filtering out the
-        // last surviving endpoint whose totalLoad is inflated by shadows.
-        this.gateOnTotalLoad = "total_load".equalsIgnoreCase(config.getAutoTpmDecodeGateLoadMode());
         this.resourceMeasureFactory = resourceMeasureFactory;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, this);
     }
@@ -134,7 +128,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long sumCacheUsed = 0;
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
-            loads[i] = gateOnTotalLoad ? ep.getTotalLoad() : ep.getEngineLoad();
+            loads[i] = ep.getEngineLoad();
             kvUseds[i] = ep.realKvUsed();
             sumLoad += loads[i];
             sumCacheUsed += kvUseds[i];

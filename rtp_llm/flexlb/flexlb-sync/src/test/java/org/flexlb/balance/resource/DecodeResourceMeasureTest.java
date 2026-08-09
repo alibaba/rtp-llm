@@ -52,7 +52,7 @@ class DecodeResourceMeasureTest {
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
         endpoint.reserve(1L, 0, 0);
         endpoint.reserve(2L, 0, 0);
-        // getTotalLoad() = confirmedRunningCount(0) + inflightRequests.size(2) = 2, limit = 2, 2 >= 2 → unavailable
+        // getEngineLoad() = confirmedRunningCount(0) + inflightRequests.size(2) = 2, limit = 2, 2 >= 2 → unavailable
         assertFalse(measure.isResourceAvailable(endpoint));
     }
 
@@ -62,7 +62,7 @@ class DecodeResourceMeasureTest {
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
         endpoint.reserve(1L, 0, 0);
-        // getTotalLoad() = confirmedRunningCount(0) + inflightRequests.size(1) = 1, limit = 3, 1 < 3 → available
+        // getEngineLoad() = confirmedRunningCount(0) + inflightRequests.size(1) = 1, limit = 3, 1 < 3 → available
         assertTrue(measure.isResourceAvailable(endpoint));
     }
 

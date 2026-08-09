@@ -26,7 +26,6 @@ public class DecodeResourceMeasure implements ResourceMeasure {
     private final long fullSpeedThreshold;
     private final long stopThreshold;
     private final long concurrencyLimit;
-    private final boolean gateOnTotalLoad;
 
     public DecodeResourceMeasure(ConfigService configService) {
         FlexlbConfig config = configService.loadBalanceConfig();
@@ -35,9 +34,6 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         this.fullSpeedThreshold = config.getDecodeFullSpeedThreshold();
         this.stopThreshold = config.getDecodeStopThreshold();
         this.concurrencyLimit = config.getDecodeConcurrencyLimit();
-        // P1-2: independent N2 fallback — "total_load" restores the legacy
-        // full-shadow gate without touching the N3 commit/guard switches.
-        this.gateOnTotalLoad = "total_load".equalsIgnoreCase(config.getAutoTpmDecodeGateLoadMode());
     }
 
     @Override
@@ -52,15 +48,13 @@ public class DecodeResourceMeasure implements ResourceMeasure {
         if (endpoint == null || !endpoint.getStatus().isAlive()) {
             return false;
         }
-        // N2: gate on the engine-facing load — reservations parked in a
-        // prefill queue guard KV only and must not saturate this limit
-        // (root cause C of the 8400 storm: shadow saturation on an idle engine).
-        // P1-2: autoTpmDecodeGateLoadMode=total_load restores the legacy gate.
-        long engineLoad = gateOnTotalLoad ? endpoint.getTotalLoad() : endpoint.getEngineLoad();
+        // Gate on the engine-facing load — reservations parked in a prefill
+        // queue guard KV only and must not saturate this limit (root cause C
+        // of the 8400 storm: shadow saturation on an idle engine).
+        long engineLoad = endpoint.getEngineLoad();
         if (concurrencyLimit > 0 && engineLoad >= concurrencyLimit) {
-            Logger.warn("Decode worker {} resource unavailable: gateLoad={} (gateMode={}), totalLoad={}, engineLoad={}, limit={}",
-                    endpoint.ipPort(), engineLoad, gateOnTotalLoad ? "total_load" : "engine_load",
-                    endpoint.getTotalLoad(), endpoint.getEngineLoad(), concurrencyLimit);
+            Logger.warn("Decode worker {} resource unavailable: engineLoad={}, totalLoad={}, limit={}",
+                    endpoint.ipPort(), engineLoad, endpoint.getTotalLoad(), concurrencyLimit);
             return false;
         }
         long used = endpoint.realKvUsed();

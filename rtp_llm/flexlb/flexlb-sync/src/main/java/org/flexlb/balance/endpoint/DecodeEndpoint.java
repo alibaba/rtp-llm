@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -70,6 +71,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final java.util.Set<Long> queuedPhase = ConcurrentHashMap.newKeySet();
 
     /**
+     * O(1) mirror of {@code |queuedPhase ∩ inflightRequests|} (PR-C):
+     * incremented when a reservation is marked queued and decremented when
+     * it is dispatched / released / calibrated out, so {@link #getEngineLoad}
+     * avoids the per-call O(n) scan of the legacy formula. Read lock-free;
+     * written under {@link #admissionLock} (except {@link #markDispatchedPhase}
+     * which relies on the atomic add/remove return value).
+     */
+    private final AtomicInteger queuedPhaseCount = new AtomicInteger(0);
+
+    /**
      * Serializes admission-state mutations (reserve / release / calibrate /
      * expired eviction) so that {@link #tryReleaseVictimsAndReserveIncoming}
      * can validate-then-apply atomically against {@link #admissionVersion}
@@ -109,7 +120,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try {
             RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens, priority, deadlineMs);
             // A (re-)reserve puts the request back into the pre-queue state.
-            queuedPhase.remove(requestId);
+            if (queuedPhase.remove(requestId)) {
+                queuedPhaseCount.decrementAndGet();
+            }
             RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
             if (prev != null) {
                 // requestId already exists — subtract the old kvTokens before overwriting,
@@ -130,7 +143,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             RequestInflight removed = inflightRequests.remove(requestId);
-            queuedPhase.remove(requestId);
+            if (queuedPhase.remove(requestId)) {
+                queuedPhaseCount.decrementAndGet();
+            }
             if (removed != null) {
                 inflightKvReservedTotal.addAndGet(-removed.kvTokens());
                 inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
@@ -515,8 +530,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         // N2: keep the queued-phase set consistent with the reserved entries
         // (calibrate removes confirmed/finished entries directly, bypassing
-        // release()).
-        queuedPhase.retainAll(inflightRequests.keySet());
+        // release()). Drop stale queued ids one-by-one so the O(1) counter
+        // stays in sync (PR-C).
+        java.util.Iterator<Long> queuedIt = queuedPhase.iterator();
+        while (queuedIt.hasNext()) {
+            Long requestId = queuedIt.next();
+            if (!inflightRequests.containsKey(requestId)) {
+                queuedIt.remove();
+                queuedPhaseCount.decrementAndGet();
+            }
+        }
     }
 
     /**
@@ -637,7 +660,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             int evicted = requestEvictor.evictExpired(ttlMs);
-            queuedPhase.retainAll(inflightRequests.keySet());
+            // Drop stale queued ids one-by-one so the O(1) counter stays in
+            // sync (PR-C) — evictExpired may have removed inflight entries.
+            java.util.Iterator<Long> queuedEvictIt = queuedPhase.iterator();
+            while (queuedEvictIt.hasNext()) {
+                Long requestId = queuedEvictIt.next();
+                if (!inflightRequests.containsKey(requestId)) {
+                    queuedEvictIt.remove();
+                    queuedPhaseCount.decrementAndGet();
+                }
+            }
             long cutoff = System.currentTimeMillis() - ttlMs;
             boolean trackedPurged = trackedConfirmed.values()
                     .removeIf(task -> task.lastSeenMs() < cutoff);
@@ -662,23 +694,29 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * 8400 storm). {@link #getTotalLoad()} keeps the full shadow view for
      * observability and eviction planning.
      *
-     * <p>Formula: {@code confirmedRunningCount + inflightRequests.size()
-     * − |queuedPhase ∩ inflightRequests|}. The loop computes the intersection
-     * rather than using {@code queuedPhase.size()} because {@code queuedPhase}
-     * is cleaned lazily (only in calibrate and release), so it may contain
-     * stale entries already removed from {@code inflightRequests}. Directly
-     * subtracting {@code queuedPhase.size()} would over-subtract and make the
-     * load artificially low. The {@code containsKey} check is lock-free and
-     * consistent with other read paths ({@link #getTotalLoad()}, etc.).
+     * <p>O(1) formula (PR-C): {@code confirmedRunningCount
+     * + max(0, inflightRequests.size() − queuedPhaseCount)}. The
+     * {@link #queuedPhaseCount} AtomicInteger is maintained incrementally at
+     * every queuedPhase mutation point ({@link #markQueuedPhase},
+     * {@link #markDispatchedPhase}, {@link #reserve}, {@link #release},
+     * {@link #doCalibrate}, {@link #evictExpiredRequests}) so the hot gate
+     * path no longer scans the queued set.
+     *
+     * <p><b>Drift self-healing:</b> the counter is read lock-free and may
+     * transiently drift outside {@code [0, inflight]} under torn updates;
+     * the read side clamps to that range and emits a drift metric so the
+     * gate never sees an out-of-range load.
      */
     public int getEngineLoad() {
-        int queued = 0;
-        for (Long requestId : queuedPhase) {
-            if (inflightRequests.containsKey(requestId)) {
-                queued++;
-            }
+        int inflight = inflightRequests.size();
+        int queued = queuedPhaseCount.get();
+        // Drift self-healing: queued should stay within [0, inflight].
+        if (queued < 0 || queued > inflight) {
+            logger.warn("Decode queuedPhaseCount drift: count={}, inflight={}, confirmed={}, "
+                    + "clamping to [{}, {}]", queued, inflight, confirmedRunningCount, 0, inflight);
+            queued = Math.max(0, Math.min(queued, inflight));
         }
-        return confirmedRunningCount + Math.max(0, inflightRequests.size() - queued);
+        return confirmedRunningCount + Math.max(0, inflight - queued);
     }
 
     /**
@@ -690,7 +728,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             if (inflightRequests.containsKey(requestId)) {
-                queuedPhase.add(requestId);
+                if (queuedPhase.add(requestId)) {
+                    queuedPhaseCount.incrementAndGet();
+                }
             }
         } finally {
             admissionLock.unlock();
@@ -703,7 +743,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * calibrate confirms it. Idempotent.
      */
     public void markDispatchedPhase(long requestId) {
-        queuedPhase.remove(requestId);
+        if (queuedPhase.remove(requestId)) {
+            queuedPhaseCount.decrementAndGet();
+        }
     }
 
     /**

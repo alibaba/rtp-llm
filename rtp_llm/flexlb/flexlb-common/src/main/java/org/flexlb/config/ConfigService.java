@@ -306,9 +306,8 @@ public class ConfigService {
             config.getAutoTpmMaxTransferCount());
         log.info("autoTpmCommitWaitReleaseTimeoutMs={}",
             config.getAutoTpmCommitWaitReleaseTimeoutMs());
-        log.info("autoTpmCommitStrategy={}, autoTpmVictimGuardMode={}, autoTpmDecodeGateLoadMode={}",
-            config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode(),
-            config.getAutoTpmDecodeGateLoadMode());
+        log.info("autoTpmCommitStrategy={}, autoTpmVictimGuardMode={}",
+            config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode());
         log.info("workerTimeoutMs={}",
             config.getWorkerTimeoutMs());
         log.info("==========================================");
