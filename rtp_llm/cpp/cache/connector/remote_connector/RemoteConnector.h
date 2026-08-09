@@ -27,6 +27,10 @@ class RemoteConnectorAsyncContext;
 
 class RemoteConnector: public KVCacheConnector {
 public:
+    // Production remote cache currently supports exactly one FULL group. Multi-group policies are retained only as
+    // future restoration scaffolding and are intentionally unreachable through RemoteConnector.
+    static void validateConfig(const CacheConfig& cache_config);
+
     RemoteConnector(const CacheConfig&                        cache_config,
                     const KVCacheConfig&                      kv_cache_config,
                     const RuntimeConfig&                      runtime_config,

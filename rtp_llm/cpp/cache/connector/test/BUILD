@@ -5,7 +5,10 @@ cc_test = cc_test_wrapper
 
 test_copts = [
     "-fno-access-control",
-] + copts()
+] + copts() + select({
+    "//:using_remote_kv_cache": ["-DUSE_REMOTE_KV_CACHE=1"],
+    "//conditions:default": [],
+})
 
 test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",

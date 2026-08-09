@@ -349,6 +349,44 @@ TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
     EXPECT_NE(cache_manager->convertIndexToAddr(1, 3, "full1").kv_addr, nullptr);
 }
 
+#ifdef USE_REMOTE_KV_CACHE
+TEST_F(KVCacheManagerTest, MultiGroupRemoteFailsBeforeAllocatorInitialization) {
+    auto cache_config = makeSimpleHybridMhaCacheConfig(
+        /*layer_num=*/4, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.enable_remote_cache = true;
+    auto cache_manager                  = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          nullptr,
+                                                          kv_cache_config,
+                                                          ParallelismConfig{},
+                                                          RuntimeConfig{});
+
+    EXPECT_THROW(cache_manager->init(), std::runtime_error);
+    EXPECT_EQ(cache_manager->allocator_, nullptr);
+    EXPECT_EQ(cache_manager->coordinator_, nullptr);
+}
+
+TEST_F(KVCacheManagerTest, SingleNonFullRemoteFailsBeforeAllocatorInitialization) {
+    auto cache_config = makeSimpleLinearCacheConfig(
+        /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.enable_remote_cache = true;
+    auto cache_manager                  = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          nullptr,
+                                                          kv_cache_config,
+                                                          ParallelismConfig{},
+                                                          RuntimeConfig{});
+
+    EXPECT_THROW(cache_manager->init(), std::runtime_error);
+    EXPECT_EQ(cache_manager->allocator_, nullptr);
+    EXPECT_EQ(cache_manager->coordinator_, nullptr);
+}
+#endif
+
 TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
     auto expect_pool_backing = [](RoleType role_type) {
         auto config = makeCompactDSV4ManagerConfig(/*block_num=*/8);

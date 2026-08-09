@@ -96,25 +96,6 @@ std::vector<GroupBase> buildGroups(const LayerKVCacheSpecBuildResults& runtime_s
     return groups;
 }
 
-KVCacheSpecPtr representativeSpec(const std::vector<GroupBase>& groups, CacheGroupType group_type) {
-    KVCacheSpecPtr result;
-    std::string    fingerprint;
-    for (const auto& group : groups) {
-        if (group.policy.group_type != group_type) {
-            continue;
-        }
-        if (result == nullptr) {
-            result      = group.spec->clone();
-            fingerprint = group.spec->layoutFingerprint();
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(fingerprint == group.spec->layoutFingerprint(),
-                                    "hybrid %d cache groups have different kv cache spec layouts",
-                                    static_cast<int>(group_type));
-        }
-    }
-    return result;
-}
-
 void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups) {
     std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
     for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
@@ -156,21 +137,14 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
         CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(model_config.num_layers);
-    config.layer_all_num      = config.layer_num;
-    config.seq_size_per_block = tokens_per_block;
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.linear_step        = 1;
+    config.layer_num                   = static_cast<uint32_t>(model_config.num_layers);
+    config.layer_all_num               = config.layer_num;
+    config.seq_size_per_block          = tokens_per_block;
+    config.use_mla                     = model_config.attn_config.use_mla;
+    config.linear_step                 = 1;
+    config.use_independent_block_pools = true;
 
     auto cache_groups = buildGroups(runtime_specs, model_config, parallelism_config);
-    auto full_spec    = representativeSpec(cache_groups, CacheGroupType::FULL);
-    auto linear_spec  = representativeSpec(cache_groups, CacheGroupType::LINEAR);
-
-    if (full_spec != nullptr && linear_spec != nullptr) {
-        RTP_LLM_CHECK_WITH_INFO(full_spec->block_size_bytes() >= linear_spec->block_size_bytes(),
-                                "not support full attention with padding now");
-    }
-
     for (auto& group : cache_groups) {
         group.kv_block_stride_bytes = group.spec->block_size_bytes();
         group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();

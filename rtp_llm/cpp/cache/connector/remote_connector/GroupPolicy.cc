@@ -277,6 +277,23 @@ bool FullLayerGroupPolicy::init() {
 bool FullLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                               std::vector<std::string>&               location_spec_group_names) const {
     if (groups_.size() == 1) {
+        const auto& cache_keys = resource->cacheKeys();
+        RTP_LLM_CHECK(!cache_keys.empty());
+        size_t valid_keys_size = cache_keys.size();
+        if (!resource->lastBlockAligned()) {
+            valid_keys_size--;
+        }
+        if (!validateResourceGroupBlocks(*resource, groups_, valid_keys_size)) {
+            return false;
+        }
+        const auto& tag    = groups_.begin()->first;
+        const auto& blocks = resource->blocks(tag);
+        for (size_t key_idx = 0; key_idx < valid_keys_size; ++key_idx) {
+            if (isNullBlockIdx(blocks.at(key_idx))) {
+                RTP_LLM_LOG_WARNING("cache group tag [%s] has invalid block at index [%zu]", tag.c_str(), key_idx);
+                return false;
+            }
+        }
         return true;
     }
     return DefaultLayerGroupPolicy::getNeedWriteGroups(resource, location_spec_group_names);

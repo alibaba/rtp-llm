@@ -207,10 +207,10 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
                                    size_t             transfer_scale_bytes = 0,
                                    bool               opaque_store         = false) {
     CacheConfig config;
-    config.layer_num                   = static_cast<uint32_t>(layer_id + 1);
-    config.layer_all_num               = config.layer_num;
-    config.seq_size_per_block          = tokens_per_block;
-    config.use_independent_block_pools = independent_pools;
+    config.layer_num          = static_cast<uint32_t>(layer_id + 1);
+    config.layer_all_num      = config.layer_num;
+    config.seq_size_per_block = tokens_per_block;
+    (void)independent_pools;
 
     GroupBase target_group;
     target_group.tag              = tag;
@@ -227,8 +227,8 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
                                                                      KVCacheSpecType::MultiHeadAttention));
     target_group.policy                = policy;
     target_group.block_num             = static_cast<uint32_t>(block_num);
-    target_group.kv_block_stride_bytes = kv_transfer;
-    target_group.kv_scale_stride_bytes = scale_transfer;
+    target_group.kv_block_stride_bytes = physical_kv_stride;
+    target_group.kv_scale_stride_bytes = physical_scale_stride;
 
     std::vector<LayerBase> layers(static_cast<size_t>(layer_id + 1));
     for (size_t i = 0; i < layers.size(); ++i) {

@@ -79,10 +79,9 @@ struct GroupSpec {
 
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
     CacheConfig config;
-    config.layer_num                   = 1;
-    config.layer_all_num               = 1;
-    config.seq_size_per_block          = groups.front().tokens_per_block;
-    config.use_independent_block_pools = true;
+    config.layer_num          = 1;
+    config.layer_all_num      = 1;
+    config.seq_size_per_block = groups.front().tokens_per_block;
 
     std::vector<GroupBase>   topology_groups;
     std::vector<std::string> layer_tags;

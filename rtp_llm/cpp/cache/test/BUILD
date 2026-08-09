@@ -273,9 +273,9 @@ cc_test(
 )
 
 cc_test(
-    name = "hybrid_kv_cache_allocator_test",
+    name = "hybrid_kv_cache_allocator_behavior_test",
     srcs = [
-        "HybridTypeKVCacheAllocatorTest.cc",
+        "HybridKVCacheAllocatorBehaviorTest.cc",
     ],
     data = [],
     copts = test_copts,
