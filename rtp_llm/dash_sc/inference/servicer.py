@@ -431,6 +431,17 @@ def _apply_request_overrides(
         generate_config.ttft_timeout_ms = engine_timeout_ms
     if other.traffic_reject_priority is not None:
         generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
+    # Auto-TPM QoS priority from x-dashscope-inner-qos-level. Mirrors
+    # openai_endpoint.py which sets qos_priority from the HTTP header so
+    # it survives IPC to the dash_sc enqueue loop where
+    # GenerateInput.headers may be absent. Do NOT confuse with
+    # traffic_reject_priority (x-ds-request-priority) above.
+    qos_level = other.request_headers.get("x-dashscope-inner-qos-level")
+    if qos_level is not None:
+        try:
+            generate_config.qos_priority = int(str(qos_level).strip())
+        except (TypeError, ValueError):
+            pass
     if other.reasoning_effort is not None:
         kwargs = dict(getattr(generate_config, "chat_template_kwargs", None) or {})
         kwargs["reasoning_effort"] = other.reasoning_effort

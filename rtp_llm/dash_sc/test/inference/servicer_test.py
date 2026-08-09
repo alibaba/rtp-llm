@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
@@ -43,7 +43,13 @@ from rtp_llm.dash_sc.inference.servicer import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.ops import RoleType
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.server.master_client import MasterClient
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+)
 
 
 def _add_input_tensor(
@@ -2332,6 +2338,72 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             visitor.last_generate_input.headers,
             {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
+        # qos_priority must NOT be set when x-dashscope-inner-qos-level
+        # is absent from the request.
+        self.assertIsNone(generate_config.qos_priority)
+
+    async def test_qos_priority_set_from_ds_header_attributes(self) -> None:
+        """dash_sc path must set generate_config.qos_priority from
+        x-dashscope-inner-qos-level, mirroring openai_endpoint.py."""
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-dashscope-inner-qos-level": "77",
+                "x-ds-request-priority": "10",
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        generate_config = visitor.last_generate_input.generate_config
+        # Channel 2: qos_priority set by _apply_request_overrides
+        self.assertEqual(generate_config.qos_priority, 77)
+        # traffic_reject_priority still comes from x-ds-request-priority
+        self.assertEqual(generate_config.traffic_reject_priority, 10)
+        # Channel 1: headers also carry the qos level
+        self.assertEqual(
+            visitor.last_generate_input.headers.get("x-dashscope-inner-qos-level"),
+            "77",
+        )
+        # _extract_priority returns 77 via either channel
+        self.assertEqual(
+            MasterClient._extract_priority(visitor.last_generate_input), 77
+        )
+
+    async def test_extract_priority_fallback_to_qos_priority(self) -> None:
+        """When GenerateInput.headers is empty (e.g. after IPC),
+        _extract_priority must fall back to generate_config.qos_priority."""
+        gc = GenerateConfig()
+        gc.qos_priority = 77
+        input_no_headers = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2], dtype=torch.int),
+            mm_inputs=[],
+            generate_config=gc,
+            headers={},
+        )
+        self.assertEqual(MasterClient._extract_priority(input_no_headers), 77)
+
+    async def test_extract_priority_returns_50_when_no_priority(self) -> None:
+        """When neither headers nor qos_priority carry a value,
+        _extract_priority returns the default 50."""
+        gc = GenerateConfig()
+        self.assertIsNone(gc.qos_priority)
+        input_no_priority = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2], dtype=torch.int),
+            mm_inputs=[],
+            generate_config=gc,
+            headers={},
+        )
+        self.assertEqual(MasterClient._extract_priority(input_no_priority), 50)
 
 
 if __name__ == "__main__":
