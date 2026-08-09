@@ -14,7 +14,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:s1"
             },
             "result": {
-                "response": "It looks like you're asking about the",
+                "response": "The **CAP Theorem**, also known",
                 "finished": true
             }
         }
