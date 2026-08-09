@@ -826,8 +826,8 @@ class IndexerRef(torch.nn.Module):
             block_kv = self.blocksize
             num_heads_kv = 1
             head_dim_with_sf = 132
-            kv_cache_fp8 = kv_cache.kv_scale_base.view(
-                kv_cache.kv_scale_base.shape[0],
+            kv_cache_fp8 = kv_cache.kv_cache_base.view(
+                kv_cache.kv_cache_base.shape[0],
                 block_kv,
                 num_heads_kv,
                 head_dim_with_sf,

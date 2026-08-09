@@ -380,6 +380,43 @@ TEST(HybridPoolConfigCreatorTest, Dsv4ReverseSpecOrderPreservesGroups) {
     EXPECT_EQ(config.groupForLayer(0, "swa_kv").tag, "swa_kv");
 }
 
+TEST(HybridPoolConfigCreatorTest, SparseIndexerUsesIndependentNaturalStridePool) {
+    ModelConfig model_config;
+    model_config.num_layers                          = 2;
+    model_config.attn_config.use_mla                 = true;
+    model_config.attn_config.kv_lora_rank            = 512;
+    model_config.attn_config.rope_head_dim           = 64;
+    model_config.attn_config.tokens_per_block        = 512;
+    model_config.attn_config.kernel_tokens_per_block = 64;
+
+    KVCacheSpecDesc default_desc;
+    default_desc.tag                       = "default";
+    default_desc.cache_type                = KVCacheSpecType::MultiHeadLatentAttention;
+    default_desc.kernel_seq_size_per_block = 64;
+
+    KVCacheSpecDesc indexer_desc;
+    indexer_desc.tag                       = "indexer_kv";
+    indexer_desc.cache_type                = KVCacheSpecType::OpaqueKV;
+    indexer_desc.entry_dtype               = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems               = 132;
+    indexer_desc.explicit_entry_count      = 512;
+    indexer_desc.kernel_seq_size_per_block = 64;
+    model_config.kv_cache_spec_descs.assign(2, {default_desc, indexer_desc});
+
+    ParallelismConfig parallelism_config;
+    auto              config = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
+
+    ASSERT_EQ(config.groupNums(), 2);
+    EXPECT_EQ(config.layerIdsForGroup("default"), (std::vector<int>{0, 1}));
+    EXPECT_EQ(config.layerIdsForGroup("indexer_kv"), (std::vector<int>{0, 1}));
+    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup("default"), 64u);
+    EXPECT_EQ(config.kernelSeqSizePerBlockForGroup("indexer_kv"), 64u);
+    EXPECT_EQ(config.kvScaleStrideBytesForGroup("default"), 0u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup("indexer_kv"), 512u * 132u);
+    EXPECT_EQ(config.kvScaleStrideBytesForGroup("indexer_kv"), 0u);
+    EXPECT_EQ(config.blockSizeBytesForGroup("indexer_kv"), 2u * 512u * 132u);
+}
+
 static GroupBase makeTestGroup(const KVCacheSpecPtr& spec, CacheGroupType type, std::vector<int> layer_ids) {
     GroupBase group;
     group.tag       = spec->tag;
@@ -559,9 +596,6 @@ TEST(CacheConfigTest, SetTopologyRejectsPaddedMhaRowsBeforePythonViewConstructio
 
     group.kv_scale_stride_bytes = spec->scale_block_size_bytes() - 1;
     EXPECT_THROW(config.setTopology({group, opaque_group}, layers), std::exception);
-
-    opaque_group.uses_sparse_indexer_scale_layout = true;
-    EXPECT_THROW(config.setTopology({opaque_group}, {{0, {"swa"}}}), std::exception);
 }
 
 TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpecs) {

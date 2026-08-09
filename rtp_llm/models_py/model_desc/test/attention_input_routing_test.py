@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
+from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextGatedDeltaNetDecode,
@@ -13,6 +14,11 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     _maybe_write_cp_cache_store,
     _write_cp_cache_store,
 )
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    resolve_mla_use_fast_path,
+)
+from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
+from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 class FakeKVCache:
@@ -37,6 +43,33 @@ class RoutingModel(GptModelBase):
 
 
 class AttentionInputRoutingTest(unittest.TestCase):
+    def test_mla_fast_path_uses_bound_total_kv_length(self):
+        for is_prefill, max_length, cp_enabled, expected in (
+            (True, 4, False, True),
+            (True, 5, False, False),
+            (False, 4, False, False),
+            (True, 4, True, False),
+        ):
+            with self.subTest(
+                is_prefill=is_prefill,
+                max_length=max_length,
+                cp_enabled=cp_enabled,
+            ):
+                attention_inputs = PyAttentionInputs()
+                attention_inputs.is_prefill = is_prefill
+                attention_inputs.context_total_kv_length = max_length
+                parallelism = SimpleNamespace(
+                    prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp_enabled)
+                )
+                self.assertEqual(
+                    resolve_mla_use_fast_path(
+                        SimpleNamespace(indexer_topk=4),
+                        attention_inputs,
+                        parallelism,
+                    ),
+                    expected,
+                )
+
     def test_qwen3_next_cuda_graph_uses_narrow_block_map_view(self):
         block_map = torch.arange(12, dtype=torch.int32).reshape(3, 4)
         attention_inputs = SimpleNamespace(
@@ -126,9 +159,9 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
     def test_prepare_fmha_impl_only_for_model_selected_tags(self):
         group_inputs = {
-            "full": object(),
-            "linear0": object(),
-            "linear1": object(),
+            "full": PyAttentionInputs(),
+            "linear0": PyAttentionInputs(),
+            "linear1": PyAttentionInputs(),
         }
         inputs = SimpleNamespace(attention_inputs=group_inputs)
         model = RoutingModel(["full"])
@@ -145,7 +178,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         factory.assert_called_once()
 
     def test_default_model_prepares_every_tag(self):
-        group_inputs = {"group0": object(), "group1": object()}
+        group_inputs = {"group0": PyAttentionInputs(), "group1": PyAttentionInputs()}
         inputs = SimpleNamespace(attention_inputs=group_inputs)
         model = RoutingModel(None)
 
@@ -159,6 +192,178 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         self.assertEqual(fmha_impl, group_inputs)
         self.assertEqual(factory.call_count, 2)
+
+    def test_sparse_model_prepares_group_local_impls_with_one_path_decision(self):
+        group_inputs = {
+            "default": PyAttentionInputs(),
+            "indexer_kv": PyAttentionInputs(),
+        }
+        inputs = SimpleNamespace(attention_inputs=group_inputs)
+        model = object.__new__(GenericMoeModel)
+        nn.Module.__init__(model)
+        model.config = SimpleNamespace(
+            attn_config=SimpleNamespace(is_sparse=True),
+            getAttentionConfigs=lambda _tp_size: object(),
+        )
+        model.parallelism_config = SimpleNamespace(get_attn_tp_size=lambda: 1)
+        model.weight = object()
+        model.fmha_config = object()
+
+        def return_tagged_inputs(
+            _config,
+            _parallelism,
+            _weight,
+            tagged_inputs,
+            _fmha,
+            _graph,
+            **_kwargs,
+        ):
+            return tagged_inputs
+
+        with patch(
+            "rtp_llm.models_py.model_desc.generic_moe.resolve_mla_use_fast_path",
+            return_value=False,
+        ) as resolve_fast_path, patch(
+            "rtp_llm.models_py.model_desc.generic_moe.AttnImplFactory.get_fmha_impl",
+            side_effect=return_tagged_inputs,
+        ) as factory:
+            fmha_impl = model.prepare_fmha_impl(inputs, is_cuda_graph=True)
+
+        self.assertEqual(fmha_impl, group_inputs)
+        resolve_fast_path.assert_called_once()
+        self.assertEqual(factory.call_count, 2)
+        for call in factory.call_args_list:
+            self.assertFalse(call.kwargs["mla_use_fast_path"])
+
+    def test_sparse_model_builds_fmha_routes_once_and_looks_up_each_layer_cache(self):
+        model = object.__new__(GenericMoeModel)
+        nn.Module.__init__(model)
+        model.config = SimpleNamespace(attn_config=SimpleNamespace(is_sparse=True))
+        model.layer_num = 2
+        model.kv_cache = object()
+        model.embed_tokens = Mock(return_value=torch.ones((1, 2)))
+        layers = [Mock(), Mock()]
+        for layer in layers:
+            layer.return_value = SimpleNamespace(
+                hidden_states=torch.ones((1, 2)),
+                residual=torch.zeros((1, 2)),
+            )
+        model.layers = layers
+        model.norm = Mock(return_value=(torch.ones((1, 2)), None))
+        fmha_impl = {"default": object(), "indexer_kv": object()}
+
+        with patch(
+            "rtp_llm.models_py.model_desc.generic_moe.select_fmha_impl_for_tag",
+            side_effect=lambda routes, tag: routes[tag],
+        ) as select_route, patch(
+            "rtp_llm.models_py.model_desc.generic_moe.get_layer_caches_for_tags",
+            side_effect=lambda _cache, layer_id, tags: {
+                tag: f"{tag}-{layer_id}" for tag in tags
+            },
+        ) as get_layer_caches:
+            model.forward(SimpleNamespace(input_ids=torch.tensor([1])), fmha_impl)
+
+        self.assertEqual(select_route.call_count, 2)
+        self.assertEqual(get_layer_caches.call_count, 2)
+        self.assertEqual(
+            [call.args[1] for call in get_layer_caches.call_args_list], [0, 1]
+        )
+        self.assertIs(layers[0].call_args.args[2], layers[1].call_args.args[2])
+        self.assertEqual(
+            layers[0].call_args.kwargs["kv_cache"],
+            {"default": "default-0", "indexer_kv": "indexer_kv-0"},
+        )
+        self.assertEqual(
+            layers[1].call_args.kwargs["kv_cache"],
+            {"default": "default-1", "indexer_kv": "indexer_kv-1"},
+        )
+
+    def test_sparse_indexer_publishes_group_cache_after_kernel_write(self):
+        attention = object.__new__(MlaAttention)
+        nn.Module.__init__(attention)
+        attention.q_lora_rank = 0
+
+        for topk_indices in (torch.tensor([3]), None):
+            with self.subTest(topk_indices=topk_indices):
+                events = []
+                indexer_cache = SimpleNamespace(tag="indexer_kv")
+
+                def run_indexer(*args, **kwargs):
+                    events.append(("indexer_write", args[2]))
+                    return topk_indices
+
+                input_lengths = object()
+                prefix_lengths = object()
+                block_ids = object()
+                cache_store_inputs = object()
+                cache_store_writer = Mock()
+                cache_store_writer.write.side_effect = (
+                    lambda _inputs, cache: events.append(("cache_store", cache))
+                )
+                indexer_attn_inputs = SimpleNamespace(
+                    is_prefill=True,
+                    input_lengths=input_lengths,
+                    prefix_lengths=prefix_lengths,
+                    kv_cache_block_id=block_ids,
+                    cache_store_inputs=cache_store_inputs,
+                    cache_store_writer=cache_store_writer,
+                )
+
+                attention.indexer = Mock(side_effect=run_indexer)
+                indexer_impl = SimpleNamespace(
+                    fmha_params=object(),
+                    attn_inputs=indexer_attn_inputs,
+                    cp_params=None,
+                    is_sparse=lambda: False,
+                )
+
+                result = attention._run_sparse_indexer(
+                    hidden_states=torch.empty(0),
+                    q_c=None,
+                    q_view=torch.empty(0),
+                    kv_cache=indexer_cache,
+                    fmha_impl=indexer_impl,
+                )
+
+                self.assertIs(result, topk_indices)
+                self.assertEqual(
+                    events,
+                    [
+                        ("indexer_write", indexer_cache),
+                        ("cache_store", indexer_cache),
+                    ],
+                )
+                cache_store_writer.write.assert_called_once_with(
+                    cache_store_inputs,
+                    indexer_cache,
+                )
+
+    def test_sparse_indexer_does_not_publish_cache_during_decode(self):
+        attention = object.__new__(MlaAttention)
+        nn.Module.__init__(attention)
+        attention.q_lora_rank = 0
+        attention.indexer = Mock(return_value=torch.tensor([3]))
+        cache_store_writer = Mock()
+        indexer_impl = SimpleNamespace(
+            fmha_params=object(),
+            attn_inputs=SimpleNamespace(
+                is_prefill=False,
+                cache_store_inputs=None,
+                cache_store_writer=cache_store_writer,
+            ),
+            cp_params=None,
+            is_sparse=lambda: False,
+        )
+
+        attention._run_sparse_indexer(
+            hidden_states=torch.empty(0),
+            q_c=None,
+            q_view=torch.empty(0),
+            kv_cache=SimpleNamespace(tag="indexer_kv"),
+            fmha_impl=indexer_impl,
+        )
+
+        cache_store_writer.write.assert_not_called()
 
 
 if __name__ == "__main__":
