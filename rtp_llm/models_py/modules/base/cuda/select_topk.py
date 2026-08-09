@@ -3,6 +3,7 @@ from torch import nn
 
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.modules.base.common.moe_topk import group_topk_supported
 
 
 class SelectTopk(nn.Module):
@@ -37,6 +38,20 @@ class GroupTopK(nn.Module):
         renormalize: bool,
         routed_scaling_factor: float,
     ):
+        num_experts = scores.shape[-1]
+        if not group_topk_supported(
+            num_experts=num_experts,
+            n_group=n_group,
+            topk_group=topk_group,
+            top_k=topk,
+            renormalize=renormalize,
+        ):
+            raise ValueError(
+                "unsupported fused GroupTopK routing: "
+                f"num_experts={num_experts}, n_group={n_group}, "
+                f"topk_group={topk_group}, top_k={topk}, "
+                f"renormalize={renormalize}"
+            )
         scores = scores.sigmoid()
         scores_with_bias = scores + correction_bias.unsqueeze(0)
         self.group_topk_op.forward(
