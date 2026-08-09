@@ -18,10 +18,6 @@
 namespace rtp_llm {
 
 class CPSlotMapper;
-struct KVCacheTokenCapacity {
-    size_t total_tokens     = 0;
-    size_t available_tokens = 0;
-};
 
 struct KVCachePoolMetricsSnapshot {
     std::string pool_name            = "unnamed";
@@ -79,14 +75,7 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping);
 
-    BlockPoolPtr getBlockPool() const {
-        return block_pool_;
-    }
-
-    virtual BlockPoolPtr getBlockPool(std::string_view tag) const {
-        (void)tag;
-        return block_pool_;
-    }
+    virtual BlockPoolPtr getBlockPool(std::string_view tag) const = 0;
 
     SharedBlockCachePtr sharedBlockCache() const {
         return shared_block_cache_;
@@ -102,10 +91,6 @@ public:
 
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
         cp_slot_mapper_ = std::move(cp_slot_mapper);
-    }
-
-    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
-        return cp_slot_mapper_;
     }
 
     // Reserve some blocks for already-running streams' future allocations.
@@ -127,11 +112,11 @@ public:
     virtual size_t                  connectorRefBlocksNum() const;
     virtual size_t                  blockCacheRefBlocksNum() const;
     virtual size_t                  notInUseBlocksNum() const;
-    virtual size_t                  availableTokensNum() const;
-    virtual size_t                  totalTokensNum() const;
     virtual size_t                  totalBlocksNum() const;
-    virtual size_t                  maxAvailableTokensNum() const;
-    virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
+    virtual size_t                  totalTokensNum() const;
+    virtual size_t                  availableTokensNum() const;
+    // Logical request length limit. FULL groups constrain the value when present.
+    virtual size_t                                  maxSequenceLength() const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
     virtual std::vector<std::string>                independentEvictionTags() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
@@ -143,29 +128,23 @@ protected:
     MallocResult         initMalloc(const MallocInfo& malloc_info);
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)             = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
-    virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
     // Estimate peak additional blocks for one sequence resource.
     virtual int  estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                         int                    seq_len,
                                         int                    remaining_tokens,
                                         int                    reserve_step,
-                                        bool                   enable_reuse_cache) const           = 0;
+                                        bool                   enable_reuse_cache) const                              = 0;
     virtual int  estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                     int  common_seq_len,
                                                     int  remaining_tokens,
                                                     int  reserve_step,
                                                     bool enable_reuse_cache,
-                                                    int  target_batch_size) const = 0;
-    virtual void checkCPShardedMallocResult(const MallocInfo&) const {}
+                                                    int  target_batch_size) const                    = 0;
     virtual void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
-    bool         cpShardThisGroupForCapacity(std::string_view tag) const;
     size_t       logicalSeqSizePerBlockForCapacity(std::string_view tag) const;
-    int          cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const;
-    int          deviceCacheMetricTokensPerBlock() const;
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
-    BlockPoolPtr                       block_pool_;
     SharedBlockCachePtr                shared_block_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;

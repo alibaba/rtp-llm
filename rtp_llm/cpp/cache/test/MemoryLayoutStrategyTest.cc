@@ -151,7 +151,8 @@ protected:
         cache_config.seq_size_per_block = 1;
         initializeSingleGroup(cache_config, spec, block_num);
 
-        auto pool_cfg   = BlockPoolConfigHelper::createConfig(cache_config);
+        auto pool_cfg =
+            BlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front().tag);
         auto layout_cfg = pool_cfg.memory_layouts[0];
 
         layout_cfg.enable_kv_scale          = false;
@@ -254,8 +255,9 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     cache_config.seq_size_per_block = 4;
     initializeSingleGroup(cache_config, spec, 8);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
-    auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
+    auto pool_cfg =
+        BlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front().tag);
+    auto config = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto  kv_cache_tensor = torch::zeros({static_cast<int64_t>(config.kv_block_pool_size_bytes)}, torch::kInt8);
     auto  kv_scale_tensor = torch::zeros({static_cast<int64_t>(config.kv_scale_pool_size_bytes)}, torch::kInt8);
@@ -414,8 +416,9 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesBy
     cache_config.seq_size_per_block = 64;
     initializeSingleGroup(cache_config, spec, 8);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
-    auto config   = pool_cfg.memory_layouts[0];
+    auto pool_cfg =
+        BlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front().tag);
+    auto config = pool_cfg.memory_layouts[0];
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
     auto kv_cache_tensor =
@@ -484,8 +487,9 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale)
     cache_config.seq_size_per_block = 64;
     initializeSingleGroup(cache_config, spec, 8);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
-    auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
+    auto pool_cfg =
+        BlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front().tag);
+    auto config = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
     auto kv_cache_tensor =
@@ -648,7 +652,8 @@ TEST_F(MemoryLayoutStrategyTest, BlockPoolConfigPropagatesKernelBlockSplitButKee
     cache_config.seq_size_per_block = 4;
     initializeSingleGroup(cache_config, spec, 4);
 
-    auto pool_config = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_config =
+        BlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front().tag);
     ASSERT_EQ(pool_config.memory_layouts.size(), 1u);
     auto layout_config = pool_config.memory_layouts[0];
     EXPECT_EQ(layout_config.kernel_blocks_per_kv_block, 2u);

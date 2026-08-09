@@ -4,7 +4,6 @@
 #include <limits>
 #include <numeric>
 
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
@@ -35,31 +34,8 @@ bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVC
     return budget.swa_block_bytes == 0 || static_cast<size_t>(swa_blocks) <= remaining / budget.swa_block_bytes;
 }
 
-size_t sharedPoolBlockSizeBytes(const CacheConfig& config) {
-    RTP_LLM_CHECK_WITH_INFO(!config.use_independent_block_pools,
-                            "shared pool block size requires shared-pool cache config");
-    const auto kv_stride    = BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(config);
-    const auto scale_stride = BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(config);
-    RTP_LLM_CHECK_WITH_INFO(kv_stride <= std::numeric_limits<size_t>::max() - scale_stride,
-                            "shared pool block stride overflow: kv=%zu scale=%zu",
-                            kv_stride,
-                            scale_stride);
-    const auto layer_stride = kv_stride + scale_stride;
-    const auto layer_num    = config.groupLayerNum();
-    RTP_LLM_CHECK_WITH_INFO(layer_num == 0 || layer_stride <= std::numeric_limits<size_t>::max() / layer_num,
-                            "shared pool block size overflow: layers=%zu layer_stride=%zu",
-                            layer_num,
-                            layer_stride);
-    return layer_num * layer_stride;
-}
-
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
-    if (!config.use_independent_block_pools) {
-        budget.paged_block_bytes = sharedPoolBlockSizeBytes(config);
-        return budget;
-    }
-
     budget.explicit_pool_reserve_bytes = config.explicitlySizedPoolReserveBytes();
     for (const auto& group : config.topology().groups()) {
         if (config.usesExplicitIndependentBlocks(group.tag)) {

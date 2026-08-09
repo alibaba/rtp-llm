@@ -329,14 +329,15 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
-TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
+TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearGroup) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
-    EXPECT_THROW(cache_manager->init(), std::runtime_error);
+    ASSERT_TRUE(cache_manager->init());
     ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->getBlockPool(), nullptr);
+    EXPECT_NE(cache_manager->allocator_->getBlockPool("linear"), nullptr);
+    EXPECT_NE(cache_manager->convertIndexToAddr(1, 0, "linear").kv_addr, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
@@ -1195,6 +1196,54 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     EXPECT_LT(info.total_kv_cache, kv_cache_manager->totalBlocksNum() * cache_config.seq_size_per_block);
 }
 
+TEST_F(KVCacheManagerTest, GetKVCacheInfoUsesLogicalCapacityOfCPShardedFullPool) {
+    CacheConfig cache_config;
+    cache_config.layer_num          = 4;
+    cache_config.seq_size_per_block = 4;
+    cache_config.linear_step        = 1;
+
+    auto linear_spec               = makeResolvedLinearSpec(DataType::TYPE_FP16,
+                                              1,
+                                              1,
+                                              1,
+                                              1,
+                                              2,
+                                              /*physical_block_size=*/4,
+                                              DataType::TYPE_FP16,
+                                              DataType::TYPE_FP16,
+                                              "linear");
+    auto full_spec                 = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, /*physical_block_size=*/4, "full");
+    auto full_policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_policy.explicit_block_num = 4;
+    setTestTopology(
+        cache_config,
+        {makeTestGroupForConfig(cache_config, linear_spec, {0, 1}, CacheGroupType::LINEAR, "linear"),
+         makeTestGroupForConfig(cache_config, full_spec, {2, 3}, CacheGroupType::FULL, "full", full_policy)});
+    cache_config.finalizeBlockNums(/*dynamic_block_num=*/10, RuntimeConfig{});
+
+    auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(kv_cache_manager->init());
+    auto hybrid_allocator =
+        std::dynamic_pointer_cast<HybridPoolCoordinatorKVCacheManager>(kv_cache_manager->coordinator_cache_manager_);
+    ASSERT_NE(hybrid_allocator, nullptr);
+
+    auto cp_slot_mapper               = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+    kv_cache_manager->cp_slot_mapper_ = cp_slot_mapper;
+    hybrid_allocator->setCPSlotMapper(cp_slot_mapper);
+
+    const auto&  pools              = hybrid_allocator->groupBlockPools();
+    const size_t full_total         = pools.at("full")->totalBlocksNum();
+    const size_t full_available     = pools.at("full")->availableBlocksNum();
+    const size_t linear_total       = pools.at("linear")->totalBlocksNum();
+    const size_t logical_block_size = cp_slot_mapper->virtualBlockSize();
+    ASSERT_LT(full_total * logical_block_size, linear_total * cache_config.seq_size_per_block);
+
+    const auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
+    EXPECT_EQ(info.block_size, logical_block_size);
+    EXPECT_EQ(info.total_kv_cache, full_total * logical_block_size);
+    EXPECT_EQ(info.available_kv_cache, full_available * logical_block_size);
+}
+
 TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridPoolFullGroups) {
     auto cache_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
 
@@ -1204,7 +1253,7 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
-    const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
+    const size_t physical_capacity = hybrid_allocator->totalTokensNum();
     auto         cp_slot_mapper =
         std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, static_cast<int>(cache_config.seq_size_per_block));
     kv_cache_manager->cp_slot_mapper_ = cp_slot_mapper;
@@ -1221,8 +1270,8 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
                      pool->totalBlocksNum() * static_cast<size_t>(cache_config.seq_size_per_block * 2));
     }
 
-    EXPECT_EQ(kv_cache_manager->maxAvailableTokensNum(), expected_logical_capacity);
-    EXPECT_GT(kv_cache_manager->maxAvailableTokensNum(), physical_capacity);
+    EXPECT_EQ(kv_cache_manager->maxSequenceLength(), expected_logical_capacity);
+    EXPECT_GT(kv_cache_manager->maxSequenceLength(), physical_capacity);
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailable) {

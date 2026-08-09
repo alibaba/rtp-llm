@@ -16,7 +16,6 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -247,17 +246,11 @@ bool KVCacheManager::init() {
                                                    && kv_cache_config_.enable_prefix_tree_memory_cache
                                                    && kv_cache_config_.enable_independent_group_eviction;
 
-    const bool use_group_pools = config_.use_independent_block_pools || config_.groupNums() > 1;
-    if (use_group_pools) {
-        allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
-                                                                           AllocationType::DEVICE,
-                                                                           metrics_reporter_,
-                                                                           kv_cache_config_.reserve_block_ratio,
-                                                                           pd_sep_config_.role_type);
-    } else {
-        allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-    }
+    allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
+                                                                       AllocationType::DEVICE,
+                                                                       metrics_reporter_,
+                                                                       kv_cache_config_.reserve_block_ratio,
+                                                                       pd_sep_config_.role_type);
 
     if (use_cuda_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
@@ -450,16 +443,12 @@ void KVCacheManager::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cach
     allocator_->blockCacheFree(batch_kv_cache_resource);
 }
 
-size_t KVCacheManager::availableTokensNum() const {
-    return allocator_->availableTokensNum();
-}
-
 size_t KVCacheManager::totalBlocksNum() const {
     return allocator_->totalBlocksNum();
 }
 
-size_t KVCacheManager::maxAvailableTokensNum() const {
-    return allocator_->maxAvailableTokensNum();
+size_t KVCacheManager::maxSequenceLength() const {
+    return allocator_->maxSequenceLength();
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
@@ -517,10 +506,9 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
                                          cp_slot_mapper_->virtualBlockSize() :
                                          config_.seq_size_per_block;
 
-    const auto capacity     = allocator_->tokenCapacity(block_size_tokens);
     info.block_size         = block_size_tokens;
-    info.total_kv_cache     = capacity.total_tokens;
-    info.available_kv_cache = capacity.available_tokens;
+    info.total_kv_cache     = allocator_->totalTokensNum();
+    info.available_kv_cache = allocator_->availableTokensNum();
 
     return info;
 }

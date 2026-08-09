@@ -40,11 +40,11 @@ public:
     // Reject inputs longer than the KV cache can hold; mark the stream errored so the caller
     // sees the failure via collectStreamOutput / pollStreamOutput. Mirrors FIFOScheduler.
     bool checkInputLength(const GenerateStreamPtr& stream) {
-        if (cache_manager_ && stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
+        if (cache_manager_ && stream->inputLength() > cache_manager_->maxSequenceLength()) {
             stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                                 "input len " + std::to_string(stream->inputLength())
                                     + " is greater than kv cache max available tokens num "
-                                    + std::to_string(cache_manager_->maxAvailableTokensNum()));
+                                    + std::to_string(cache_manager_->maxSequenceLength()));
             return false;
         }
         return true;

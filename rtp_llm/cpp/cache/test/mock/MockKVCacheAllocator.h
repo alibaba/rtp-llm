@@ -45,6 +45,7 @@ public:
                 singleBatchNeedBlocks,
                 (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step),
                 (const, override));
+    MOCK_METHOD(BlockPoolPtr, getBlockPool, (std::string_view tag), (const, override));
     MOCK_METHOD(int,
                 estimatePeakNeedBlocks,
                 (const KVCacheResource& kv_cache_resource,
@@ -58,7 +59,6 @@ protected:
     MOCK_METHOD(bool, doInit, (), (override));
     MOCK_METHOD(MallocResult, incrMalloc, (const MallocInfo&), (override));
     MOCK_METHOD(MallocResult, initMallocForCommonLen, (const MallocInfo&), (override));
-    MOCK_METHOD(int, getNeedBlocks, (const MallocInfo&), (const, override));
     MOCK_METHOD(int,
                 estimateInitialBatchPeakNeedBlocks,
                 (int  seq_len,

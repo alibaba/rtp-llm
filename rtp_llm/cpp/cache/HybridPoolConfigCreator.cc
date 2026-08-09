@@ -127,8 +127,6 @@ buildGroupsFromLayerSpecs(const LayerKVCacheSpecBuildResults& layer_specs,
 }
 
 void setupIndependentPoolSizes(CacheConfig& config, std::vector<GroupBase> groups, std::vector<LayerBase> layers) {
-    config.use_independent_block_pools = true;
-
     for (auto& group : groups) {
         const auto& spec = group.spec;
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec tag=%s is null", group.tag.c_str());
