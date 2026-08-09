@@ -4,7 +4,8 @@ def h20_oss_suites():
     # H20 (SM9x) — Architecture-grouped suites
     # ============================================================================
 
-    # Newloader production boundaries for Qwen3 dense and DeepSeek V3.2.
+    # Newloader production boundaries for Qwen3 dense, DeepSeek V3.2, and
+    # GLM MLA/MoE variants.
     # DeepSeek score-model coverage includes MLA, FP8 KV, TP2, DeepEP, and
     # CUDA Graph; MTP uses the four-layer checkpoint for score and the extracted
     # layer-61 checkpoint for draft, so both assets match their actual layouts.
@@ -30,6 +31,20 @@ def h20_oss_suites():
                 task_info="data/model/deepseek_v32_4layers/v32_fp8_q_r_h20.json",
                 smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --reserver_runtime_mem_mb 20000 --tp_size 1 --world_size 1 --dp_size 1 --fp8_kv_cache 1 --sp_type mtp --sp_model_type deepseek-v3-mtp --sp_checkpoint_path /mnt/nas1/hf/DeepSeek-V3.2-Exp-MTP --sp_act_type BF16",
                 envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_glm5_newloader_fp8kv",
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 512 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1 --fp8_kv_cache 1 --kernel_seq_size_per_block 64",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "ACCL_LOW_LATENCY_OPTIMIZE=1"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="h20_glm4_moe_lite_newloader",
+                task_info="data/model/glm4_moe_lite/q_r_h20.json",
+                smoke_args="--warm_up 0 --seq_size_per_block 64 --act_type BF16 --enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["H20"],
             ),
         ],
