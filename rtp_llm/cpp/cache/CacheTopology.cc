@@ -88,7 +88,9 @@ void CacheTopology::validateAndBuildIndex() {
                                     "CacheTopology layer=%zu has duplicate tag=%s",
                                     layer_index,
                                     tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(group_layers.at(tag).count(static_cast<int>(layer_index)) != 0,
+            const auto group_layers_it = group_layers.find(tag);
+            RTP_LLM_CHECK_WITH_INFO(group_layers_it != group_layers.end()
+                                        && group_layers_it->second.count(static_cast<int>(layer_index)) != 0,
                                     "CacheTopology layer=%zu tag=%s is missing reverse group membership",
                                     layer_index,
                                     tag.c_str());

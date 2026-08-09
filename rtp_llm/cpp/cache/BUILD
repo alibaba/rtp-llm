@@ -326,6 +326,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":batch_kv_cache_resource",
+        ":block_pool",
         ":cache_types",
         ":kv_cache_allocator",
         "//rtp_llm/cpp/config:model_config",

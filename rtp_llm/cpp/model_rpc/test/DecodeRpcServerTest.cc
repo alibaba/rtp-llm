@@ -116,7 +116,7 @@ TEST(DecodeRpcServerTest, WholeBlockTransferUsesExplicitLayoutAndPageRouting) {
     const auto mla = makeRpcConfig({makeRpcGroup("full", {0})}, /*use_mla=*/true);
     EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(mla, /*page_level_routing=*/false));
 
-    const auto opaque = makeRpcConfig({makeOpaqueRpcGroup("opaque")}, /*use_mla=*/false, /*use_opaque=*/true);
+    const auto opaque = makeRpcConfig({makeOpaqueRpcGroup("opaque")});
     EXPECT_TRUE(DecodeRpcServer::requiresWholeBlockTransfer(opaque, /*page_level_routing=*/false));
 
     const auto grouped = makeRpcConfig({makeRpcGroup("full", {0}), makeRpcGroup("second", {1})});
@@ -141,6 +141,24 @@ TEST(DecodeRpcServerTest, WholeBlockRemoteRequestUsesOnlyMlaAndActiveOpaqueLayou
 
     const auto opaque = makeRpcConfig({makeOpaqueRpcGroup("opaque")});
     EXPECT_TRUE(DecodeRpcServer::remoteWholeBlock(opaque));
+}
+
+TEST(DecodeRpcServerTest, InactiveOpaqueGroupDoesNotChangeRemoteProtocol) {
+    auto full   = makeRpcGroup("full", {0});
+    auto opaque = makeOpaqueRpcGroup("opaque");
+    auto spec   = std::make_shared<OpaqueKVCacheSpec>(8, 8);
+    spec->tag   = "opaque";
+    opaque.spec = std::move(spec);
+    opaque.layer_ids.clear();
+
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+    config.layer_num          = 1;
+    config.setTopology({std::move(full), std::move(opaque)}, {{0, {"full"}}});
+
+    EXPECT_TRUE(config.usesOpaqueKVCacheStore());
+    EXPECT_FALSE(config.usesActiveOpaqueKVCacheStore());
+    EXPECT_FALSE(DecodeRpcServer::remoteWholeBlock(config));
 }
 
 TEST(DecodeRpcServerTest, LoadPredicatesAreUnrestrictedWithoutPageLevelRouting) {

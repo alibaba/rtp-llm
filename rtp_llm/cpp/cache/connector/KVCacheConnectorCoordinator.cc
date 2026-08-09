@@ -393,7 +393,7 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
     if (!isPdInvertMode()) {
         return true;
     }
-    const uint32_t layer_all_num         = static_cast<uint32_t>(cache_config_.layer_all_num);
+    const uint32_t layer_all_num         = cache_config_.totalLayerNum();
     auto           layer_block_converter = std::make_shared<LayerBlockConverterImpl>(allocator_);
 
     auto p2p_config = P2PConnectorConfig::create(

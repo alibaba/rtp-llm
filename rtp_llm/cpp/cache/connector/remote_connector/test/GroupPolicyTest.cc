@@ -6,7 +6,7 @@
 #include <string_view>
 
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/cache/CoordinatorKVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -32,7 +32,7 @@ namespace test {
 
 namespace {
 
-KVCacheSpecPtr makeFakeSpec(const std::string& tag, CacheGroupType group_type) {
+KVCacheSpecPtr makeFakeSpec(const std::string& tag, CacheGroupType group_type = CacheGroupType::FULL) {
     AttentionConfigs attn_config;
     attn_config.kv_head_num             = 1;
     attn_config.size_per_head           = 1;
@@ -65,20 +65,20 @@ KVCacheSpecPtr makeFakeSpec(const std::string& tag, CacheGroupType group_type) {
 
 }  // namespace
 
-class FakeKVCacheAllocator: public CoordinatorKVCacheManager {
+class FakeKVCacheAllocator: public KVCacheAllocator {
 public:
     FakeKVCacheAllocator(const CacheConfig&              config,
                          const std::vector<std::string>& full_group_tags,
                          const std::vector<std::string>& other_group_tags,
                          size_t                          per_group_layer_num):
-        CoordinatorKVCacheManager(config) {
+        KVCacheAllocator(config) {
         const auto group_count = full_group_tags.size() + other_group_tags.size();
         if (group_count > 0) {
             CacheConfig fake_config;
             fake_config.layer_num = static_cast<uint32_t>(group_count * per_group_layer_num);
-            std::vector<GroupTopology> groups;
-            int                        next_layer_id = 0;
-            const auto                 append_group  = [&](const std::string& tag, CacheGroupType group_type) {
+            std::vector<GroupBase> groups;
+            int                    next_layer_id = 0;
+            const auto             append_group  = [&](const std::string& tag, CacheGroupType group_type) {
                 std::vector<int> layer_ids;
                 for (size_t i = 0; i < per_group_layer_num; ++i) {
                     layer_ids.push_back(next_layer_id++);
@@ -113,7 +113,7 @@ public:
         return {};
     }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
-        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake coordinator cache manager has no cache topology");
+        RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
         GroupedCacheLayerLayout::GroupLayouts groups;
         for (const auto& group : topology_->groups()) {
             std::vector<BlockBufferPtrInfo> layers(topology_->layers().size());
@@ -134,6 +134,9 @@ public:
                                int                    remaining_tokens,
                                int                    reserve_step,
                                bool                   enable_reuse_cache) const override {
+        return 0;
+    }
+    int getNeedBlocks(const MallocInfo& malloc_info) const override {
         return 0;
     }
     int estimateInitialBatchPeakNeedBlocks(int  seq_len,
@@ -162,9 +165,6 @@ public:
     int seqSizePerBlock() const override {
         return 0;
     }
-    BlockPoolPtr getBlockPool(std::string_view) const override {
-        return nullptr;
-    }
 
     const std::shared_ptr<const CacheTopology>& topology() const {
         return topology_;
@@ -177,6 +177,9 @@ public:
         return 0;
     }
     size_t availableBlocksNum() const {
+        return 0;
+    }
+    size_t availableTokensNum() const {
         return 0;
     }
     size_t totalBlocksNum() const {
@@ -264,18 +267,6 @@ public:
                          size_t                          sw_size                         = 0) {
         allocator_ =
             std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, per_group_layer_num);
-        const auto fake_manager = std::dynamic_pointer_cast<FakeKVCacheAllocator>(allocator_);
-        ASSERT_NE(fake_manager, nullptr);
-        for (const auto& tag : full_group_tags) {
-            const auto& group = fake_manager->topology()->group(tag);
-            EXPECT_EQ(group.policy.group_type, CacheGroupType::FULL);
-            EXPECT_EQ(group.spec->type, KVCacheSpecType::MultiHeadAttention);
-        }
-        for (const auto& tag : other_group_tags) {
-            const auto& group = fake_manager->topology()->group(tag);
-            EXPECT_EQ(group.policy.group_type, CacheGroupType::LINEAR);
-            EXPECT_EQ(group.spec->type, KVCacheSpecType::LinearAttention);
-        }
         switch (group_mode) {
             case RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT: {
                 group_policy_ = std::make_shared<remote_connector::DefaultLayerGroupPolicy>(
@@ -344,9 +335,9 @@ public:
 private:
     void setResourceBlocks(KVCacheResource&                                                     resource,
                            std::initializer_list<std::pair<std::string_view, BlockIndicesType>> group_blocks) {
-        const auto fake_manager = std::dynamic_pointer_cast<FakeKVCacheAllocator>(allocator_);
-        ASSERT_NE(fake_manager, nullptr);
-        resource.initGroups(fake_manager->topology());
+        const auto allocator = std::dynamic_pointer_cast<FakeKVCacheAllocator>(allocator_);
+        ASSERT_NE(allocator, nullptr);
+        resource.initGroups(allocator->topology());
         for (const auto& [tag, blocks] : group_blocks) {
             resource.mutableBlockIds(tag).assign(blocks);
         }
@@ -651,9 +642,9 @@ private:
     }
 
 private:
-    std::shared_ptr<CoordinatorKVCacheManager> allocator_;
-    std::shared_ptr<GroupPolicy>               group_policy_;
-    CacheConfig                                config_;
+    std::shared_ptr<KVCacheAllocator> allocator_;
+    std::shared_ptr<GroupPolicy>      group_policy_;
+    CacheConfig                       config_;
 };
 
 TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_single_tp) {

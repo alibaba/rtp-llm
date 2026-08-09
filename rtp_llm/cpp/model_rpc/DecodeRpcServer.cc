@@ -61,7 +61,7 @@ ErrorInfo DecodeRpcServer::validatePrefillCpPeerCount(int32_t prefill_cp_size, s
 }
 
 bool DecodeRpcServer::remoteWholeBlock(const CacheConfig& cache_config) {
-    return cache_config.use_mla || cache_config.use_opaque_kv_cache_store;
+    return cache_config.use_mla || cache_config.usesActiveOpaqueKVCacheStore();
 }
 
 bool DecodeRpcServer::requiresWholeBlockTransfer(const CacheConfig& cache_config, bool page_level_routing) {
@@ -162,10 +162,10 @@ ErrorInfo DecodeRpcServer::validateMTPTransfer(const CacheConfig&         main_c
         return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
                          "MTP remote transfer protocol mismatch: module=" + std::to_string(module_index)
                              + ", main{mla=" + std::to_string(main_config.use_mla)
-                             + ",opaque=" + std::to_string(main_config.use_opaque_kv_cache_store)
+                             + ",opaque=" + std::to_string(main_config.usesActiveOpaqueKVCacheStore())
                              + ",hybrid=" + std::to_string(main_config.enable_hybrid_attention)
                              + "}, sub{mla=" + std::to_string(sub_config.use_mla)
-                             + ",opaque=" + std::to_string(sub_config.use_opaque_kv_cache_store)
+                             + ",opaque=" + std::to_string(sub_config.usesActiveOpaqueKVCacheStore())
                              + ",hybrid=" + std::to_string(sub_config.enable_hybrid_attention) + "}");
     }
     return ErrorInfo::OkStatus();
@@ -858,7 +858,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
     const bool use_mla              = cache_config.use_mla;
     const bool use_grouped_cache    = cache_config.groupNums() > 1;
-    const bool use_opaque_kv_store  = cache_config.use_opaque_kv_cache_store;
+    const bool use_opaque_kv_store  = cache_config.usesOpaqueKVCacheStore();
     const bool use_hybrid_attention = cache_config.enable_hybrid_attention;
     const bool is_page_level_rr     = isPageLevelRouting(load_context.prefill_cp_size, load_context.peer_addrs.size());
     const bool use_whole_kv_block   = requiresWholeBlockTransfer(cache_config, is_page_level_rr);
@@ -1101,7 +1101,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
                 for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
                     const bool mtp_use_grouped_cache    = mtp_cache_cfg.groupNums() > 1;
-                    const bool mtp_use_opaque_kv_store  = mtp_cache_cfg.use_opaque_kv_cache_store;
+                    const bool mtp_use_opaque_kv_store  = mtp_cache_cfg.usesOpaqueKVCacheStore();
                     const bool mtp_use_hybrid_attention = mtp_cache_cfg.enable_hybrid_attention;
 
                     // Same multi-group iteration as the main path.

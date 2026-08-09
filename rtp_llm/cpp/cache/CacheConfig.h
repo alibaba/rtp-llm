@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -23,24 +24,18 @@ namespace rtp_llm {
 struct CacheConfig {
 private:
     std::shared_ptr<const CacheTopology> cache_topology;
+    std::optional<uint32_t>              finalized_global_block_num_;
 
 public:
-    std::vector<int> layer_to_block_stride_bytes;
-    bool             group_block_layout_initialized           = false;
-    bool             use_independent_block_pools              = false;
-    bool             use_typed_cache_regions                  = false;
-    bool             use_opaque_kv_cache_store                = false;
-    bool             disable_decode_first_malloc_device_reuse = false;
+    bool use_independent_block_pools = false;
 
-    rtp_llm::DataType dtype                   = rtp_llm::DataType::TYPE_INVALID;
-    uint32_t          layer_num               = 0;  // the number of main model layers
-    uint32_t          layer_all_num           = 0;  // the number of all layers including mtp modules
-    bool              use_mla                 = false;
-    bool              is_sparse               = false;
-    bool              enable_hybrid_attention = false;
+    uint32_t layer_num               = 0;  // the number of main model layers
+    uint32_t layer_all_num           = 0;  // the number of all layers including mtp modules
+    bool     use_mla                 = false;
+    bool     is_sparse               = false;
+    bool     enable_hybrid_attention = false;
 
     // Block configuration
-    uint32_t block_num = 0;
     // Global cache-key and cache-manager physical base granularity B. Raw
     // cache keys and request-level block ordinals always use this value.
     size_t seq_size_per_block = 1;
@@ -74,20 +69,8 @@ public:
         return tag.has_value() ? kernelSeqSizePerBlockForGroup(*tag) : seq_size_per_block;
     }
 
-    // Block sizing information
-    // ---- Per-block sizes (all layers) ----
-    size_t kv_block_size_bytes = 0;
-    size_t kv_scale_size_bytes = 0;
-    size_t block_size_bytes    = 0;  // (kv + scales together)
-
-    // ---- Per-block strides (one layer) ----
-    size_t kv_block_stride_bytes = 0;
-    size_t kv_scale_stride_bytes = 0;
-
     // Attention-specific configuration
-    int    linear_step     = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    int    group_layer_num = 1;  // Number of layers per group for hybrid attention
-    size_t explicitly_sized_pool_reserve_bytes = 0;
+    int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -110,6 +93,17 @@ public:
     int groupNums() const {
         return cache_topology == nullptr ? 0 : static_cast<int>(cache_topology->groups().size());
     }
+
+    uint32_t          totalLayerNum() const;
+    uint32_t          blockNum() const;
+    size_t            groupLayerNum() const;
+    size_t            layerBlockStrideBytes(int layer_id) const;
+    size_t            explicitReserveBytesForGroup(std::string_view tag) const;
+    size_t            explicitlySizedPoolReserveBytes() const;
+    bool              usesTypedCacheRegions() const;
+    bool              usesOpaqueKVCacheStore() const;
+    bool              usesActiveOpaqueKVCacheStore() const;
+    rtp_llm::DataType cacheDType() const;
 
     const CacheTopology& topology() const {
         RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");

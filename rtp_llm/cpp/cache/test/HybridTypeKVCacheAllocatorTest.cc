@@ -467,8 +467,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InitAndAddressLookupSmoke) {
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(allocator->seqSizePerBlock(), 4);
-    EXPECT_EQ(allocator->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator->freeBlocksNum(), config.block_num - 1);
+    EXPECT_EQ(allocator->totalBlocksNum(), config.blockNum() - 1);
+    EXPECT_EQ(allocator->freeBlocksNum(), config.blockNum() - 1);
 
     // Should be able to fetch address for any global layer and non-zero block id.
     auto addr0 = allocator->convertIndexToAddr(/*layer_id=*/0, std::string(kLinearTag), /*block_id=*/1);
@@ -576,15 +576,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsAmbiguousDefaultFullGroupA
     CacheConfig main_config;
     main_config.seq_size_per_block = 4;
     main_config.layer_num          = 2;
-    main_config.layer_all_num      = 2;
-    main_config.group_layer_num    = 1;
     setTestTopology(
         main_config,
         {makeTestGroupForConfig(
              main_config, makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1), {0}, CacheGroupType::FULL, "full0"),
          makeTestGroupForConfig(
              main_config, makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1), {1}, CacheGroupType::FULL, "full1")});
-    main_config.layer_to_block_stride_bytes.assign(3, 1);
 
     auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
@@ -601,9 +598,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDefaultAliasMatchesSparseIndexerL
     CacheConfig main_config;
     main_config.seq_size_per_block = 4;
     main_config.layer_num          = 2;
-    main_config.layer_all_num      = 2;
-    main_config.group_layer_num    = 1;
-    main_config.is_sparse          = true;
     setTestTopology(
         main_config,
         {makeTestGroupForConfig(
@@ -613,11 +607,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDefaultAliasMatchesSparseIndexerL
     auto main_groups                                = main_config.topology().groups();
     main_groups[0].uses_sparse_indexer_scale_layout = true;
     main_config.setTopology(std::move(main_groups), main_config.topology().layers());
-    main_config.layer_to_block_stride_bytes.assign(3, 1);
 
     auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    propose_config.is_sparse                           = true;
     auto propose_groups                                = propose_config.topology().groups();
     propose_groups[0].uses_sparse_indexer_scale_layout = true;
     propose_config.setTopology(std::move(propose_groups), propose_config.topology().layers());
@@ -631,7 +623,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDefaultAliasMatchesSparseIndexerL
 
     auto incompatible_target =
         makeSingleLayerCacheConfig(makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL);
-    incompatible_target.is_sparse = true;
     try {
         incompatible_target.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
         FAIL() << "expected sparse-indexer layout mismatch to reject the default alias";
@@ -717,15 +708,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpPrefersExactDefaultGroupMatch) {
     CacheConfig main_config;
     main_config.seq_size_per_block = 4;
     main_config.layer_num          = 2;
-    main_config.layer_all_num      = 2;
-    main_config.group_layer_num    = 1;
     setTestTopology(
         main_config,
         {makeTestGroupForConfig(
              main_config, makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), {0}, CacheGroupType::FULL, "default"),
          makeTestGroupForConfig(
              main_config, makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1), {1}, CacheGroupType::FULL, "aux")});
-    main_config.layer_to_block_stride_bytes.assign(3, 1);
 
     auto propose_config = makeSingleLayerCacheConfig(makeMhaSpec("default",
                                                                  /*tokens_per_block=*/4,
@@ -766,8 +754,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAliasErrorIdentifiesSourceAndTarg
         CacheGroupType::FULL,
         /*layer_num=*/2,
         /*block_num=*/4);
-    main_config.group_layer_num = 2;
-    auto propose_config         = makeSimpleMhaCacheConfig(
+    auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, DataType::TYPE_FP16);
     auto propose_groups         = propose_config.topology().groups();
     auto propose_layers         = propose_config.topology().layers();
@@ -792,8 +779,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasMultiGroupProposeConf
     CacheConfig propose_config;
     propose_config.seq_size_per_block = 4;
     propose_config.layer_num          = 1;
-    propose_config.layer_all_num      = 1;
-    propose_config.group_layer_num    = 1;
     setTestTopology(
         propose_config,
         {makeTestGroupForConfig(propose_config,
@@ -803,7 +788,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasMultiGroupProposeConf
                                 "default"),
          makeTestGroupForConfig(
              propose_config, makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1), {0}, CacheGroupType::FULL, "aux")});
-    propose_config.layer_to_block_stride_bytes = {1};
 
     try {
         main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
@@ -815,9 +799,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasMultiGroupProposeConf
 
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsShortTargetGroup) {
     CacheConfig main_config;
-    main_config.layer_num       = 5;
-    main_config.layer_all_num   = 5;
-    main_config.group_layer_num = 3;
+    main_config.layer_num = 5;
     setTestTopology(
         main_config,
         {makeTestGroupForConfig(
@@ -827,7 +809,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsShortTargetGroup) {
                                 {3, 4},
                                 CacheGroupType::LINEAR,
                                 "linear")});
-    main_config.layer_to_block_stride_bytes.assign(6, 1);
 
     auto propose_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
@@ -838,12 +819,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsShortTargetGroup) {
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsPartialOrReorderedSourceGroup) {
     auto main_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    main_config.group_layer_num = 2;
-    main_config.layer_to_block_stride_bytes.assign(4, 1);
 
     CacheConfig partial_source;
-    partial_source.layer_num     = 2;
-    partial_source.layer_all_num = 2;
+    partial_source.layer_num = 2;
     setTestTopology(
         partial_source,
         {makeTestGroupForConfig(partial_source,
@@ -853,7 +831,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsPartialOrReorderedSourceGr
                                 "default"),
          makeTestGroupForConfig(
              partial_source, makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1), {1}, CacheGroupType::FULL, "aux")});
-    partial_source.layer_to_block_stride_bytes.assign(2, 1);
     EXPECT_THROW(main_config.mergeMTPModule(partial_source, /*module_index=*/0, /*main_layer_num=*/2),
                  std::runtime_error);
 
@@ -1368,7 +1345,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
     EXPECT_NE(full_buf[0].addr, nullptr);
     EXPECT_EQ(linear_buf[0].size_bytes, config.kvBlockStrideBytesForGroup(kLinearTag));
     EXPECT_EQ(full_buf[0].size_bytes, config.kvBlockStrideBytesForGroup(kFullTag));
-    EXPECT_LT(linear_buf[0].size_bytes, config.kv_block_stride_bytes);
+    EXPECT_LT(linear_buf[0].size_bytes, BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(config));
 
     auto layout = allocator->allLayerCacheBase();
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
@@ -1381,9 +1358,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {
-    auto config      = makeTinyHybridConfig();
-    config.block_num = 6;  // free=5
-    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto config = makeTinyHybridConfig();
+    config.finalizeBlockNums(6, RuntimeConfig{});  // free=5
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();
@@ -1435,8 +1412,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
 // a step hit ((2+1)%2==1). Without sparse cleanup, that slot must survive so that
 // causal_conv1d can still read it by prefix_length.
 TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreservesReusedLinearTail) {
-    auto config       = makeTinyHybridConfig();
-    config.block_num  = 16;  // 6 cached (resident, non-evictable) + 4 new + 1 null reserved
+    auto config = makeTinyHybridConfig();
+    config.finalizeBlockNums(16, RuntimeConfig{});  // 6 cached (resident, non-evictable) + 4 new + 1 null reserved
     auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
@@ -1478,9 +1455,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
 // to incrMalloc(). Sparse cleanup must prune non-step blocks while preserving step hits and
 // the configured active tail slot.
 TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
-    auto config      = makeTinyHybridConfig();
-    config.block_num = 16;  // pre-allocates 6 + 6 = 12 blocks plus the reserved null block
-    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto config = makeTinyHybridConfig();
+    config.finalizeBlockNums(16, RuntimeConfig{});  // pre-allocates 6 + 6 = 12 blocks plus the reserved null block
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();
@@ -1676,9 +1653,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FreshUnalignedMultiSequencePeakMatchesExa
     for (const bool reuse_cache : {false, true}) {
         SCOPED_TRACE(reuse_cache ? "reuse enabled" : "reuse disabled");
 
-        auto config      = makeTinyHybridConfig();
-        config.block_num = 7;  // Six usable blocks: exactly the two-stage initialization peak below.
-        auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+        auto config = makeTinyHybridConfig();
+        config.finalizeBlockNums(7, RuntimeConfig{});  // Six usable blocks: exactly the two-stage peak below.
+        auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
         ASSERT_TRUE(allocator->init());
 
         auto resource = makeBatchResource(/*batch_size=*/2, config, /*keys=*/{});
@@ -1721,9 +1698,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FreshUnalignedMultiSequencePeakMatchesExa
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, EstimatedPeakCoversDecodeMallocAndSparseCleanup) {
-    auto config      = makeTinyHybridConfig();
-    config.block_num = 28;  // 27 usable blocks.
-    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto config = makeTinyHybridConfig();
+    config.finalizeBlockNums(28, RuntimeConfig{});  // 27 usable blocks.
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{});

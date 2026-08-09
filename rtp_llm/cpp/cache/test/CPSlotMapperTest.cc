@@ -150,7 +150,6 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     CacheConfig config;
     config.seq_size_per_block = 8;
     config.layer_num          = 1;
-    config.layer_all_num      = 1;
 
     auto full_spec = std::make_shared<MHAKVCacheSpec>(8, 8);
     full_spec->tag = "full";
@@ -183,7 +182,6 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionUsesRawKeysWithoutMutatingSourceTime
     CacheConfig config;
     config.seq_size_per_block = 8;
     config.layer_num          = 1;
-    config.layer_all_num      = 1;
 
     auto full_spec = std::make_shared<MHAKVCacheSpec>(8, 8);
     full_spec->tag = "full";
