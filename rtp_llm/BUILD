@@ -264,6 +264,7 @@ py_library(
         ":torchvision",
         ":protobuf",
         ":pyOpenSSL",
+        "//rtp_llm/models_py:deepseek_vl2_vision_loader",
         "//rtp_llm/models_py:qwen2_vl_vision_loader",
         "//rtp_llm/models_py:qwen3_vl_vision_loader",
     ] + select({

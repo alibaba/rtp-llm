@@ -174,6 +174,7 @@ py_library(
         "new_models/*.py",
         "new_models/deepseek_v3/*.py",
         "new_models/deepseek_v3_mtp/*.py",
+        "new_models/deepseek_vl2/*.py",
         "new_models/mtp/*.py",
         "new_models/qwen2/*.py",
         "new_models/qwen2_moe/*.py",
@@ -184,6 +185,11 @@ py_library(
         "new_models/qwen3_vl/*.py",
         "new_models/qwen3_vl_moe/*.py",
         "quant_methods/*.py",
+    ], exclude = [
+        # DeepSeek-VL2 vision pulls timm/torchvision/Pillow and registers its
+        # model when the narrow loader target imports it. Other VL vision
+        # modules are torch-only.
+        "new_models/deepseek_vl2/vision.py",
     ]),
     deps = [
         ":new_loader_core",
@@ -242,6 +248,23 @@ py_library(
         "@//:using_cuda12_arm": flashattn,
         "//conditions:default": [],
     }),
+    visibility = ["//rtp_llm:__subpackages__"],
+)
+
+py_library(
+    name = "deepseek_vl2_vision_loader",
+    srcs = [
+        "new_models/__init__.py",
+        "new_models/deepseek_vl2/__init__.py",
+        "new_models/deepseek_vl2/vision.py",
+    ],
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm:Pillow",
+        "//rtp_llm:timm",
+        "//rtp_llm:torch",
+        "//rtp_llm:torchvision",
+    ],
     visibility = ["//rtp_llm:__subpackages__"],
 )
 
