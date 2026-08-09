@@ -137,12 +137,11 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
         CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     CacheConfig config;
-    config.layer_num                   = static_cast<uint32_t>(model_config.num_layers);
-    config.layer_all_num               = config.layer_num;
-    config.seq_size_per_block          = tokens_per_block;
-    config.use_mla                     = model_config.attn_config.use_mla;
-    config.linear_step                 = 1;
-    config.use_independent_block_pools = true;
+    config.layer_num          = static_cast<uint32_t>(model_config.num_layers);
+    config.layer_all_num      = config.layer_num;
+    config.seq_size_per_block = tokens_per_block;
+    config.use_mla            = model_config.attn_config.use_mla;
+    config.linear_step        = 1;
 
     auto cache_groups = buildGroups(runtime_specs, model_config, parallelism_config);
     for (auto& group : cache_groups) {

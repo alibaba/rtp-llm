@@ -238,6 +238,27 @@ uint32_t CacheConfig::blockNum() const {
     RTP_LLM_FAIL("CacheConfig::blockNum requires a finalized global block count or a global FULL/LINEAR group");
 }
 
+uint32_t CacheConfig::blockNumForGroup(std::string_view tag) const {
+    const auto explicit_block_num = policyForGroup(tag).explicit_block_num;
+    if (finalized_global_block_num_ == 1) {
+        return 1;
+    }
+    if (explicit_block_num > 0) {
+        return explicit_block_num;
+    }
+    if (!finalized_global_block_num_.has_value()) {
+        return group(tag).block_num;
+    }
+    RTP_LLM_CHECK_WITH_INFO(finalized_global_block_num_.has_value(),
+                            "CacheConfig::blockNumForGroup requires finalized config for dynamic group tag=%s",
+                            std::string(tag).c_str());
+    if (policyForGroup(tag).group_type == CacheGroupType::SWA) {
+        const auto step = static_cast<uint32_t>(std::max(1, linear_step));
+        return *finalized_global_block_num_ / step + (*finalized_global_block_num_ % step != 0 ? 1u : 0u);
+    }
+    return *finalized_global_block_num_;
+}
+
 size_t CacheConfig::groupLayerNum() const {
     size_t result = 0;
     for (const auto& group : topology().groups()) {

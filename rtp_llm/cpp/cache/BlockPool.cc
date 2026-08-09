@@ -50,15 +50,14 @@ const char* memoryTypeName(MemoryType memory_type) {
     return "UNKNOWN";
 }
 
-const char*
-requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing, bool use_cuda_malloc_backing) {
+const char* requestedBackingName(AllocationType allocation_type, bool use_cuda_malloc_backing) {
     if (allocation_type == AllocationType::HOST) {
         return shouldPinHostBlockPool() ? "CPU_PINNED_OR_CPU_FALLBACK" : "CPU";
     }
     if (use_cuda_malloc_backing) {
         return "GPU_CUDA_MALLOC";
     }
-    return use_pinned_cpu_backing ? "CPU_PINNED" : "GPU";
+    return "GPU";
 }
 
 bool shouldPinHostBlockPool() {
@@ -117,22 +116,14 @@ void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {
 
 }  // namespace
 
-BlockPool::BlockPool(const BlockPoolConfig& config,
-                     AllocationType         allocation_type,
-                     bool                   use_pinned_cpu_backing,
-                     bool                   use_cuda_malloc_backing):
-    config_(config),
-    allocation_type_(allocation_type),
-    use_pinned_cpu_backing_(use_pinned_cpu_backing),
-    use_cuda_malloc_backing_(use_cuda_malloc_backing) {}
+BlockPool::BlockPool(const BlockPoolConfig& config, AllocationType allocation_type, bool use_cuda_malloc_backing):
+    config_(config), allocation_type_(allocation_type), use_cuda_malloc_backing_(use_cuda_malloc_backing) {}
 
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
 }
 
 void BlockPool::validateConfig() const {
-    RTP_LLM_CHECK_WITH_INFO(!(use_pinned_cpu_backing_ && use_cuda_malloc_backing_),
-                            "BlockPool cannot use both pinned CPU backing and cudaMalloc backing");
     RTP_LLM_CHECK_WITH_INFO(!config_.memory_layouts.empty(), "BlockPoolConfig.memory_layouts must not be empty");
     RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "BlockPoolConfig.block_num must be > 0");
 
@@ -179,8 +170,6 @@ void BlockPool::initializeCacheBuffer() {
                          config_.total_size_bytes);
         markHostBlockPoolDontDump(
             config_.pool_name.c_str(), cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
-    } else if (use_pinned_cpu_backing_) {
-        initializePinnedCpuBuffer("device block pool pinned CPU backing");
     } else if (use_cuda_malloc_backing_) {
         initializeCudaMallocBuffer();
     } else {
@@ -197,7 +186,7 @@ void BlockPool::initializeCacheBuffer() {
                      "block_num=%u memory_layouts=%zu",
                      config_.pool_name.c_str(),
                      allocationTypeName(allocation_type_),
-                     requestedBackingName(allocation_type_, use_pinned_cpu_backing_, use_cuda_malloc_backing_),
+                     requestedBackingName(allocation_type_, use_cuda_malloc_backing_),
                      memoryTypeName(where()),
                      is_cuda,
                      is_pinned,
@@ -206,22 +195,6 @@ void BlockPool::initializeCacheBuffer() {
                      static_cast<double>(config_.total_size_bytes) / kBytesPerMB,
                      config_.block_num,
                      config_.memory_layouts.size());
-}
-
-void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
-    RTP_LLM_LOG_WARNING(
-        "%s, pool_name=%s, total_size=%zu bytes", log_context, config_.pool_name.c_str(), config_.total_size_bytes);
-    auto cpu_buffer = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
-                                   torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
-    try {
-        cache_aligned_buffer_ = cpu_buffer.pin_memory();
-    } catch (const std::exception& e) {
-        RTP_LLM_FAIL("%s pin failed, pool_name=%s total_size=%zu bytes, error=%s",
-                     log_context,
-                     config_.pool_name.c_str(),
-                     config_.total_size_bytes,
-                     e.what());
-    }
 }
 
 void BlockPool::initializeCudaMallocBuffer() {

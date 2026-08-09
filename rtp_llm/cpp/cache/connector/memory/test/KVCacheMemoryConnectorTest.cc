@@ -15,10 +15,9 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/TestRpcService.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
@@ -115,7 +114,7 @@ protected:
         createDevice();
 
         cache_config_ = createMockCacheConfig();
-        allocator_    = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+        allocator_    = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
         ASSERT_TRUE(allocator_->init());
 
         const int server_num = 4;
@@ -177,7 +176,7 @@ protected:
                                                        /*local_head_num_kv=*/8,
                                                        /*size_per_head=*/128);
         cache_config_.linear_step = linear_step;
-        allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+        allocator_                = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
         ASSERT_TRUE(allocator_->init());
         connector_ =
             std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
@@ -294,14 +293,18 @@ private:
     }
 
     void verifyGpuBufferContent(const std::vector<LayerBlock>& gpu_layer_blocks) const {
+        std::vector<BlockIdxType> blocks_by_layer(cache_config_.totalLayerNum(), NULL_BLOCK_IDX);
         for (const auto& layer_block : gpu_layer_blocks) {
-            if (isNullBlockIdx(layer_block.block_id)) {
+            blocks_by_layer.at(static_cast<size_t>(layer_block.layer_id)) = layer_block.block_id;
+        }
+        for (const auto& slot : connector_->layerGroupSlots()) {
+            const auto block_id = blocks_by_layer.at(static_cast<size_t>(slot.layer_id));
+            if (isNullBlockIdx(block_id)) {
                 continue;
             }
-            const auto gpu_bufs =
-                allocator_->convertIndexToBuffer(layer_block.layer_id, "default", layer_block.block_id);
+            const auto gpu_bufs = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, block_id);
             ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
-            verifyBlockInfosContent(gpu_bufs, static_cast<char>('k' + layer_block.layer_id));
+            verifyBlockInfosContent(gpu_bufs, static_cast<char>('k' + slot.layer_id));
         }
     }
     void verifyCpuBufferContent(const std::vector<LayerBlock>& gpu_layer_blocks,
@@ -324,21 +327,20 @@ private:
         }
 
         size_t byte_off = 0;
-        for (size_t layer = 0; layer < layer_num; ++layer) {
-            const size_t layer_stride = cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
-            const auto   block_id     = layer_to_block[layer];
+        for (const auto& slot : connector_->layerGroupSlots()) {
+            const auto block_id = layer_to_block[static_cast<size_t>(slot.layer_id)];
             if (isNullBlockIdx(block_id)) {
-                byte_off += layer_stride;
+                byte_off += slot.stride_bytes;
                 continue;
             }
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
+            const auto gpu_bufs = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, block_id);
             const auto bytes    = sumBlockInfosBytes(gpu_bufs);
             ASSERT_GT(bytes, 0u);
-            ASSERT_LE(bytes, layer_stride);
+            ASSERT_LE(bytes, slot.stride_bytes);
 
-            const char expected_k = static_cast<char>('k' + static_cast<int>(layer));
+            const char expected_k = static_cast<char>('k' + slot.layer_id);
             verifyBlockBytesEq(mem_buffer, byte_off, bytes, expected_k);
-            byte_off += layer_stride;
+            byte_off += slot.stride_bytes;
         }
     }
     void prepareBufferContent(const std::vector<LayerBlock>& gpu_layer_blocks,
@@ -360,21 +362,21 @@ private:
         }
 
         size_t total = 0;
-        for (size_t layer = 0; layer < layer_num; ++layer) {
-            total += cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
+        for (const auto& slot : connector_->layerGroupSlots()) {
+            total += slot.stride_bytes;
         }
 
-        for (size_t layer = 0; layer < layer_num; ++layer) {
-            const auto block_id = layer_to_block[layer];
+        for (const auto& slot : connector_->layerGroupSlots()) {
+            const auto block_id = layer_to_block[static_cast<size_t>(slot.layer_id)];
             if (isNullBlockIdx(block_id)) {
                 continue;
             }
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
+            const auto gpu_bufs = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, block_id);
             const auto bytes    = sumBlockInfosBytes(gpu_bufs);
             ASSERT_GT(bytes, 0u);
-            ASSERT_LE(bytes, cache_config_.layerBlockStrideBytes(static_cast<int>(layer)));
+            ASSERT_LE(bytes, slot.stride_bytes);
             if (fill_gpu) {
-                setBlockInfosContent(gpu_bufs, static_cast<char>('k' + static_cast<int>(layer)));
+                setBlockInfosContent(gpu_bufs, static_cast<char>('k' + slot.layer_id));
             }
         }
         if (fill_gpu) {
@@ -396,19 +398,18 @@ private:
         // Fill memory buffer (merged layout: reserve per-layer stride even if block is null).
         if (fill_cpu) {
             size_t byte_off = 0;
-            for (size_t layer = 0; layer < layer_num; ++layer) {
-                const size_t layer_stride = cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
-                const auto   block_id     = layer_to_block[layer];
+            for (const auto& slot : connector_->layerGroupSlots()) {
+                const auto block_id = layer_to_block[static_cast<size_t>(slot.layer_id)];
                 if (isNullBlockIdx(block_id)) {
-                    byte_off += layer_stride;
+                    byte_off += slot.stride_bytes;
                     continue;
                 }
-                const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
+                const auto gpu_bufs = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, block_id);
                 const auto bytes    = sumBlockInfosBytes(gpu_bufs);
                 ASSERT_GT(bytes, 0u);
-                ASSERT_LE(bytes, layer_stride);
-                setBlockBytes(mem_buffer, byte_off, bytes, static_cast<char>('k' + static_cast<int>(layer)));
-                byte_off += layer_stride;
+                ASSERT_LE(bytes, slot.stride_bytes);
+                setBlockBytes(mem_buffer, byte_off, bytes, static_cast<char>('k' + slot.layer_id));
+                byte_off += slot.stride_bytes;
             }
         }
 
@@ -519,14 +520,14 @@ private:
         return block_indices;
     }
     std::shared_ptr<BlockPool> ensureBlockPool(size_t block_size) const {
-        // Business implementation uses a single `block_pool_` with fixed block_size_bytes
-        // ("one cache-key across all layers" total bytes). Smaller mem_block_size values
-        // (e.g. when some layers are NULL for a key) should still be served by the same pool.
         auto pool = connector_->block_pool_;
-        if (!pool) {
-            // initBlockPool uses the topology-derived block size and kv_cache_config_.memory_cache_size_mb.
+        if (!pool && !connector_->isDualPool()) {
             EXPECT_NO_THROW(connector_->initBlockPool());
             pool = connector_->block_pool_;
+        }
+        if (!pool && connector_->isDualPool()) {
+            pool = block_size == connector_->incomplete_block_size_ ? connector_->incomplete_pool_ :
+                                                                      connector_->complete_pool_;
         }
         if (!pool) {
             ADD_FAILURE() << "block pool is null";
@@ -540,6 +541,10 @@ private:
     }
     std::shared_ptr<BlockPool> requireExistingBlockPool(size_t block_size) const {
         auto pool = connector_->block_pool_;
+        if (!pool && connector_->isDualPool()) {
+            pool = block_size == connector_->incomplete_block_size_ ? connector_->incomplete_pool_ :
+                                                                      connector_->complete_pool_;
+        }
         if (!pool) {
             ADD_FAILURE() << "expected block pool exists, block_size=" << block_size;
         }
@@ -1295,7 +1300,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysAreSmall_NoN
                                        /*linear_blocks=*/{NULL_BLOCK_IDX, 1, NULL_BLOCK_IDX},
                                        /*full_blocks=*/{1, NULL_BLOCK_IDX, 1});
 
-    auto pool = connector_->block_pool_;
+    // linear_step is pinned to 1, so every retained block uses the complete pool.
+    auto pool = connector_->complete_pool_;
     ASSERT_NE(pool, nullptr);
     const size_t free_before = pool->freeBlocksNum();
 
@@ -1305,10 +1311,34 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysAreSmall_NoN
     EXPECT_EQ(pool->freeBlocksNum(), free_before);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsTailAfterLastBigKey_InHybridAttn) {
+TEST_F(KVCacheMemoryConnectorTest, NonUnitLinearStepRetainedPathCreatesAndUsesIncompletePool) {
+    resetToHybridCacheConfig(/*linear_step=*/2);
+    ASSERT_NE(connector_->complete_pool_, nullptr);
+    ASSERT_NE(connector_->incomplete_pool_, nullptr);
+    EXPECT_EQ(connector_->memoryPoolFor(CacheBlockKind::COMPLETE), connector_->complete_pool_);
+    EXPECT_EQ(connector_->memoryPoolFor(CacheBlockKind::INCOMPLETE), connector_->incomplete_pool_);
+
+    CacheKeysType cache_keys{81101, 81102};
+    auto          res = makeHybridCacheResource(cache_keys,
+                                       /*linear_blocks=*/{NULL_BLOCK_IDX, 1},
+                                       /*full_blocks=*/{1, 1});
+
+    auto ctx = connector_->asyncWrite(res, std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true));
+    ASSERT_NE(ctx, nullptr);
+    ASSERT_TRUE(waitUntilDone(ctx));
+    ASSERT_TRUE(ctx->success());
+
+    const auto incomplete_match = connector_->block_cache_->match(cache_keys[0]);
+    EXPECT_FALSE(incomplete_match.is_complete);
+    EXPECT_EQ(incomplete_match.block_size, connector_->incomplete_block_size_);
+    const auto complete_match = connector_->block_cache_->match(cache_keys[1]);
+    EXPECT_TRUE(complete_match.is_complete);
+    EXPECT_EQ(complete_match.block_size, connector_->complete_block_size_);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsAllIncompleteKeysWithUnitLinearStep_InHybridAttn) {
     resetToHybridCacheConfig();
-    // Hybrid-attn: write small keys for continuity, but ensure the final written key is big.
-    // Keys after the last big key must be dropped.
+    // linear_step=1 has no incomplete pool, so incomplete keys are dropped on both sides of a complete key.
     std::vector<std::unique_ptr<TestRpcServer>> servers;
     std::vector<std::string>                    addrs;
     for (int i = 0; i < 2; ++i) {
@@ -1324,10 +1354,10 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsTailAfterLastBigKey_InHybridA
 
     CacheKeysType cache_keys{82001, 82002, 82003, 82004};
     // 4 layers, 4 keys:
-    // - key0 big (all valid)
-    // - key1 small (layer1 NULL)
-    // - key2 big (all valid)  => last big
-    // - key3 small (layer3 NULL) => should be DROPPED (not written, not inserted)
+    // - key0 complete (all valid)
+    // - key1 incomplete (layer1 NULL) => dropped before the last complete key
+    // - key2 complete (all valid) => last complete key
+    // - key3 incomplete (layer3 NULL) => dropped after the last complete key
     auto res = makeHybridCacheResource(cache_keys,
                                        /*linear_blocks=*/{1, NULL_BLOCK_IDX, 1, 1},
                                        /*full_blocks=*/{1, 1, 1, NULL_BLOCK_IDX});
@@ -1340,12 +1370,12 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsTailAfterLastBigKey_InHybridA
     EXPECT_TRUE(ctx->success());
 
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
-    EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[1]));
+    EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[1]));
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[2]));
     EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[3]));
 
-    // Written count should be >= 3 (exact +3 if cache was empty and no evictions)
-    EXPECT_GE(connector_->block_cache_->size(), cache_before + 3);
+    // Only the two complete keys are written (exact +2 if cache was empty and no evictions).
+    EXPECT_GE(connector_->block_cache_->size(), cache_before + 2);
 
     connector_->broadcast_manager_.reset();
     for (auto& s : servers) {
@@ -1760,7 +1790,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
         + 256;
     kv_cache_config_.memory_cache_size_mb = std::max(pool_mb, 512);
 
-    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+    allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
     ASSERT_TRUE(allocator_->init());
     connector_ = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
     ASSERT_TRUE(connector_->init());
@@ -1936,8 +1966,8 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
 
     // Allocate one memory block for the merged layout (one cache-key across all layers).
     size_t total_bytes = 0;
-    for (int layer = 0; layer < static_cast<int>(cache_config_.totalLayerNum()); ++layer) {
-        total_bytes += cache_config_.layerBlockStrideBytes(layer);
+    for (const auto& slot : connector_->layerGroupSlots()) {
+        total_bytes += slot.stride_bytes;
     }
     ASSERT_GT(total_bytes, 0u);
 
@@ -1970,19 +2000,18 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
         layer_to_block[static_cast<size_t>(lb.layer_id)] = lb.block_id;
     }
     size_t byte_off = 0;
-    for (size_t layer = 0; layer < layer_num; ++layer) {
-        const size_t layer_stride = cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
-        const auto   block_id     = layer_to_block[layer];
+    for (const auto& slot : connector_->layerGroupSlots()) {
+        const auto block_id = layer_to_block[static_cast<size_t>(slot.layer_id)];
         if (isNullBlockIdx(block_id)) {
-            byte_off += layer_stride;
+            byte_off += slot.stride_bytes;
             continue;
         }
-        const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
+        const auto gpu_bufs = allocator_->convertIndexToBuffer(slot.layer_id, slot.tag, block_id);
         const auto bytes    = sumBlockInfosBytes(gpu_bufs);
         ASSERT_GT(bytes, 0u);
-        ASSERT_LE(bytes, layer_stride);
-        verifyBlockBytesEq(mem_buffer, byte_off, bytes, static_cast<char>('k' + static_cast<int>(layer)));
-        byte_off += layer_stride;
+        ASSERT_LE(bytes, slot.stride_bytes);
+        verifyBlockBytesEq(mem_buffer, byte_off, bytes, static_cast<char>('k' + slot.layer_id));
+        byte_off += slot.stride_bytes;
     }
 }
 

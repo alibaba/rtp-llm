@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
@@ -116,15 +116,21 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_);
+            auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
+            ASSERT_EQ(cache_config_.groupNums(), 1);
+            const auto& group_tag  = cache_config_.topology().groups().front().tag;
+            const auto  block_pool = allocator->getBlockPool(group_tag);
+            ASSERT_NE(block_pool, nullptr);
+            ASSERT_NE(block_pool->getBaseAddress(), nullptr);
+            ASSERT_GT(block_pool->getTotalSizeBytes(), 0u);
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
                                                                            runtime_config_,
                                                                            parallelism_config_,
                                                                            sp_config_,
-                                                                           nullptr,
-                                                                           0,
+                                                                           block_pool->getBaseAddress(),
+                                                                           block_pool->getTotalSizeBytes(),
                                                                            allocator));
             ASSERT_TRUE(remote_connectors_[i]->init());
             servers_[i]->set_remote_connector(remote_connectors_[i]);

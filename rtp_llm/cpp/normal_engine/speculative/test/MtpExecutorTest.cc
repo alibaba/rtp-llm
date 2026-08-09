@@ -6,7 +6,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -872,14 +871,8 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
         std::map<std::string, size_t> block_transfer;
         std::map<std::string, size_t> scale_transfer;
         for (const auto& group : config.topology().groups()) {
-            block_stride.emplace(group.tag,
-                                 config.use_independent_block_pools ?
-                                     group.kv_block_stride_bytes :
-                                     BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(config));
-            scale_stride.emplace(group.tag,
-                                 config.use_independent_block_pools ?
-                                     group.kv_scale_stride_bytes :
-                                     BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(config));
+            block_stride.emplace(group.tag, group.kv_block_stride_bytes);
+            scale_stride.emplace(group.tag, group.kv_scale_stride_bytes);
             block_transfer.emplace(group.tag, group.kv_block_stride_bytes);
             scale_transfer.emplace(group.tag, group.kv_scale_stride_bytes);
         }
@@ -890,8 +883,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     };
     const auto& target_config = components.executor->cache_manager_->cacheConfig();
     const auto& draft_config  = components.executor->cache_manager_->getMTPModuleCacheConfig(0);
-    ASSERT_NE(BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(target_config),
-              BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(draft_config));
+    ASSERT_NE(target_config.kvBlockStrideBytesForGroup("full"), draft_config.kvBlockStrideBytesForGroup("full"));
     ASSERT_EQ(active_target_model->forwardedInputs().size(), 1u);
     expect_layout(active_target_model->forwardedInputs().front(), target_config);
     ASSERT_EQ(active_draft_model->forwardedInputs().size(), propose_step);

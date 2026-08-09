@@ -14,7 +14,6 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 using namespace std;
@@ -145,33 +144,26 @@ TEST_F(NormalBatchStreamProcessorTest, testPerGroupCacheLayoutMaps) {
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
 
-    for (const bool independent : {false, true}) {
-        CacheConfig cache_config;
-        cache_config.layer_num                   = 1;
-        cache_config.seq_size_per_block          = 1;
-        cache_config.use_independent_block_pools = independent;
-        const auto full_spec                     = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 2, 8, 1, "full");
-        const auto linear_spec                   = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 1, "linear");
-        auto       full = test::makeTestGroupForConfig(cache_config, full_spec, {0}, CacheGroupType::FULL, "full");
-        auto linear = test::makeTestGroupForConfig(cache_config, linear_spec, {0}, CacheGroupType::LINEAR, "linear");
-        test::setTestTopology(cache_config, {full, linear});
+    CacheConfig cache_config;
+    cache_config.layer_num          = 1;
+    cache_config.seq_size_per_block = 1;
+    const auto full_spec            = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 2, 8, 1, "full");
+    const auto linear_spec          = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 2, 1, "linear");
+    auto       full   = test::makeTestGroupForConfig(cache_config, full_spec, {0}, CacheGroupType::FULL, "full");
+    auto       linear = test::makeTestGroupForConfig(cache_config, linear_spec, {0}, CacheGroupType::LINEAR, "linear");
+    test::setTestTopology(cache_config, {full, linear});
 
-        NormalBatchStreamProcessor processor(
-            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
-        const auto& config = processor.model_input_gatherer_config_;
-        EXPECT_EQ(config.group_kv_block_stride_bytes.at("full"), full.kv_block_stride_bytes);
-        EXPECT_EQ(config.group_kv_scale_stride_bytes.at("full"), full.kv_scale_stride_bytes);
-        EXPECT_EQ(config.group_kv_block_stride_bytes.at("linear"),
-                  independent ? linear.kv_block_stride_bytes :
-                                BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(cache_config));
-        EXPECT_EQ(config.group_kv_scale_stride_bytes.at("linear"),
-                  independent ? linear.kv_scale_stride_bytes :
-                                BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(cache_config));
-        EXPECT_EQ(config.group_kv_block_transfer_bytes.at("full"), full.kv_block_stride_bytes);
-        EXPECT_EQ(config.group_kv_scale_transfer_bytes.at("full"), full.kv_scale_stride_bytes);
-        EXPECT_EQ(config.group_kv_block_transfer_bytes.at("linear"), linear.kv_block_stride_bytes);
-        EXPECT_EQ(config.group_kv_scale_transfer_bytes.at("linear"), linear.kv_scale_stride_bytes);
-    }
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    const auto& config = processor.model_input_gatherer_config_;
+    EXPECT_EQ(config.group_kv_block_stride_bytes.at("full"), full.kv_block_stride_bytes);
+    EXPECT_EQ(config.group_kv_scale_stride_bytes.at("full"), full.kv_scale_stride_bytes);
+    EXPECT_EQ(config.group_kv_block_stride_bytes.at("linear"), linear.kv_block_stride_bytes);
+    EXPECT_EQ(config.group_kv_scale_stride_bytes.at("linear"), linear.kv_scale_stride_bytes);
+    EXPECT_EQ(config.group_kv_block_transfer_bytes.at("full"), full.kv_block_stride_bytes);
+    EXPECT_EQ(config.group_kv_scale_transfer_bytes.at("full"), full.kv_scale_stride_bytes);
+    EXPECT_EQ(config.group_kv_block_transfer_bytes.at("linear"), linear.kv_block_stride_bytes);
+    EXPECT_EQ(config.group_kv_scale_transfer_bytes.at("linear"), linear.kv_scale_stride_bytes);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
@@ -414,9 +406,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(default_table.tag, "default");
         EXPECT_EQ(default_table.type, CacheGroupType::FULL);
         EXPECT_EQ(model_input.group_kv_block_stride_bytes.at("default"),
-                  BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(cache_config));
+                  cache_config.kvBlockStrideBytesForGroup("default"));
         EXPECT_EQ(model_input.group_kv_scale_stride_bytes.at("default"),
-                  BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(cache_config));
+                  cache_config.kvScaleStrideBytesForGroup("default"));
         EXPECT_EQ(model_input.group_kv_block_transfer_bytes.at("default"),
                   cache_config.kvBlockStrideBytesForGroup("default"));
         EXPECT_EQ(model_input.group_kv_scale_transfer_bytes.at("default"),

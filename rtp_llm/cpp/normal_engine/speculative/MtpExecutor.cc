@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -388,16 +387,9 @@ static void applyCacheLayoutToModelInput(GptModelInputs& model_input, const Cach
     model_input.group_kv_block_transfer_bytes.clear();
     model_input.group_kv_scale_transfer_bytes.clear();
 
-    const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
     for (const auto& group : cache_config.topology().groups()) {
-        model_input.group_kv_block_stride_bytes.emplace(
-            group.tag,
-            use_group_local_storage_layout ? group.kv_block_stride_bytes :
-                                             BlockPoolConfigHelper::sharedPoolKvBlockStrideBytes(cache_config));
-        model_input.group_kv_scale_stride_bytes.emplace(
-            group.tag,
-            use_group_local_storage_layout ? group.kv_scale_stride_bytes :
-                                             BlockPoolConfigHelper::sharedPoolKvScaleStrideBytes(cache_config));
+        model_input.group_kv_block_stride_bytes.emplace(group.tag, group.kv_block_stride_bytes);
+        model_input.group_kv_scale_stride_bytes.emplace(group.tag, group.kv_scale_stride_bytes);
         model_input.group_kv_block_transfer_bytes.emplace(group.tag, group.kv_block_stride_bytes);
         model_input.group_kv_scale_transfer_bytes.emplace(group.tag, group.kv_scale_stride_bytes);
     }

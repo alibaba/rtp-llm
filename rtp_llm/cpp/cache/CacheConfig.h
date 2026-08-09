@@ -139,9 +139,7 @@ public:
         return group(tag).layer_ids;
     }
 
-    uint32_t blockNumForGroup(std::string_view tag) const {
-        return group(tag).block_num;
-    }
+    uint32_t blockNumForGroup(std::string_view tag) const;
 
     size_t kvBlockStrideBytesForGroup(std::string_view tag) const {
         return group(tag).kv_block_stride_bytes;
