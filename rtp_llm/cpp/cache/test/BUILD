@@ -17,7 +17,10 @@ cuda13_torch_link_deps = select({
 
 test_copts = [
     "-fno-access-control",
-] + copts()
+] + copts() + select({
+    "//:using_remote_kv_cache": ["-DUSE_REMOTE_KV_CACHE=1"],
+    "//conditions:default": [],
+})
 
 test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",

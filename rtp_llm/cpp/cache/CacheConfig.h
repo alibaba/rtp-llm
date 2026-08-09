@@ -25,6 +25,7 @@ struct CacheConfig {
 private:
     std::shared_ptr<const CacheTopology> cache_topology;
     std::optional<uint32_t>              finalized_global_block_num_;
+    bool                                 configured_sparse_ = false;
 
 public:
     bool use_independent_block_pools = false;
@@ -32,7 +33,6 @@ public:
     uint32_t layer_num     = 0;  // the number of main model layers
     uint32_t layer_all_num = 0;  // the number of all layers including mtp modules
     bool     use_mla       = false;
-    bool     is_sparse     = false;
 
     // Block configuration
     // Global cache-key and cache-manager physical base granularity B. Raw
@@ -102,6 +102,14 @@ public:
     bool              usesTypedCacheRegions() const;
     bool              usesOpaqueKVCacheStore() const;
     rtp_llm::DataType cacheDType() const;
+
+    bool isSparse() const {
+        return configured_sparse_
+               || (cache_topology != nullptr
+                   && std::any_of(cache_topology->groups().begin(),
+                                  cache_topology->groups().end(),
+                                  [](const auto& group) { return group.spec->type == KVCacheSpecType::OpaqueKV; }));
+    }
 
     const CacheTopology& topology() const {
         RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");

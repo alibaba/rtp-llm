@@ -203,13 +203,11 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
     // The group owns the physical row stride, while its spec describes the logical payload.
-    const size_t seq_size_per_block      = cache_config.seqSizePerBlockForGroup(layer_kv.tag);
-    const size_t kv_block_stride_bytes   = cache_config.kvBlockStrideBytesForGroup(layer_kv.tag);
-    const size_t kv_scale_stride_bytes   = cache_config.kvScaleStrideBytesForGroup(layer_kv.tag);
-    const size_t kv_block_transfer_bytes = group.spec->block_size_bytes();
-    // Sparse-MLA scale rows still carry the packed indexer; keep row-stride scale
-    // transfers until the indexer moves to its own pool.
-    const size_t kv_scale_transfer_bytes         = cache_config.kvScaleStrideBytesForGroup(layer_kv.tag);
+    const size_t seq_size_per_block              = cache_config.seqSizePerBlockForGroup(layer_kv.tag);
+    const size_t kv_block_stride_bytes           = cache_config.kvBlockStrideBytesForGroup(layer_kv.tag);
+    const size_t kv_scale_stride_bytes           = cache_config.kvScaleStrideBytesForGroup(layer_kv.tag);
+    const size_t kv_block_transfer_bytes         = group.spec->block_size_bytes();
+    const size_t kv_scale_transfer_bytes         = group.spec->scale_block_size_bytes();
     const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1;
 
     RTP_LLM_CHECK_WITH_INFO(

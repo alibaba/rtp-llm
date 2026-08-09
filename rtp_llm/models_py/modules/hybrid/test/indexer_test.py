@@ -108,10 +108,9 @@ class MockKVCache:
         total_tokens = num_blocks * batch_size
         cache_dim = indexer_size
 
-        self.kv_scale_base = torch.randn(
+        self.kv_cache_base = torch.randn(
             total_tokens,
-            tokens_per_block,
-            cache_dim,
+            tokens_per_block * cache_dim,
             dtype=torch.bfloat16,
             device=device,
         ).to(torch.float8_e4m3fn)
