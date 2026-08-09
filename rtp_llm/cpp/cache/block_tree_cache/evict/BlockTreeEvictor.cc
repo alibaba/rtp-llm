@@ -518,7 +518,7 @@ std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(Transf
         const bool had_source = !cascade_desc.source_blocks.empty();
         if (!prepareDesc(cascade_desc)) {
             if (had_source) {
-                RTP_LLM_LOG_WARNING("cascade move rejected "
+                RTP_LLM_LOG_DEBUG("cascade move rejected "
                                     "group_set[%zu] tier %s->%s node_key=%ld, skipping",
                                     cascade_group_set_id,
                                     tierName(cascade_desc.source_tier),
