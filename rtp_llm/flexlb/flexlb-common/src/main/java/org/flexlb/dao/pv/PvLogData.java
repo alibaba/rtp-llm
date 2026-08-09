@@ -5,8 +5,10 @@ import lombok.Data;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * PV log data
@@ -40,6 +42,8 @@ public class PvLogData {
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private List<BalanceContext.CacheMatchSelection> cacheMatchSelections;
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private Map<RoleType, String> selectionReasons;
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private List<ShortestTtftDecision> shortestTtftDecisions;
 
     public PvLogData(BalanceContext ctx) {
@@ -66,6 +70,7 @@ public class PvLogData {
         this.cacheMatchUs = ctx.getCacheMatchQueryTimeUs();
         this.cacheMatchCount = ctx.getCacheMatchQueryCount();
         this.cacheMatchSelections = List.copyOf(ctx.getCacheMatchSelectionByRole().values());
+        this.selectionReasons = Map.copyOf(ctx.getSelectionReasonByRole());
         if (!ctx.getShortestTtftDecisionByRole().isEmpty()) {
             this.shortestTtftDecisions = List.copyOf(ctx.getShortestTtftDecisionByRole().values());
         }

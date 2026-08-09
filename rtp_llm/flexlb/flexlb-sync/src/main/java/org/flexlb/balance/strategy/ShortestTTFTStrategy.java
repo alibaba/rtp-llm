@@ -440,6 +440,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             double cacheHitDiscount,
             String selectionReason,
             CacheAffinityDecision cacheAffinityDecision) {
+        balanceContext.recordSelectionReason(roleType, selectionReason);
         if (!Logger.isDebugEnabled()) {
             return;
         }

@@ -33,6 +33,17 @@ class PvLogDataTest {
     }
 
     @Test
+    void includesSelectionReasonWithoutDebugSnapshot() {
+        BalanceContext context = new BalanceContext();
+        context.recordSelectionReason(RoleType.PREFILL, "SHORTEST_TTFT_FALLBACK");
+
+        String json = JsonUtils.toStringOrEmpty(new PvLogData(context));
+
+        assertTrue(json.contains("\"selectionReasons\":{\"PREFILL\":\"SHORTEST_TTFT_FALLBACK\"}"));
+        assertFalse(json.contains("shortestTtftDecisions"));
+    }
+
+    @Test
     void includesBlockHashAndKvcmTimings() {
         Request request = new Request();
         request.setRequestId("request-1");
@@ -48,6 +59,7 @@ class PvLogDataTest {
         context.recordCacheMatch("KVCM", 56, RoleType.PREFILL, "10.0.0.1", 256);
         context.recordCacheMatch("KVCM", 78, RoleType.PREFILL, "10.0.0.2", 512);
         context.recordCacheMatch("KVCM", 10, RoleType.DECODE, "10.0.0.3", 128);
+        context.recordSelectionReason(RoleType.PREFILL, "CACHE_LEADER");
         context.recordShortestTtftDecision(new ShortestTtftDecision(
                 RoleType.PREFILL,
                 "default",
@@ -90,6 +102,7 @@ class PvLogDataTest {
         assertEquals(144, data.getCacheMatchUs());
         assertEquals(3, data.getCacheMatchCount());
         assertEquals(2, data.getCacheMatchSelections().size());
+        assertEquals("CACHE_LEADER", data.getSelectionReasons().get(RoleType.PREFILL));
         assertEquals(1, data.getShortestTtftDecisions().size());
         assertEquals("10.0.0.2", data.getCacheMatchSelections().getFirst().selectedIp());
         assertEquals(512, data.getCacheMatchSelections().getFirst().hitCacheTokens());
@@ -104,6 +117,7 @@ class PvLogDataTest {
         assertTrue(json.contains("\"cacheMatchUs\":144"));
         assertTrue(json.contains("\"cacheMatchCount\":3"));
         assertTrue(json.contains("\"cacheMatchSelections\":[{\"role\":\"PREFILL\",\"selectedIp\":\"10.0.0.2\",\"hitCacheTokens\":512}"));
+        assertTrue(json.contains("\"selectionReasons\":{\"PREFILL\":\"CACHE_LEADER\"}"));
         assertTrue(json.contains("\"shortestTtftDecisions\":[{\"role\":\"PREFILL\""));
         assertTrue(json.contains("\"strategy\":\"ShortestTTFT\""));
         assertTrue(json.contains("\"selectionReason\":\"SHORTEST_TTFT\""));

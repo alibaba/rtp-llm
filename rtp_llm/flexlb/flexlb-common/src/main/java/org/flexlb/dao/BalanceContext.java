@@ -84,6 +84,12 @@ public class BalanceContext {
 
     private final Map<RoleType, CacheMatchSelection> cacheMatchSelectionByRole = new EnumMap<>(RoleType.class);
 
+    /**
+     * Final routing reason per role. Kept independently from the debug-only
+     * decision snapshot so PV logs retain the selected path at INFO level.
+     */
+    private final Map<RoleType, String> selectionReasonByRole = new EnumMap<>(RoleType.class);
+
     private Map<RoleType, ShortestTtftDecision> shortestTtftDecisionByRole;
 
     private boolean success = true;
@@ -159,6 +165,10 @@ public class BalanceContext {
             this.shortestTtftDecisionByRole = new EnumMap<>(RoleType.class);
         }
         this.shortestTtftDecisionByRole.put(decision.role(), decision);
+    }
+
+    public void recordSelectionReason(RoleType role, String selectionReason) {
+        this.selectionReasonByRole.put(role, selectionReason);
     }
 
     public Map<RoleType, ShortestTtftDecision> getShortestTtftDecisionByRole() {

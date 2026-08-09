@@ -155,6 +155,9 @@ class ShortestTTFTStrategyTest {
         infoContext.setRequest(req);
         staticCacheLoadBalancer.select(infoContext, RoleType.PREFILL, null);
         Assertions.assertTrue(infoContext.getShortestTtftDecisionByRole().isEmpty());
+        Assertions.assertEquals(
+                "SHORTEST_TTFT",
+                infoContext.getSelectionReasonByRole().get(RoleType.PREFILL));
     }
 
     @Test
