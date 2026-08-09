@@ -39,6 +39,28 @@ public class TaskInfo {
     private long runningEnteredTimeMs;
     @JsonProperty("request_received_time_ms")
     private long requestReceivedTimeMs;
+    @JsonProperty("input_queue_enqueue_time_ms")
+    private long inputQueueEnqueueTimeMs;
+    @JsonProperty("input_queue_drain_time_ms")
+    private long inputQueueDrainTimeMs;
+    @JsonProperty("remote_kv_wait_ms")
+    private long remoteKvWaitMs;
+    @JsonProperty("first_token_time_ms")
+    private long firstTokenTimeMs;
+    @JsonProperty("hbm_local_match_tokens")
+    private long hbmLocalMatchTokens;
+    @JsonProperty("remote_kv_added_match_tokens")
+    private long remoteKvAddedMatchTokens;
+    @JsonProperty("first_prefill_step_id")
+    private long firstPrefillStepId;
+    @JsonProperty("last_prefill_step_id")
+    private long lastPrefillStepId;
+    @JsonProperty("prefill_step_count")
+    private long prefillStepCount;
+    @JsonProperty("prefill_nonfinal_chunk_tokens_min")
+    private long prefillNonfinalChunkTokensMin;
+    @JsonProperty("prefill_nonfinal_chunk_tokens_max")
+    private long prefillNonfinalChunkTokensMax;
 
     @JsonIgnore
     private double cacheHitDiscount = DEFAULT_CACHE_HIT_DISCOUNT;

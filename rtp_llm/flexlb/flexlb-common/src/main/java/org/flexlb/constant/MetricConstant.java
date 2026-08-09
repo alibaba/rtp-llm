@@ -162,6 +162,36 @@ public class MetricConstant {
     public static final String ENGINE_WORKER_STATUS_ENGINE_OBSERVED_RECEIVED_TO_WAITING_MS =
             "app.engine.worker.status.engine.received.to.waiting.ms";
 
+    public static final String ENGINE_WORKER_STATUS_INPUT_QUEUE_WAIT_MS =
+            "app.engine.worker.status.input.queue.wait.ms";
+
+    public static final String ENGINE_WORKER_STATUS_SCHEDULER_TO_RUNNING_MS =
+            "app.engine.worker.status.scheduler.to.running.ms";
+
+    public static final String ENGINE_WORKER_STATUS_SCHEDULER_WAIT_MS =
+            "app.engine.worker.status.scheduler.wait.ms";
+
+    public static final String ENGINE_WORKER_STATUS_REMOTE_KV_WAIT_MS =
+            "app.engine.worker.status.remote.kv.wait.ms";
+
+    public static final String ENGINE_WORKER_STATUS_RUNNING_TO_FIRST_TOKEN_MS =
+            "app.engine.worker.status.running.to.first.token.ms";
+
+    public static final String ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS =
+            "app.engine.worker.status.hbm.local.match.tokens";
+
+    public static final String ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS =
+            "app.engine.worker.status.remote.kv.added.match.tokens";
+
+    public static final String ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT =
+            "app.engine.worker.status.prefill.step.count";
+
+    public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MIN =
+            "app.engine.worker.status.prefill.nonfinal.chunk.tokens.min";
+
+    public static final String ENGINE_WORKER_STATUS_PREFILL_NONFINAL_CHUNK_TOKENS_MAX =
+            "app.engine.worker.status.prefill.nonfinal.chunk.tokens.max";
+
     /* ------------------------ Cache Health Monitoring -------------------------- */
 
     /**

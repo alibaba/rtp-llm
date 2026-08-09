@@ -411,6 +411,17 @@ message TaskInfoPB {
     // waiting queue. Reconciles against the master's dispatch-to-waiting observation.
     // 0 = unknown (edge paths that bypass the record point).
     int64 request_received_time_ms = 13;
+    int64 input_queue_enqueue_time_ms = 14;
+    int64 input_queue_drain_time_ms = 15;
+    int64 remote_kv_wait_ms = 16;
+    int64 first_token_time_ms = 17;
+    int64 hbm_local_match_tokens = 18;
+    int64 remote_kv_added_match_tokens = 19;
+    int64 first_prefill_step_id = 20;
+    int64 last_prefill_step_id = 21;
+    int64 prefill_step_count = 22;
+    int64 prefill_nonfinal_chunk_tokens_min = 23;
+    int64 prefill_nonfinal_chunk_tokens_max = 24;
 }
 
 message UpdateWeightsRequestPB {

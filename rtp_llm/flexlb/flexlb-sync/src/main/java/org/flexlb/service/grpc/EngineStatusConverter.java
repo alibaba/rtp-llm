@@ -111,6 +111,17 @@ public class EngineStatusConverter {
             taskInfo.setWaitingEnteredTimeMs(taskInfoPB.getWaitingEnteredTimeMs());
             taskInfo.setRunningEnteredTimeMs(taskInfoPB.getRunningEnteredTimeMs());
             taskInfo.setRequestReceivedTimeMs(taskInfoPB.getRequestReceivedTimeMs());
+            taskInfo.setInputQueueEnqueueTimeMs(taskInfoPB.getInputQueueEnqueueTimeMs());
+            taskInfo.setInputQueueDrainTimeMs(taskInfoPB.getInputQueueDrainTimeMs());
+            taskInfo.setRemoteKvWaitMs(taskInfoPB.getRemoteKvWaitMs());
+            taskInfo.setFirstTokenTimeMs(taskInfoPB.getFirstTokenTimeMs());
+            taskInfo.setHbmLocalMatchTokens(taskInfoPB.getHbmLocalMatchTokens());
+            taskInfo.setRemoteKvAddedMatchTokens(taskInfoPB.getRemoteKvAddedMatchTokens());
+            taskInfo.setFirstPrefillStepId(taskInfoPB.getFirstPrefillStepId());
+            taskInfo.setLastPrefillStepId(taskInfoPB.getLastPrefillStepId());
+            taskInfo.setPrefillStepCount(taskInfoPB.getPrefillStepCount());
+            taskInfo.setPrefillNonfinalChunkTokensMin(taskInfoPB.getPrefillNonfinalChunkTokensMin());
+            taskInfo.setPrefillNonfinalChunkTokensMax(taskInfoPB.getPrefillNonfinalChunkTokensMax());
 
             taskInfoMap.put(requestId, taskInfo);
         }

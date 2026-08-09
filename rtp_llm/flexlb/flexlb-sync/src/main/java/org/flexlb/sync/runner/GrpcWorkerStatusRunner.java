@@ -21,6 +21,7 @@ import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -149,6 +150,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
                 handleTaskStateUpdateResult(workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo));
+                reportFinishedPrefillTasks(finishedTaskInfo);
 
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
@@ -178,6 +180,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             // Update local task state (including checking lost, updating running, and cleaning completed)
             handleTaskStateUpdateResult(workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo));
+            reportFinishedPrefillTasks(finishedTaskInfo);
 
             // Correct running queue total wait time
             workerStatus.updateRunningQueueTime();
@@ -247,6 +250,52 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (!json.isEmpty()) {
             pvLogger.info(json);
         }
+    }
+
+    private void reportFinishedPrefillTasks(Map<String, TaskInfo> finishedTaskInfo) {
+        if (roleType != RoleType.PREFILL || finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
+            return;
+        }
+        for (TaskInfo task : finishedTaskInfo.values()) {
+            engineHealthReporter.reportPrefillWorkerStatusTask(
+                    modelName, ip, roleType.getCode(), group, task);
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("event", "prefill_worker_status");
+            event.put("requestId", task.getRequestId());
+            event.put("model", modelName);
+            event.put("workerIp", ip);
+            event.put("workerPort", workerStatusPort);
+            event.put("role", roleType.getCode());
+            event.put("group", group);
+            event.put("inputQueueEnqueueTimeMs", task.getInputQueueEnqueueTimeMs());
+            event.put("inputQueueDrainTimeMs", task.getInputQueueDrainTimeMs());
+            event.put("remoteKvWaitMs", task.getRemoteKvWaitMs());
+            event.put("firstTokenTimeMs", task.getFirstTokenTimeMs());
+            event.put("hbmLocalMatchTokens", task.getHbmLocalMatchTokens());
+            event.put("remoteKvAddedMatchTokens", task.getRemoteKvAddedMatchTokens());
+            event.put("firstPrefillStepId", task.getFirstPrefillStepId());
+            event.put("lastPrefillStepId", task.getLastPrefillStepId());
+            event.put("prefillStepCount", task.getPrefillStepCount());
+            event.put("prefillNonfinalChunkTokensMin", task.getPrefillNonfinalChunkTokensMin());
+            event.put("prefillNonfinalChunkTokensMax", task.getPrefillNonfinalChunkTokensMax());
+            event.put("inputQueueWaitMs", duration(task.getInputQueueDrainTimeMs(), task.getInputQueueEnqueueTimeMs()));
+            long schedulerToRunningMs = duration(task.getRunningEnteredTimeMs(), task.getWaitingEnteredTimeMs());
+            event.put("schedulerToRunningMs", schedulerToRunningMs);
+            event.put("schedulerWaitMs", schedulerToRunningMs < 0 ? -1
+                    : Math.max(0, schedulerToRunningMs - task.getRemoteKvWaitMs()));
+            event.put("runningToFirstTokenMs", duration(task.getFirstTokenTimeMs(), task.getRunningEnteredTimeMs()));
+            String json = JsonUtils.toStringOrEmpty(event);
+            if (!json.isEmpty()) {
+                pvLogger.info(json);
+            }
+        }
+    }
+
+    private long duration(long endTimeMs, long startTimeMs) {
+        if (endTimeMs <= 0 || startTimeMs <= 0) {
+            return -1;
+        }
+        return Math.max(0, endTimeMs - startTimeMs);
     }
 
     private void updateCacheStatus(CacheStatus cacheStatus) {

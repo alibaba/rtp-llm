@@ -70,6 +70,43 @@ class EngineStatusConverterTest {
     }
 
     @Test
+    void preservesPrefillTimingAndCacheBreakdownFromWorkerStatus() {
+        EngineRpcService.TaskInfoPB finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId("request-1")
+                .setInputQueueEnqueueTimeMs(1000)
+                .setInputQueueDrainTimeMs(1100)
+                .setRemoteKvWaitMs(200)
+                .setFirstTokenTimeMs(1500)
+                .setHbmLocalMatchTokens(512)
+                .setRemoteKvAddedMatchTokens(256)
+                .setFirstPrefillStepId(7)
+                .setLastPrefillStepId(9)
+                .setPrefillStepCount(3)
+                .setPrefillNonfinalChunkTokensMin(128)
+                .setPrefillNonfinalChunkTokensMax(256)
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
+                .addFinishedTaskList(finishedTask)
+                .build();
+
+        WorkerStatusResponse response =
+                EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
+
+        var task = response.getFinishedTaskInfo().get("request-1");
+        assertEquals(1000, task.getInputQueueEnqueueTimeMs());
+        assertEquals(1100, task.getInputQueueDrainTimeMs());
+        assertEquals(200, task.getRemoteKvWaitMs());
+        assertEquals(1500, task.getFirstTokenTimeMs());
+        assertEquals(512, task.getHbmLocalMatchTokens());
+        assertEquals(256, task.getRemoteKvAddedMatchTokens());
+        assertEquals(7, task.getFirstPrefillStepId());
+        assertEquals(9, task.getLastPrefillStepId());
+        assertEquals(3, task.getPrefillStepCount());
+        assertEquals(128, task.getPrefillNonfinalChunkTokensMin());
+        assertEquals(256, task.getPrefillNonfinalChunkTokensMax());
+    }
+
+    @Test
     void preservesCacheMatchMetadataFromWorkerStatus() {
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setBlockHashLookaheadTokens(1)

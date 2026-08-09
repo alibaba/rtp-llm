@@ -27,8 +27,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import reactor.netty.resources.LoopResources;
 
-import java.util.Map;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -269,6 +269,41 @@ class EngineHealthReporterTest {
                 "group", "test-group");
         verify(monitor).report("app.engine.worker.status.engine.received.to.waiting.ms",
                 expectedTags, 42.0);
+    }
+
+    @Test
+    void shouldReportPrefillWorkerStatusTaskMetrics() {
+        TaskInfo task = new TaskInfo();
+        task.setInputQueueEnqueueTimeMs(1000);
+        task.setInputQueueDrainTimeMs(1100);
+        task.setWaitingEnteredTimeMs(1200);
+        task.setRunningEnteredTimeMs(1600);
+        task.setRemoteKvWaitMs(200);
+        task.setFirstTokenTimeMs(1900);
+        task.setHbmLocalMatchTokens(512);
+        task.setRemoteKvAddedMatchTokens(256);
+        task.setPrefillStepCount(3);
+        task.setPrefillNonfinalChunkTokensMin(128);
+        task.setPrefillNonfinalChunkTokensMax(256);
+
+        reporter.reportPrefillWorkerStatusTask(
+                "test-model", "10.0.0.1", "PREFILL", "test-group", task);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "group", "test-group");
+        verify(monitor).report("app.engine.worker.status.input.queue.wait.ms", expectedTags, 100.0);
+        verify(monitor).report("app.engine.worker.status.scheduler.to.running.ms", expectedTags, 400.0);
+        verify(monitor).report("app.engine.worker.status.scheduler.wait.ms", expectedTags, 200.0);
+        verify(monitor).report("app.engine.worker.status.remote.kv.wait.ms", expectedTags, 200.0);
+        verify(monitor).report("app.engine.worker.status.running.to.first.token.ms", expectedTags, 300.0);
+        verify(monitor).report("app.engine.worker.status.hbm.local.match.tokens", expectedTags, 512.0);
+        verify(monitor).report("app.engine.worker.status.remote.kv.added.match.tokens", expectedTags, 256.0);
+        verify(monitor).report("app.engine.worker.status.prefill.step.count", expectedTags, 3.0);
+        verify(monitor).report("app.engine.worker.status.prefill.nonfinal.chunk.tokens.min", expectedTags, 128.0);
+        verify(monitor).report("app.engine.worker.status.prefill.nonfinal.chunk.tokens.max", expectedTags, 256.0);
     }
 
     @Test
