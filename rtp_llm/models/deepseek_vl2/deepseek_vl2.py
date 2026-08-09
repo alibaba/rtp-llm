@@ -1,14 +1,14 @@
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from transformers import AutoTokenizer
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models.deepseek_vl2.deepseek_vl2_weight import DeepSeekVLV2Weight
+from rtp_llm.ops import MlaOpsType
+from rtp_llm.utils.model_weight import yarn_get_mscale
 
 
 class DeepSeekVLV2(BaseModel):
@@ -21,7 +21,7 @@ class DeepSeekVLV2(BaseModel):
         config.activation_type = "gated-silu"
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
-            return
+            return config
         with open(config_path) as reader:
             content = reader.read()
             top_config_json = json.loads(content)
@@ -30,25 +30,22 @@ class DeepSeekVLV2(BaseModel):
         return config
 
     def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 
-        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel    
-        model_config = self.model_config
-        parallelism_config = self.parallelism_config
-        fmha_config = self.fmha_config
-        py_hw_kernel_config = self.hw_kernel_config
-        moe_config = self.moe_config
-        max_generate_batch_size = self.max_generate_batch_size
-
-        # Use GenericMoeModel with new config architecture
-        # attention_type is determined from model_config.attn_config.use_mla
+        if self.model_config.attn_config.use_mla:
+            raise RuntimeError(
+                "DeepSeek-VL2 small/full checkpoints use MLA, which is not "
+                "supported by the legacy DeepSeekVLV2Weight layout; enable "
+                "USE_NEW_LOADER=1"
+            )
         self.py_model = GenericMoeModel(
-            model_config,
-            parallelism_config,
+            self.model_config,
+            self.parallelism_config,
             self.weight,
-            moe_config,
-            max_generate_batch_size=max_generate_batch_size,
-            fmha_config=fmha_config,
-            py_hw_kernel_config=py_hw_kernel_config,
+            self.moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
             device_resource_config=self.device_resource_config,
         )
 
@@ -56,30 +53,119 @@ class DeepSeekVLV2(BaseModel):
     def _from_hf(config: ModelConfig, top_config_json: Dict[str, Any]):
 
         config.model_name = "deepseek_vl_v2"
-        config_json = top_config_json["language_config"]
-        config.inter_size = config_json["intermediate_size"]
-        config.attn_config.head_num = config_json["num_attention_heads"]
+        config.model_type = "deepseek_vl_v2"
+        config_json = top_config_json.get("language_config")
+        if not isinstance(config_json, dict):
+            raise ValueError(
+                "DeepSeek-VL2 config.json must contain a language_config object"
+            )
+
+        # DeepSeek-VL2 full omits several fields and relies on the official
+        # DeepseekV2Config defaults. Keep those defaults explicit here so both
+        # legacy and newloader routes build the checkpoint's real topology.
+        config.hidden_size = config_json.get("hidden_size", 4096)
+        config.num_layers = config_json.get("num_hidden_layers", 30)
+        config.attn_config.head_num = config_json.get("num_attention_heads", 32)
         config.attn_config.kv_head_num = config_json.get(
             "num_key_value_heads", config.attn_config.head_num
         )
-        config.num_layers = config_json["num_hidden_layers"]
-        config.vocab_size = config_json["vocab_size"]
+        config.vocab_size = config_json.get("vocab_size", 102400)
         config.tie_word_embeddings = config_json.get("tie_word_embeddings", False)
-        config.hidden_size = config_json["hidden_size"]
-        assert config.hidden_size % config.attn_config.head_num == 0
-        config.attn_config.size_per_head = (
-            config.hidden_size // config.attn_config.head_num
-        )
+        if config.hidden_size % config.attn_config.head_num:
+            raise ValueError(
+                f"hidden_size={config.hidden_size} must be divisible by "
+                f"num_attention_heads={config.attn_config.head_num}"
+            )
         config.attn_config.rope_config.base = int(config_json.get("rope_theta", 10000))
-        config.attn_config.rope_config.dim = config.attn_config.size_per_head
-        config.attn_config.rope_config.style = 1
 
-        # MLA config
-        config.attn_config.use_mla = False
+        use_mla = config_json.get("use_mla", True)
+        if not isinstance(use_mla, bool):
+            raise TypeError(f"language_config.use_mla must be bool, got {use_mla!r}")
+        config.attn_config.use_mla = use_mla
+        if use_mla:
+            q_lora_rank = config_json.get("q_lora_rank", 1536)
+            config.attn_config.q_lora_rank = (
+                0 if q_lora_rank is None else int(q_lora_rank)
+            )
+            kv_lora_rank = config_json.get("kv_lora_rank", 512)
+            config.attn_config.kv_lora_rank = (
+                0 if kv_lora_rank is None else int(kv_lora_rank)
+            )
+            config.attn_config.nope_head_dim = config_json.get("qk_nope_head_dim", 128)
+            config.attn_config.rope_head_dim = config_json.get("qk_rope_head_dim", 64)
+            config.attn_config.v_head_dim = config_json.get("v_head_dim", 128)
+            if (
+                config.attn_config.kv_lora_rank <= 0
+                or config.attn_config.nope_head_dim <= 0
+                or config.attn_config.rope_head_dim <= 0
+                or config.attn_config.v_head_dim <= 0
+            ):
+                raise ValueError("DeepSeek-VL2 MLA dimensions must all be positive")
+            config.attn_config.size_per_head = (
+                config.attn_config.nope_head_dim + config.attn_config.rope_head_dim
+            )
+            config.attn_config.rope_config.dim = config.attn_config.rope_head_dim
+            config.attn_config.rope_config.offset = config.attn_config.nope_head_dim
+            config.attn_config.rope_config.style = (
+                5 if config.mla_ops_type == MlaOpsType.MHA else 0
+            )
+            rope_scaling = config_json.get("rope_scaling")
+            if rope_scaling is not None:
+                if not isinstance(rope_scaling, dict):
+                    raise TypeError("language_config.rope_scaling must be a mapping")
+                required_yarn_fields = {
+                    "factor",
+                    "original_max_position_embeddings",
+                    "mscale",
+                    "mscale_all_dim",
+                }
+                missing_yarn_fields = required_yarn_fields - rope_scaling.keys()
+                if missing_yarn_fields:
+                    raise ValueError(
+                        "language_config.rope_scaling is missing required fields: "
+                        + ", ".join(sorted(missing_yarn_fields))
+                    )
+                scaling_factor = float(rope_scaling["factor"])
+                mscale = float(rope_scaling["mscale"])
+                mscale_all_dim = float(rope_scaling["mscale_all_dim"])
+                config.attn_config.rope_config.scale = scaling_factor
+                config.attn_config.rope_config.factor1 = float(
+                    rope_scaling.get("beta_slow", 1)
+                )
+                config.attn_config.rope_config.factor2 = float(
+                    rope_scaling.get("beta_fast", 32)
+                )
+                config.attn_config.rope_config.max_pos = int(
+                    rope_scaling["original_max_position_embeddings"]
+                )
+                config.deepseek_rope_mscale = mscale
+                config.deepseek_mscale_all_dim = mscale_all_dim
+                config.attn_config.rope_config.mscale = yarn_get_mscale(
+                    scaling_factor, mscale
+                ) / yarn_get_mscale(scaling_factor, mscale_all_dim)
+                softmax_mscale = yarn_get_mscale(scaling_factor, mscale_all_dim)
+                config.attn_config.softmax_extra_scale = softmax_mscale * softmax_mscale
+
+            rope_interleave = config_json.get("rope_interleave", True)
+            if not isinstance(rope_interleave, bool):
+                raise TypeError("language_config.rope_interleave must be bool")
+            config.attn_config.rope_config.is_neox_style = not rope_interleave
+            indexer_rope_interleave = config_json.get("indexer_rope_interleave", False)
+            if not isinstance(indexer_rope_interleave, bool):
+                raise TypeError("language_config.indexer_rope_interleave must be bool")
+            config.attn_config.rope_config.indexer_is_neox_style = (
+                not indexer_rope_interleave
+            )
+        else:
+            config.attn_config.size_per_head = (
+                config.hidden_size // config.attn_config.head_num
+            )
+            config.attn_config.rope_config.dim = config.attn_config.size_per_head
+            config.attn_config.rope_config.style = 1
 
         # from Llama
         config.layernorm_eps = config_json.get(
-            "rms_norm_eps", config_json.get("layer_norm_eps", 1e-05)
+            "rms_norm_eps", config_json.get("layer_norm_eps", 1e-6)
         )
 
         # MOE config
@@ -131,7 +217,9 @@ class DeepSeekVLV2(BaseModel):
         config.mm_related_params.config["vision_config"] = vision_config
         projector_config = top_config_json.get("projector_config", {})
         config.mm_related_params.config["projector_config"] = projector_config
-        candidate_resolutions = top_config_json.get("candidate_resolutions", {})
+        candidate_resolutions = top_config_json.get(
+            "candidate_resolutions", ((384, 384),)
+        )
         config.mm_related_params.config["candidate_resolutions"] = candidate_resolutions
         config.mm_related_params.special_tokens.update({"default_mm_token": "<image>"})
         config.mm_related_params.config["tile_tag"] = top_config_json.get(
@@ -151,6 +239,10 @@ class DeepSeekVLV2(BaseModel):
 
     @staticmethod
     def get_weight_cls():
+        # Keep the legacy weight graph out of the newloader import path; only
+        # the old loader asks for this class.
+        from rtp_llm.models.deepseek_vl2.deepseek_vl2_weight import DeepSeekVLV2Weight
+
         return DeepSeekVLV2Weight
 
 
