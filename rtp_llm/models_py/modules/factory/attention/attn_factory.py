@@ -46,6 +46,7 @@ def get_mla_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    use_fast_path: Optional[bool] = None,
 ) -> MlaImplBase:
 
     mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
@@ -56,14 +57,10 @@ def get_mla_impl(
 
         cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
         # TODO: support fast path for cp prefill
-        use_fast_path = (
-            attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item()
-            <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
+        if use_fast_path is None:
+            use_fast_path = resolve_mla_use_fast_path(
+                attn_configs, attn_inputs, parallelism_config
             )
-        )
 
         if not use_fast_path and not impl.support_parallelism_config(
             parallelism_config
@@ -95,6 +92,20 @@ def get_mla_impl(
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance
     raise Exception(f"can not find mla type")
+
+
+def resolve_mla_use_fast_path(
+    attn_configs: AttentionConfigs,
+    attn_inputs: PyAttentionInputs,
+    parallelism_config: Optional[ParallelismConfig],
+) -> bool:
+    return (
+        attn_inputs.is_prefill
+        and attn_inputs.context_total_kv_length <= attn_configs.indexer_topk
+        and not (
+            parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
+        )
+    )
 
 
 def _is_fmha_impl_disabled(
@@ -226,6 +237,7 @@ class AttnImplFactory(object):
         attn_inputs: PyAttentionInputs,
         fmha_config: Optional[FMHAConfig] = None,
         is_cuda_graph: bool = False,
+        mla_use_fast_path: Optional[bool] = None,
     ) -> AttentionImpl:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
@@ -234,16 +246,29 @@ class AttnImplFactory(object):
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
         key_str = "mla" if attn_configs.use_mla else "mha"
         fmha_impl_method = cls.FMHA_IMPL_REGISTRY[key_str]
-        instance = fmha_impl_method(
-            attn_configs,
-            weight,
-            attn_inputs,
-            fmha_config,
-            model_config.quant_config,
-            is_cuda_graph,
-            model_config.max_seq_len,
-            parallelism_config,
-        )
+        if key_str == "mla":
+            instance = fmha_impl_method(
+                attn_configs,
+                weight,
+                attn_inputs,
+                fmha_config,
+                model_config.quant_config,
+                is_cuda_graph,
+                model_config.max_seq_len,
+                parallelism_config,
+                mla_use_fast_path,
+            )
+        else:
+            instance = fmha_impl_method(
+                attn_configs,
+                weight,
+                attn_inputs,
+                fmha_config,
+                model_config.quant_config,
+                is_cuda_graph,
+                model_config.max_seq_len,
+                parallelism_config,
+            )
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance
 

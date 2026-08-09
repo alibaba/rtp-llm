@@ -685,44 +685,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpRejectsAmbiguousDefaultFullGroupA
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpDefaultAliasMatchesSparseIndexerLayoutContract) {
-    CacheConfig main_config;
-    main_config.seq_size_per_block = 4;
-    main_config.layer_num          = 2;
-    setTestTopology(
-        main_config,
-        {makeTestGroupForConfig(
-             main_config, makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1), {0}, CacheGroupType::FULL, "full0"),
-         makeTestGroupForConfig(
-             main_config, makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1), {1}, CacheGroupType::FULL, "full1")});
-    auto main_groups                                = main_config.topology().groups();
-    main_groups[0].uses_sparse_indexer_scale_layout = true;
-    main_config.setTopology(std::move(main_groups), main_config.topology().layers());
-
-    auto propose_config = makeSimpleMhaCacheConfig(
-        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    auto propose_groups                                = propose_config.topology().groups();
-    propose_groups[0].uses_sparse_indexer_scale_layout = true;
-    propose_config.setTopology(std::move(propose_groups), propose_config.topology().layers());
-
-    const auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2);
-    ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(sub_config->layerIdsForGroup("full0"), std::vector<int>({0}));
-    EXPECT_TRUE(sub_config->layerIdsForGroup("full1").empty());
-    EXPECT_EQ(main_config.layerIdsForGroup("full0"), std::vector<int>({0, 2}));
-    EXPECT_EQ(main_config.layerIdsForGroup("full1"), std::vector<int>({1}));
-
-    auto incompatible_target =
-        makeSingleLayerCacheConfig(makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL);
-    try {
-        incompatible_target.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
-        FAIL() << "expected sparse-indexer layout mismatch to reject the default alias";
-    } catch (const std::runtime_error& e) {
-        EXPECT_NE(std::string(e.what()).find("no compatible target group for sole propose tag=default"),
-                  std::string::npos);
-    }
-}
-
 TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpDoesNotAliasDefaultFullGroupToLinearTarget) {
     auto main_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);

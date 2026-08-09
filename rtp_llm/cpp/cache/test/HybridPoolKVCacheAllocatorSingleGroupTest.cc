@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
-#include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
@@ -557,12 +556,11 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigSlicesDesc
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
-    auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    config.hybrid_attention_config.hybrid_attention_types            = {};
-    auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
-    second_desc.tag                                                  = "layer1_state";
+    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.enable_hybrid_attention = true;
+    config.hybrid_attention_config.hybrid_attention_types  = {};
+    auto second_desc                                       = config.kv_cache_spec_descs[1][0];
+    second_desc.tag                                        = "layer1_state";
     config.kv_cache_spec_descs[1].push_back(second_desc);
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
@@ -574,12 +572,14 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigSupportsDe
     EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
 }
 
-TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigRejectsLegacyHybridWithoutAttentionTypes) {
+TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, SingleLayerMtpConfigDoesNotRequireAttentionTypes) {
     auto config                                            = makeTestModelConfig(/*num_layers=*/2);
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {};
 
-    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/0), std::runtime_error);
+    const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/0);
+    EXPECT_EQ(single_layer.kv_cache_spec_descs.size(), 1u);
+    EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
 }
 
 TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
@@ -836,42 +836,51 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockBatchCopyCopiesCompleteSp
     model_config.attn_config.is_sparse               = true;
     model_config.attn_config.indexer_head_dim        = 256;
     model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
+    KVCacheSpecDesc indexer_desc;
+    indexer_desc.tag                       = "indexer_kv";
+    indexer_desc.cache_type                = KVCacheSpecType::OpaqueKV;
+    indexer_desc.entry_dtype               = DataType::TYPE_UINT8;
+    indexer_desc.entry_elems               = 264;
+    indexer_desc.explicit_entry_count      = model_config.attn_config.tokens_per_block;
+    indexer_desc.kernel_seq_size_per_block = model_config.attn_config.kernel_tokens_per_block;
+    for (auto& layer_descs : model_config.kv_cache_spec_descs) {
+        layer_descs.push_back(indexer_desc);
+    }
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
-    auto config                = SingleConfigCreator::createSingleConfig(model_config,
-                                                          parallelism_config,
-                                                          /*is_mtp=*/false,
-                                                          /*gen_num_per_cycle=*/0);
+    auto config                = CacheConfigCreator::createBasicConfig(
+        model_config, parallelism_config, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
     config.finalizeBlockNums(4, RuntimeConfig{});
 
     ASSERT_TRUE(config.is_sparse);
-    ASSERT_GT(config.kvScaleStrideBytesForGroup("default"), 0u);
+    ASSERT_EQ(config.groupNums(), 2);
+    ASSERT_EQ(config.kvBlockStrideBytesForGroup("indexer_kv"), 4u * 264u);
 
     allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    const auto stride   = config.kvScaleStrideBytesForGroup("default");
+    const auto stride   = config.kvBlockStrideBytesForGroup("indexer_kv");
     auto       snapshot = [&]() {
         std::vector<std::vector<uint8_t>> blocks(config.blockNum(), std::vector<uint8_t>(stride));
         for (uint32_t block = 0; block < config.blockNum(); ++block) {
-            auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "default", static_cast<int>(block));
-            EXPECT_NE(addr.kv_scale_addr, nullptr);
-            memcpy(blocks[block].data(), addr.kv_scale_addr, stride);
+            auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "indexer_kv", static_cast<int>(block));
+            EXPECT_NE(addr.kv_addr, nullptr);
+            memcpy(blocks[block].data(), addr.kv_addr, stride);
         }
         return blocks;
     };
     auto verify = [&](const std::vector<std::vector<uint8_t>>& expected) {
         for (uint32_t block = 0; block < config.blockNum(); ++block) {
-            auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "default", static_cast<int>(block));
-            EXPECT_EQ(memcmp(addr.kv_scale_addr, expected[block].data(), stride), 0)
+            auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "indexer_kv", static_cast<int>(block));
+            EXPECT_EQ(memcmp(addr.kv_addr, expected[block].data(), stride), 0)
                 << "sparse indexer mismatch at block " << block;
         }
     };
 
     for (uint32_t block = 0; block < config.blockNum(); ++block) {
-        auto  addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "default", static_cast<int>(block));
-        auto* data = static_cast<uint8_t*>(addr.kv_scale_addr);
+        auto  addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "indexer_kv", static_cast<int>(block));
+        auto* data = static_cast<uint8_t*>(addr.kv_addr);
         ASSERT_NE(data, nullptr);
         for (size_t offset = 0; offset < stride; ++offset) {
             data[offset] = static_cast<uint8_t>((block * 67 + offset) % 251);
@@ -882,13 +891,13 @@ TEST_F(HybridPoolKVCacheAllocatorSingleGroupTest, BlockBatchCopyCopiesCompleteSp
     EXPECT_NO_THROW(allocator_->blockBatchCopy(std::vector<GroupBlockIdPair>{}));
     verify(initial);
 
-    EXPECT_NO_THROW(allocator_->blockBatchCopy({GroupBlockIdPair{"default", 0, 1}}));
+    EXPECT_NO_THROW(allocator_->blockBatchCopy({GroupBlockIdPair{"indexer_kv", 0, 1}}));
     auto after_single = initial;
     after_single[1]   = initial[0];
     verify(after_single);
 
     const int last_block = static_cast<int>(config.blockNum() - 1);
-    EXPECT_NO_THROW(allocator_->blockBatchCopy({GroupBlockIdPair{"default", 1, last_block}}));
+    EXPECT_NO_THROW(allocator_->blockBatchCopy({GroupBlockIdPair{"indexer_kv", 1, last_block}}));
     auto after_last        = after_single;
     after_last[last_block] = after_single[1];
     verify(after_last);

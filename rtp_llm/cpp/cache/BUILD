@@ -369,7 +369,10 @@ cc_library(
     hdrs = [
         "KVCacheManager.h",
     ],
-    copts = copts(),
+    copts = copts() + select({
+        "//:using_remote_kv_cache": ["-DUSE_REMOTE_KV_CACHE=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":cache_core",

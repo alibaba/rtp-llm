@@ -72,6 +72,64 @@ class HybridKVCacheSpecTest(TestCase):
             self.assertEqual(layer_descs[0].tag, "default")
             self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MLA)
 
+    def test_sparse_mla_uses_independent_indexer_descriptor(self):
+        config = ModelConfig()
+        config.num_layers = 2
+        config.attn_config.use_mla = True
+        config.mla_ops_type = "FLASH_MLA"
+        config.attn_config.is_sparse = True
+        config.attn_config.indexer_head_dim = 128
+        config.attn_config.tokens_per_block = 512
+        config.attn_config.kernel_tokens_per_block = 64
+
+        BaseModel._post_build_model_config(config)
+
+        self.assertEqual(len(config.kv_cache_spec_descs), 2)
+        for layer_descs in config.kv_cache_spec_descs:
+            self.assertEqual(
+                [desc.tag for desc in layer_descs], ["default", "indexer_kv"]
+            )
+            self.assertEqual(layer_descs[0].cache_type, KVCacheSpecType.MLA)
+            indexer_desc = layer_descs[1]
+            self.assertEqual(indexer_desc.cache_type, KVCacheSpecType.OPAQUE_KV)
+            self.assertEqual(indexer_desc.entry_dtype, DataType.TYPE_UINT8)
+            self.assertEqual(indexer_desc.entry_elems, 132)
+            self.assertEqual(indexer_desc.explicit_entry_count, 512)
+            self.assertEqual(indexer_desc.kernel_seq_size_per_block, 64)
+
+    def test_sparse_deepseek_mtp_uses_same_descriptor_helper(self):
+        config = ModelConfig()
+        config.num_layers = 1
+        config.is_mtp = True
+        config.attn_config.use_mla = True
+        config.mla_ops_type = "FLASH_MLA"
+        config.attn_config.is_sparse = True
+        config.attn_config.indexer_head_dim = 256
+        config.attn_config.tokens_per_block = 256
+        config.attn_config.kernel_tokens_per_block = 64
+
+        DeepSeekV3Mtp._post_build_model_config(config)
+
+        self.assertEqual(
+            [desc.tag for desc in config.kv_cache_spec_descs[0]],
+            ["default", "indexer_kv"],
+        )
+        self.assertEqual(config.kv_cache_spec_descs[0][1].entry_elems, 264)
+
+    def test_sparse_mla_rejects_invalid_indexer_head_dim(self):
+        for indexer_head_dim in (0, 100):
+            with self.subTest(indexer_head_dim=indexer_head_dim):
+                config = ModelConfig()
+                config.num_layers = 1
+                config.attn_config.is_sparse = True
+                config.attn_config.indexer_head_dim = indexer_head_dim
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "sparse indexer_head_dim must be positive and divisible by 128",
+                ):
+                    BaseModel._post_build_model_config(config)
+
     def test_mtp_single_layer_models_keep_one_descriptor(self):
         for model_cls in (QwenV2MTP, DeepSeekV3Mtp):
             config = ModelConfig()

@@ -4,7 +4,14 @@ from pathlib import Path
 
 import torch
 
-from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_attention_inputs_value,
+    get_layer_cache_for_tag,
+    get_layer_caches_for_tags,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_tag,
+)
+from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType
 from rtp_llm.ops.compute_ops import (
@@ -28,6 +35,16 @@ class _RoutingCache:
         ]
 
 
+class _ConcreteRoutingCache:
+    def __init__(self, caches: list[LayerKVCache]) -> None:
+        self._caches = caches
+
+    def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
+        if layer_id != 0:
+            raise RuntimeError(f"invalid layer {layer_id}")
+        return self._caches
+
+
 class PyModelInputsCompatTest(unittest.TestCase):
     def test_hybrid_attention_config_has_explicit_constructors(self) -> None:
         default_config = HybridAttentionConfig()
@@ -43,6 +60,39 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             HybridAttentionConfig(True, True)
+
+    def test_sparse_routes_are_selected_by_tag_not_topology_order(self) -> None:
+        default_cache = LayerKVCache(torch.ones(1), 64, 0, "default")
+        indexer_cache = LayerKVCache(torch.ones(1) * 2, 64, 0, "indexer_kv")
+        cache = _ConcreteRoutingCache([indexer_cache, default_cache])
+
+        self.assertIs(get_layer_cache_for_tag(cache, 0, "default"), default_cache)
+        self.assertIs(get_layer_cache_for_tag(cache, 0, "indexer_kv"), indexer_cache)
+        selected = get_layer_caches_for_tags(cache, 0, ("default", "indexer_kv"))
+        self.assertEqual(
+            selected, {"default": default_cache, "indexer_kv": indexer_cache}
+        )
+        fmha = {"indexer_kv": object(), "default": object()}
+        self.assertIs(select_fmha_impl_for_tag(fmha, "default"), fmha["default"])
+        self.assertIs(select_fmha_impl_for_tag(fmha, "indexer_kv"), fmha["indexer_kv"])
+
+    def test_sparse_routes_reject_missing_duplicate_and_wrong_types(self) -> None:
+        duplicate = _ConcreteRoutingCache(
+            [
+                LayerKVCache(torch.ones(1), 64, 0, "indexer_kv"),
+                LayerKVCache(torch.ones(1), 64, 0, "indexer_kv"),
+            ]
+        )
+        with self.assertRaisesRegex(RuntimeError, "duplicate KV cache tag"):
+            get_layer_cache_for_tag(duplicate, 0, "indexer_kv")
+        with self.assertRaisesRegex(RuntimeError, "missing"):
+            select_fmha_impl_for_tag({"default": object()}, "indexer_kv")
+        with self.assertRaisesRegex(RuntimeError, "requires a mapping"):
+            select_fmha_impl_for_tag(object(), "indexer_kv")
+
+        inputs = type("Inputs", (), {"attention_inputs": {"default": object()}})()
+        with self.assertRaisesRegex(RuntimeError, "invalid value type"):
+            get_attention_inputs_value(inputs)
 
     def test_cache_binding_stubs_match_runtime_members(self) -> None:
         stub_path = (
@@ -165,6 +215,56 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(3, layer.layer_id)
         self.assertFalse(hasattr(layer, "group_id"))
         self.assertEqual("full", layer.tag)
+
+    def test_indexer_uses_token_addressable_view_of_opaque_pool(self) -> None:
+        indexer_op = object.__new__(IndexerOp)
+        indexer_op.index_head_dim = 128
+        indexer_op.block_size = 128
+        indexer_op.blocksize = 64
+        entry_elems = 132
+        indexer_op.entry_elems = entry_elems
+        indexer_op.page_elems = indexer_op.blocksize * entry_elems
+        base = torch.empty((3, 64 * entry_elems), dtype=torch.uint8)
+        layer = LayerKVCache(base, 64, layer_id=0, tag="indexer_kv")
+
+        view = indexer_op._indexer_cache_view(layer)
+
+        self.assertEqual(view.shape, (3, 64, entry_elems))
+        self.assertEqual(view.data_ptr(), base.data_ptr())
+
+    def test_indexer_rejects_invalid_opaque_pool_geometry(self) -> None:
+        indexer_op = object.__new__(IndexerOp)
+        indexer_op.index_head_dim = 128
+        indexer_op.block_size = 128
+        indexer_op.blocksize = 64
+        row_width = 64 * 132
+        indexer_op.entry_elems = 132
+        indexer_op.page_elems = row_width
+
+        with self.assertRaisesRegex(RuntimeError, "contiguous tensor"):
+            indexer_op._indexer_cache_view(
+                LayerKVCache(
+                    torch.empty((row_width, 2), dtype=torch.uint8).transpose(0, 1),
+                    64,
+                    0,
+                    "indexer_kv",
+                )
+            )
+        with self.assertRaisesRegex(RuntimeError, "page geometry mismatch"):
+            indexer_op._indexer_cache_view(
+                LayerKVCache(
+                    torch.empty((2, row_width), dtype=torch.uint8), 128, 0, "indexer_kv"
+                )
+            )
+        with self.assertRaisesRegex(RuntimeError, "exact 2D kernel-page layout"):
+            indexer_op._indexer_cache_view(
+                LayerKVCache(
+                    torch.empty((2, row_width - 1), dtype=torch.uint8),
+                    64,
+                    0,
+                    "indexer_kv",
+                )
+            )
 
     def test_attention_inputs_mapping_is_selected_by_layer_tag(self) -> None:
         full = self._attn_inputs(is_prefill=False, input_length=1)

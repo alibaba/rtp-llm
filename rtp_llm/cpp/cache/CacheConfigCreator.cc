@@ -178,8 +178,11 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
     validateModelBlockGranularity(model_config);
+    const auto  requires_independent_pools = std::any_of(model_config.kv_cache_spec_descs.begin(),
+                                                        model_config.kv_cache_spec_descs.end(),
+                                                        [](const auto& descs) { return descs.size() > 1; });
     CacheConfig config;
-    if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
+    if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools || requires_independent_pools) {
         config = HybridPoolConfigCreator::createConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
         config.use_independent_block_pools = true;
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
@@ -188,7 +191,7 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
         config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     }
 
-    if (!model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
+    if (!model_config.hybrid_attention_config.enable_independent_kv_cache_pools && !requires_independent_pools) {
         const auto full_group_num = std::count_if(
             config.topology().groups().begin(), config.topology().groups().end(), [](const GroupBase& group) {
                 return group.policy.group_type == CacheGroupType::FULL && group.spec
