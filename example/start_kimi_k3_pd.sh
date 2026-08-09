@@ -98,7 +98,7 @@ Optional environment variables:
   KIMI_K3_PERF_FUSIONS                  optimized TP8/EP8 defaults to 1;
                                          all other modes/topologies default to 0
   KIMI_K3_FUSED_AG_GEMM                 auto|off|force; defaults to auto;
-                                         Prefill global M<64K always uses NCCL
+                                         Prefill SP global M<32K uses NCCL AG+GEMM
   KIMI_K3_BATCHED_KDA_DECODE            optimized TP8/EP8 Decode defaults to 1;
                                          all other modes/topologies default to 0
   KIMI_K3_PERF_MODE                     strict performance-path validation only

@@ -197,7 +197,7 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         fused.assert_not_called()
         torch.testing.assert_close(actual, torch.mm(gathered_input, weight))
 
-    def test_auto_policy_starts_at_64k_global_tokens(self) -> None:
+    def test_auto_policy_starts_at_32k_global_tokens(self) -> None:
         with (
             patch.dict(
                 os.environ,
@@ -212,8 +212,8 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
                 clear=False,
             ),
         ):
-            self.assertFalse(kimi_k3._use_fused_prefill_ag_gemm(65535))
-            self.assertTrue(kimi_k3._use_fused_prefill_ag_gemm(65536))
+            self.assertFalse(kimi_k3._use_fused_prefill_ag_gemm(32767))
+            self.assertTrue(kimi_k3._use_fused_prefill_ag_gemm(32768))
 
     def test_decoder_delegates_cuda_prefill_shard_to_attention(self) -> None:
         if not torch.cuda.is_available():
