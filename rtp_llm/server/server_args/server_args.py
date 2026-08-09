@@ -250,6 +250,69 @@ class EnvArgumentParser(argparse.ArgumentParser):
 
         EnvArgumentParser._env_mappings[action.dest] = full_env_name
 
+    # Destinations whose env values are strictly validated against `choices`
+    # in mixed CLI + environment mode. Limited to arguments introduced together
+    # with this validation so that pre-existing deployments with stale invalid
+    # env values keep starting up; widening this set is a separate change.
+    _STRICT_ENV_CHOICE_DESTS = frozenset({"kv_cache_event_publisher_type"})
+
+    # Destinations for which an empty environment variable value is treated as
+    # "unset" instead of being bound as an empty string. Limited to arguments
+    # introduced together with this behavior; every other argument keeps the
+    # legacy semantics where an empty value is bound as-is, because some
+    # deployments rely on setting an env variable to "" as an explicit
+    # "disable" switch. Widening this set is a separate change.
+    _EMPTY_ENV_AS_UNSET_DESTS = frozenset(
+        {
+            "kv_cache_event_publisher_type",
+            "kv_cache_event_manager_endpoint",
+            "kv_cache_event_instance_group",
+            "kv_cache_event_instance_id",
+            "kv_cache_event_host_ip_port",
+            "kv_cache_event_queue_capacity",
+            "kv_cache_event_report_batch_size",
+            "kv_cache_event_flush_interval_ms",
+            "kv_cache_event_heartbeat_interval_ms",
+            "kv_cache_event_request_timeout_ms",
+            "kv_cache_event_snapshot_timeout_ms",
+            "kv_cache_event_retry_interval_ms",
+            "kv_cache_event_snapshot_interval_ms",
+            "kv_cache_event_log_max_keys",
+        }
+    )
+
+    def _env_value_provided(self, dest: str, env_value: Optional[str]) -> bool:
+        if env_value is None:
+            return False
+        if env_value == "" and dest in self._EMPTY_ENV_AS_UNSET_DESTS:
+            return False
+        return True
+
+    def _validate_env_choice(
+        self, action: argparse.Action, value: Any, env_name: str
+    ) -> None:
+        if action.choices is None or value in action.choices:
+            return
+
+        option = (
+            action.option_strings[0] if action.option_strings else action.dest
+        )
+        choices = ", ".join(repr(choice) for choice in action.choices)
+        logging.error(
+            "Invalid value for environment variable %s (argument %s)",
+            env_name,
+            option,
+        )
+        if action.dest not in self._STRICT_ENV_CHOICE_DESTS:
+            # Preserve the legacy tolerance for pre-existing arguments: the
+            # invalid value is still bound (as before this validation existed)
+            # and only surfaced via the ERROR log above.
+            return
+        self.error(
+            f"argument {option}: invalid choice: "
+            f"{value!r} (choose from {choices})"
+        )
+
     def parse_args(
         self,
         args: Optional[Sequence[str]] = None,
@@ -269,7 +332,10 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 # Read values from environment variables for all registered arguments
                 for dest, env_name in self._env_mappings.items():
                     env_value = os.environ.get(env_name)
-                    if env_value is not None:
+                    # For kv_cache_event_* destinations an empty value is
+                    # treated as "unset"; all other arguments keep the legacy
+                    # semantics where an empty value is bound as-is.
+                    if self._env_value_provided(dest, env_value):
                         # Find the action for this dest
                         action = None
                         for action_item in self._actions:
@@ -343,7 +409,10 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 # Only set from environment if the value wasn't provided via command line
                 if dest not in provided_args:
                     env_value = os.environ.get(env_name)
-                    if env_value is not None:
+                    # Same empty-value semantics as the pure environment
+                    # variable path above: "unset" only for the whitelisted
+                    # kv_cache_event_* destinations.
+                    if self._env_value_provided(dest, env_value):
                         # Find the action to get the type converter
                         action = None
                         for action_item in self._actions:
@@ -359,12 +428,50 @@ class EnvArgumentParser(argparse.ArgumentParser):
                             if action.type is not None:
                                 try:
                                     converted_value = action.type(env_value)
-                                    setattr(parsed_args, dest, converted_value)
+                                except argparse.ArgumentTypeError:
+                                    # Values explicitly rejected by the converter
+                                    # (e.g. str2bool) fail fast so the mixed
+                                    # CLI+env path matches the pure-env path,
+                                    # where argparse raises the same error.
+                                    option = (
+                                        action.option_strings[0]
+                                        if action.option_strings
+                                        else action.dest
+                                    )
+                                    logging.error(
+                                        "Invalid value for environment variable %s (argument %s)",
+                                        env_name,
+                                        option,
+                                    )
+                                    self.error(
+                                        f"argument {option}: invalid value "
+                                        f"{env_value!r} from environment "
+                                        f"variable {env_name}"
+                                    )
                                 except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
-                                    pass
+                                    # Preserve the legacy fallback-to-default behavior
+                                    # for plain conversion failures, but make the
+                                    # ignored configuration discoverable.
+                                    logging.warning(
+                                        "Ignoring environment variable %s because it "
+                                        "cannot be converted for argument %s; using "
+                                        "the default value %r",
+                                        env_name,
+                                        action.option_strings[0]
+                                        if action.option_strings
+                                        else action.dest,
+                                        action.default,
+                                    )
+                                else:
+                                    self._validate_env_choice(
+                                        action, converted_value, env_name
+                                    )
+                                    setattr(parsed_args, dest, converted_value)
                             else:
                                 # No type converter, use as string
+                                self._validate_env_choice(
+                                    action, env_value, env_name
+                                )
                                 setattr(parsed_args, dest, env_value)
 
         # 应用所有配置绑定

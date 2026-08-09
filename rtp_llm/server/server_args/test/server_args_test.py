@@ -4,6 +4,10 @@ import os
 import sys
 from unittest import TestCase, main
 
+from rtp_llm.config.test.kv_cache_event_test_values import (
+    KV_CACHE_EVENT_ENV_CASES,
+)
+
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
@@ -344,6 +348,168 @@ class ServerArgsSetTest(TestCase):
     def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
         """Test that pdfusion_scheduler_mode only accepts fixed scheduler patterns."""
         sys.argv = ["prog", "--pdfusion_scheduler_mode", "ratioo"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_kv_cache_event_env_vars_bind_to_config(self):
+        for env_name, _, raw_value, _ in KV_CACHE_EVENT_ENV_CASES:
+            os.environ[env_name] = raw_value
+        # Exercise the mixed CLI + environment path rather than argparse's
+        # environment-to-argv fallback.
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        for _, field_name, _, expected_value in KV_CACHE_EVENT_ENV_CASES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(
+                    expected_value,
+                    getattr(py_env_configs.kv_cache_config, field_name),
+                )
+
+    def test_kv_cache_event_env_rejects_unknown_publisher_type(self):
+        os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = "KVCM"
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_existing_env_choice_tolerates_unknown_value_in_mixed_mode(self):
+        # Pre-existing arguments keep the legacy tolerance for stale invalid
+        # env values (only the new KV cache event argument is strict), so a
+        # deployment upgrade cannot be broken by an old typo; the problem is
+        # surfaced via an ERROR log instead.
+        os.environ["PDFUSION_SCHEDULER_MODE"] = "unknown"
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertLogs(level="ERROR") as logs:
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "unknown",
+            py_env_configs.runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode,
+        )
+        self.assertTrue(
+            any("PDFUSION_SCHEDULER_MODE" in message for message in logs.output)
+        )
+
+    def test_empty_env_value_is_treated_as_unset_in_mixed_mode(self):
+        os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = ""
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "none",
+            py_env_configs.kv_cache_config.kv_cache_event_publisher_type,
+        )
+
+    def test_empty_env_value_is_treated_as_unset_in_pure_env_mode(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = ""
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "none",
+            py_env_configs.kv_cache_config.kv_cache_event_publisher_type,
+        )
+
+    def test_empty_env_value_still_binds_for_legacy_args_in_mixed_mode(self):
+        # Empty-value-as-unset is limited to the kv_cache_event_* whitelist.
+        # Pre-existing arguments keep the legacy semantics where "" is bound
+        # as-is: some deployments set an env variable to an empty string as an
+        # explicit "disable" switch (e.g. THINK_START_TAG="").
+        os.environ["THINK_START_TAG"] = ""
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "",
+            py_env_configs.generate_env_config.think_start_tag,
+        )
+
+    def test_empty_env_value_still_binds_for_legacy_args_in_pure_env_mode(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["THINK_START_TAG"] = ""
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "",
+            py_env_configs.generate_env_config.think_start_tag,
+        )
+
+    def test_invalid_typed_env_value_warns_and_uses_default_in_mixed_mode(self):
+        os.environ["KV_CACHE_EVENT_QUEUE_CAPACITY"] = "not-an-integer"
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertLogs(level="WARNING") as logs:
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            100000,
+            py_env_configs.kv_cache_config.kv_cache_event_queue_capacity,
+        )
+        self.assertTrue(
+            any("KV_CACHE_EVENT_QUEUE_CAPACITY" in message for message in logs.output)
+        )
+
+    def test_invalid_boolean_env_value_fails_fast_in_mixed_mode(self):
+        # str2bool raises ArgumentTypeError, which must fail fast so the mixed
+        # CLI+env path matches the pure-env path instead of silently falling
+        # back to the default value.
+        os.environ["ENABLE_REMOTE_CACHE"] = "ture"
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(SystemExit):
+                rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertTrue(
+            any("ENABLE_REMOTE_CACHE" in message for message in logs.output)
+        )
+
+    def test_invalid_boolean_env_value_fails_fast_in_pure_env_mode(self):
+        # The pure environment-variable path converts env values through
+        # argparse itself; both paths must reject the same invalid input.
+        os.environ["MODEL_TYPE"] = "qwen"
+        os.environ["ENABLE_REMOTE_CACHE"] = "ture"
+        sys.argv = ["prog"]
 
         import rtp_llm.server.server_args.server_args
 

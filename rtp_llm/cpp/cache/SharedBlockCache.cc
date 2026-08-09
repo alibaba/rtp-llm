@@ -74,6 +74,7 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
                 lru_cache_.put(cache_key, existing_item);
                 ++version_;
             }
+            updatePublishedStateLocked(cache_key);
             if (existing_item.is_resident) {
                 markAllTreeAliasesResidentLocked(cache_key);
             }
@@ -101,8 +102,38 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     }
     updateItemDependencyLocked(item, namespace_id, dependency);
 
+    // LRUCache::put normally evicts a full cache's tail internally. Perform
+    // that transition explicitly so tree aliases and cache-event state are
+    // updated before the replacement key is published.
+    if (lru_cache_.full() && !lru_cache_.empty()) {
+        const auto evicted = std::find_if(lru_cache_.items().rbegin(),
+                                          lru_cache_.items().rend(),
+                                          [](const auto& entry) { return !entry.second.is_resident; });
+        if (evicted == lru_cache_.items().rend()) {
+            RTP_LLM_LOG_WARNING("SharedBlockCache capacity is exhausted by resident entries; skipping cache key %lld",
+                                static_cast<long long>(cache_key));
+            return;
+        }
+        const auto       evicted_key = evicted->first;
+        UnifiedCacheItem evicted_item;
+        if (removeItemLocked(evicted_key, &evicted_item)) {
+            removeAllTreeAliasesForCacheKeyLocked(evicted_key);
+            // Unlike selectAndEvict(), this capacity replacement has no
+            // EvictResult through which the caller can release block-cache
+            // references, so release the evicted item's references here.
+            for (size_t gid = 0; gid < evicted_item.group_block_ids.size() && gid < group_pools_.size()
+                                 && gid < static_cast<size_t>(group_num_);
+                 ++gid) {
+                const auto block_id = evicted_item.group_block_ids[gid];
+                if (!isNullBlockIdx(block_id)) {
+                    group_pools_[gid]->blockCacheFree(block_id);
+                }
+            }
+        }
+    }
     lru_cache_.put(cache_key, item);
     ++version_;
+    updatePublishedStateLocked(cache_key);
     upsertTreeNodeLocked(cache_key, namespace_id, dependency, item.is_resident);
     refreshAllTreeAliasesLocked(cache_key);
 
@@ -166,7 +197,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
             std::vector<NamespacedKey> ordered_chain(chain.rbegin(), chain.rend());
             for (const auto& tree_key : ordered_chain) {
                 UnifiedCacheItem removed_item;
-                if (!lru_cache_.remove(tree_key.cache_key, &removed_item)) {
+                if (!removeItemLocked(tree_key.cache_key, &removed_item)) {
                     removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                     continue;
                 }
@@ -211,7 +242,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
     size_t selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
         UnifiedCacheItem removed_item;
-        if (!lru_cache_.remove(cache_key, &removed_item)) {
+        if (!removeItemLocked(cache_key, &removed_item)) {
             continue;
         }
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -283,7 +314,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
                 std::vector<NamespacedKey> ordered_chain(chain.rbegin(), chain.rend());
                 for (const auto& tree_key : ordered_chain) {
                     UnifiedCacheItem removed_item;
-                    if (!lru_cache_.remove(tree_key.cache_key, &removed_item)) {
+                    if (!removeItemLocked(tree_key.cache_key, &removed_item)) {
                         removeAllTreeAliasesForCacheKeyLocked(tree_key.cache_key);
                         continue;
                     }
@@ -334,7 +365,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         if (!has_target_group) {
             continue;
         }
-        if (!lru_cache_.remove(cache_key, &removed_item)) {
+        if (!removeItemLocked(cache_key, &removed_item)) {
             continue;
         }
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -418,7 +449,7 @@ std::optional<SharedBlockCache::UnifiedCacheItem> SharedBlockCache::remove(Cache
     std::lock_guard<std::mutex> lock(mu_);
 
     UnifiedCacheItem removed_item;
-    if (!lru_cache_.remove(cache_key, &removed_item)) {
+    if (!removeItemLocked(cache_key, &removed_item)) {
         return std::nullopt;
     }
     removeAllTreeAliasesForCacheKeyLocked(cache_key);
@@ -448,6 +479,45 @@ std::vector<CacheKeyType> SharedBlockCache::allCacheKeys() const {
         keys.push_back(key);
     }
     return keys;
+}
+
+SharedBlockCache::LogicalCacheSnapshot SharedBlockCache::logicalCacheSnapshot() const {
+    LogicalCacheSnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        snapshot.version = cache_event_version_;
+        if (event_publisher_) {
+            // Incremental publication and authoritative snapshots use the
+            // same locked completeness set once a publisher is installed.
+            snapshot.cache_keys.reserve(published_keys_.size());
+            snapshot.cache_keys.insert(snapshot.cache_keys.end(), published_keys_.begin(), published_keys_.end());
+        } else {
+            // Keep this API useful before publisher installation.
+            snapshot.cache_keys.reserve(lru_cache_.size());
+            for (const auto& [cache_key, item] : lru_cache_.items()) {
+                if (isLogicallyCompleteLocked(item)) {
+                    snapshot.cache_keys.push_back(cache_key);
+                }
+            }
+        }
+    }
+    std::sort(snapshot.cache_keys.begin(), snapshot.cache_keys.end());
+    return snapshot;
+}
+
+void SharedBlockCache::setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids) {
+    std::lock_guard<std::mutex> lock(mu_);
+    event_publisher_    = std::move(publisher);
+    required_group_ids_ = required_group_ids;
+    published_keys_.clear();
+    if (!event_publisher_) {
+        return;
+    }
+    for (const auto& [cache_key, item] : lru_cache_.items()) {
+        if (isLogicallyCompleteLocked(item)) {
+            published_keys_.insert(cache_key);
+        }
+    }
 }
 
 int64_t SharedBlockCache::version() const {
@@ -693,6 +763,52 @@ bool SharedBlockCache::updateItemDependencyLocked(UnifiedCacheItem&      item,
     return true;
 }
 
+bool SharedBlockCache::removeItemLocked(CacheKeyType cache_key, UnifiedCacheItem* removed_item) {
+    if (!lru_cache_.remove(cache_key, removed_item)) {
+        return false;
+    }
+    ++version_;
+    updatePublishedStateLocked(cache_key);
+    return true;
+}
+
+bool SharedBlockCache::isLogicallyCompleteLocked(const UnifiedCacheItem& item) const {
+    // Only groups that participate in prefix reuse are required; groups such as
+    // SWA windows never insert full block chains and must not block publication.
+    if (required_group_ids_.empty()) {
+        return false;
+    }
+    for (const int group_id : required_group_ids_) {
+        if (group_id < 0 || static_cast<size_t>(group_id) >= item.group_block_ids.size()) {
+            return false;
+        }
+        const auto gid = static_cast<size_t>(group_id);
+        if (isNullBlockIdx(item.group_block_ids[gid]) || !groupMatchable(item, gid)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void SharedBlockCache::updatePublishedStateLocked(CacheKeyType cache_key) {
+    if (!event_publisher_) {
+        return;
+    }
+
+    const auto* item        = lru_cache_.find(cache_key);
+    const bool  is_complete = item != nullptr && isLogicallyCompleteLocked(*item);
+    const auto  published   = published_keys_.find(cache_key);
+    if (is_complete && published == published_keys_.end()) {
+        published_keys_.insert(cache_key);
+        ++cache_event_version_;
+        (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_ADD, cache_key, 0});
+    } else if (!is_complete && published != published_keys_.end()) {
+        published_keys_.erase(published);
+        ++cache_event_version_;
+        (void)event_publisher_->tryPublish({KVCacheEventType::BLOCK_DELETE, cache_key, 0});
+    }
+}
+
 bool SharedBlockCache::groupMatchable(const UnifiedCacheItem& item, size_t group_id) {
     return group_id >= item.matchable_groups.size() || item.matchable_groups[group_id];
 }
@@ -864,6 +980,7 @@ void SharedBlockCache::removeGroupFromItemLocked(CacheKeyType cache_key, int gro
         removeAllTreeAliasesForCacheKeyLocked(cache_key);
     }
     ++version_;
+    updatePublishedStateLocked(cache_key);
 }
 
 bool SharedBlockCache::hasFlatItemLocked(CacheKeyType cache_key) const {

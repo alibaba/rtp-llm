@@ -12,10 +12,14 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 
 namespace rtp_llm {
 
 class SharedBlockCache {
+private:
+    static const size_t kCacheMaxCapacity = 10000000;
+
 public:
     using NamespaceId = uint32_t;
 
@@ -65,10 +69,16 @@ public:
         std::vector<BlockIdxType> group_block_ids;
     };
 
+    struct LogicalCacheSnapshot {
+        int64_t                   version = -1;
+        std::vector<CacheKeyType> cache_keys;
+    };
+
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
 
 public:
-    explicit SharedBlockCache(): lru_cache_(kCacheMaxCapacity) {}
+    explicit SharedBlockCache(size_t max_capacity = kCacheMaxCapacity):
+        lru_cache_(max_capacity == 0 ? 1 : max_capacity) {}
 
     void init(int group_num, const std::vector<BlockPoolPtr>& group_pools);
 
@@ -101,13 +111,21 @@ public:
     std::vector<CacheKeyType> allCacheKeys() const;
 
     int64_t version() const;
-    void    setPrefixTreeEnabled(bool enabled);
-    bool    prefixTreeEnabled() const;
-    void    setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
+
+    // KVCM publishes one logical key only after every required cache group is visible.
+    LogicalCacheSnapshot logicalCacheSnapshot() const;
+
+    // Installed during engine initialization and cleared before publisher shutdown.
+    // `required_group_ids` lists the groups whose reuse chains are densely
+    // materialized; a key is publishable only when every listed group holds a
+    // matchable block.
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
+
+    void setPrefixTreeEnabled(bool enabled);
+    bool prefixTreeEnabled() const;
+    void setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
 
 private:
-    static const size_t kCacheMaxCapacity = 10000000;
-
     struct PrefixTreeNode {
         NamespacedKey                                        key;
         NamespacedKey                                        parent;
@@ -153,6 +171,9 @@ private:
     bool                       updateItemDependencyLocked(UnifiedCacheItem&      item,
                                                           NamespaceId            namespace_id,
                                                           const BlockDependency& dependency) const;
+    bool                       removeItemLocked(CacheKeyType cache_key, UnifiedCacheItem* removed_item);
+    bool                       isLogicallyCompleteLocked(const UnifiedCacheItem& item) const;
+    void                       updatePublishedStateLocked(CacheKeyType cache_key);
     static bool                groupMatchable(const UnifiedCacheItem& item, size_t group_id);
     static bool                hasUsableGroup(const UnifiedCacheItem& item, int group_id);
     std::vector<NamespacedKey> collectEvictChainLocked(const NamespacedKey& leaf_key) const;
@@ -165,12 +186,16 @@ private:
     bool isFlatItemResidentLocked(CacheKeyType cache_key) const;
     bool isIndependentEvictionGroupLocked(int group_id) const;
 
-    LRUCacheType       lru_cache_;
-    mutable std::mutex mu_;
-    int64_t            version_{-1};
-    bool               prefix_tree_enabled_{true};
-    bool               independent_group_eviction_enabled_{false};
-    uint64_t           tree_access_seq_{0};
+    LRUCacheType                     lru_cache_;
+    mutable std::mutex               mu_;
+    int64_t                          version_{-1};
+    int64_t                          cache_event_version_{-1};
+    KVCacheEventPublisherPtr         event_publisher_;
+    std::vector<int>                 required_group_ids_;
+    std::unordered_set<CacheKeyType> published_keys_;
+    bool                             prefix_tree_enabled_{true};
+    bool                             independent_group_eviction_enabled_{false};
+    uint64_t                         tree_access_seq_{0};
 
     int                                                                                    group_num_ = 0;
     std::vector<BlockPoolPtr>                                                              group_pools_;

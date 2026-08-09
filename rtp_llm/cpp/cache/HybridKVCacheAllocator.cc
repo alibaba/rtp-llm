@@ -73,6 +73,18 @@ std::vector<int> HybridKVCacheAllocator::independentEvictionGroupIds() const {
     return group_ids;
 }
 
+std::vector<int> HybridKVCacheAllocator::reuseParticipatingGroupIds() const {
+    // Unlike skipReuseCacheGroup() (which admits tail-sparse LINEAR groups into
+    // the reuse surface), the publication completeness set only accepts groups
+    // that materialize every block position; see cacheGroupPublishesPrefixChain.
+    std::vector<CacheGroupPolicy> policies;
+    policies.reserve(kv_cache_groups_.size());
+    for (const auto& group : kv_cache_groups_) {
+        policies.push_back(group->policy());
+    }
+    return reuseParticipatingGroupIdsFromPolicies(policies);
+}
+
 bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
     return mapper && mapper->isSharded() && gid >= 0 && static_cast<size_t>(gid) < kv_cache_groups_.size()
            && mapper->compactLastRankGroup(config_, static_cast<size_t>(gid));
