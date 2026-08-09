@@ -98,7 +98,7 @@ private:
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
+        cfg.is_mla                     = cache_config.use_mla || cache_config.isSparse();
         cfg.use_mla                    = cache_config.use_mla;
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;

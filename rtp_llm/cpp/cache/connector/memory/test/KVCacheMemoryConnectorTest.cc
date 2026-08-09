@@ -1300,7 +1300,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysAreSmall_NoN
                                        /*linear_blocks=*/{NULL_BLOCK_IDX, 1, NULL_BLOCK_IDX},
                                        /*full_blocks=*/{1, NULL_BLOCK_IDX, 1});
 
-    // linear_step is pinned to 1, so every retained block uses the complete pool.
+    // linear_step is pinned to 1, so every block is complete and incomplete_pool_ is never created.
     auto pool = connector_->complete_pool_;
     ASSERT_NE(pool, nullptr);
     const size_t free_before = pool->freeBlocksNum();
@@ -1338,7 +1338,8 @@ TEST_F(KVCacheMemoryConnectorTest, NonUnitLinearStepRetainedPathCreatesAndUsesIn
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsAllIncompleteKeysWithUnitLinearStep_InHybridAttn) {
     resetToHybridCacheConfig();
-    // linear_step=1 has no incomplete pool, so incomplete keys are dropped on both sides of a complete key.
+    // linear_step=1 has no incomplete pool, so incomplete keys are dropped whether they occur before or after the
+    // last complete key.
     std::vector<std::unique_ptr<TestRpcServer>> servers;
     std::vector<std::string>                    addrs;
     for (int i = 0; i < 2; ++i) {
@@ -1370,11 +1371,12 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsAllIncompleteKeysWithUnitLine
     EXPECT_TRUE(ctx->success());
 
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[0]));
+    // linear_step==1 disables the incomplete pool, so small (non-complete) keys are dropped too.
     EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[1]));
     EXPECT_TRUE(connector_->block_cache_->contains(cache_keys[2]));
     EXPECT_FALSE(connector_->block_cache_->contains(cache_keys[3]));
 
-    // Only the two complete keys are written (exact +2 if cache was empty and no evictions).
+    // Only the two complete keys are written (exact +2 if cache was empty and no evictions)
     EXPECT_GE(connector_->block_cache_->size(), cache_before + 2);
 
     connector_->broadcast_manager_.reset();
@@ -1777,9 +1779,9 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     const auto             topology_groups = cache_config_.topology().groups();
     std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
     ASSERT_EQ(groups.size(), 1u);
-    groups[0].block_num             = static_cast<uint32_t>(kBlockNum);
-    groups[0].kv_block_stride_bytes = kv_block_stride_bytes;
-    groups[0].kv_scale_stride_bytes = kv_scale_stride_bytes;
+    groups[0].policy.explicit_block_num = static_cast<uint32_t>(kBlockNum);
+    groups[0].kv_block_stride_bytes     = kv_block_stride_bytes;
+    groups[0].kv_scale_stride_bytes     = kv_scale_stride_bytes;
     cache_config_.setTopology(std::move(groups), cache_config_.topology().layers());
     ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kvBlockStrideBytesForGroup("default"));
 

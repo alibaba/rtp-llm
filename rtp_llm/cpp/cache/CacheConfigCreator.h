@@ -1,14 +1,9 @@
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
-#include <memory>
 #include <optional>
-#include "absl/status/status.h"
-#include "absl/status/statusor.h"
+
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
-#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
@@ -20,9 +15,6 @@ struct KVCacheBlockBudget {
     size_t swa_block_bytes             = 0;
 };
 
-// Returns the largest global block count whose independent-pool backing fits
-// in total_budget_bytes:
-//   explicit reserve + N * paged bytes + ceil(N / linear_step) * SWA bytes.
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step);
 
 class CacheConfigCreator {
@@ -47,21 +39,18 @@ public:
                                       bool                               is_mtp,
                                       bool                               is_eagle);
 
-    // Unified desc->spec conversion. Callers provide the runtime build context;
-    // descs remain read-only.
-    static LayerKVCacheSpecBuildResults buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
-                                                                 const SpecBuildContext&      ctx,
-                                                                 int64_t                      expected_layer_num);
-
 private:
-    // Removed functions moved to MemoryEvaluationHelper:
-    // getDefaultRuntimeMemorySize
-    // getKVCacheMemorySize
-
-    // Removed functions moved to dedicated creators:
-    // createSingleConfig
-    // createHybridConfig
-    // splitIntoGroups (moved to HybridConfigCreator)
+    static uint32_t localBlockNum(const KVCacheBlockBudget& budget,
+                                  size_t                    total_budget_bytes,
+                                  int                       test_block_num,
+                                  int                       linear_step,
+                                  bool                      sentinel_only);
+    static void     publishLocalBlockNum(
+            int* block_nums, size_t world_size, int64_t world_rank, uint32_t local_block_num, bool sentinel_only);
+    static uint32_t
+    selectConvergedBlockNum(const int* block_nums, size_t world_size, uint32_t local_block_num, bool sentinel_only);
+    static uint32_t
+    convergeBlockNum(uint32_t local_block_num, const ParallelismConfig& parallelism_config, bool sentinel_only);
 };
 
 }  // namespace rtp_llm

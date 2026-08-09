@@ -15,7 +15,6 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -154,12 +153,15 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
 static void setGroupBlockNumsForTest(CacheConfig& config, const std::unordered_map<std::string, uint32_t>& block_nums) {
     const auto             topology_groups = config.topology().groups();
     std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
+    uint32_t               global_block_num = 0;
     for (auto& group : groups) {
         const auto it = block_nums.find(group.tag);
         ASSERT_NE(it, block_nums.end());
-        group.block_num = it->second;
+        group.policy.explicit_block_num = it->second;
+        global_block_num                = std::max(global_block_num, it->second);
     }
     config.setTopology(std::move(groups), config.topology().layers());
+    config.finalizeBlockNums(global_block_num, RuntimeConfig{});
 }
 
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
@@ -1195,10 +1197,9 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoUsesFinalizedGlobalTokenCapacity) {
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfoKeepsGlobalCapacityUnderCP) {
     CacheConfig cache_config;
-    cache_config.layer_num                   = 4;
-    cache_config.seq_size_per_block          = 4;
-    cache_config.linear_step                 = 1;
-    cache_config.use_independent_block_pools = true;
+    cache_config.layer_num          = 4;
+    cache_config.seq_size_per_block = 4;
+    cache_config.linear_step        = 1;
 
     auto linear_spec               = makeResolvedLinearSpec(DataType::TYPE_FP16,
                                               1,
@@ -1210,14 +1211,14 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoKeepsGlobalCapacityUnderCP) {
                                               DataType::TYPE_FP16,
                                               DataType::TYPE_FP16,
                                               "linear");
-    auto full_spec                 = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 4, /*physical_block_size=*/4, "full");
+    auto full_spec                 = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, /*physical_block_size=*/4, "full");
     auto full_policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_policy.explicit_block_num = 4;
     setTestTopology(
         cache_config,
         {makeTestGroupForConfig(cache_config, linear_spec, {0, 1}, CacheGroupType::LINEAR, "linear"),
          makeTestGroupForConfig(cache_config, full_spec, {2, 3}, CacheGroupType::FULL, "full", full_policy)});
-    cache_config.finalizeBlockNums(/*dynamic_block_num=*/20, RuntimeConfig{});
+    cache_config.finalizeBlockNums(/*dynamic_block_num=*/10, RuntimeConfig{});
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(kv_cache_manager->init());

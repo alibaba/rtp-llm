@@ -52,6 +52,7 @@ cc_library(
         "//rtp_llm/cpp/config:eplb_config",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:hash_util",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
     ],
     copts = copts(),
     alwayslink = True,

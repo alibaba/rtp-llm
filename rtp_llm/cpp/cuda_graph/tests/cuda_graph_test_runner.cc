@@ -1,6 +1,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <map>
+#include <utility>
+
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
@@ -101,6 +104,10 @@ public:
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
 
+    uint64_t groupedCacheFallbackCount() const {
+        return runner_ != nullptr ? runner_->groupedCacheFallbackCount() : 0;
+    }
+
     ~CudaGraphTestRunner() {
         reset_runner();
     }
@@ -115,14 +122,13 @@ private:
         const auto default_capacity = CacheBlockTableCapacity::fromBlockSizes(
             max_seq_len, physical_tokens_per_block, kernel_tokens_per_block, params.sp_steps, "test runner");
         for (const auto& tag : group_tags) {
-            const auto [it, inserted] = params.kv_cache_groups.emplace(tag, CacheGroupType::FULL);
-            (void)it;
-            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate CUDA graph KV cache tag=%s", tag.c_str());
             const auto capacity_it = group_capacities.find(tag);
-            params.kv_cache_block_table_capacities[tag] =
-                capacity_it == group_capacities.end() ?
-                    default_capacity :
+            if (capacity_it == group_capacities.end()) {
+                params.kv_cache_block_table_capacities[tag] = default_capacity;
+            } else {
+                params.kv_cache_block_table_capacities[tag] =
                     CacheBlockTableCapacity{capacity_it->second.first, capacity_it->second.second};
+            }
         }
     }
 
@@ -175,5 +181,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tag"),
              py::arg("device"))
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("groupedCacheFallbackCount", &CudaGraphTestRunner::groupedCacheFallbackCount);
 }

@@ -1,11 +1,15 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <cstdint>
 #include <cassert>
 
 namespace rtp_llm {
+
+inline constexpr std::string_view kDefaultKVCacheTag = "default";
+inline constexpr std::string_view kIndexerKVCacheTag = "indexer_kv";
 
 inline std::string makeCacheKey(size_t model_id, const std::string& token_id_str, size_t layer_id) {
     return "model_id_" + std::to_string(model_id) + "_token_id_str_" + token_id_str + "_layer_id_"
@@ -14,7 +18,7 @@ inline std::string makeCacheKey(size_t model_id, const std::string& token_id_str
 
 inline std::string
 makeCacheKey(size_t model_id, const std::string& token_id_str, size_t layer_id, const std::string& tag) {
-    if (tag.empty() || tag == "default") {
+    if (tag.empty() || tag == kDefaultKVCacheTag) {
         return makeCacheKey(model_id, token_id_str, layer_id);
     }
     return makeCacheKey(model_id, token_id_str, layer_id) + "_tag_" + tag;

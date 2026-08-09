@@ -706,8 +706,9 @@ class LayoutComparisonTest: public MemoryLayoutStrategyTest {};
 
 // Boundary Condition Test
 TEST_F(MemoryLayoutStrategyTest, SingleLayerSingleBlock) {
+    // Block 0 is a reserved sentinel, so 2 total slots is the smallest legal pool (1 usable block).
     auto ctx = createTestContext(createTestConfig(/*layer_num=*/1,
-                                                  /*block_num=*/1,
+                                                  /*block_num=*/2,
                                                   /*k_block_bytes=*/256,
                                                   /*v_block_bytes=*/256));
 

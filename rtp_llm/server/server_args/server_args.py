@@ -192,9 +192,7 @@ class EnvArgumentParser(argparse.ArgumentParser):
     def _register_config_binding(
         self,
         action: argparse.Action,
-        bind_to: Union[
-            Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]
-        ],
+        bind_to: Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]],
     ) -> None:
         """注册参数到配置对象的绑定关系"""
         binding = ConfigBinding(action, bind_to)
@@ -361,7 +359,6 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
                                 except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
                                     pass
                             else:
                                 # No type converter, use as string

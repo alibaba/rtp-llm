@@ -166,7 +166,6 @@ public:
 
 private:
     void initConnectorCoordinator();
-    void allocateAndSync();
     void reportMetricsLoop();
     void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
 

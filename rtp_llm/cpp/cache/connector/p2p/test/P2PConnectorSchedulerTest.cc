@@ -324,6 +324,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_NullResource) {
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
+    EXPECT_EQ(result.error_info.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
 
     // 验证 BroadcastTp 和 StartLoad 都没有被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
@@ -340,6 +341,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_EmptyResource) {
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
+    EXPECT_EQ(result.error_info.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
 
     // 验证 BroadcastTp 和 StartLoad 都没有被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
