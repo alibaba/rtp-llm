@@ -216,6 +216,7 @@ _ENGINE_SYMBOLS = {
     "RtpEmbeddingOp",
     "RtpLLMOp",
     "build_xgrammar_tokenizer_info_json",
+    "build_xgrammar_tokenizer_info_json_from_vocab",
 }
 _compute_ops_lock = threading.RLock()
 _compute_ops_loaded = False
@@ -276,6 +277,7 @@ def _set_engine_fallbacks() -> None:
     globals()["EmbeddingCppOutput"] = EmptyClass
     globals()["MMRdmaEncoderOp"] = EmptyClass
     globals()["build_xgrammar_tokenizer_info_json"] = EmptyClass
+    globals()["build_xgrammar_tokenizer_info_json_from_vocab"] = EmptyClass
     globals()["RtpEmbeddingOp"] = EmptyClass
     globals()["RtpLLMOp"] = EmptyClass
 
@@ -298,6 +300,7 @@ def _load_engine_ops(required: bool = False) -> None:
                 RtpEmbeddingOp,
                 RtpLLMOp,
                 build_xgrammar_tokenizer_info_json,
+                build_xgrammar_tokenizer_info_json_from_vocab,
             )
             from libth_transformer_config import MultimodalInput as MultimodalInputCpp
 
@@ -309,6 +312,9 @@ def _load_engine_ops(required: bool = False) -> None:
             globals()[
                 "build_xgrammar_tokenizer_info_json"
             ] = build_xgrammar_tokenizer_info_json
+            globals()[
+                "build_xgrammar_tokenizer_info_json_from_vocab"
+            ] = build_xgrammar_tokenizer_info_json_from_vocab
             _engine_ops_error = None
         except BaseException as e:
             _engine_ops_error = e

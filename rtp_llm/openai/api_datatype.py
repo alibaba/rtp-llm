@@ -1,8 +1,9 @@
+import re
 import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictBool, model_validator
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.utils.base_model_datatypes import AuxInfo
@@ -98,6 +99,9 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[List[ToolCall]] = None
     partial: Optional[bool] = False
     tool_call_id: Optional[str] = None
+    # K3 KVV dynamic tools: tool definitions embedded in a message
+    # (typically the system message) instead of the request-level field.
+    tools: Optional[List[Dict[str, Any]]] = None
 
 
 # NOTE: according to openai api definition, `function_call` is deprecated, and replaced by `tool_calls`.
@@ -109,8 +113,9 @@ class ChatMessage(BaseModel):
 
 class GPTFunctionDefinition(BaseModel):
     name: str
-    description: str
+    description: Optional[str] = None
     parameters: Dict[str, Any]
+    strict: Optional[StrictBool] = None
 
     # These parameters are for qwen style function.
     name_for_model: Optional[str] = None
@@ -155,7 +160,7 @@ def get_tool_choice_function_name(tool_choice: Optional[ToolChoice]) -> Optional
 class ResponseFormatJSONSchema(BaseModel):
     name: Optional[str] = None
     schema: Optional[Dict[str, Any]] = None
-    strict: Optional[bool] = None
+    strict: Optional[StrictBool] = None
 
 
 class ResponseFormat(BaseModel):
@@ -167,7 +172,11 @@ class ResponseFormat(BaseModel):
     @model_validator(mode="after")
     def _check_payload(self) -> "ResponseFormat":
         if self.type == "json_schema":
-            if self.json_schema is None or self.json_schema.schema is None:
+            if self.json_schema is None or not self.json_schema.name:
+                raise ValueError(
+                    "response_format.type=json_schema requires json_schema.name"
+                )
+            if self.json_schema.schema is None:
                 raise ValueError(
                     "response_format.type=json_schema requires json_schema.schema"
                 )
@@ -180,6 +189,12 @@ class ResponseFormat(BaseModel):
         return self
 
 
+class ThinkingConfig(BaseModel):
+    type: Literal["enabled", "disabled"] = "enabled"
+    keep: Optional[str] = None
+    effort: Optional[Literal["low", "high", "max"]] = None
+
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
@@ -189,6 +204,8 @@ class ChatCompletionRequest(BaseModel):
     reasoning_effort: Optional[str] = None
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    presence_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = 0.0
     top_k: Optional[int] = None
     max_tokens: Optional[int] = None
     max_completion_tokens: Optional[int] = None
@@ -202,10 +219,9 @@ class ChatCompletionRequest(BaseModel):
     top_logprobs: Optional[int] = None
     response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
+    thinking: Optional[ThinkingConfig] = None
 
     # ---- These functions are not implemented yet.
-    # presence_penalty: Optional[float] = 0.0
-    # frequency_penalty: Optional[float] = 0.0
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.
@@ -225,17 +241,75 @@ class ChatCompletionRequest(BaseModel):
     enable_thinking: Optional[bool] = None
 
     @model_validator(mode="after")
-    def _check_tool_choice(self) -> "ChatCompletionRequest":
-        if self.tool_choice == "required" and not self.tools:
+    def _check_tool_contract(self) -> "ChatCompletionRequest":
+        message_tools = [
+            tool for message in self.messages or [] for tool in (message.tools or [])
+        ]
+
+        tool_name_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,255}$")
+
+        def _validate_dynamic_tool(tool: Dict[str, Any]) -> str:
+            if not isinstance(tool, dict):
+                raise ValueError("dynamic tool must be an object")
+            if tool.get("type") != "function":
+                raise ValueError("dynamic tool.type must be 'function'")
+            function = tool.get("function")
+            if not isinstance(function, dict):
+                raise ValueError("dynamic tool.function must be an object")
+            name = function.get("name")
+            if not isinstance(name, str) or not tool_name_pattern.fullmatch(name):
+                raise ValueError(
+                    "dynamic tool.function.name must match "
+                    "[A-Za-z_][A-Za-z0-9_]{0,255}"
+                )
+            if not isinstance(function.get("parameters"), dict):
+                raise ValueError("dynamic tool.function.parameters must be an object")
+            strict = function.get("strict")
+            if strict is not None and not isinstance(strict, bool):
+                raise ValueError("dynamic tool.function.strict must be a boolean")
+            return name
+
+        dynamic_names = []
+        for message in self.messages or []:
+            if message.role == RoleEnum.tool and not message.tool_call_id:
+                raise ValueError("tool messages require a non-empty tool_call_id")
+            if not message.tools:
+                continue
+            if message.role != RoleEnum.system:
+                raise ValueError("dynamic tools are only allowed in system messages")
+            if message.content not in (None, "", []):
+                raise ValueError(
+                    "a system message with dynamic tools must have empty content"
+                )
+            dynamic_names.extend(_validate_dynamic_tool(tool) for tool in message.tools)
+
+        global_names = [tool.function.name for tool in self.tools or []]
+        all_names = global_names + dynamic_names
+        if len(all_names) != len(set(all_names)):
+            raise ValueError(
+                "tool names must be unique across global and dynamic tools"
+            )
+
+        def _tool_name(tool: Dict[str, Any]) -> Optional[str]:
+            function = tool.get("function")
+            if isinstance(function, dict):
+                return function.get("name")
+            return None
+
+        has_tools = bool(self.tools) or bool(message_tools)
+        if self.tool_choice == "required" and not has_tools:
             raise ValueError("tool_choice='required' requires non-empty tools")
 
         name = get_tool_choice_function_name(self.tool_choice)
         if name is None:
             return self
 
-        if not self.tools:
+        if not has_tools:
             raise ValueError("tool_choice function requires non-empty tools")
-        tool_names = {tool.function.name for tool in self.tools}
+        tool_names = {tool.function.name for tool in self.tools or []}
+        tool_names.update(
+            tool_name for tool in message_tools if (tool_name := _tool_name(tool))
+        )
         if name not in tool_names:
             raise ValueError(f"tool_choice function {name!r} is not in tools")
         return self
@@ -253,15 +327,20 @@ class ChatCompletionRequest(BaseModel):
         return self.chat_template_kwargs
 
     def enable_thinking_requested(self):
+        if self.thinking is not None and self.thinking.type == "enabled":
+            return True
         if self.enable_thinking is True:
             return True
         chat_template_kwargs = self.get_chat_template_kwargs()
-        return (
-            chat_template_kwargs is not None
-            and chat_template_kwargs.get("enable_thinking") is True
-        )
+        if chat_template_kwargs is None:
+            return False
+        if "thinking" in chat_template_kwargs:
+            return chat_template_kwargs["thinking"] is True
+        return chat_template_kwargs.get("enable_thinking") is True
 
     def disable_thinking(self):
+        if self.thinking is not None and self.thinking.type == "disabled":
+            return True
         if self.thinking_budget == 0:
             return True
         if (
@@ -272,12 +351,11 @@ class ChatCompletionRequest(BaseModel):
         if self.enable_thinking is False:
             return True
         chat_template_kwargs = self.get_chat_template_kwargs()
-        if (
-            chat_template_kwargs is not None
-            and chat_template_kwargs.get("enable_thinking", True) is False
-        ):
-            return True
-        return False
+        if chat_template_kwargs is None:
+            return False
+        if "thinking" in chat_template_kwargs:
+            return chat_template_kwargs["thinking"] is False
+        return chat_template_kwargs.get("enable_thinking", True) is False
 
 
 class CompletionTokensDetails(BaseModel):

@@ -134,3 +134,12 @@ class FtRuntimeException(Exception):
 
     def __reduce__(self):
         return self.__class__, (self.exception_type, self.message)
+
+
+def http_status_for(exception: BaseException) -> int:
+    if (
+        isinstance(exception, FtRuntimeException)
+        and exception.exception_type.category == ExceptionCategory.BAD_REQUEST
+    ):
+        return 400
+    return 500

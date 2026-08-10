@@ -239,6 +239,10 @@ class OpenaiEndpoint(object):
             config.temperature = request.temperature
         if request.top_p != None:
             config.top_p = request.top_p
+        if request.presence_penalty != None:
+            config.presence_penalty = request.presence_penalty
+        if request.frequency_penalty != None:
+            config.frequency_penalty = request.frequency_penalty
         if request.top_k != None:
             config.top_k = request.top_k
         if request.n != None:

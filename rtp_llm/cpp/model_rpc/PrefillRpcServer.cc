@@ -137,6 +137,11 @@ void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_c
             new_error_msg += error_msg;                                                                                \
             if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                         \
                 new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                      \
+            } else if (!status.error_details().empty()) {                                                              \
+                ErrorDetailsPB error_details;                                                                          \
+                if (error_details.ParseFromString(status.error_details()) && error_details.error_code() != 0) {        \
+                    new_error_code = static_cast<ErrorCode>(error_details.error_code());                               \
+                }                                                                                                      \
             }                                                                                                          \
         } else {                                                                                                       \
             if (prefill_context.client_stream) {                                                                       \
