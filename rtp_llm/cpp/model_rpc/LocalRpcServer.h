@@ -106,7 +106,8 @@ protected:
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,
-                                  std::shared_ptr<GenerateStream>& stream);
+                                  std::shared_ptr<GenerateStream>& stream,
+                                  RemoteGenerateWaitResult*        remote_generate_result = nullptr);
 
     // Shared helpers for single and batch paths
     ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);

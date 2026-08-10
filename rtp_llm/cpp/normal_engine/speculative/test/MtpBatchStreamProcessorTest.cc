@@ -10,6 +10,7 @@
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -30,10 +31,11 @@ public:
                                           const RuntimeConfig&   runtime_config,
                                           const ResourceContext& resource_context,
                                           const vector<int>&     input_ids,
-                                          const int              block_id) {
+                                          const int              block_id,
+                                          shared_ptr<GenerateConfig> generate_config = nullptr) {
         std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
         query->input_ids       = torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
-        query->generate_config = make_shared<GenerateConfig>();
+        query->generate_config = generate_config ? std::move(generate_config) : make_shared<GenerateConfig>();
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         BatchKVCacheResource addr;
@@ -226,6 +228,109 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
     auto          last_hidden_states_h      = last_hidden_states.cpu().clone();
     vector<float> expect_last_hidden_states = {0.1, 0.2, 1.1, 1.2};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states_h));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSpecUpdateAdvancesCanonicalThinkStateForAcceptedTokens) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+
+    model_config.max_seq_len                  = 16;
+    model_config.vocab_size                   = 10;
+    model_config.num_layers                   = 1;
+    model_config.attn_config.tokens_per_block = 2;
+    model_config.special_tokens.eos_token_id  = 9;
+
+    auto kv_cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                          /*block_num=*/10,
+                                                          /*tokens_per_block=*/2,
+                                                          rtp_llm::TYPE_INT8,
+                                                          /*local_head_num_kv=*/128,
+                                                          /*size_per_head=*/256);
+    auto cache_manager = std::make_shared<KVCacheManager>(kv_cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          KVCacheConfig{},
+                                                          ParallelismConfig{},
+                                                          runtime_config);
+    ASSERT_TRUE(cache_manager->init());
+    resource_context.cache_manager = cache_manager;
+
+    auto generate_config                 = make_shared<GenerateConfig>();
+    generate_config->in_think_mode       = true;
+    generate_config->max_thinking_tokens = 8;
+    generate_config->end_think_token_ids = {4, 5};
+
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1, generate_config);
+    auto processors = stream->getAllLogitsProcessorPtr();
+    ASSERT_EQ(processors.size(), 1);
+    auto canonical_think_processor = dynamic_pointer_cast<ThinkModeLogitsProcessor>(processors.front());
+    ASSERT_NE(canonical_think_processor, nullptr);
+    EXPECT_EQ(canonical_think_processor->thinkEndTokensStatus(), vector<size_t>({0}));
+
+    stream->specUpdate(
+        {torch::tensor({{4, 5}}, torch::kInt32), 2, 6, torch::Tensor(), torch::Tensor()});
+
+    EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), vector<int>({1, 4, 5}));
+    EXPECT_EQ(canonical_think_processor->thinkEndTokensStatus(), vector<size_t>({2}));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSpecUpdateUsesOnlyTokensThatFitAtMaxLength) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+
+    model_config.max_seq_len                 = 3;
+    model_config.vocab_size                  = 10;
+    model_config.num_layers                  = 1;
+    model_config.special_tokens.eos_token_id = 9;
+
+    auto generate_config                 = make_shared<GenerateConfig>();
+    generate_config->in_think_mode       = true;
+    generate_config->max_thinking_tokens = 8;
+    generate_config->end_think_token_ids = {4, 5};
+
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, generate_config);
+    auto canonical_think_processor =
+        dynamic_pointer_cast<ThinkModeLogitsProcessor>(stream->getAllLogitsProcessorPtr().front());
+    ASSERT_NE(canonical_think_processor, nullptr);
+
+    stream->specUpdate(
+        {torch::tensor({{4, 5}}, torch::kInt32), 2, 6, torch::Tensor(), torch::Tensor()});
+
+    EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), vector<int>({1, 2, 4}));
+    EXPECT_EQ(toVec<int>(stream->getSPOutputBuffer()->tokens), vector<int>({4, 6}));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(canonical_think_processor->thinkEndTokensStatus(), vector<size_t>({0}));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testSpecUpdateUsesOnlyTokensRetainedThroughEos) {
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+
+    model_config.max_seq_len                 = 16;
+    model_config.vocab_size                  = 10;
+    model_config.num_layers                  = 1;
+    model_config.special_tokens.eos_token_id = 5;
+
+    auto generate_config                 = make_shared<GenerateConfig>();
+    generate_config->in_think_mode       = true;
+    generate_config->max_thinking_tokens = 8;
+    generate_config->end_think_token_ids = {5};
+
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1, generate_config);
+    auto canonical_think_processor =
+        dynamic_pointer_cast<ThinkModeLogitsProcessor>(stream->getAllLogitsProcessorPtr().front());
+    ASSERT_NE(canonical_think_processor, nullptr);
+
+    stream->specUpdate(
+        {torch::tensor({{5, 6}}, torch::kInt32), 2, 7, torch::Tensor(), torch::Tensor()});
+
+    EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), vector<int>({1, 5}));
+    EXPECT_EQ(toVec<int>(stream->getSPOutputBuffer()->tokens), vector<int>({5, 7}));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_EQ(canonical_think_processor->thinkEndTokensStatus(), vector<size_t>({0}));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testSpecUpdateAtEffectiveMaxLengthReportsLongPromptError) {

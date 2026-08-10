@@ -64,9 +64,24 @@ void PrefillStatInfo::nextStage() {
 }
 
 PrefillGenerateContext::~PrefillGenerateContext() {
+    cleanupRemoteLoadCache();
     reportTime();
     closeGrpcStream();
     stopStream();
+}
+
+void PrefillGenerateContext::cleanupRemoteLoadCache() {
+    if (client_stream && !grpc_stream_closed) {
+        if (client_context) {
+            client_context->TryCancel();
+        }
+        closeGrpcStream();
+    }
+    if (stream_ && stream_->queryPdSep()) {
+        stream_->releaseKVCacheForPDSep();
+    }
+    remote_kv_cache_held      = false;
+    remote_load_cache_started = false;
 }
 
 void PrefillGenerateContext::stopStream() {
@@ -113,6 +128,10 @@ void PrefillGenerateContext::reset() {
     client_stream.reset();
     grpc_stream_closed             = false;
     last_grpc_stream_closed_status = grpc::Status::OK;
+    remote_load_cache_started      = false;
+    remote_kv_cache_held           = false;
+    local_generate_done            = false;
+    deferred_local_status          = grpc::Status::OK;
 }
 
 void PrefillGenerateContext::nextStage() {

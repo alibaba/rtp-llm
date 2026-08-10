@@ -11,6 +11,7 @@ namespace rtp_llm {
 
 class AsyncContext;
 class GenerateStream;
+class LocalRpcServerOutcomeTest;
 
 class StreamCacheResource {
 public:
@@ -105,7 +106,8 @@ public:
     bool enableDeviceCache() const;
     bool enableTieredMemoryCache() const;
 
-    void holdKVCacheForPDSep();
+    bool holdKVCacheForPDSep();
+    bool hasKVCacheHoldForPDSep() const;
     void releaseKVCacheForPDSep();
 
     std::string debugString() const {
@@ -131,6 +133,8 @@ private:
     void                          waitStoreCacheDone(const std::shared_ptr<AsyncContext>& store_context);
 
 private:
+    friend class LocalRpcServerOutcomeTest;
+
     GenerateStream*          stream_;
     BatchKVCacheResourcePtr  batch_kv_cache_resource_;
     ResourceContext          resource_context_;

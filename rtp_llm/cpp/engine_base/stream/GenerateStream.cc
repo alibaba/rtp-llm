@@ -1,5 +1,6 @@
 #include <condition_variable>
 #include <cstddef>
+#include <exception>
 #include <memory>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -19,6 +20,15 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+bool unblocksRemoteGenerateWait(StreamEvents::EventType event) {
+    return event == StreamEvents::NeedRemoteGenerate || event == StreamEvents::GenerateDone
+           || event == StreamEvents::Error;
+}
+
+}  // namespace
 
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
@@ -496,8 +506,13 @@ void GenerateStream::checkTimeout() {
 // 统一的事件上报接口，替代原先所有 reportXX 方法。
 // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
 void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    generate_status_->reportEvent(event, error_code, error_msg);
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        generate_status_->reportEvent(event, error_code, error_msg);
+    }
+    if (unblocksRemoteGenerateWait(event)) {
+        cv_->notify_all();
+    }
 }
 
 // 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
@@ -505,11 +520,31 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
                                             ErrorCode               error_code,
                                             const std::string&      error_msg) {
     generate_status_->reportEvent(event, error_code, error_msg);
+    if (unblocksRemoteGenerateWait(event)) {
+        cv_->notify_all();
+    }
+}
+
+void GenerateStream::publishRemoteGenerateHandoffWithoutLock(bool update_remote_generate) {
+    if (!update_remote_generate || !queryPdSep()
+        || stream_cache_resource_->resourceContext().role_type != RoleType::PREFILL
+        || generate_status_->hasEvent(StreamEvents::Error)
+        || generate_status_->hasEvent(StreamEvents::GenerateDone)
+        || generate_status_->getStatus() == StreamState::FINISHED) {
+        return;
+    }
+    if (!stream_cache_resource_->holdKVCacheForPDSep()) {
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED,
+                               "failed to retain KV cache for remote generation");
+        return;
+    }
+    reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+    reportEventWithoutLock(StreamEvents::GenerateDone);
 }
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    reportEvent(StreamEvents::Error, error_code, error_msg);
 }
 
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
@@ -657,18 +692,47 @@ void GenerateStream::matchEosToken(int batch_id) {
     }
 }
 
-bool GenerateStream::waitForRemoteGenerate() {
+RemoteGenerateWaitResult GenerateStream::waitForRemoteGenerate() {
     std::unique_lock<std::mutex> lock(*mutex_);
-    // Wait until stream status -> NeedRemoteGenerate
-    cv_->wait(lock, [this] { return generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate); });
-    // If stream status is abnormal, log the error info
-    if (hasError()) {
+    cv_->wait(lock, [this] {
+        return generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate)
+               || generate_status_->hasEvent(StreamEvents::GenerateDone)
+               || generate_status_->hasEvent(StreamEvents::Error)
+               || generate_status_->getStatus() == StreamState::FINISHED;
+    });
+    auto result = remoteGenerateOutcomeWithoutLock();
+    RTP_LLM_CHECK_WITH_INFO(result.has_value(), "remote generate wait ended without an outcome");
+    if (*result == RemoteGenerateWaitResult::Error) {
         RTP_LLM_LOG_WARNING("waitForRemoteGenerate exits due to stream [%ld] error: %s",
                             streamId(),
                             generate_status_->error_info.ToString().c_str());
     }
+    return *result;
+}
 
-    return !hasError();
+RemoteGenerateWaitResult GenerateStream::resolveRemoteLoadFailure(ErrorCode          error_code,
+                                                                  const std::string& error_msg) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    auto outcome = remoteGenerateOutcomeWithoutLock();
+    if (outcome == RemoteGenerateWaitResult::LocalDone || outcome == RemoteGenerateWaitResult::Error) {
+        return *outcome;
+    }
+    reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
+    return RemoteGenerateWaitResult::Error;
+}
+
+std::optional<RemoteGenerateWaitResult> GenerateStream::remoteGenerateOutcomeWithoutLock() const {
+    if (generate_status_->hasEvent(StreamEvents::Error) || hasError()) {
+        return RemoteGenerateWaitResult::Error;
+    }
+    if (generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+        return RemoteGenerateWaitResult::Handoff;
+    }
+    if (generate_status_->hasEvent(StreamEvents::GenerateDone)
+        || generate_status_->getStatus() == StreamState::FINISHED) {
+        return RemoteGenerateWaitResult::LocalDone;
+    }
+    return std::nullopt;
 }
 
 std::vector<int> GenerateStream::getLatestTokens(size_t token_num) {
@@ -708,157 +772,199 @@ void GenerateStream::matchStopWordsList(int batch_id) {
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
-    *is_context_stream_ = false;
-    if (hasError() && !update_info.force_update_info) {
-        return;
-    }
+    try {
+        RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
+        *is_context_stream_ = false;
+        if (hasError() && !update_info.force_update_info) {
+            return;
+        }
 
-    const auto& new_tokens = update_info.new_tokens;
+        const auto& new_tokens = update_info.new_tokens;
 
-    if (isPerfTest()) {
-        const_cast<torch::Tensor&>(new_tokens).zero_();
-    }
+        if (isPerfTest()) {
+            const_cast<torch::Tensor&>(new_tokens).zero_();
+        }
 
-    RTP_LLM_CHECK(new_tokens.dim() == 2);
-    RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
-    RTP_LLM_CHECK(update_info.num_new_tokens > 0);
-    RTP_LLM_CHECK(update_info.num_new_tokens <= new_tokens.size(1));
+        RTP_LLM_CHECK(new_tokens.dim() == 2);
+        RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
+        RTP_LLM_CHECK(update_info.num_new_tokens > 0);
+        RTP_LLM_CHECK(update_info.num_new_tokens <= new_tokens.size(1));
 
-    const int     previous_seq_len     = seqLength();
-    const int64_t effective_max_tokens = static_cast<int64_t>(maxTokenNum());
-    const int64_t remaining_token_num  = effective_max_tokens - previous_seq_len;
-    if (remaining_token_num <= 0) {
-        reportEventWithoutLock(
-            StreamEvents::Error,
-            ErrorCode::LONG_PROMPT_ERROR,
-            "stream [" + std::to_string(streamId()) + "] cannot accept speculative tokens at sequence length ["
-                + std::to_string(previous_seq_len) + "], effective max tokens is ["
-                + std::to_string(effective_max_tokens) + "]");
-        return;
-    }
-    const int num_new_tokens =
-        static_cast<int>(std::min<int64_t>(update_info.num_new_tokens, remaining_token_num));
-    const int cur_cached_len = previous_seq_len - 1;
+        const int     previous_seq_len     = seqLength();
+        const int64_t effective_max_tokens = static_cast<int64_t>(maxTokenNum());
+        const int64_t remaining_token_num  = effective_max_tokens - previous_seq_len;
+        if (remaining_token_num <= 0) {
+            reportEventWithoutLock(
+                StreamEvents::Error,
+                ErrorCode::LONG_PROMPT_ERROR,
+                "stream [" + std::to_string(streamId()) + "] cannot accept speculative tokens at sequence length ["
+                    + std::to_string(previous_seq_len) + "], effective max tokens is ["
+                    + std::to_string(effective_max_tokens) + "]");
+            return;
+        }
+        const int num_new_tokens =
+            static_cast<int>(std::min<int64_t>(update_info.num_new_tokens, remaining_token_num));
+        const int cur_cached_len = previous_seq_len - 1;
 
-    int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     hasNumBeams(),
-                                     streamId(),
-                                     error_token_id)) {
+        int error_token_id = 0;
+        if (!complete_token_ids_->update(new_tokens,
+                                         begin_time_us_,
+                                         num_new_tokens,
+                                         generate_input_->inputLength(),
+                                         maxTokenNum(),
+                                         vocab_size_,
+                                         hasNumBeams(),
+                                         streamId(),
+                                         error_token_id)) {
+            reportEventWithoutLock(StreamEvents::Error,
+                                   ErrorCode::OUT_OF_VOCAB_RANGE,
+                                   "output token id:" + std::to_string(error_token_id)
+                                       + " out of vocab size: " + std::to_string(vocab_size_));
+            return;
+        }
+
+        updateOutput({new_tokens,
+                      num_new_tokens,
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      torch::Tensor(),
+                      update_info.update_remote_generate,
+                      update_info.force_update_info});
+
+        if (generate_status_->hasEvent(StreamEvents::Error)) {
+            return;
+        }
+        const bool is_done = generate_status_->hasEvent(StreamEvents::GenerateDone)
+                             || generate_status_->getStatus() == StreamState::FINISHED;
+        const int committed_token_num = seqLength() - previous_seq_len;
+        RTP_LLM_CHECK_WITH_INFO(committed_token_num > 0 && committed_token_num <= num_new_tokens,
+                                "stream [%ld] committed speculative token count [%d] is outside [1, %d]",
+                                streamId(),
+                                committed_token_num,
+                                num_new_tokens);
+        const auto committed_tokens = new_tokens.narrow(1, 0, committed_token_num).contiguous();
+
+        int  target_last_token = committed_tokens.data_ptr<int>()[committed_token_num - 1];
+        int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
+        spec_tokens[0]         = target_last_token;
+        spec_tokens[1]         = update_info.draft_token;
+        propose_token_         = {target_last_token, update_info.draft_token};
+
+        sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
+        sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+
+        int nxt_cached_len   = seqLength() - 1;
+        int accept_token_num = nxt_cached_len - cur_cached_len;
+        if ((!is_done || reuseCache()) && accept_token_num > 1 && stream_cache_resource_) {
+            int seq_size_per_block = seqSizePerBlock();
+
+            auto [cached_src_block_idx, cached_des_block_idx] =
+                getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
+            stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
+
+            auto [src_block_idx, des_block_idx] =
+                getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
+            stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
+
+            RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
+                              streamId(),
+                              cur_cached_len + 1,
+                              nxt_cached_len + 1,
+                              cached_src_block_idx,
+                              cached_des_block_idx,
+                              src_block_idx,
+                              des_block_idx);
+        } else {
+            RTP_LLM_LOG_DEBUG(
+                "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
+        }
+
+        if (!is_done) {
+            updateLogitProcessorStatus(committed_tokens, committed_token_num);
+        }
+
+        publishRemoteGenerateHandoffWithoutLock(update_info.update_remote_generate);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("stream [%ld] speculative update failed: %s", streamId(), error.what());
         reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
-        return;
+                               ErrorCode::EXECUTION_EXCEPTION,
+                               std::string("speculative stream update failed: ") + error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("stream [%ld] speculative update failed with an unknown exception", streamId());
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::EXECUTION_EXCEPTION,
+                               "speculative stream update failed with an unknown exception");
     }
-
-    // update speculative output buffer
-    int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
-    int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
-    spec_tokens[0]         = target_last_token;
-    spec_tokens[1]         = update_info.draft_token;
-    propose_token_         = {target_last_token, update_info.draft_token};
-
-    sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
-    sp_output_buffer_->all_probs     = update_info.draft_token_probs;
-
-    // for spec-decode linear attention, we need to adjust cache blocks
-    int nxt_cached_len   = seqLength() - 1;
-    int accept_token_num = nxt_cached_len - cur_cached_len;
-    if (accept_token_num > 1 && stream_cache_resource_) {
-        int seq_size_per_block = seqSizePerBlock();
-
-        // 1. swap cache blocks of accept tokens to corresponding blocks
-        auto [cached_src_block_idx, cached_des_block_idx] =
-            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
-
-        // 2. swap final block of accept tokens to the next sequence block
-        auto [src_block_idx, des_block_idx] =
-            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
-
-        RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamId(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1,
-                          cached_src_block_idx,
-                          cached_des_block_idx,
-                          src_block_idx,
-                          des_block_idx);
-    } else {
-        RTP_LLM_LOG_DEBUG(
-            "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
-    }
-
-    // update normal output buffer
-    updateOutput({new_tokens,
-                  num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  torch::Tensor(),
-                  update_info.update_remote_generate,
-                  update_info.force_update_info});
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
-    *is_context_stream_ = false;
-    if (hasError() && !update_info.force_update_info) {
-        return;
-    }
-
-    const auto& new_tokens     = update_info.new_tokens;
-    auto        num_new_tokens = update_info.num_new_tokens;
-
-    int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     hasNumBeams(),
-                                     streamId(),
-                                     error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
-        return;
-    }
-
-    resizeSubGenerateStatus(update_info.new_tokens.size(0));
-
-    // TODO(xinfei.sxf) fix this (update_queue)
-    updateOutput(update_info);
-
-    bool is_done = getStatus() == StreamState::FINISHED;
-
-    if (!is_done) {
-        updateLogitProcessorStatus(update_info);
-    }
-
-    if (!is_done || reuseCache()) {
-        // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
-        auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
-        if (!update_res) {
-            reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+    try {
+        RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
+        *is_context_stream_ = false;
+        if (hasError() && !update_info.force_update_info) {
             return;
         }
+
+        const auto& new_tokens     = update_info.new_tokens;
+        auto        num_new_tokens = update_info.num_new_tokens;
+
+        int error_token_id = 0;
+        if (!complete_token_ids_->update(new_tokens,
+                                         begin_time_us_,
+                                         num_new_tokens,
+                                         generate_input_->inputLength(),
+                                         maxTokenNum(),
+                                         vocab_size_,
+                                         hasNumBeams(),
+                                         streamId(),
+                                         error_token_id)) {
+            reportEventWithoutLock(StreamEvents::Error,
+                                   ErrorCode::OUT_OF_VOCAB_RANGE,
+                                   "output token id:" + std::to_string(error_token_id)
+                                       + " out of vocab size: " + std::to_string(vocab_size_));
+            return;
+        }
+
+        resizeSubGenerateStatus(update_info.new_tokens.size(0));
+
+        updateOutput(update_info);
+
+        if (generate_status_->hasEvent(StreamEvents::Error)) {
+            return;
+        }
+        const bool is_done = generate_status_->hasEvent(StreamEvents::GenerateDone)
+                             || generate_status_->getStatus() == StreamState::FINISHED;
+
+        if (!is_done) {
+            updateLogitProcessorStatus(update_info);
+        }
+
+        if (!is_done || reuseCache()) {
+            auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
+            if (!update_res) {
+                reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+                return;
+            }
+        }
+
+        publishRemoteGenerateHandoffWithoutLock(update_info.update_remote_generate);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("stream [%ld] update failed: %s", streamId(), error.what());
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::EXECUTION_EXCEPTION,
+                               std::string("stream update failed: ") + error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("stream [%ld] update failed with an unknown exception", streamId());
+        reportEventWithoutLock(StreamEvents::Error,
+                               ErrorCode::EXECUTION_EXCEPTION,
+                               "stream update failed with an unknown exception");
     }
 }
 
@@ -901,9 +1007,13 @@ void GenerateStream::updateLogitProcessorStatus(const StreamUpdateInfo& update_i
     RTP_LLM_PROFILE_FUNCTION();
     updateLogitProcessorMultiSeqStatus(update_info.src_batch_indices);
 
-    const auto& new_tokens = update_info.new_tokens;
+    updateLogitProcessorStatus(update_info.new_tokens, update_info.num_new_tokens);
+}
+
+void GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+    RTP_LLM_PROFILE_FUNCTION();
+
     RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
-    auto num_new_tokens = update_info.num_new_tokens;
 
     for (auto logit_processor_ptr : getAllLogitsProcessorPtr()) {
         logit_processor_ptr->updateStatus(new_tokens, num_new_tokens);
@@ -1105,11 +1215,38 @@ void GenerateStream::resizeSubGenerateStatus(size_t new_size) {
     }
 }
 
-void GenerateStream::holdKVCacheForPDSep() {
-    stream_cache_resource_->holdKVCacheForPDSep();
+PdSepCacheHoldResult GenerateStream::holdKVCacheForPDSep() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (generate_status_->hasEvent(StreamEvents::Error)) {
+        return PdSepCacheHoldResult::AlreadyLocalTerminal;
+    }
+    const bool needs_remote = generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate);
+    if (needs_remote) {
+        if (stream_cache_resource_->hasKVCacheHoldForPDSep()) {
+            return PdSepCacheHoldResult::Held;
+        }
+        if (stream_cache_resource_->isResourceReleased()) {
+            return PdSepCacheHoldResult::HoldFailed;
+        }
+        return stream_cache_resource_->holdKVCacheForPDSep() ? PdSepCacheHoldResult::Held
+                                                              : PdSepCacheHoldResult::HoldFailed;
+    }
+    if (generate_status_->hasEvent(StreamEvents::GenerateDone)
+        || generate_status_->getStatus() == StreamState::FINISHED) {
+        return PdSepCacheHoldResult::AlreadyLocalTerminal;
+    }
+    if (stream_cache_resource_->hasKVCacheHoldForPDSep()) {
+        return PdSepCacheHoldResult::Held;
+    }
+    if (stream_cache_resource_->isResourceReleased()) {
+        return PdSepCacheHoldResult::HoldFailed;
+    }
+    return stream_cache_resource_->holdKVCacheForPDSep() ? PdSepCacheHoldResult::Held
+                                                          : PdSepCacheHoldResult::HoldFailed;
 }
 
 void GenerateStream::releaseKVCacheForPDSep() {
+    std::lock_guard<std::mutex> lock(*mutex_);
     stream_cache_resource_->releaseKVCacheForPDSep();
 }
 

@@ -1,11 +1,18 @@
 
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
+
+#include <chrono>
+#include <functional>
+#include <future>
+#include <stdexcept>
 
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
@@ -15,6 +22,20 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+class ThrowingLogitsProcessor: public BaseLogitsProcessor {
+public:
+    void process(const SamplerInputs&, size_t, size_t) override {}
+    void updateMultiSeqStatus(const std::vector<int>&) override {}
+
+    void updateStatus(const torch::Tensor&, int32_t) override {
+        throw std::runtime_error("injected logits processor failure");
+    }
+};
+
+}  // namespace
 
 class GenerateStreamStateTest: public DeviceTestBase {
 protected:
@@ -28,26 +49,65 @@ protected:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createStream(const std::vector<int>& input_tokens = {1, 2, 3, 4, 5, 6},
-                                   bool                    reuse_cache  = false) {
+    GenerateStreamPtr createStream(const std::vector<int>& input_tokens  = {1, 2, 3, 4, 5, 6},
+                                   bool                    reuse_cache   = false,
+                                   RoleType                role_type     = RoleType::PDFUSION,
+                                   bool                    pd_separation = false) {
         cache_manager_ =
             std::make_shared<KVCacheManager>(init_config(), /*warmup=*/false, /*metrics_reporter=*/nullptr);
         EXPECT_TRUE(cache_manager_->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
+        resource_context.role_type     = role_type;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         generate_config->num_return_sequences = 1;
+        generate_config->pd_separation        = pd_separation;
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
         ModelConfig   model_config;
         RuntimeConfig runtime_config;
-        model_config.max_seq_len = 2048;
+        model_config.max_seq_len                 = 2048;
+        model_config.vocab_size                  = 128;
+        model_config.special_tokens.eos_token_id = 127;
         return std::make_shared<NormalGenerateStream>(
             generate_input, model_config, runtime_config, resource_context, nullptr);
+    }
+
+    RemoteGenerateWaitResult waitForRemoteGenerateWithFallback(const GenerateStreamPtr&     stream,
+                                                               const std::function<void()>& terminal_event,
+                                                               bool& completed_without_fallback) {
+        std::promise<void> waiter_started;
+        auto               waiter_started_future = waiter_started.get_future();
+        auto waiter = std::async(std::launch::async, [&stream, &waiter_started]() {
+            waiter_started.set_value();
+            return stream->waitForRemoteGenerate();
+        });
+
+        waiter_started_future.wait();
+        try {
+            terminal_event();
+        } catch (...) {
+            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+            stream->moveToNext();
+            waiter.wait();
+            throw;
+        }
+        completed_without_fallback = waiter.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+        if (!completed_without_fallback) {
+            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+            stream->moveToNext();
+        }
+        return waiter.get();
+    }
+
+    void initSpecOutput(const GenerateStreamPtr& stream) {
+        auto output    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        output->tokens = torch::full({1, 2}, -1, torch::kInt32);
+        stream->setSPOutputBuffer(output);
     }
 
 protected:
@@ -337,6 +397,357 @@ TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {
     // Should transition to LOADING_CACHE if asyncLoadCache was initiated
     // or stay in WAITING if no connectors are available
     ASSERT_TRUE(new_state == StreamState::LOADING_CACHE || new_state == StreamState::WAITING);
+}
+
+TEST_F(GenerateStreamStateTest, testWaitForRemoteGenerateReturnsOnNormalRemoteTransition) {
+    auto stream                      = createStream();
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+            stream->reportEvent(StreamEvents::GenerateDone);
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::Handoff);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+}
+
+TEST_F(GenerateStreamStateTest, testWaitForRemoteGenerateReturnsWhenFirstTokenIsEos) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::PREFILL, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->update({torch::tensor({{127}}, torch::kInt32),
+                            1,
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            true,
+                            false});
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::LocalDone);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+}
+
+TEST_F(GenerateStreamStateTest, testWaitForRemoteGenerateReturnsOnError) {
+    auto stream                      = createStream();
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() { stream->reportError(ErrorCode::MALLOC_FAILED, "prefill failed"); },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::Error);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+}
+
+TEST_F(GenerateStreamStateTest, testWaitForRemoteGenerateReturnsOnCancellation) {
+    auto stream                      = createStream();
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() { stream->reportError(ErrorCode::CANCELLED, "request cancelled"); },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::Error);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(GenerateStreamStateTest, testWaitForRemoteGenerateErrorWinsOverHandoff) {
+    auto stream                      = createStream();
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+    stream->reportError(ErrorCode::MALLOC_FAILED, "prefill failed after handoff");
+
+    EXPECT_EQ(stream->waitForRemoteGenerate(), RemoteGenerateWaitResult::Error);
+}
+
+TEST_F(GenerateStreamStateTest, testResolveRemoteLoadFailurePreservesLocalDone) {
+    auto stream                      = createStream();
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->reportEvent(StreamEvents::GenerateDone);
+
+    EXPECT_EQ(stream->resolveRemoteLoadFailure(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "load failed"),
+              RemoteGenerateWaitResult::LocalDone);
+    EXPECT_FALSE(stream->hasError());
+}
+
+TEST_F(GenerateStreamStateTest, testResolveRemoteLoadFailurePreservesLocalError) {
+    auto stream                      = createStream();
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->reportError(ErrorCode::MALLOC_FAILED, "stage failure");
+
+    EXPECT_EQ(stream->resolveRemoteLoadFailure(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "load failed"),
+              RemoteGenerateWaitResult::Error);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+}
+
+TEST_F(GenerateStreamStateTest, testResolveRemoteLoadFailureCommitsErrorWhenNoLocalOutcomeExists) {
+    auto stream                      = createStream();
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    EXPECT_EQ(stream->resolveRemoteLoadFailure(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "load failed"),
+              RemoteGenerateWaitResult::Error);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+}
+
+TEST_F(GenerateStreamStateTest, testUpdateKvFailureDoesNotPublishRemoteHandoff) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::PREFILL, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    EXPECT_CALL(*allocator, updateKVBlock(testing::_, testing::_, testing::_, testing::_))
+        .WillOnce(testing::Return(false));
+    cache_manager_->allocator_ = allocator;
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->update({torch::tensor({{7}}, torch::kInt32),
+                            1,
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::tensor({0}, torch::kInt32),
+                            torch::Tensor(),
+                            true,
+                            false});
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::Error);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+}
+
+TEST_F(GenerateStreamStateTest, testSpecUpdatePostProcessingFailureDoesNotPublishRemoteHandoff) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::PREFILL, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+    initSpecOutput(stream);
+    stream->logits_processor_list_.push_back(std::make_shared<ThrowingLogitsProcessor>());
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->specUpdate(
+                {torch::tensor({{7}}, torch::kInt32), 1, 8, torch::Tensor(), torch::Tensor(), true, false});
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::Error);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+}
+
+TEST_F(GenerateStreamStateTest, testUpdatePostProcessingFailureUnblocksRemoteWaitWithError) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::PREFILL, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->logits_processor_list_.push_back(std::make_shared<ThrowingLogitsProcessor>());
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->update({torch::tensor({{7}}, torch::kInt32),
+                            1,
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            true,
+                            false});
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::Error);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+}
+
+TEST_F(GenerateStreamStateTest, testSpecUpdatePublishesRemoteHandoffAfterPostProcessingSucceeds) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::PREFILL, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+    initSpecOutput(stream);
+    ASSERT_TRUE(stream->streamCacheResource().initKVBlock().ok());
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->specUpdate(
+                {torch::tensor({{7}}, torch::kInt32), 1, 8, torch::Tensor(), torch::Tensor(), true, false});
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::Handoff);
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+    EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+}
+
+TEST_F(GenerateStreamStateTest, testFinishedUpdateSkipsLogitsProcessorAndReturnsLocalDone) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::PREFILL, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->logits_processor_list_.push_back(std::make_shared<ThrowingLogitsProcessor>());
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->update({torch::tensor({{127}}, torch::kInt32),
+                            1,
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            true,
+                            false});
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::LocalDone);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+}
+
+TEST_F(GenerateStreamStateTest, testFinishedUpdateStillCommitsKvWhenReuseCacheIsEnabled) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, true, RoleType::PREFILL, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->generateConfig()->reuse_cache = true;
+
+    auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    EXPECT_CALL(*allocator, updateKVBlock(testing::_, testing::_, testing::_, testing::_))
+        .WillOnce(testing::Return(true));
+    cache_manager_->allocator_ = allocator;
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->update({torch::tensor({{127}}, torch::kInt32),
+                            1,
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::Tensor(),
+                            torch::tensor({0}, torch::kInt32),
+                            torch::Tensor(),
+                            true,
+                            false});
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::LocalDone);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+}
+
+TEST_F(GenerateStreamStateTest, testFinishedSpecUpdateSkipsLogitsProcessorAndReturnsLocalDone) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::PREFILL, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->setPerfTest(false);
+    initSpecOutput(stream);
+    stream->logits_processor_list_.push_back(std::make_shared<ThrowingLogitsProcessor>());
+
+    bool completed_without_fallback = false;
+    auto result = waitForRemoteGenerateWithFallback(
+        stream,
+        [&stream]() {
+            stream->specUpdate(
+                {torch::tensor({{127}}, torch::kInt32), 1, 8, torch::Tensor(), torch::Tensor(), true, false});
+        },
+        completed_without_fallback);
+
+    EXPECT_TRUE(completed_without_fallback);
+    EXPECT_EQ(result, RemoteGenerateWaitResult::LocalDone);
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+}
+
+TEST_F(GenerateStreamStateTest, testDecodeUpdateNeverPublishesPrefillHandoff) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::DECODE, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+    stream->update({torch::tensor({{7}}, torch::kInt32),
+                    1,
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    torch::Tensor(),
+                    true,
+                    false});
+
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+}
+
+TEST_F(GenerateStreamStateTest, testDecodeSpecUpdateNeverPublishesPrefillHandoff) {
+    auto stream = createStream({1, 2, 3, 4, 5, 6}, false, RoleType::DECODE, true);
+    stream->generate_status_->status = StreamState::RUNNING;
+    initSpecOutput(stream);
+    stream->specUpdate(
+        {torch::tensor({{7}}, torch::kInt32), 1, 8, torch::Tensor(), torch::Tensor(), true, false});
+
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::Error));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
 }
 
 }  // namespace rtp_llm

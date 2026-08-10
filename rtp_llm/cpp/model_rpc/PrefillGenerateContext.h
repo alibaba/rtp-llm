@@ -49,7 +49,7 @@ struct RPCContext {
     }
 
     const GenerateInputPB*                 request;
-    grpc::ServerWriter<GenerateOutputsPB>* writer;
+    grpc::internal::WriterInterface<GenerateOutputsPB>* writer;
 };
 
 class PrefillGenerateContext: public GenerateContext {
@@ -69,6 +69,7 @@ public:
     ~PrefillGenerateContext();
     void         reset() override;
     void         nextStage();
+    void         cleanupRemoteLoadCache();
     grpc::Status closeGrpcStream();
     void         closeGrpcConnection();
 
@@ -78,7 +79,7 @@ private:
     void stopStream();
 
 public:
-    typedef grpc::ClientReaderWriter<GenerateRequestPB, GenerateOutputsPB> ClientStream;
+    typedef grpc::ClientReaderWriterInterface<GenerateRequestPB, GenerateOutputsPB> ClientStream;
 
     RemoteServerResource*                resource;
     RPCContext                           rpc_context;
@@ -91,6 +92,10 @@ public:
     std::shared_ptr<ClientStream>        client_stream;
     bool                                 grpc_stream_closed             = false;
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
+    bool                                 remote_load_cache_started      = false;
+    bool                                 remote_kv_cache_held           = false;
+    bool                                 local_generate_done            = false;
+    grpc::Status                         deferred_local_status          = grpc::Status::OK;
     PrefillStatInfo                      stat_info;
     int64_t                              loading_cache_requests = 0;
 };

@@ -747,13 +747,22 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
     }
 }
 
-void StreamCacheResource::holdKVCacheForPDSep() {
+bool StreamCacheResource::holdKVCacheForPDSep() {
+    if (pd_kvcache_ref_) {
+        return true;
+    }
     auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
     const auto& cache_keys = resource.cacheKeys();
     auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
-    if (ref) {
-        pd_kvcache_ref_ = std::move(ref);
+    if (!ref) {
+        return false;
     }
+    pd_kvcache_ref_ = std::move(ref);
+    return true;
+}
+
+bool StreamCacheResource::hasKVCacheHoldForPDSep() const {
+    return pd_kvcache_ref_ != nullptr;
 }
 
 void StreamCacheResource::releaseKVCacheForPDSep() {

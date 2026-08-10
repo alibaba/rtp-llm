@@ -75,14 +75,23 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
 grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             context,
                                               const string&                    request_key,
                                               WriterInterface*                 writer,
-                                              std::shared_ptr<GenerateStream>& stream) {
+                                              std::shared_ptr<GenerateStream>& stream,
+                                              RemoteGenerateWaitResult*        remote_generate_result) {
     RTP_LLM_PROFILE_FUNCTION();
+    bool wait_result_set = false;
+    auto setWaitResult   = [&](RemoteGenerateWaitResult result) {
+        wait_result_set = true;
+        if (remote_generate_result != nullptr) {
+            *remote_generate_result = result;
+        }
+    };
     // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
     // 如果流有错误，应该停止消费输出
     while (stream->isActive() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
+                setWaitResult(RemoteGenerateWaitResult::Error);
                 return serializeErrorMsg(request_key, result.status());
             } else {
                 break;
@@ -98,20 +107,35 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->specialTokens().eos_token_id);
         if (context->IsCancelled()) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+            setWaitResult(RemoteGenerateWaitResult::Error);
             RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
+            setWaitResult(RemoteGenerateWaitResult::Error);
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+        }
+        if (stream->queryPdSep()) {
+            const auto result = stream->waitForRemoteGenerate();
+            setWaitResult(result);
+            if (result == RemoteGenerateWaitResult::Error) {
+                return serializeErrorMsg(request_key, stream->statusInfo());
+            }
+            break;
         }
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
             break;
         }
-        if (stream->queryPdSep()) {
-            stream->waitForRemoteGenerate();
-            break;
+    }
+
+    // A P/D stream can terminate before producing an output, so the loop above may not execute.
+    if (stream->queryPdSep() && !wait_result_set) {
+        const auto result = stream->waitForRemoteGenerate();
+        setWaitResult(result);
+        if (result == RemoteGenerateWaitResult::Error) {
+            return serializeErrorMsg(request_key, stream->statusInfo());
         }
     }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());

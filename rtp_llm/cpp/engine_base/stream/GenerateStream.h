@@ -83,6 +83,18 @@ class GenerateStream;
 
 using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
 
+enum class RemoteGenerateWaitResult {
+    Handoff,
+    LocalDone,
+    Error,
+};
+
+enum class PdSepCacheHoldResult {
+    Held,
+    AlreadyLocalTerminal,
+    HoldFailed,
+};
+
 class GenerateStream: public std::enable_shared_from_this<GenerateStream> {
 public:
     static constexpr uint64_t STREAM_MAGIC = 0xA11CE5DEADBEEF01ULL;
@@ -343,8 +355,10 @@ public:
         return return_all_hidden_states_;
     }
 
-    bool waitForRemoteGenerate();
-    void holdKVCacheForPDSep();
+    // Wait for the P->D handoff or a terminal local outcome.
+    RemoteGenerateWaitResult waitForRemoteGenerate();
+    RemoteGenerateWaitResult resolveRemoteLoadFailure(ErrorCode error_code, const std::string& error_msg);
+    PdSepCacheHoldResult holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
 
     std::vector<int> getLatestTokens(size_t token_num);
@@ -535,8 +549,11 @@ public:
     bool     queryPdSep() const;
 
 protected:
+    std::optional<RemoteGenerateWaitResult> remoteGenerateOutcomeWithoutLock() const;
+    void publishRemoteGenerateHandoffWithoutLock(bool update_remote_generate);
     void updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     void updateLogitProcessorStatus(const StreamUpdateInfo& update_info);
+    void updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void fillSubGenerateStatus(StreamState state);
     void resizeSubGenerateStatus(size_t new_size);
 

@@ -233,48 +233,157 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
+    auto stream = prefill_context.getStream();
     AtomicGuard       request_guard(loading_cache_requests_);
+    const auto hold_result = stream->holdKVCacheForPDSep();
+    if (hold_result == PdSepCacheHoldResult::AlreadyLocalTerminal) {
+        return;
+    }
+    if (hold_result == PdSepCacheHoldResult::HoldFailed) {
+        const auto hold_error =
+            ErrorInfo(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "failed to retain KV cache before remote load");
+        const auto local_outcome = stream->resolveRemoteLoadFailure(hold_error.code(), hold_error.ToString());
+        if (local_outcome == RemoteGenerateWaitResult::LocalDone) {
+            prefill_context.local_generate_done = true;
+            return;
+        }
+        prefill_context.error_info = stream->statusInfo();
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
+    prefill_context.remote_kv_cache_held = true;
     GenerateRequestPB load_request;
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
-    CLIENT_GRPC_RET_IF_ERROR(
-        prefill_context, prefill_context.client_stream->Write(load_request), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    bool        write_ok = false;
+    std::string write_error_message = "remote load request write failed";
+    try {
+        write_ok = prefill_context.client_stream->Write(load_request);
+    } catch (const std::exception& e) {
+        write_error_message += ": " + std::string(e.what());
+    } catch (...) {
+        write_error_message += ": unknown exception";
+    }
+    if (!write_ok) {
+        const auto load_error = ErrorInfo(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, write_error_message);
+        const auto local_outcome = stream->resolveRemoteLoadFailure(load_error.code(), load_error.ToString());
+        prefill_context.cleanupRemoteLoadCache();
+        if (local_outcome == RemoteGenerateWaitResult::LocalDone) {
+            prefill_context.local_generate_done = true;
+            return;
+        }
+        prefill_context.error_info = stream->statusInfo();
+        prefill_context.error_status =
+            serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
+    prefill_context.remote_load_cache_started = true;
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to poll local output", prefill_context.request_id);
-    auto first_status = pollStreamOutput(prefill_context.server_context,
+    auto remote_generate_result = RemoteGenerateWaitResult::Error;
+    auto first_status           = pollStreamOutput(prefill_context.server_context,
                                          prefill_context.request_key,
                                          prefill_context.rpc_context.writer,
-                                         prefill_context.getStream());
+                                         prefill_context.getStream(),
+                                         &remote_generate_result);
     if (!first_status.ok()) {
-        prefill_context.error_status = first_status;
+        if (prefill_context.remote_load_cache_started) {
+            prefill_context.deferred_local_status = first_status;
+        } else {
+            prefill_context.error_status = first_status;
+        }
         return;
     }
     RTP_LLM_LOG_DEBUG("request [%ld] poll local output end", prefill_context.request_id);
 
-    auto stream = prefill_context.getStream();
-    if (stream->hasError()) {
-        prefill_context.finished     = true;
-        prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, stream->statusInfo().ToString());
+    if (remote_generate_result == RemoteGenerateWaitResult::LocalDone) {
+        prefill_context.local_generate_done = true;
+        if (!prefill_context.remote_load_cache_started) {
+            prefill_context.finished = true;
+        }
+        return;
+    }
+    if (remote_generate_result == RemoteGenerateWaitResult::Error) {
+        auto stream = prefill_context.getStream();
+        auto status = serializeErrorMsg(prefill_context.request_key, stream->statusInfo());
+        if (prefill_context.remote_load_cache_started) {
+            prefill_context.deferred_local_status = status;
+        } else {
+            prefill_context.error_status = status;
+        }
     }
 }
 
 void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (!prefill_context.remote_load_cache_started) {
+        return;
+    }
+    auto stream = prefill_context.getStream();
     GenerateOutputsPB load_response;
-    CLIENT_GRPC_RET_IF_ERROR(
-        prefill_context, prefill_context.client_stream->Read(&load_response), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
-    auto error_code = transRPCErrorCode(load_response.error_info().error_code());
-    CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
-    RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
+    bool              read_ok = false;
+    std::string       read_error_message = "remote load response failed";
+    try {
+        read_ok = prefill_context.client_stream->Read(&load_response);
+    } catch (const std::exception& e) {
+        read_error_message += ": " + std::string(e.what());
+    } catch (...) {
+        read_error_message += ": unknown exception";
+    }
+    const auto error_code = read_ok ? transRPCErrorCode(load_response.error_info().error_code())
+                                    : ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED;
 
-    // Decode has finished loading cache, now safe to release KV cache blocks.
-    // This is called after cache store transfer is complete.
-    if (prefill_context.generate_input->generate_config->pd_separation) {
-        prefill_context.getStream()->releaseKVCacheForPDSep();
+    if (!read_ok) {
+        const auto load_error = ErrorInfo(error_code, read_error_message);
+        if (!prefill_context.local_generate_done && prefill_context.deferred_local_status.ok()) {
+            stream->resolveRemoteLoadFailure(load_error.code(), load_error.ToString());
+        }
+        prefill_context.cleanupRemoteLoadCache();
+        if (prefill_context.local_generate_done) {
+            prefill_context.finished = true;
+        } else if (!prefill_context.deferred_local_status.ok()) {
+            prefill_context.error_status = prefill_context.deferred_local_status;
+        } else {
+            prefill_context.error_info   = stream->statusInfo();
+            prefill_context.error_status =
+                serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        }
+        return;
+    }
+    if (error_code != ErrorCode::NONE_ERROR) {
+        const auto load_error = ErrorInfo(error_code, "remote load response failed");
+        if (!prefill_context.local_generate_done && prefill_context.deferred_local_status.ok()) {
+            stream->resolveRemoteLoadFailure(load_error.code(), load_error.ToString());
+        }
+        prefill_context.cleanupRemoteLoadCache();
+        if (prefill_context.local_generate_done) {
+            prefill_context.finished = true;
+        } else if (!prefill_context.deferred_local_status.ok()) {
+            prefill_context.error_status = prefill_context.deferred_local_status;
+        } else {
+            prefill_context.error_info   = stream->statusInfo();
+            prefill_context.error_status =
+                serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        }
+        return;
+    }
+    if (prefill_context.remote_kv_cache_held) {
+        stream->releaseKVCacheForPDSep();
+        prefill_context.remote_kv_cache_held = false;
+    }
+    prefill_context.remote_load_cache_started = false;
+    RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
+    if (!prefill_context.deferred_local_status.ok()) {
+        prefill_context.error_status = prefill_context.deferred_local_status;
+        return;
+    }
+    if (prefill_context.local_generate_done) {
+        prefill_context.finished = true;
     }
 }
 

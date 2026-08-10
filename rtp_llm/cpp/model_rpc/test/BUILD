@@ -130,3 +130,14 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "local_rpc_server_outcome_test",
+    srcs = [
+        "LocalRpcServerOutcomeTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
