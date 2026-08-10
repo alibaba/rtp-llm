@@ -75,6 +75,18 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "sampler_generator_state_test",
+    srcs = ["SamplerGeneratorStateTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:sampler_generator_state",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",

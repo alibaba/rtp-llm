@@ -61,10 +61,25 @@ cc_library(
 )
 
 cc_library(
+    name = "sampler_generator_state",
+    srcs = ["SamplerGeneratorState.cc"],
+    hdrs = ["SamplerGeneratorState.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+    ] + torch_deps(),
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
-        exclude = ["TensorPbConvert.cc"],
+        exclude = [
+            "SamplerGeneratorState.cc",
+            "TensorPbConvert.cc",
+        ],
     ),
     hdrs = glob(
         ["*.h"],
@@ -72,6 +87,7 @@ cc_library(
             "PrefillPeerSelector.h",
             "CacheTransferBlockSelector.h",
             "RPCPool.h",
+            "SamplerGeneratorState.h",
         ],
     ),
     visibility = ["//visibility:public"],
@@ -81,6 +97,7 @@ cc_library(
         ":model_rpc_pool",
         ":prefill_peer_selector",
         ":rpc_error_code",
+        ":sampler_generator_state",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/disaggregate/cache_store",

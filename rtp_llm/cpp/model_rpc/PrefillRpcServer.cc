@@ -1,6 +1,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/SamplerGeneratorState.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
@@ -399,6 +400,16 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     generate_request.set_client_id(process_id_);
     generate_request.set_request_id(prefill_context.request_id);
     generate_request.set_first_generate_token_id(first_token);
+    generate_request.set_sampler_generator_state_version(kCurrentSamplerGeneratorStateVersion);
+    auto generator_state = captureSamplerGeneratorState(
+        stream->generateConfig()->random_seed.has_value(), stream->getGenerator());
+    if (!generator_state.ok()) {
+        prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, generator_state.status().ToString());
+        return;
+    }
+    if (!generator_state->empty()) {
+        generate_request.set_sampler_generator_state(*generator_state);
+    }
     auto context_position_ids = stream->getContextPositionIds();
     if (context_position_ids.defined()) {
         generate_request.mutable_position_ids()->CopyFrom(

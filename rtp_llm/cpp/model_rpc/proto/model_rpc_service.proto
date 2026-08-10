@@ -261,6 +261,9 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    // Opaque state captured after prefill sampling for seeded requests.
+    bytes sampler_generator_state = 14;
+    uint32 sampler_generator_state_version = 15;
 }
 
 // in tp case, decode master broadcast to decode worker

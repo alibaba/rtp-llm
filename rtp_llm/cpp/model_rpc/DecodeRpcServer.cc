@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/model_rpc/CacheTransferBlockSelector.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillPeerSelector.h"
+#include "rtp_llm/cpp/model_rpc/SamplerGeneratorState.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -159,6 +160,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                       generate_request.stage() == RemoteStage::GENERATE,
                       grpc::StatusCode::INTERNAL,
                       "message first status != RemoteStage::GENERATE");
+    const auto generator_state_status = restoreSamplerGeneratorState(
+        generate_request.sampler_generator_state_version(),
+        generate_stream->generateConfig()->random_seed.has_value(),
+        generate_stream->getGenerator(),
+        generate_request.sampler_generator_state());
+    GRPC_RET_IF_ERROR(decode_context,
+                      generator_state_status.ok(),
+                      grpc::StatusCode::INVALID_ARGUMENT,
+                      generator_state_status.ToString());
     decode_context.time_info.updateGenerateBeginTime();
     generate_stream->setIsContextStream(false);
     generate_stream->step();
