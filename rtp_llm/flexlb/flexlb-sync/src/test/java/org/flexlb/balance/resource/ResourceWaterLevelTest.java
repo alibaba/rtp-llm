@@ -106,70 +106,25 @@ class ResourceWaterLevelTest {
     }
 
     @Test
-    void prefillWaterLevelUsesLocalWaitingUncachedTokens() {
-        FlexlbConfig config = tokenAwarePrefillConfig();
+    void prefillResourceDoesNotFilterByUncachedTokens() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setPrefillQueueSizeThreshold(2);
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setAlive(true);
-        TaskInfo localTask = task("waiting", 20_000, 0, false);
+        TaskInfo localTask = task("large-request", 100_000_000, 0, false);
         localTask.setPredictedPrefixLength(0);
-        workerStatus.putLocalTask("waiting", localTask);
-        updateTaskStatus(workerStatus, Map.of("waiting", task("waiting", 20_000, 0, true)), Map.of());
+        workerStatus.putLocalTask("large-request", localTask);
 
-        assertEquals(62.5, measure.calculateWorkerWaterLevel(workerStatus));
-        assertTrue(measure.isResourceAvailable(workerStatus));
-
-        updateTaskStatus(workerStatus, Map.of("waiting", task("waiting", 32_000, 0, true)), Map.of());
-
-        assertEquals(100.0, measure.calculateWorkerWaterLevel(workerStatus));
-        assertFalse(measure.isResourceAvailable(workerStatus));
-    }
-
-    @Test
-    void prefillWaitingUncachedTokensUsesActualCacheHitAfterStatusUpdate() {
-        FlexlbConfig config = tokenAwarePrefillConfig();
-        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
-        WorkerStatus workerStatus = new WorkerStatus();
-        workerStatus.setAlive(true);
-        TaskInfo localTask = task("request", 20_000, 0, false);
-        localTask.setPredictedPrefixLength(0);
-        workerStatus.putLocalTask("request", localTask);
-        updateTaskStatus(workerStatus, Map.of("request", task("request", 20_000, 4_000, true)), Map.of());
-
+        assertEquals(1, workerStatus.getInTransitAndWaitingTaskCount());
+        assertEquals(100_000_000, workerStatus.getInTransitAndWaitingUncachedTokens());
         assertEquals(50.0, measure.calculateWorkerWaterLevel(workerStatus));
         assertTrue(measure.isResourceAvailable(workerStatus));
     }
 
     @Test
-    void prefillWaitingUncachedTokensIncludesInTransitAndConfirmedLocalTasks() {
-        FlexlbConfig config = tokenAwarePrefillConfig();
-        config.setPrefillQueueSizeThreshold(2);
-        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
-        WorkerStatus workerStatus = new WorkerStatus();
-        workerStatus.setAlive(true);
-        TaskInfo inTransitTask = task("in-transit", 48_000, 16_000, false);
-        inTransitTask.setPredictedPrefixLength(16_000);
-        workerStatus.putLocalTask("in-transit", inTransitTask);
-
-        assertEquals(100.0, measure.calculateWorkerWaterLevel(workerStatus));
-        assertFalse(measure.isResourceAvailable(workerStatus));
-
-        updateTaskStatus(workerStatus,
-                Map.of("in-transit", task("in-transit", 48_000, 0, false)), Map.of());
-
-        assertEquals(100.0, measure.calculateWorkerWaterLevel(workerStatus));
-        assertFalse(measure.isResourceAvailable(workerStatus));
-
-        updateTaskStatus(workerStatus, Map.of(),
-                Map.of("in-transit", task("in-transit", 48_000, 0, false)));
-
-        assertEquals(0.0, measure.calculateWorkerWaterLevel(workerStatus));
-        assertTrue(measure.isResourceAvailable(workerStatus));
-    }
-
-    @Test
     void prefillQueueSizeExcludesLocalTaskAlreadyReportedAsRunningByEngine() {
-        FlexlbConfig config = tokenAwarePrefillConfig();
+        FlexlbConfig config = new FlexlbConfig();
         config.setPrefillQueueSizeThreshold(1);
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
         WorkerStatus workerStatus = new WorkerStatus();
@@ -181,22 +136,6 @@ class ResourceWaterLevelTest {
 
         assertEquals(0.0, measure.calculateWorkerWaterLevel(workerStatus));
         assertTrue(measure.isResourceAvailable(workerStatus));
-    }
-
-    @Test
-    void prefillWaitingUncachedTokensFallsBackToLocalPredictionWhenEngineHitIsUnknown() {
-        FlexlbConfig config = tokenAwarePrefillConfig();
-        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
-        WorkerStatus workerStatus = new WorkerStatus();
-        workerStatus.setAlive(true);
-        TaskInfo localTask = task("request", 64_000, 0, false);
-        localTask.setPredictedPrefixLength(48_000);
-        workerStatus.putLocalTask("request", localTask);
-        updateTaskStatus(workerStatus, Map.of("request", task("request", 64_000, 0, false)), Map.of());
-
-        assertEquals(50.0, measure.calculateWorkerWaterLevel(workerStatus));
-        assertTrue(measure.isResourceAvailable(workerStatus));
-
     }
 
     @Test
@@ -216,14 +155,6 @@ class ResourceWaterLevelTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         return configService;
-    }
-
-    private static FlexlbConfig tokenAwarePrefillConfig() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.setPrefillQueueSizeThreshold(10);
-        config.setPrefillMaxBatchTokens(16_000);
-        config.setPrefillWaitingUncachedTokenBatchCount(2);
-        return config;
     }
 
     private static TaskInfo task(String requestId, long inputLength, long prefixLength, boolean prefixLengthValid) {
