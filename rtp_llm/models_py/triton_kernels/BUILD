@@ -6,6 +6,16 @@ py_library(
 )
 
 py_library(
+    name = "kimi_kda",
+    srcs = glob(["kimi_kda/*.py"]),
+    deps = [
+        ":common",
+        ":fla",
+    ],
+    visibility = ["//visibility:public"]
+)
+
+py_library(
     name = "causal_conv1d",
     srcs = glob(["causal_conv1d/*.py"]),
     visibility = ["//visibility:public"]
@@ -37,6 +47,7 @@ py_library(
         ":moe",
         ":common",
         ":sparse_mla",
+        ":kimi_kda",
     ],
     visibility = ["//visibility:public"]
 )
