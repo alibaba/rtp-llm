@@ -8,10 +8,13 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-# flashinfer-python is only available for CUDA12
+# CUDA 13 uses flashinfer-python without the CUDA-12-only prebuilt caches.
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]
-flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
+# Keep one capability list across CUDA versions. On CUDA 13 the centralized
+# CUDA13_UNAVAILABLE_REQUIREMENTS table resolves fast-hadamard-transform to an
+# empty wrapper, and indexer_op rejects DSA models at construction time.
+flashmla = ["flash-mla", "tilelang", "fast-hadamard-transform"]
 rtp_kernel = ["rtp-kernel"]
 flashattn = ["flash_attn","flash-attn-3"]
 requirement(flashinfer)
@@ -52,6 +55,7 @@ py_library(
         "//rtp_llm/models_py/distributed:moriep_wrapper",
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
+        "//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/routers",
     ] + select({
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
@@ -62,14 +66,13 @@ py_library(
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda12_9_x86": flashmla,
+        "@//:using_cuda13": flashmla,
         "//conditions:default": [],
     }) + select({
-        "@//:using_cuda12_9_x86": rtp_kernel,
-        "@//:using_cuda12_arm": rtp_kernel,
+        "@//:using_cuda12_9_plus": rtp_kernel,
         "//conditions:default": [],
     }) + select({
-        "@//:using_cuda12_9_x86": flashattn,
-        "@//:using_cuda12_arm": flashattn,
+        "@//:using_cuda12_9": flashattn,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -101,7 +104,8 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ])
+    ]),
+    visibility = [":__subpackages__"],
 )
 
 py_library(

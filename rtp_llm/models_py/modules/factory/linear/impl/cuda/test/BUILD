@@ -21,6 +21,9 @@ py_test(
     exec_properties = {'gpu':'SM100'},
 )
 
+# Selected by the SM100_ARM tag in ut-gb200/ut-gb200-cu13. The root .bazelrc
+# injects gpu=SM100_ARM for --config=cuda12_9_arm and gpu=SM100_ARM_CU13 for
+# --config=cuda13_arm.
 py_test(
     name = "fp8_deepgemm_linear_sm100_arm_test",
     srcs = [
@@ -29,7 +32,6 @@ py_test(
     ],
     deps = py_test_deps,
     tags = ["SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM'},
 )
 
 py_test(
@@ -37,5 +39,4 @@ py_test(
     srcs = ["fp4_gemm_linear_test.py"],
     deps = py_test_deps,
     tags = ["SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM'},
 )

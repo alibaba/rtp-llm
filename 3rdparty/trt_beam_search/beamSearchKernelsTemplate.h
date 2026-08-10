@@ -16,7 +16,6 @@
 
 #ifndef CUDART_VERSION
 #if USING_ROCM
-// ROCm: use hipcub directly
 #include <hipcub/hipcub.hpp>
 #include "rtp_llm/models_py/bindings/rocm/hipcub_shims.h"
 #else
@@ -41,7 +40,7 @@ namespace kernels
 
 static constexpr size_t MAX_BLOCK_SIZE = 1024;
 #if USING_ROCM
-static constexpr size_t MIN_BLOCK_SIZE = 64; // ROCm wavefront size
+static constexpr size_t MIN_BLOCK_SIZE = 64;
 #else
 static constexpr size_t MIN_BLOCK_SIZE = 32;
 #endif
@@ -668,8 +667,8 @@ void beamSearchKernelLauncher(
 
     if constexpr (IS_V2)
     {
-        // currently all the mask value of logits in beam search is -inf, pass to the kernel with the mask value fixed for now
-        // note the function is just a kernel launcher running on host, it's perfectly fine to have a static varible here
+        // Padded vocabulary entries are -inf. Preserve their arrival order instead
+        // of running the atomic tie-reorder path for thousands of equal values.
         const static T mask_val = T(-std::numeric_limits<float>::infinity());
 
         // see `BeamSearchLayer<T>::configureBeamSearchLayer()` for the workspace structure
@@ -687,18 +686,17 @@ void beamSearchKernelLauncher(
         void* pTopK = reinterpret_cast<void*>(reinterpret_cast<char*>(workspace) + offset);
 
         // Stage 1
-        invokeTopkLastDim<T>(nBS * nBMIn, nV, nBMOut * 2, true, mask_val, logProbs, pStage1LogProbs, pStage1Ids, 
-            pTopK, stream);
+        invokeTopkLastDim<T>(
+            nBS * nBMIn, nV, nBMOut * 2, true, mask_val, logProbs, pStage1LogProbs, pStage1Ids, pTopK, stream);
         check_cuda_error();
 
         int nThread = std::min(std::max(roundUp(nBMIn * nBMOut * 2, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
-        addCumLogProbs<<<nBS, nThread, 0, stream>>>(pStage1LogProbs, bh.cumLogProbsIn, bh.finished, bh.endIds,
-            bh.diversityRates, bh.batchSlots, nBS, nBMIn, nBMOut);
-        check_cuda_error();
+        launchAddCumLogProbs<T>(pStage1LogProbs, bh.cumLogProbsIn, bh.finished, bh.endIds,
+            bh.diversityRates, bh.batchSlots, nBS, nBMIn, nBMOut, nThread, stream);
 
         // Stage 2
-        invokeTopkLastDim<T>(nBS, nBMIn * nBMOut * 2, nBMOut * 2, true, mask_val, pStage1LogProbs, pStage2LogProbs, 
-            pStage2Ids, pTopK, stream);
+        invokeTopkLastDim<T>(nBS, nBMIn * nBMOut * 2, nBMOut * 2, true, mask_val, pStage1LogProbs,
+            pStage2LogProbs, pStage2Ids, pTopK, stream);
         check_cuda_error();
 
         nThread = std::min(std::max(roundUp(nBMOut * 2, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);

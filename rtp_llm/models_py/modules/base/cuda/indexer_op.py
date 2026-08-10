@@ -42,18 +42,36 @@ def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     return sf_fp32
 
 
-def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
+def _require_fast_hadamard_transform():
+    # Construction-time failure is intentional: builds without this optional
+    # wheel must reject DSA/indexer models before their first forward. Keep a
+    # missing top-level package distinct from transitive import errors.
+    try:
+        from fast_hadamard_transform import hadamard_transform
+    except ModuleNotFoundError as exc:
+        if exc.name != "fast_hadamard_transform":
+            raise
+        raise RuntimeError(
+            "DeepSeek-V3.2 DSA requires the fast-hadamard-transform wheel, "
+            "but the current build does not include it (for example, CUDA 13 "
+            "builds currently defer this dependency)."
+        ) from exc
+    return hadamard_transform
+
+
+def _rotate_activation(x: torch.Tensor, hadamard_transform: Any) -> torch.Tensor:
     """
     Hadamard transform for activation rotation.
 
     Args:
         x: Input tensor in bfloat16
+        hadamard_transform: Resolved fast_hadamard_transform.hadamard_transform
+            callable (cached on the owning IndexerOp; see __init__).
 
     Returns:
         Rotated activation tensor
     """
     assert x.dtype == torch.bfloat16
-    from fast_hadamard_transform import hadamard_transform
 
     hidden_size = x.size(-1)
     assert (
@@ -95,6 +113,10 @@ class IndexerOp(nn.Module):
             scale_fmt: FP8 quantization format (default: "ue8m0")
         """
         super().__init__()
+        # Construction-time fail-fast (intentional, tested): reject DSA/indexer
+        # models on builds lacking the wheel before their first forward. Cache
+        # the resolved callable so the decode hot path avoids a per-call import.
+        self._hadamard_transform = _require_fast_hadamard_transform()
         self.index_n_heads = index_n_heads
         self.index_head_dim = index_head_dim
         self.index_topk = index_topk
@@ -139,8 +161,8 @@ class IndexerOp(nn.Module):
             )
 
         # Apply Hadamard transform (activation rotation)
-        query = _rotate_activation(q)
-        key = _rotate_activation(k)
+        query = _rotate_activation(q, self._hadamard_transform)
+        key = _rotate_activation(k, self._hadamard_transform)
 
         return query, key
 
@@ -182,8 +204,8 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        query = _rotate_activation(q)
-        key = _rotate_activation(k)
+        query = _rotate_activation(q, self._hadamard_transform)
+        key = _rotate_activation(k, self._hadamard_transform)
 
         return query, key
 
@@ -218,7 +240,7 @@ class IndexerOp(nn.Module):
             )
 
         # Apply Hadamard transform (activation rotation)
-        key = _rotate_activation(k)
+        key = _rotate_activation(k, self._hadamard_transform)
 
         return key
 

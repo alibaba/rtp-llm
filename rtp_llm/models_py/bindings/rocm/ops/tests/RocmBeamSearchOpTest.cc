@@ -12,3 +12,7 @@ TEST_F(RocmBeamSearchOpTest, simpleTest) {
 TEST_F(RocmBeamSearchOpTest, variableBeamWidthTest) {
     runVariableBeamWidthTests();
 }
+
+TEST_F(RocmBeamSearchOpTest, paddedVocabTest) {
+    paddedVocabTest();
+}

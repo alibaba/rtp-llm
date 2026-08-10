@@ -59,6 +59,38 @@ def http_deps():
     )
 
     http_archive(
+        name = "torch_2.9_py310_cuda_aarch64",
+        sha256 = "37780eb80e4319d6e004ea9597353da0b3947681866d7adff4757ece164a5cd9",
+        urls = [
+            "https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "torch_2.11_py310_cuda_aarch64",
+        sha256 = "4af01fad0822353e766770ff2c7d6bdc2cbcc2ac7fcd6da93a9e3c6f3f932b21",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "https://download.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
+        name = "torch_2.11_py310_cuda",
+        sha256 = "4c5be01584b7fee22d3c0d04062fd28026044acd07ffd0ee64cbd54b60e62d39",
+        urls = [
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "https://download.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+        ],
+        type = "zip",
+        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
+    )
+
+    http_archive(
         name = "torch_rocm",
         sha256 = "521d1febc9bfebe44fb321727ad550dcaf05900dd917b20bed52fb307f43bf3a",
         urls = [
@@ -115,6 +147,14 @@ def http_deps():
             "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/kv-cache-manager-client-2026_04_29_14_29.rpm",
         ],
         sha256 = "8a50e27c6c009bb2e9d55c7ff44ccef53268cc0b67559b95fd7e22221f1e9600",
+    )
+
+    http_file(
+        name = "remote_kv_cache_manager_client_rpm_cuda13_x86_64",
+        urls = [
+            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/kvcm/cuda13/x86_64/kv-cache-manager-client-2026_07_29_cuda13_2_sm100.rpm",
+        ],
+        sha256 = "c7870e72dcac194dc87bd8efeae16da8529a5c3eb9239851db0305088b42564c",
     )
 
     http_archive(

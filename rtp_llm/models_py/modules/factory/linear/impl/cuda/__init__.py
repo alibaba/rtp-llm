@@ -18,11 +18,14 @@ if is_cuda():
     from .fp8_gemm_linear import CudaFp8GEMMLinear
     from .fp8_per_tensor_linear import CudaFp8PerTensorLinear
 
-    major, minor = get_sm()
-    if major >= 10:
-        from .fp4_linear import CudaFp4GEMMLinear
-
-        LinearFactory.register(CudaFp4GEMMLinear)
-
     LinearFactory.register(CudaFp8PerTensorLinear)
     LinearFactory.register(CudaFp8GEMMLinear)
+
+    major, minor = get_sm()
+    if major >= 10:
+        try:
+            from .fp4_linear import CudaFp4GEMMLinear
+        except Exception:
+            logger.exception("Failed to register CUDA FP4 Linear strategy")
+        else:
+            LinearFactory.register(CudaFp4GEMMLinear)

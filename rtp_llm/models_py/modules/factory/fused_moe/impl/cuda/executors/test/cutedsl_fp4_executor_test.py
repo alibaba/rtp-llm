@@ -19,11 +19,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
     CutedslFp4Executor,
 )
+from rtp_llm.models_py.kernels.cuda.fp4_kernel import scaled_fp4_grouped_quant
 from rtp_llm.utils.model_weight import W
 
 from flashinfer import fp4_quantize
 from torch.nn import functional as F
-from flashinfer import scaled_fp4_grouped_quantize
 
 
 class CutedslFp4ExecutorTestBase:
@@ -236,18 +236,18 @@ class CutedslFp4ExecutorTestBase:
         
         w1_global_scale = self.FLOAT8_E4M3_MAX * self.FLOAT4_E2M1_MAX / w1_amax
         w2_global_scale = self.FLOAT8_E4M3_MAX * self.FLOAT4_E2M1_MAX / w2_amax
-        w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
+        w1_fp4, w1_blockscale = scaled_fp4_grouped_quant(
             w1_bf16,
+            w1_global_scale,
             torch.ones(num_local_experts, dtype=torch.int32, device=w1_bf16.device)
             * 2
             * intermediate_size,
-            w1_global_scale,
         )
-        w2_fp4, w2_blockscale = scaled_fp4_grouped_quantize(
+        w2_fp4, w2_blockscale = scaled_fp4_grouped_quant(
             w2_bf16,
+            w2_global_scale,
             torch.ones(num_local_experts, dtype=torch.int32, device=w2_bf16.device)
             * self.K,
-            w2_global_scale,
         )
         
         w1_quantized = w1_fp4.permute(2, 0, 1)
@@ -363,6 +363,68 @@ class CutedslFp4ExecutorTestBase:
         )
         forward_payload = executor.execute(payload, "silu", None, None, False, None)
         output = forward_payload.fused_expert_output
+        expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
+        self.assertTrue(torch.any(expert_num_tokens < payload.expert_x.size(1)).item())
+
+        repeated_output = executor.execute(
+            payload, "silu", None, None, False, None
+        ).fused_expert_output
+        output = self._filter_valid_tokens(output, expert_num_tokens)
+        repeated_output = self._filter_valid_tokens(repeated_output, expert_num_tokens)
+        torch.testing.assert_close(output, repeated_output, atol=0, rtol=0)
+
+        capture_stream = torch.cuda.Stream()
+        capture_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(capture_stream):
+            executor.execute(payload, "silu", None, None, False, None)
+        torch.cuda.current_stream().wait_stream(capture_stream)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=capture_stream):
+            graph_output = executor.execute(
+                payload, "silu", None, None, False, None
+            ).fused_expert_output
+        torch.cuda.current_stream().wait_stream(capture_stream)
+
+        graph.replay()
+        torch.cuda.synchronize()
+        first_replay = self._filter_valid_tokens(
+            graph_output.clone(), expert_num_tokens
+        )
+        torch.testing.assert_close(output, first_replay, atol=0, rtol=0)
+
+        original_expert_num_tokens = expert_num_tokens.clone()
+        reduced_expert_num_tokens = torch.where(
+            original_expert_num_tokens > 0,
+            torch.clamp(original_expert_num_tokens // 2, min=1),
+            original_expert_num_tokens,
+        )
+        self.assertTrue(
+            torch.any(reduced_expert_num_tokens < original_expert_num_tokens).item()
+        )
+        # Preserve the captured tensor address while changing its mask values.
+        expert_num_tokens.copy_(reduced_expert_num_tokens)
+
+        reduced_eager = executor.execute(
+            payload, "silu", None, None, False, None
+        ).fused_expert_output
+        reduced_eager = self._filter_valid_tokens(
+            reduced_eager, reduced_expert_num_tokens
+        )
+        graph.replay()
+        torch.cuda.synchronize()
+        reduced_replay = self._filter_valid_tokens(
+            graph_output.clone(), reduced_expert_num_tokens
+        )
+        torch.testing.assert_close(reduced_eager, reduced_replay, atol=0, rtol=0)
+
+        expert_num_tokens.copy_(original_expert_num_tokens)
+        graph.replay()
+        torch.cuda.synchronize()
+        restored_replay = self._filter_valid_tokens(
+            graph_output.clone(), original_expert_num_tokens
+        )
+        torch.testing.assert_close(output, restored_replay, atol=0, rtol=0)
         
         input_global_scale = weights[W.moe_w1_i_s]
         ref_output = self._generate_ref_output(
@@ -376,8 +438,6 @@ class CutedslFp4ExecutorTestBase:
             w1_global_scale,
             w2_global_scale,
         )
-        
-        output = self._filter_valid_tokens(output, payload.expert_tokens_meta.expert_num_tokens)
         
         num_local_experts = self.NUM_EXPERTS // self.EP_SIZE
         num_tokens = self.BATCH_SIZE

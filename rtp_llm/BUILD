@@ -66,13 +66,13 @@ xft_dep = select({
 
 arch_dep = select({
     "@//:using_arm": [],
-    "@//:using_cuda12_arm": [],
+    "@//:using_cuda_arm": [],
     "//conditions:default": [":decord", ":av"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
-    "@//:using_cuda12_arm": [],
+    "@//:using_cuda_arm": [],
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
@@ -241,7 +241,9 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
-        "@//:using_cuda12_arm": [],
+        "@//:using_cuda_arm": [],
+        # CUDA 13 x86 has no compatible flash-attn wheel; VIT backends use SDPA.
+        "@//:using_cuda13_x86": [],
         "//conditions:default": ["flash_attn"]
     }) + arch_dep,
 )
@@ -275,23 +277,27 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
+        # CUDA 13 lacks flashinfer-jit-cache, so first-use JIT latency is
+        # expected. Package availability is controlled in cuda13_packages.bzl.
+        "@//:using_cuda13": flashinfer + flashmla,
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
-        "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
+        "@//:using_cuda12_arm": flashinfer_with_cache + [
+            "flash-mla",
+            "fast-hadamard-transform",
+        ],
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
-        "@//:using_cuda12_9_x86": rtp_kernel,
-        "@//:using_cuda12_arm": rtp_kernel,
+        "@//:using_cuda12_9_plus": rtp_kernel,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
-        "@//:using_cuda12_9_x86": flashattn,
-        "@//:using_cuda12_arm": flashattn,
+        "@//:using_cuda12_9": flashattn,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
         "@//:using_arm": [],
-        "@//:using_cuda12_arm": [],
+        "@//:using_cuda_arm": [],
         # "//:xft_use_icx": [
         #     "xfastertransformer_devel_icx",
         # ],
@@ -302,7 +308,7 @@ py_library(
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
-        "@//:using_cuda12_arm": [],
+        "@//:using_cuda_arm": [],
         "//conditions:default": []
     }) + internal_deps(),
 )

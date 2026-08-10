@@ -29,6 +29,7 @@
 #include <cuda_runtime_api.h>
 #include <cub/cub.cuh>
 #include <cuda/atomic>
+#include "3rdparty/cub_compat.h"
 #endif
 
 #include "topkLastDim.h"
@@ -598,7 +599,7 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
 #else
     constexpr bool ENABLE_VEC = false;
 #endif
-    auto f = [in_idx_buf, out, out_idx, select_min, start_bit, kth_value_bits, num_of_kth_needed, k, p_out_cnt, 
+    auto f = [in_idx_buf, out, out_idx, select_min, start_bit, kth_value_bits, num_of_kth_needed, k, p_out_cnt,
         p_out_back_cnt, p_equal, ref_last, has_mask, mask_full_bits](T value, IdxT i)
     {
         auto const full_bits = twiddle_in(value, select_min);
@@ -1261,7 +1262,7 @@ inline std::vector<void*> calc_aligned_pointers(void const* p, std::vector<size_
 
 template <typename T, typename IdxT, int BitsPerPass, int BlockSize>
 void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, IdxT const* in_idx, int batch_size,
-    IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, bool fused_last_filter, unsigned grid_dim, 
+    IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, bool fused_last_filter, unsigned grid_dim,
     std::optional<T> mask_val, cudaStream_t stream, bool sorted = false)
 {
     static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
@@ -1404,7 +1405,7 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
 
 template <typename T, typename IdxT, int BitsPerPass, int BlockSize>
 void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T const* in, IdxT const* in_idx,
-    int batch_size, IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, std::optional<T> mask_val, 
+    int batch_size, IdxT len, IdxT k, T* out, IdxT* out_idx, bool select_min, std::optional<T> mask_val,
     cudaStream_t stream, bool sorted = false)
 {
     static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
@@ -1478,7 +1479,7 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
     check_cuda_error();
 
     air_topk_stable::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true>
-        <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k, 
+        <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k,
             topk_out, topk_out_idx, select_min, bufs, has_mask, mask_val_);
     check_cuda_error();
 
@@ -1514,7 +1515,7 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     constexpr int topk_bits = 11;
     if (len <= block_dim * items_per_thread)
     {
-        standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, 
+        standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
             static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
     }
     else
@@ -1552,47 +1553,10 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
 
 ///////////////
 
-#if USING_ROCM
-#include "efficient_topk/warp_topk.hpp"
-
-template <typename T>
-size_t rocm_efficient_topk_workspace_size(int batch_size, SizeType32 len, SizeType32 k, bool is_largest) {
-    size_t buf_size = 0;
-    if (is_largest) {
-        HipKernels::WarpSortTopk<true, T, SizeType32>(
-            nullptr, buf_size, static_cast<T const*>(nullptr),
-            batch_size, len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
-    } else {
-        HipKernels::WarpSortTopk<false, T, SizeType32>(
-            nullptr, buf_size, static_cast<T const*>(nullptr),
-            batch_size, len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
-    }
-    return buf_size;
-}
-
-template <typename T>
-void rocm_efficient_topk(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
-    T const* in, T* out_val, SizeType32* out_idx, void* workspace, hipStream_t stream) {
-    size_t buf_size = 0;
-    if (is_largest) {
-        HipKernels::WarpSortTopk<true, T, SizeType32>(
-            workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, stream);
-    } else {
-        HipKernels::WarpSortTopk<false, T, SizeType32>(
-            workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, stream);
-    }
-}
-#endif // USING_ROCM
-
 template <typename T>
 size_t invokeComputeTopkLastDimWorkspaceSize(
     SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest)
 {
-#if USING_ROCM
-    if (k <= 512) {
-        return rocm_efficient_topk_workspace_size<T>(batchSize, inputLength, k, is_largest);
-    }
-#endif
     size_t buf_size = 0;
     void* workspace = nullptr;
     T const* in = nullptr;
@@ -1621,17 +1585,15 @@ INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
 
 template <typename T>
 void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
-    std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, 
+    std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx,
     void* workspace, cudaStream_t stream)
 {
     T const* in = reinterpret_cast<T const*>(input);
     T* out_val_ = reinterpret_cast<T*>(out_val);
     SizeType32* out_idx_ = reinterpret_cast<SizeType32*>(out_idx);
 #if USING_ROCM
-    if (k <= 512) {
-        rocm_efficient_topk<T>(batchSize, inputLength, k, is_largest, in, out_val_, out_idx_, workspace, stream);
-        return;
-    }
+    // ROCm beam search always supplies mask_val, which WarpSort does not support.
+    // Keep execution and workspace sizing on the stable radix implementation.
 #endif
     size_t buf_size = 0;
     standalone_stable_radix_11bits<T, SizeType32, true>(

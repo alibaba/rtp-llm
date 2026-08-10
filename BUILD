@@ -19,6 +19,14 @@ config_setting(
     values = {"define": "using_cuda12=true"},
 )
 
+# CUDA 13 reuses the CUDA 12 base configuration and the USING_CUDA12_9 macro
+# for CUDA-12.9-or-newer capabilities. Use this setting or USING_CUDA13 when
+# code must distinguish CUDA 13 from CUDA 12.x.
+config_setting(
+    name = "using_cuda13",
+    define_values = {"using_cuda13": "true"},
+)
+
 config_setting(
     name = "using_cuda12_9_x86",
     define_values = {
@@ -27,17 +35,54 @@ config_setting(
     },
 )
 
+# Pre-12.9 CUDA configs must come through the .bazelrc chain, which supplies
+# both positive CUDA markers and explicit false values for newer variants.
+# When adding a CUDA variant, update the explicit false markers in .bazelrc;
+# bare --define invocations are unsupported because they bypass this contract.
 config_setting(
     name = "cuda_pre_12_9",
     define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
         "using_cuda12_9_x86": "false",
         "using_cuda12_arm": "false",
+        "using_cuda13": "false",
+        "using_cuda13_arm": "false",
+        "using_cuda13_x86": "false",
     },
 )
 
 config_setting(
     name = "using_cuda12_arm",
-    values = {"define": "using_cuda12_arm=true"},
+    # Name-mirrored for Havenask in 3rdparty/kmonitor/kmonitor.BUILD. Only the
+    # name is shared; this root predicate intentionally remains stricter.
+    define_values = {
+        "using_cuda12_arm": "true",
+        "using_cuda13_arm": "false",
+    },
+)
+
+config_setting(
+    name = "using_cuda13_arm",
+    # Name-mirrored for Havenask in 3rdparty/kmonitor/kmonitor.BUILD. Root BUILD
+    # and .bazelrc intentionally own the stricter specialization contract.
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13": "true",
+        "using_cuda13_arm": "true",
+        "using_cuda12_arm": "false",
+    },
+)
+
+config_setting(
+    name = "using_cuda13_x86",
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13": "true",
+        "using_cuda13_x86": "true",
+    },
 )
 
 config_setting(
@@ -74,6 +119,32 @@ selects.config_setting_group(
     match_any = [
         ":using_cuda12_9_x86",
         ":using_cuda12_arm",
+    ],
+)
+
+selects.config_setting_group(
+    name = "using_cuda12_9_plus_x86",
+    match_any = [
+        ":using_cuda12_9_x86",
+        ":using_cuda13_x86",
+    ],
+)
+
+selects.config_setting_group(
+    name = "using_cuda12_9_plus",
+    match_any = [
+        ":using_cuda12_9_x86",
+        ":using_cuda12_arm",
+        ":using_cuda13_x86",
+        ":using_cuda13_arm",
+    ],
+)
+
+selects.config_setting_group(
+    name = "using_cuda_arm",
+    match_any = [
+        ":using_cuda12_arm",
+        ":using_cuda13_arm",
     ],
 )
 

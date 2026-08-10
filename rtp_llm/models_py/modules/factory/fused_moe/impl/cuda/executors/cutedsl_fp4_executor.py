@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
     flashinfer_cutedsl_moe_masked,
+    scaled_fp4_grouped_quant,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import MoEConfigAdapter
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
@@ -20,7 +21,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.utils.model_weight import W
 
-from flashinfer import scaled_fp4_grouped_quantize
 from rtp_llm.device.device_impl import CudaImpl
 
 
@@ -199,10 +199,10 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         assert self._w2.size(2) == N // 2, f"w2 last dim should be N//2={N//2}, got {self._w2.size(2)}"
 
         if payload.expert_x.dtype is torch.bfloat16:
-            hidden_states, hidden_states_scale = scaled_fp4_grouped_quantize(
+            hidden_states, hidden_states_scale = scaled_fp4_grouped_quant(
                 payload.expert_x,
+                self.input_global_scale,
                 expert_num_tokens,
-                self.input_global_scale
             )
             hidden_states = (hidden_states, hidden_states_scale)
         else:
@@ -225,4 +225,3 @@ class CutedslFp4Executor(FusedMoeExpertExecutor):
         )
 
         return CombineForwardPayload(fused_expert_output=output)
-

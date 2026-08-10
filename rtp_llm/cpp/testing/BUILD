@@ -68,6 +68,7 @@ cc_library(
     ],
     deps = [
         ":device_test_utils",
+        "//3rdparty/trt_beam_search:trt_beam_search_header",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",
         "//rtp_llm/cpp/models:models",

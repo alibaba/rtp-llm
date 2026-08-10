@@ -175,6 +175,7 @@ def rpm_library(
         deps=[],
         header_only=False,
         tags={},
+        target_compatible_with=[],
         **kwargs):
     hdrs = [ "include/" + hdr for hdr in hdrs ]
     outs = [] + hdrs
@@ -213,17 +214,20 @@ def rpm_library(
         cmd = bash_cmd,
         visibility = ["//visibility:public"],
         tags=tags,
+        target_compatible_with=target_compatible_with,
     )
     hdrs_fg_target = name + "_hdrs_fg"
     native.filegroup(
         name = hdrs_fg_target,
         srcs = hdrs,
+        target_compatible_with=target_compatible_with,
     )
     if static_lib:
         native.filegroup(
             name = name + "_static",
             srcs = [static_lib],
             visibility = ["//visibility:public"],
+            target_compatible_with=target_compatible_with,
         )
     srcs = []
     shared_files = shared_libs + (shared_lib and [shared_lib] or [])
@@ -233,6 +237,7 @@ def rpm_library(
             name = shared_filegroup,
             srcs = shared_files,
             visibility = ["//visibility:public"],
+            target_compatible_with=target_compatible_with,
         )
         if shared_libs:
             srcs.append(shared_filegroup)
@@ -244,6 +249,7 @@ def rpm_library(
             srcs = bins,
             visibility = ["//visibility:public"],
             tags=tags,
+            target_compatible_with=target_compatible_with,
         )
 
     if static_lib == None:
@@ -255,6 +261,7 @@ def rpm_library(
             strip_include_prefix = "include",
             include_prefix = include_prefix,
             visibility = ["//visibility:public"],
+            target_compatible_with=target_compatible_with,
             **kwargs
         )
     else:
@@ -266,6 +273,7 @@ def rpm_library(
             shared_library = shared_lib,
             alwayslink=alwayslink,
             visibility = ["//visibility:public"],
+            target_compatible_with=target_compatible_with,
         )
         native.cc_library(
             name = name,
@@ -275,6 +283,7 @@ def rpm_library(
             visibility = ["//visibility:public"],
             strip_include_prefix = "include",
             include_prefix = include_prefix,
+            target_compatible_with=target_compatible_with,
             **kwargs
         )
 

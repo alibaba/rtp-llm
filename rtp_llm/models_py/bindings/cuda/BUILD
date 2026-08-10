@@ -154,7 +154,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/cuda/kernels:user_buffers",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + select({
-        "@//:using_cuda12_9": [
+        "@//:using_cuda12_9_plus": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
         "//conditions:default": [],
@@ -201,7 +201,7 @@ cc_library(
         ":cuda_bindings_base",
         ":cuda_attn_bindings_base"
     ] + select({
-        "@//:using_cuda12_9": [
+        "@//:using_cuda12_9_plus": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
         "//conditions:default": [],
