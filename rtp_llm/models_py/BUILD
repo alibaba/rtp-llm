@@ -175,6 +175,7 @@ py_library(
         "new_models/deepseek_v3/*.py",
         "new_models/deepseek_v3_mtp/*.py",
         "new_models/deepseek_vl2/*.py",
+        "new_models/llama/*.py",
         "new_models/mtp/*.py",
         "new_models/qwen2/*.py",
         "new_models/qwen2_moe/*.py",
