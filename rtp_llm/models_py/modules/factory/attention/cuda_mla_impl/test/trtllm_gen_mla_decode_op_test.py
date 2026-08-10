@@ -30,6 +30,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.trtllm_gen_mla_im
     _TRTLLM_MLA_API,
     TrtllmGenMlaDecodeImpl,
     TrtllmGenMlaDecodeOp,
+    trtllm_gen_dispatch_num_heads,
     trtllm_gen_kernel_supported,
 )
 from rtp_llm.ops import KvCacheDataType, RopeConfig
@@ -75,6 +76,12 @@ class K3Geometry:
     @property
     def scale(self) -> float:
         return (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
+
+
+class K3Tp4Geometry(K3Geometry):
+    """Kimi K3 MLA geometry after TP4 attention sharding."""
+
+    num_heads = 24
 
 
 class FakeMlaParams:
@@ -258,6 +265,12 @@ class TrtllmGenMlaDecodeOpTest(TestCase):
         op = run_case(self, self.geo, [1024] * 8, num_pages=128)
         self.assertEqual(op.backend_name, "trtllm_gen")
         self.assertEqual(op._kernel, "trtllm")
+
+    def test_tp4_head_padding(self):
+        geo = K3Tp4Geometry()
+        op = run_case(self, geo, [384, 513], num_pages=16)
+        self.assertEqual(op.num_heads, 24)
+        self.assertEqual(op._dispatch_num_heads, 32)
 
 
 @skipUnless(RUN_KERNEL, SKIP_REASON)
@@ -644,35 +657,72 @@ class TrtllmGenMlaDecodeSupportTest(TestCase):
 
 
 class TrtllmGenKernelDispatchTest(TestCase):
-    """Dispatch heuristic checks (pure Python, no GPU required).
-
-    The expected boundaries below were measured on an L20D (sm103, 148 SMs)
-    with 96 heads: shapes marked False fail kernel selection in flashinfer
-    with "The numHeadsQ/numHeadsKv is not supported".
-    """
+    """Dispatch and head-padding checks (pure Python, no GPU required)."""
 
     NUM_SMS = 148
 
-    def test_aligned_heads_always_supported(self):
-        for num_heads in (64, 128):
-            self.assertTrue(
-                trtllm_gen_kernel_supported(num_heads, 128, 32768, self.NUM_SMS)
+    def test_aligned_heads_do_not_need_padding(self):
+        dispatch = trtllm_gen_dispatch_num_heads
+        for num_heads in (8, 12, 16, 32, 64, 128):
+            self.assertEqual(
+                dispatch(num_heads, 128, 8192, self.NUM_SMS), num_heads
             )
 
-    def test_k3_tp8_reference_shape_supported(self):
-        supported = trtllm_gen_kernel_supported
-        self.assertTrue(supported(12, 128, 8192, self.NUM_SMS))
-        self.assertTrue(supported(32, 128, 8192, self.NUM_SMS))
-        self.assertFalse(supported(33, 128, 8192, self.NUM_SMS))
+    def test_k3_tp4_pads_to_next_executable_tile(self):
+        dispatch = trtllm_gen_dispatch_num_heads
+        self.assertEqual(dispatch(24, 1, 8192, self.NUM_SMS), 32)
+        self.assertEqual(dispatch(24, 128, 8192, self.NUM_SMS), 32)
+        self.assertTrue(trtllm_gen_kernel_supported(24, 128, 8192, self.NUM_SMS))
 
-    def test_unaligned_heads_boundaries(self):
-        supported = trtllm_gen_kernel_supported
-        self.assertTrue(supported(96, 1, 16384, self.NUM_SMS))
-        self.assertFalse(supported(96, 2, 16384, self.NUM_SMS))
-        self.assertTrue(supported(96, 6, 4096, self.NUM_SMS))
-        self.assertFalse(supported(96, 8, 4096, self.NUM_SMS))
-        self.assertTrue(supported(96, 24, 1024, self.NUM_SMS))
-        self.assertFalse(supported(96, 32, 1024, self.NUM_SMS))
+    def test_wide_heads_pad_only_when_keeps_kernel_needs_it(self):
+        dispatch = trtllm_gen_dispatch_num_heads
+        self.assertEqual(dispatch(96, 1, 16384, self.NUM_SMS), 96)
+        self.assertEqual(dispatch(96, 2, 16384, self.NUM_SMS), 128)
+        self.assertEqual(dispatch(96, 6, 4096, self.NUM_SMS), 96)
+        self.assertEqual(dispatch(96, 8, 4096, self.NUM_SMS), 128)
+        self.assertEqual(dispatch(96, 24, 1024, self.NUM_SMS), 96)
+        self.assertEqual(dispatch(96, 32, 1024, self.NUM_SMS), 128)
+
+    def test_cuda_graph_keeps_max_capture_dispatch_heads(self):
+        op = object.__new__(TrtllmGenMlaDecodeOp)
+        op.num_heads = 96
+        op.token_per_block = 64
+        op.use_cuda_graph = True
+        op._max_context_len = 16384
+        op._num_sms = self.NUM_SMS
+        op._dispatch_num_heads = 128
+        op._attn_output = object()
+        op._kernel = "trtllm"
+        op._ensure_trtllm_ready = mock.Mock()
+        op._metadata = SimpleNamespace(
+            plan=mock.Mock(),
+            block_tables=None,
+            seq_lens=None,
+            column_indices=None,
+            batch_size=1,
+            padded_blocks=128,
+            max_seq_len=16384,
+        )
+        params = SimpleNamespace(
+            qo_indptr_h=torch.tensor([0, 1], dtype=torch.int32),
+            kvlen_h=torch.tensor([16384], dtype=torch.int32),
+        )
+
+        op.plan(params)
+
+        self.assertEqual(
+            trtllm_gen_dispatch_num_heads(96, 1, 16384, self.NUM_SMS), 96
+        )
+        self.assertEqual(op._dispatch_num_heads, 128)
+        op._metadata.plan.assert_called_once_with(params)
+
+        empty_params = SimpleNamespace(
+            qo_indptr_h=torch.tensor([0], dtype=torch.int32),
+            kvlen_h=torch.empty(0, dtype=torch.int32),
+        )
+        with self.assertRaisesRegex(RuntimeError, "does not support"):
+            op.plan(empty_params)
+        op._metadata.plan.assert_called_once_with(params)
 
     def test_invalid_shapes_rejected(self):
         self.assertFalse(trtllm_gen_kernel_supported(0, 8, 1024, self.NUM_SMS))
@@ -680,6 +730,9 @@ class TrtllmGenKernelDispatchTest(TestCase):
         self.assertFalse(trtllm_gen_kernel_supported(96, 0, 1024, self.NUM_SMS))
         self.assertFalse(trtllm_gen_kernel_supported(96, 8, 0, self.NUM_SMS))
         self.assertFalse(trtllm_gen_kernel_supported(96, 8, 1024, 0))
+        self.assertIsNone(
+            trtllm_gen_dispatch_num_heads(129, 8, 1024, self.NUM_SMS)
+        )
 
 
 if __name__ == "__main__":

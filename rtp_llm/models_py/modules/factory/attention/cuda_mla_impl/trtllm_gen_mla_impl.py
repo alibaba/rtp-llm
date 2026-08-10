@@ -8,13 +8,13 @@ dispatches this API to the trtllm-gen MLA decode kernel, which is
 significantly faster than the FlashInfer fa2 MLA decode kernel for small and
 medium batches.
 
-The trtllm-gen dispatcher always selects its SwapsMmaAb variant for at most 32
-local query heads. Wider head counts that are not a multiple of 64 use that
-variant only while its utilization heuristic holds. This adapter mirrors those
-rules at plan time and fails an unsupported explicit request. It never silently
-falls back to FlashInfer FA2 under the ``trtllm_gen`` backend name. Kimi K3 TP8
-supplies 12 local query heads per rank, so all of its decode shapes use the
-first rule.
+The trtllm-gen dispatcher requires the local query-head count to fit within
+one selected Q tile or be an exact multiple of that tile. This adapter mirrors
+the upstream selection rules and pads the head dimension to the smallest
+executable count when needed, then slices the output back to the model's head
+count. It never silently falls back to FlashInfer FA2 under the ``trtllm_gen``
+backend name. Kimi K3 TP8 supplies 12 local heads and needs no padding; TP4
+supplies 24 and is padded to 32.
 
 The implementation reuses MlaFlashInferImplBase for RoPE, KV cache writes and
 cache store publishing; only the attention operator differs from the default
@@ -88,28 +88,10 @@ def _is_blackwell(device: Optional[torch.device] = None) -> bool:
     return major == 10
 
 
-def trtllm_gen_kernel_supported(
+def _trtllm_gen_uses_swaps_kernel(
     num_heads: int, batch_size: int, max_seq_len: int, num_sms: int
 ) -> bool:
-    """Whether the trtllm-gen MLA decode kernel can serve this shape.
-
-    MLA has one latent KV head. Up to 32 query heads are served by the
-    SwapsMmaAb generation kernel without the utilization heuristic. Wider
-    head counts that are multiples of 64 use the tileSizeQ=64 kernel. Other
-    head counts (e.g. 96) use SwapsMmaAb only while the condition below holds;
-    outside of it kernel selection fails with "The numHeadsQ/numHeadsKv is
-    not supported". These conditions mirror selectMlaGenerationKernel() and
-    useSwapsMmaAbMlaGenKernel() in flashinfer's fmhaKernels.cuh.
-    """
-    if (
-        num_heads <= 0
-        or num_heads > 128
-        or batch_size <= 0
-        or max_seq_len <= 0
-        or num_sms <= 0
-    ):
-        return False
-    if num_heads <= 32 or num_heads % 64 == 0:
+    if num_heads <= 32:
         return True
     # One CTA per token covers ceil(num_heads / 16) head tiles.
     num_ctas = batch_size * ((num_heads + 15) // 16)
@@ -118,6 +100,66 @@ def trtllm_gen_kernel_supported(
     seq_len_per_cta_kv = (max_seq_len + ctas_per_seq_kv - 1) // ctas_per_seq_kv
     return (
         seq_len_per_cta_kv <= _TRTLLM_SWAPS_MAX_SEQ_PER_CTA_KV and num_ctas <= num_sms
+    )
+
+
+def _trtllm_gen_head_count_supported(
+    num_heads: int, batch_size: int, max_seq_len: int, num_sms: int
+) -> bool:
+    if (
+        num_heads <= 0
+        or num_heads > 128
+        or batch_size <= 0
+        or max_seq_len <= 0
+        or num_sms <= 0
+    ):
+        return False
+    if _trtllm_gen_uses_swaps_kernel(
+        num_heads, batch_size, max_seq_len, num_sms
+    ):
+        tile_size_q = 8 if num_heads <= 8 else 16
+    else:
+        tile_size_q = 64
+    heads_per_cta = min(num_heads, tile_size_q)
+    return num_heads % heads_per_cta == 0
+
+
+def trtllm_gen_dispatch_num_heads(
+    num_heads: int, batch_size: int, max_seq_len: int, num_sms: int
+) -> Optional[int]:
+    """Return the smallest executable trtllm-gen query-head count.
+
+    The upstream dispatcher picks an 8-, 16- or 64-head Q tile and rejects a
+    head count larger than the tile when it is not a multiple of the tile.
+    Padding with zero-valued query heads is semantically neutral because MLA
+    heads are independent until the output projection, where the padded
+    results are discarded.
+    """
+    if (
+        num_heads <= 0
+        or num_heads > 128
+        or batch_size <= 0
+        or max_seq_len <= 0
+        or num_sms <= 0
+    ):
+        return None
+    for dispatch_heads in range(num_heads, 129):
+        if _trtllm_gen_head_count_supported(
+            dispatch_heads, batch_size, max_seq_len, num_sms
+        ):
+            return dispatch_heads
+    return None
+
+
+def trtllm_gen_kernel_supported(
+    num_heads: int, batch_size: int, max_seq_len: int, num_sms: int
+) -> bool:
+    """Whether the adapter can execute this shape, including head padding."""
+    return (
+        trtllm_gen_dispatch_num_heads(
+            num_heads, batch_size, max_seq_len, num_sms
+        )
+        is not None
     )
 
 
@@ -160,11 +202,13 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
         self._max_seq_len = 0
         self._max_context_len = max_context_len
         self._kernel = "trtllm"
+        self._dispatch_num_heads = num_heads
 
         device = torch.device("cuda", torch.cuda.current_device())
         self._device = device
         self._num_sms = torch.cuda.get_device_properties(device).multi_processor_count
         self._workspace: Optional[torch.Tensor] = None
+        self._query_padded: Optional[torch.Tensor] = None
         self._attn_output: Optional[torch.Tensor] = None
 
         self._metadata = PagedMlaDecodeMetadata(
@@ -180,22 +224,33 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
         if is_cuda_graph and max_bs > 0:
             assert self._metadata.block_tables is not None
             padded_blocks = self._metadata.block_tables.size(1)
-            supported = trtllm_gen_kernel_supported(
+            dispatch_num_heads = trtllm_gen_dispatch_num_heads(
                 num_heads, max_bs, max(max_context_len, token_per_block), self._num_sms
             )
-            if not supported:
+            if dispatch_num_heads is None:
                 raise RuntimeError(
                     "trtllm-gen MLA does not support the CUDA Graph capture shape: "
                     f"heads={num_heads}, batch={max_bs}, "
                     f"max_seq_len={max_context_len}, sms={self._num_sms}"
                 )
+            self._set_dispatch_num_heads(dispatch_num_heads)
             self._ensure_trtllm_buffers(max_bs, padded_blocks, device)
             self._ensure_trtllm_ready()
             self._attn_output = torch.empty(
-                (max_bs, num_heads, kv_lora_rank),
+                (max_bs, self._dispatch_num_heads, kv_lora_rank),
                 dtype=torch.bfloat16,
                 device=device,
             )
+            if self._dispatch_num_heads != self.num_heads:
+                self._query_padded = torch.empty(
+                    (
+                        max_bs,
+                        self._dispatch_num_heads,
+                        kv_lora_rank + qk_rope_head_dim,
+                    ),
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
 
     def _align_blocks(self, num_blocks: int) -> int:
         return self._metadata.align_blocks(num_blocks)
@@ -217,6 +272,17 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
         self._metadata.ensure_capacity(batch_size, padded_blocks)
         self._sync_metadata_views()
 
+    def _set_dispatch_num_heads(self, dispatch_num_heads: int) -> None:
+        if dispatch_num_heads == self._dispatch_num_heads:
+            return
+        if self.use_cuda_graph and self._attn_output is not None:
+            raise RuntimeError(
+                "trtllm-gen dispatch head count cannot change under CUDA Graph"
+            )
+        self._dispatch_num_heads = dispatch_num_heads
+        self._query_padded = None
+        self._attn_output = None
+
     def _ensure_trtllm_ready(self) -> None:
         if self._workspace is None:
             self._workspace = _get_trtllm_workspace(self._device)
@@ -225,7 +291,7 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
             device_index = torch.cuda.current_device()
         warmup_key = (
             device_index,
-            self.num_heads,
+            self._dispatch_num_heads,
             self.kv_lora_rank,
             self.qk_rope_head_dim,
             self.token_per_block,
@@ -248,7 +314,12 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
             device=device,
         )
         query = torch.zeros(
-            (1, 1, self.num_heads, self.kv_lora_rank + self.qk_rope_head_dim),
+            (
+                1,
+                1,
+                self._dispatch_num_heads,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+            ),
             dtype=torch.bfloat16,
             device=device,
         )
@@ -280,14 +351,29 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
             if self.use_cuda_graph
             else max_seq_len
         )
-        if not trtllm_gen_kernel_supported(
-            self.num_heads, batch_size, dispatch_max_seq_len, self._num_sms
-        ):
+        if self.use_cuda_graph and self._attn_output is not None:
+            # Graph buffers are allocated from the maximum capture shape in
+            # __init__. A smaller capture batch can select a different kernel
+            # family, but the padded head extent must remain graph-static.
+            dispatch_num_heads = self._dispatch_num_heads
+            dispatch_supported = _trtllm_gen_head_count_supported(
+                dispatch_num_heads,
+                batch_size,
+                dispatch_max_seq_len,
+                self._num_sms,
+            )
+        else:
+            dispatch_num_heads = trtllm_gen_dispatch_num_heads(
+                self.num_heads, batch_size, dispatch_max_seq_len, self._num_sms
+            )
+            dispatch_supported = dispatch_num_heads is not None
+        if not dispatch_supported or dispatch_num_heads is None:
             raise RuntimeError(
                 "trtllm-gen MLA does not support the decode shape: "
                 f"heads={self.num_heads}, batch={batch_size}, "
                 f"max_seq_len={dispatch_max_seq_len}, sms={self._num_sms}"
             )
+        self._set_dispatch_num_heads(dispatch_num_heads)
         self._kernel = "trtllm"
         self._ensure_trtllm_ready()
         self._metadata.plan(fmha_params)
@@ -349,17 +435,51 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
         self._refresh_graph_block_tables(block_table, sequence_lengths)
 
     def _ensure_output(self, num_tokens: int) -> torch.Tensor:
-        if self._attn_output is None or self._attn_output.size(0) < num_tokens:
+        if (
+            self._attn_output is None
+            or self._attn_output.size(0) < num_tokens
+            or self._attn_output.size(1) != self._dispatch_num_heads
+        ):
             if self.use_cuda_graph and self._attn_output is not None:
                 raise RuntimeError(
                     "trtllm-gen MLA output buffer cannot grow under CUDA Graph"
                 )
             self._attn_output = torch.empty(
-                (num_tokens, self.num_heads, self.kv_lora_rank),
+                (num_tokens, self._dispatch_num_heads, self.kv_lora_rank),
                 dtype=torch.bfloat16,
                 device=self._device,
             )
         return self._attn_output[:num_tokens]
+
+    def _pad_query_heads(self, query: torch.Tensor) -> torch.Tensor:
+        if self._dispatch_num_heads == self.num_heads:
+            return query
+        num_tokens = query.size(0)
+        if (
+            self._query_padded is None
+            or self._query_padded.size(0) < num_tokens
+            or self._query_padded.size(1) != self._dispatch_num_heads
+            or self._query_padded.dtype != query.dtype
+            or self._query_padded.device != query.device
+        ):
+            if self.use_cuda_graph and self._query_padded is not None:
+                raise RuntimeError(
+                    "trtllm-gen padded query buffer cannot grow or change "
+                    "dtype/device under CUDA Graph"
+                )
+            self._query_padded = torch.empty(
+                (
+                    num_tokens,
+                    self._dispatch_num_heads,
+                    self.kv_lora_rank + self.qk_rope_head_dim,
+                ),
+                dtype=query.dtype,
+                device=query.device,
+            )
+        padded = self._query_padded[:num_tokens]
+        padded.zero_()
+        padded[:, : self.num_heads].copy_(query)
+        return padded
 
     def _forward_trtllm(
         self, q_absorbed: torch.Tensor, paged_kv: torch.Tensor, num_tokens: int
@@ -373,10 +493,14 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
             else self._max_seq_len
         )
         assert self._workspace is not None
+        query = self._pad_query_heads(q_absorbed)
         output = self._ensure_output(num_tokens)
-        return _TRTLLM_MLA_API(
-            query=q_absorbed.view(
-                self._batch_size, 1, self.num_heads, q_absorbed.size(-1)
+        result = _TRTLLM_MLA_API(
+            query=query.view(
+                self._batch_size,
+                1,
+                self._dispatch_num_heads,
+                query.size(-1),
             ),
             kv_cache=paged_kv,
             workspace_buffer=self._workspace,
@@ -387,12 +511,18 @@ class TrtllmGenMlaDecodeOp(AbsorbedPagedMlaDecodeOp):
             seq_lens=self._seq_lens[: self._batch_size],
             max_seq_len=max_seq_len,
             out=output.view(
-                self._batch_size, 1, self.num_heads, self.kv_lora_rank
+                self._batch_size,
+                1,
+                self._dispatch_num_heads,
+                self.kv_lora_rank,
             ),
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=1.0,
             backend="trtllm-gen",
         )
+        return result.view(
+            self._batch_size, self._dispatch_num_heads, self.kv_lora_rank
+        )[:, : self.num_heads]
 
 
 class TrtllmGenMlaDecodeImpl(PagedMlaDecodeImplMixin, MlaFlashInferImplBase):
