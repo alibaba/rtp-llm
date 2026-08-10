@@ -1285,4 +1285,10 @@ def build_dash_error_response(
     infer.parameters["incremental_output"].int64_param = 1
     infer.parameters["error_no"].int64_param = int(error_spec.error_no)
     infer.parameters["error_msg"].string_param = error_msg
+    # DashScope api-server reads status_* as standalone parameters; without
+    # status_name it degrades every error to 500 "missing status name".
+    # error_no/error_msg above are kept for backward compatibility.
+    infer.parameters["status_code"].int64_param = int(error_spec.status_code)
+    infer.parameters["status_name"].string_param = error_spec.status_name
+    infer.parameters["status_message"].string_param = status_message
     return resp

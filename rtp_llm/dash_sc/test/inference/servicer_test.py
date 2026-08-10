@@ -232,6 +232,14 @@ def _assert_parameter_error_response(
         expected_message_part,
         payload["status_message"],
     )
+    testcase.assertEqual(infer.parameters["status_code"].int64_param, 400)
+    testcase.assertEqual(
+        infer.parameters["status_name"].string_param, "InvalidParameter"
+    )
+    testcase.assertIn(
+        expected_message_part,
+        infer.parameters["status_message"].string_param,
+    )
     testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
     testcase.assertEqual(_gen_ids(resp), [])
 

@@ -939,6 +939,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         self.assertIsInstance(payload["status_code"], int)
         self.assertEqual(payload["status_name"], "InvalidParameter")
         self.assertIn("max_new_tokens", payload["status_message"])
+        self.assertEqual(infer.parameters["status_code"].int64_param, 400)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param, "InvalidParameter"
+        )
+        self.assertIn("max_new_tokens", infer.parameters["status_message"].string_param)
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
@@ -993,6 +998,14 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         payload = json.loads(infer.parameters["error_msg"].string_param)
         self.assertEqual(payload["status_code"], 429)
         self.assertEqual(payload["status_name"], "TooManyRequests")
+        self.assertEqual(infer.parameters["status_code"].int64_param, 429)
+        self.assertEqual(
+            infer.parameters["status_name"].string_param, "TooManyRequests"
+        )
+        self.assertEqual(
+            infer.parameters["status_message"].string_param,
+            "engine task list full",
+        )
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
             for i in range(len(infer.outputs))
