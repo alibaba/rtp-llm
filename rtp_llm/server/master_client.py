@@ -20,7 +20,6 @@ route_logger = logging.getLogger("route_logger")
 SCHEDULE_PATH = "/rtp_llm/schedule"
 DEFAULT_REQUEST_TIMEOUT_SEC = 0.5
 SUCCESS_CODE = 200
-DEFAULT_REQUEST_PRIORITY = 100
 CONNECTOR_LIMIT_PER_HOST = 30
 CONNECTOR_KEEPALIVE_TIMEOUT_SEC = 30
 
@@ -217,12 +216,16 @@ class MasterClient:
         block_cache_keys: list[int],
         input: GenerateInput,
         request_id: int,
+        seq_len_hint: Optional[int] = None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
 
         request_id is frontend-generated and only used for logging.
         Only connection_failed triggers slave retry and domain fallback.
+        seq_len_hint overrides the reported seq_len when one routing call stands in for
+        more work than this single input — a batch routed as one scheduling unit reports
+        its aggregate prompt length so the master's load accounting sees the true weight.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
@@ -230,28 +233,24 @@ class MasterClient:
 
         slave_addr = None
         if self.host_service:
-            slave_addr = getattr(self.host_service, "get_slave_addr", lambda: None)()
+            slave_addr = self.host_service.get_slave_addr()
 
-        ttft_timeout_ms = getattr(
-            input.generate_config, "ttft_timeout_ms", None
-        ) or getattr(input.generate_config, "timeout_ms", None)
+        ttft_timeout_ms = (
+            input.generate_config.ttft_timeout_ms or input.generate_config.timeout_ms
+        )
         if not ttft_timeout_ms or ttft_timeout_ms <= 0:
             ttft_timeout_ms = (
                 self.master_config.master_default_timeout_ms
                 if self.master_config
                 else 3600000
             )
-        request_priority = getattr(
-            input.generate_config,
-            "traffic_reject_priority",
-            DEFAULT_REQUEST_PRIORITY,
-        )
+        request_priority = input.generate_config.traffic_reject_priority
         start = time.time()
 
         payload: Dict[str, Any] = {
             "model": "engine_service",
             "block_cache_keys": block_cache_keys,
-            "seq_len": input.prompt_length,
+            "seq_len": seq_len_hint if seq_len_hint is not None else input.prompt_length,
             "debug": False,
             "request_priority": request_priority,
             "generate_timeout": ttft_timeout_ms,

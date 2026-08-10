@@ -1,9 +1,10 @@
 package org.flexlb.httpserver;
 
-import org.flexlb.service.grace.strategy.ActiveRequestShutdownHooker;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.service.grace.GracefulOnlineService;
 import org.flexlb.service.grace.GracefulShutdownService;
+import org.flexlb.service.grace.strategy.ActiveRequestShutdownHooker;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -45,6 +46,13 @@ class AppStateHookServerTest {
     @BeforeEach
     void setUp() {
         server = new AppStateHookServer(gracefulOnlineService, gracefulShutdownService, lifecycleReporter);
+        ActiveRequestShutdownHooker.shutdownCompletedSuccessfully = false;
+    }
+
+    @AfterEach
+    void tearDown() {
+        // The flag is process-global and one case flips it to true, so leaving it set would leak
+        // into whatever runs next in the same surefire JVM.
         ActiveRequestShutdownHooker.shutdownCompletedSuccessfully = false;
     }
 

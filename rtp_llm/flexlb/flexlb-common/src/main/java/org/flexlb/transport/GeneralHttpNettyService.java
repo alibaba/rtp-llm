@@ -19,10 +19,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.FlexLBException;
+import org.flexlb.exception.HttpErrorResponseException;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.NettyUtils;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
@@ -36,6 +38,7 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Supplier;
 
 /**
  * Generic HttpNettyClient request service
@@ -63,8 +66,10 @@ public class GeneralHttpNettyService {
     }
 
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
-
-        return Mono.fromFuture(this.doRequest(request, uri, path, headers, responseClz).toFuture());
+        // Delegate rather than bridging through toFuture(), which subscribes at assembly time and
+        // would fire the request even if the returned Mono is never subscribed — the 4-arg overload
+        // above is cold, and these two must not differ in that.
+        return this.doRequest(request, uri, path, headers, responseClz);
     }
 
     public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
@@ -74,6 +79,7 @@ public class GeneralHttpNettyService {
                         .readCallback((resultHttpNettyChannelContext, httpObject)
                                 -> handleNettyMessage(resultHttpNettyChannelContext, httpObject, responseClz))
                         .errorCallback(this::handlerNettyError)
+                        .channelInactiveCallback(this::handleChannelInactive)
                         .byteDataList(new ArrayList<>(1 << 4))
                         .byteDataSize(new LongAdder())
                         .build())
@@ -112,10 +118,55 @@ public class GeneralHttpNettyService {
 
     private <Result> Mono<Result> executeHttpRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
         return Flux.<Result>create(sink -> {
-            nettyCtx.setSink(sink);
+            if (nettyCtx.installSink(sink)) {
+                // The exchange ended before the sink existed, so whoever ended it had nothing to
+                // terminate and left the duty here — along with the cause it recorded, so a read
+                // timeout or protocol error keeps its type and cause chain instead of being
+                // reported as a plain disconnect.
+                Throwable pending = nettyCtx.getPendingError();
+                sink.error(pending != null ? pending
+                        : StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                                .toException("channel closed before request could be written"));
+                return;
+            }
             DefaultFullHttpRequest request = buildRequest(nettyCtx, uri, path, headers);
-            nettyCtx.getChannel().writeAndFlush(request);
+            // A write onto a channel that died between the connect and here fails its promise and
+            // fires nothing else: the peer is already gone, so no inbound frame and no read timeout
+            // will ever terminate the sink.
+            nettyCtx.getChannel().writeAndFlush(request).addListener((ChannelFutureListener) future -> {
+                if (!future.isSuccess()) {
+                    failSink(nettyCtx, () -> StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                            .toException("failed to write request, uri=" + uri + ", path=" + path, future.cause()));
+                }
+            });
         }).last();
+    }
+
+    /**
+     * The peer disconnected mid-exchange. Both aggregation paths (200 and non-200) terminate the
+     * sink only on {@link LastHttpContent}, which a disconnected peer will never send, and the
+     * read-timeout handler stops firing once the channel is inactive — so without failing the sink
+     * here the caller would wait forever.
+     */
+    private <Result> void handleChannelInactive(HttpNettyChannelContext<Result> nettyCtx) {
+        failSink(nettyCtx, () -> StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                .toException("channel closed before the response completed"));
+    }
+
+    /**
+     * Fails the sink if this caller wins the exclusive termination claim, so the several paths that
+     * can end an exchange (disconnect, netty error, failed write) cannot double-terminate it or,
+     * worse, each assume another one did. The error is built only by the winner — the losing path
+     * is the common one (a completed exchange closes its own channel) and must stay allocation-free.
+     */
+    private <Result> void failSink(HttpNettyChannelContext<Result> nettyCtx, Supplier<Throwable> error) {
+        FluxSink<Result> sink = nettyCtx.claimTermination(error);
+        if (sink == null || sink.isCancelled()) {
+            // Either the exchange had already ended, or this caller won the claim before the sink
+            // existed — in which case claimTermination recorded the cause for whoever installs it.
+            return;
+        }
+        sink.error(error.get());
     }
 
     private <Result> DefaultFullHttpRequest buildRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
@@ -137,12 +188,15 @@ public class GeneralHttpNettyService {
 
     private <Result> void handlerNettyError(HttpNettyChannelContext<Result> nettyCtx, Throwable e) {
         if (e instanceof ReadTimeoutException) {
-            nettyCtx.getSink().error(StatusEnum.READ_TIME_OUT.toException());
+            failSink(nettyCtx, StatusEnum.READ_TIME_OUT::toException);
         } else {
-            nettyCtx.getSink()
-                    .error(StatusEnum.NETTY_CATCH_ERROR.toException("sync load balance unexpected netty " + "error " + "happened, exception: ",
-                            e));
+            failSink(nettyCtx, () -> StatusEnum.NETTY_CATCH_ERROR.toException("sync load balance unexpected netty "
+                    + "error " + "happened, exception: ", e));
         }
+        // Closing is this method's own duty and must happen whether or not the sink was ours to
+        // fail. A sink installed after the claim was taken is not covered by the channelInactive
+        // this close triggers — that one finds the claim gone and does nothing. It is installSink
+        // reporting the exchange already finished that hands termination to the installing thread.
         nettyCtx.getChannel().close();
     }
 
@@ -175,9 +229,14 @@ public class GeneralHttpNettyService {
         // If status code is not 200, indicates abnormal situation, parse chunk and return error
         if (httpStatusCode != StatusEnum.SUCCESS.getCode()) {
             NettyUtils.cacheBuffer(nettyCtx, obj);
+            // Wait for the whole error body before failing; a chunked non-200 response would
+            // otherwise be truncated to its first chunk, corrupting upstream business-error JSON.
+            if (!(obj instanceof LastHttpContent)) {
+                return;
+            }
             String body = NettyUtils.readBody(nettyCtx);
             NettyUtils.finishNettyWithException(nettyCtx,
-                    new RuntimeException("http error, httpStatusCode=" + httpStatusCode + ", body=" + body));
+                    new HttpErrorResponseException(httpStatusCode, body));
             return;
         }
 

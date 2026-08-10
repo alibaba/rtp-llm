@@ -32,3 +32,15 @@ py_test(
         "//rtp_llm/server:server",
     ],
 )
+
+py_test(
+    name = "batch_routing_test",
+    srcs = ["batch_routing_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+    ],
+)

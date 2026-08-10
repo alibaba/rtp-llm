@@ -2,7 +2,6 @@ package org.flexlb.dao.master;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections4.MapUtils;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.util.Logger;
@@ -27,7 +26,7 @@ public class WorkerStatus {
     private int port;
     private String site;
     private Long availableConcurrency;
-    private boolean alive;
+    private volatile boolean alive;
     private AtomicLong availableKvCacheTokens = new AtomicLong();
     private AtomicLong usedKvCacheTokens = new AtomicLong();
     private CacheStatus cacheStatus;

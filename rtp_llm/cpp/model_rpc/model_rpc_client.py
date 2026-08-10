@@ -566,34 +566,25 @@ class ModelRpcClient(object):
             input_py.generate_config.timeout_ms
         )
         input_py.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-        input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
 
-        address_list = self._addresses
-
-        for role_addr in input_py.generate_config.role_addrs:
-            if (
-                (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                or role_addr.role == RoleType.PDFUSION
-                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
-            ):
-                if role_addr.ip != "":
-                    address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
-                    break
+        target = self._role_addr_target(input_py)
+        address_list = [target] if target is not None else self._addresses
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_py.request_id}")
+        target_address = address_list[input_py.request_id % len(address_list)]
         logging.debug(
-            f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_py.request_id}] send to address: {target_address}"
         )
 
+        # Built once, after the target is known: trans_input validates the generate_config and
+        # copies every field into a fresh PB, so building it twice doubles that per-request cost
+        # on the streaming hot path for a value nothing in between reads.
         input_pb = trans_input(input_py)
 
         try:
-            # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
-            logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
@@ -615,7 +606,68 @@ class ModelRpcClient(object):
             if response_iterator:
                 response_iterator.cancel()
 
+    def _role_addr_target(self, input_py: GenerateInput) -> Optional[str]:
+        """Pre-assigned backend for this input, or None if it carries no usable role_addr.
+
+        Same role-matching rule as :meth:`enqueue` — a caller that routed the request (the master,
+        or the dispatcher stamping ``generate_config.role_addrs``) has already chosen the backend,
+        and honouring it is the whole point of that choice.
+        """
+        for role_addr in input_py.generate_config.role_addrs:
+            if (
+                (self._decode_entrance and role_addr.role == RoleType.DECODE)
+                or role_addr.role == RoleType.PDFUSION
+                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
+            ):
+                if role_addr.ip != "":
+                    return role_addr.ip + ":" + str(role_addr.grpc_port)
+        return None
+
+    def _select_batch_address(self, inputs: list[GenerateInput]) -> str:
+        """Target for one batch RPC.
+
+        A batch RPC goes to a single backend, so every input in it must agree on the target. The
+        dispatcher stamps one chunk with one target and the chunk shares a single generate_config,
+        so agreement holds by construction; a disagreement means the caller mis-assembled the batch
+        and silently sending it to the first input's backend would route the rest somewhere they
+        were not scheduled for.
+        """
+        targets = {self._role_addr_target(inp) for inp in inputs}
+        if targets == {None}:
+            # Nothing pre-assigned: fall back to the static data-parallel address list.
+            if not self._addresses:
+                raise ValueError(
+                    f"No address found for batch request: {inputs[0].request_id}"
+                )
+            return self._addresses[inputs[0].request_id % len(self._addresses)]
+        if len(targets) > 1:
+            # Typed as INVALID_PARAMS to name the fault: a mixed batch is a caller assembly
+            # error. Note /batch_infer currently has no exception handler above this, so the
+            # wire response is Starlette's bare 500 either way — the type buys an accurate
+            # error_code for whoever adds one, and a message without a traceback stapled on.
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                f"batch request: [{len(inputs)} items] has inconsistent pre-assigned "
+                f"backends {sorted(str(t) for t in targets)}; one batch RPC targets one backend",
+            )
+        return targets.pop()
+
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        """Send one chunk as a single BatchGenerateCall and return one output per input, in order.
+
+        Error semantics are chunk-level all-or-nothing. The C++ BatchGenerateCall returns a
+        per-item result vector (1:1 with ``inputs``: a failed item carries ``error_info`` while
+        its siblings still carry a ``final_output``), but this client raises on the first
+        ``error_info`` and discards the rest. That is deliberate, not an oversight of the
+        server's per-item contract: the consumers (``pipeline.batch_infer``,
+        ``openai_endpoint``) and the single-request ``enqueue`` path have no per-item error
+        slot in a ``list[GenerateOutputs]``, and the dispatcher already provides partial-failure
+        at chunk granularity (a failed chunk becomes a placeholder while sibling chunks survive).
+        Turning this into per-item partial return is a larger change that must also teach both
+        consumers to represent a single failed item. ``BatchEnqueueDecodeSemanticsTest`` locks
+        this behavior (raise-on-first-error, ``inputs[i]`` <-> ``results[i]`` alignment, and
+        ``grpc.RpcError`` translation).
+        """
         if not inputs:
             return []
 
@@ -628,7 +680,7 @@ class ModelRpcClient(object):
             input_pb = trans_input(inp)
             batch_input_pb.inputs.append(input_pb)
 
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        target_address = self._select_batch_address(inputs)
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )
@@ -639,6 +691,17 @@ class ModelRpcClient(object):
             response = await stub.BatchGenerateCall(
                 batch_input_pb, timeout=grpc_timeout_seconds
             )
+
+            if len(response.results) != len(inputs):
+                # C++ BatchGenerateCall is contractually 1:1 (one result per input). A shorter
+                # result vector would otherwise make the loop below return a silently-truncated
+                # list (dropping trailing inputs with no error); a longer one would IndexError on
+                # inputs[i]. Fail typed instead so a server-side contract break surfaces loudly.
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    f"batch request: [{len(inputs)} items] got {len(response.results)} result(s); "
+                    f"server violated the 1:1 per-item contract",
+                )
 
             results = []
             for i, result_pb in enumerate(response.results):
