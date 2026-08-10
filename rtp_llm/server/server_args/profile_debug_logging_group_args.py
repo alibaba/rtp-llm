@@ -101,6 +101,6 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         env_name="ENABLE_MODEL_INPUTS_LOG",
         bind_to=(profiling_debug_config, "enable_model_inputs_log"),
         type=str2bool,
-        default=False,
-        help="控制是否打印模型输入日志。可选值: True (启用), False (禁用)。默认为 False",
+        default=True,
+        help="控制是否打印模型输入日志。可选值: True (启用), False (禁用)。默认为 True",
     )
