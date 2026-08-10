@@ -36,11 +36,12 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 event = std::move(event)]() mutable {
         auto resolve_store_stride = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
             size_t stride_bytes = fallback_stride;
-            if (!tensor.defined() || tensor.dim() != 2) {
+            if (!tensor.defined() || tensor.dim() < 2) {
                 return stride_bytes;
             }
             const size_t row_stride_bytes = static_cast<size_t>(tensor.stride(0)) * tensor.element_size();
-            const int    layer_tokens_per_block = captured_kv_cache.seq_size_per_block;
+
+            const int layer_tokens_per_block = captured_kv_cache.seq_size_per_block;
             RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
                                     "LayerKVCache.seq_size_per_block must be positive for cache-store %s write",
                                     name);
@@ -48,14 +49,21 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             const size_t store_tokens = captured_cache_store.tokens_per_block;
             RTP_LLM_CHECK_WITH_INFO(store_tokens > 0, "cache-store tokens_per_block must be positive");
 
-            if (store_tokens >= layer_tokens) {
-                RTP_LLM_CHECK_WITH_INFO(store_tokens % layer_tokens == 0,
-                                        "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%zu "
-                                        "for cache-store %s write",
-                                        store_tokens,
-                                        layer_tokens,
-                                        name);
+            if (captured_kv_cache.cache_store_tensor_is_kernel_block_view && store_tokens >= layer_tokens) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    store_tokens % layer_tokens == 0,
+                    "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%zu "
+                    "for cache-store %s write",
+                    store_tokens,
+                    layer_tokens,
+                    name);
                 return row_stride_bytes * (store_tokens / layer_tokens);
+            }
+
+            if (store_tokens >= layer_tokens) {
+                // dim(0) already indexes physical blocks. This is the layout
+                // used by independent MLA pools and raw Linear/KDA storage.
+                return row_stride_bytes;
             }
 
             // CP compact STATE/SWA rows can cover cp_size canonical cache-key
@@ -71,19 +79,25 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         };
 
         size_t kv_block_stride_bytes = captured_cache_store.kv_block_stride_bytes;
-        if (captured_kv_cache.kv_cache_base.defined() && captured_kv_cache.kv_cache_base.dim() == 2) {
-            kv_block_stride_bytes =
-                resolve_store_stride(captured_kv_cache.kv_cache_base, kv_block_stride_bytes, "kv");
+        // Independent hybrid-pool tensors can be exposed as a 3-D physical
+        // block view (for example [blocks, tokens_per_block,
+        // bytes_per_token]).  Their row stride is group-local and can differ
+        // from the cache-store-wide fallback.  Segmented linear writes also
+        // require the tensor-derived stride even for other tensor ranks.
+        if (captured_kv_cache.kv_cache_base.defined()
+            && (captured_kv_cache.kv_cache_base.dim() == 2 || captured_kv_cache.kv_cache_base.dim() == 3
+                || !captured_kv_cache.cache_store_segment_sizes.empty())) {
+            kv_block_stride_bytes = resolve_store_stride(captured_kv_cache.kv_cache_base, kv_block_stride_bytes, "kv");
         }
         size_t kv_scale_stride_bytes = captured_cache_store.kv_scale_stride_bytes;
-        if (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.dim() == 2) {
+        if (captured_kv_cache.kv_scale_base.defined()
+            && (captured_kv_cache.kv_scale_base.dim() == 2 || captured_kv_cache.kv_scale_base.dim() == 3)) {
             kv_scale_stride_bytes =
                 resolve_store_stride(captured_kv_cache.kv_scale_base, kv_scale_stride_bytes, "scale");
         }
 
-        const size_t layer_tokens_per_block = static_cast<size_t>(captured_kv_cache.seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
-                                "LayerKVCache.seq_size_per_block must be positive for cache-store write");
+        const size_t store_tokens_per_block = captured_cache_store.tokens_per_block;
+        RTP_LLM_CHECK_WITH_INFO(store_tokens_per_block > 0, "cache-store physical tokens_per_block must be positive");
 
         CacheStoreInputs inputs{captured_input_lengths,
                                 captured_prefix_lengths,
@@ -96,7 +110,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                 captured_cache_store.request_id,
                                 captured_cache_store.request_pd_separation,
                                 captured_cache_store.cache_keys,
-                                layer_tokens_per_block,
+                                store_tokens_per_block,
                                 kv_block_stride_bytes,
                                 kv_scale_stride_bytes,
                                 captured_cache_store.pd_separation,
@@ -116,6 +130,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.numel() > 0) ?
                 captured_kv_cache.kv_scale_base :
                 torch::Tensor();
+        kv_cache_info.linear_cache_segment_sizes = captured_kv_cache.cache_store_segment_sizes;
         execWriteCacheStore(inputs, kv_cache_info, captured_cache_store.mla_kvcache, captured_cache_store.cache_store);
     };
 

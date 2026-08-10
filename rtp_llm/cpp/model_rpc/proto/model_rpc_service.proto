@@ -332,6 +332,19 @@ message GenerateRequestPB {
     // cp_size physical blocks per virtual block. Default 0 keeps backward
     // compatibility (treated as 1 by decode side).
     int32 prefill_cp_size = 13;
+    // Physical and kernel-page cache geometry used by Prefill. Decode validates
+    // these fields before loading cache; this stage intentionally supports only
+    // equal Prefill/Decode physical block sizes.
+    int32 prefill_seq_size_per_block = 14;
+    int32 prefill_kernel_seq_size_per_block = 15;
+    // Attention TP size, independent of MoE EP size. peer_addrs are ordered by
+    // this TP rank and must contain exactly this many entries.
+    int32 prefill_attention_tp_size = 16;
+    // Cache dtypes are serialized as rtp_llm::DataType integer values.  K3
+    // Decode validates these before loading segmented KDA/MLA state.
+    int32 prefill_cache_dtype = 17;
+    int32 prefill_ssm_state_dtype = 18;
+    int32 prefill_conv_state_dtype = 19;
 }
 
 // in tp case, decode master broadcast to decode worker

@@ -2,9 +2,36 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <algorithm>
+#include <cstdlib>
+#include <cstdint>
 #include <torch/torch.h>
 
 namespace rtp_llm {
+namespace {
+
+bool kimiK3PdTraceLogEnabled() {
+    const char* value = std::getenv("KIMI_K3_DEBUG");
+    return value != nullptr && std::string(value) == "1";
+}
+
+uint64_t fnv1aPrefix(const void* data, size_t size, size_t* hashed_size) {
+    constexpr size_t   kMaxPrefixBytes = 64 * 1024;
+    constexpr uint64_t kOffsetBasis    = 14695981039346656037ULL;
+    constexpr uint64_t kPrime          = 1099511628211ULL;
+
+    const size_t prefix_size = std::min(size, kMaxPrefixBytes);
+    const auto*  bytes       = static_cast<const uint8_t*>(data);
+    uint64_t     hash        = kOffsetBasis;
+    for (size_t i = 0; i < prefix_size; ++i) {
+        hash ^= bytes[i];
+        hash *= kPrime;
+    }
+    *hashed_size = prefix_size;
+    return hash;
+}
+
+}  // namespace
 
 RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util):
     memory_util_(memory_util) {}
@@ -166,6 +193,16 @@ std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::
 
     if (!copyBlock(new_block, block)) {
         return nullptr;
+    }
+    if (kimiK3PdTraceLogEnabled() && block->key.rfind("kv_model_id_", 0) == 0) {
+        size_t         hashed_size = 0;
+        const uint64_t hash        = fnv1aPrefix(new_block->addr.get(), new_block->len, &hashed_size);
+        RTP_LLM_LOG_INFO("[K3_PD_TRACE] event=cache_store_host_copy key=%s bytes=%u prefix_bytes=%zu "
+                         "prefix_fnv1a64=%016llx",
+                         block->key.c_str(),
+                         block->len,
+                         hashed_size,
+                         static_cast<unsigned long long>(hash));
     }
     return new_block;
 }
