@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/model_rpc/CacheTransferBlockSelector.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillPeerSelector.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -618,35 +619,26 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                     load_context.block_ids_by_group.size());
             RTP_LLM_CHECK_WITH_INFO(load_context.block_ids_by_group[gid] != nullptr, "null group_block: gid=%zu", gid);
             const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-            auto        block_num = block_ids.size();
             size_t      model_id  = maga_init_params_.model_id;
 
-            // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
-            std::vector<size_t> block_pos_list;
-            block_pos_list.reserve(block_num);
-            if (use_hybrid && block_num > 0) {
-                CacheGroupType group_type = CacheGroupType::FULL;
-                if (layer_id < cache_config.layer_to_group_id.size() && !cache_config.group_types.empty()) {
-                    const int gid = cache_config.layer_to_group_id[layer_id];
-                    if (gid >= 0 && static_cast<size_t>(gid) < cache_config.group_types.size()) {
-                        group_type = cache_config.group_types[static_cast<size_t>(gid)];
-                    }
+            CacheGroupType group_type = CacheGroupType::FULL;
+            if (use_hybrid) {
+                if (gid >= cache_config.group_types.size()) {
+                    const auto error_msg = "missing cache group type for group " + std::to_string(gid);
+                    return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
                 }
-                if (group_type == CacheGroupType::LINEAR) {
-                    block_pos_list.push_back(block_num - 1);
-
-                } else {
-                    for (size_t block_pos = 0; block_pos < block_num; ++block_pos) {
-                        block_pos_list.push_back(block_pos);
-                    }
-                }
-            } else {
-                for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; ++block_pos) {
-                    block_pos_list.push_back(block_pos);
-                }
+                group_type = cache_config.group_types[gid];
+            }
+            auto block_pos_list = selectCacheTransferBlockPositions(
+                group_type, block_ids, load_context.cache_keys.size(), load_context.reuse_block_size);
+            if (!block_pos_list.ok()) {
+                const auto error_msg = "invalid cache transfer layout for model layer " + std::to_string(layer_id)
+                                       + ": " + block_pos_list.status().ToString();
+                RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
+                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
             }
 
-            for (size_t block_pos : block_pos_list) {
+            for (size_t block_pos : *block_pos_list) {
                 auto cache_key = makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                 // FT_LOG_DEBUG("large model load cache_key %s", cache_key.c_str());
                 auto block_id = block_ids[block_pos];
@@ -729,40 +721,30 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         RTP_LLM_CHECK_WITH_INFO(
                             load_context.block_ids_by_group[gid] != nullptr, "null mtp group_block: gid=%zu", gid);
                         const auto& block_ids = load_context.block_ids_by_group[gid]->blocks();
-                        auto        block_num = block_ids.size();
                         size_t      model_id  = mtp_base_model_id;
 
                         // Use per-module global_layer_ids for address lookup.
                         const int global_layer_id = mtp_cache_cfg.global_layer_ids[0][layer_id];
 
-                        // Hybrid cache: Linear group only needs the last block; Full group needs all blocks.
-                        std::vector<size_t> block_pos_list;
-                        block_pos_list.reserve(block_num);
-                        if (mtp_use_hybrid && block_num > 0) {
-                            CacheGroupType group_type = CacheGroupType::FULL;
-                            if (layer_id < mtp_cache_cfg.layer_to_group_id.size()
-                                && !mtp_cache_cfg.group_types.empty()) {
-                                const int gid = mtp_cache_cfg.layer_to_group_id[layer_id];
-                                if (gid >= 0 && static_cast<size_t>(gid) < mtp_cache_cfg.group_types.size()) {
-                                    group_type = mtp_cache_cfg.group_types[static_cast<size_t>(gid)];
-                                }
+                        CacheGroupType group_type = CacheGroupType::FULL;
+                        if (mtp_use_hybrid) {
+                            if (gid >= mtp_cache_cfg.group_types.size()) {
+                                const auto error_msg = "missing draft cache group type for group " + std::to_string(gid);
+                                return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
                             }
-                            if (group_type == CacheGroupType::LINEAR) {
-                                block_pos_list.push_back(block_num - 1);
-
-                            } else {
-                                for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num;
-                                     ++block_pos) {
-                                    block_pos_list.push_back(block_pos);
-                                }
-                            }
-                        } else {
-                            for (size_t block_pos = load_context.reuse_block_size; block_pos < block_num; ++block_pos) {
-                                block_pos_list.push_back(block_pos);
-                            }
+                            group_type = mtp_cache_cfg.group_types[gid];
+                        }
+                        auto block_pos_list = selectCacheTransferBlockPositions(
+                            group_type, block_ids, load_context.cache_keys.size(), load_context.reuse_block_size);
+                        if (!block_pos_list.ok()) {
+                            const auto error_msg = "invalid cache transfer layout for draft layer "
+                                                   + std::to_string(layer_id) + ": "
+                                                   + block_pos_list.status().ToString();
+                            RTP_LLM_LOG_WARNING("%s", error_msg.c_str());
+                            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error_msg);
                         }
 
-                        for (size_t block_pos : block_pos_list) {
+                        for (size_t block_pos : *block_pos_list) {
                             auto cache_key =
                                 makeCacheKey(model_id, std::to_string(load_context.cache_keys[block_pos]), layer_id);
                             auto       block_id       = block_ids[block_pos];

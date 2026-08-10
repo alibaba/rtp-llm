@@ -51,6 +51,30 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "cache_transfer_block_selector_test",
+    srcs = ["CacheTransferBlockSelectorTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:cache_transfer_block_selector",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "cache_transfer_block_selector_allocation_test",
+    srcs = ["CacheTransferBlockSelectorAllocationTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_group",
+        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+        "//rtp_llm/cpp/model_rpc:cache_transfer_block_selector",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",
