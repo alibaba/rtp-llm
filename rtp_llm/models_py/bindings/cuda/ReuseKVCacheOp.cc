@@ -28,6 +28,24 @@ void ReuseKVCacheIndexedBatched(torch::Tensor final_compressed_kv,
     const int k_pe_dim          = k_pe.size(1);
     const int kv_dim            = compressed_kv_dim + k_pe_dim;
 
+    TORCH_CHECK(kv_cache_base.dim() == 3,
+                "kv_cache_base must be [num_blocks, tokens_per_block, kv_dim]");
+    TORCH_CHECK(kv_cache_base.size(1) == tokens_per_block,
+                "kv_cache_base tokens per block mismatch: ",
+                kv_cache_base.size(1),
+                " != ",
+                tokens_per_block);
+    TORCH_CHECK(kv_cache_base.size(2) >= kv_dim,
+                "kv_cache_base entry is too small: ",
+                kv_cache_base.size(2),
+                " < ",
+                kv_dim);
+    TORCH_CHECK(kv_cache_base.stride(2) == 1,
+                "kv_cache_base innermost KV dimension must be contiguous");
+
+    const int64_t kv_cache_block_stride = kv_cache_base.stride(0);
+    const int64_t kv_cache_entry_stride = kv_cache_base.stride(1);
+
     StreamType stream = GET_CURRENT_STREAM();
 
     invokeReuseKVCacheIndexedBatched<__nv_bfloat16>(reinterpret_cast<__nv_bfloat16*>(final_compressed_kv.data_ptr()),
@@ -43,7 +61,8 @@ void ReuseKVCacheIndexedBatched(torch::Tensor final_compressed_kv,
                                                     compressed_kv_dim,
                                                     k_pe_dim,
                                                     tokens_per_block,
-                                                    kv_dim,
+                                                    kv_cache_block_stride,
+                                                    kv_cache_entry_stride,
                                                     stream);
 }
 

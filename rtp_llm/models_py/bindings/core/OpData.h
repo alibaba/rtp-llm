@@ -45,6 +45,13 @@ struct GptModelInputs {
     torch::Tensor         input_lengths_host_for_log;
     torch::Tensor         sequence_lengths_host_for_log;
     torch::Tensor         prefix_lengths_host_for_log;
+    // Pinned host mirrors retained at gather time. Performance-sensitive
+    // Python attention paths consume these instead of synchronously copying
+    // CUDA cache metadata back to the host during model forward.
+    torch::Tensor kv_cache_block_id_host;
+    torch::Tensor kv_cache_kernel_block_id_host;
+    torch::Tensor kv_cache_layer_to_group_host;
+    torch::Tensor kv_cache_group_types_host;
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -177,6 +184,11 @@ struct KvCacheInfo {
     torch::Tensor kv_cache_buffer;
     // Optional scale buffer for kv cache quantization (int8/fp8). If set, it should match kv_cache_buffer layout.
     torch::Tensor kv_scale_buffer;
+    // A linear cache source block is contiguous locally, but its per-head
+    // slices land in non-contiguous regions when prefill/decode TP differ.
+    // Store each logical segment under a distinct key so CacheStore can
+    // scatter it into the destination allocator's matching segments.
+    std::vector<size_t> linear_cache_segment_sizes;
 };
 
 struct CacheStoreInputs {

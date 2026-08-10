@@ -93,7 +93,8 @@ __global__ void ReuseKVCacheIndexedBatchedKernel(T*             final_compressed
                                                  int            compressed_kv_dim,
                                                  int            k_pe_dim,
                                                  int            tokens_per_block,
-                                                 int            kv_dim) {
+                                                 int64_t        kv_cache_block_stride,
+                                                 int64_t        kv_cache_entry_stride) {
 
     // 优化1: 使用 shared memory 缓存 batch 信息（对于小 batch 数量）
     __shared__ int32_t s_batch_info[64 * 4];  // 最多支持 64 个 batch
@@ -217,8 +218,8 @@ __global__ void ReuseKVCacheIndexedBatchedKernel(T*             final_compressed
         // 如果越界会导致未定义行为，但添加日志可以帮助调试
         const int cache_block_idx = reuse_cache_page_indice[reuse_cache_index];
 
-        const T* cache_block = kv_cache_base + cache_block_idx * tokens_per_block * kv_dim;
-        const T* cache_token = cache_block + token_in_block * kv_dim;
+        const T* cache_block = kv_cache_base + cache_block_idx * kv_cache_block_stride;
+        const T* cache_token = cache_block + token_in_block * kv_cache_entry_stride;
 
         // 向量化复制 compressed_kv 部分
         T* dst_compressed = final_compressed_kv + tid * compressed_kv_dim;
@@ -349,7 +350,8 @@ void invokeReuseKVCacheIndexedBatched(T*             final_compressed_kv,
                                       int            compressed_kv_dim,
                                       int            k_pe_dim,
                                       int            tokens_per_block,
-                                      int            kv_dim,
+                                      int64_t        kv_cache_block_stride,
+                                      int64_t        kv_cache_entry_stride,
                                       cudaStream_t   stream) {
 
     if (total_final_len == 0) {
@@ -380,7 +382,8 @@ void invokeReuseKVCacheIndexedBatched(T*             final_compressed_kv,
                                                                            compressed_kv_dim,
                                                                            k_pe_dim,
                                                                            tokens_per_block,
-                                                                           kv_dim);
+                                                                           kv_cache_block_stride,
+                                                                           kv_cache_entry_stride);
 
 #if USING_CUDA
     check_cuda_value(cudaPeekAtLastError());
@@ -403,7 +406,8 @@ void invokeReuseKVCacheIndexedBatched(T*             final_compressed_kv,
                                                       int,                                                             \
                                                       int,                                                             \
                                                       int,                                                             \
-                                                      int,                                                             \
+                                                      int64_t,                                                         \
+                                                      int64_t,                                                         \
                                                       cudaStream_t);
 
 #if USING_CUDA

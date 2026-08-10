@@ -176,6 +176,17 @@ class LayerKVCache:
     @kv_scale_base.setter
     def kv_scale_base(self, arg0: torch.Tensor) -> None: ...
     @property
+    def cache_store_segment_sizes(self) -> list[int]:
+        """Contiguous source segment sizes for asymmetric-TP cache-store transfer."""
+        ...
+
+    @cache_store_segment_sizes.setter
+    def cache_store_segment_sizes(self, arg0: list[int]) -> None: ...
+    @property
+    def cache_store_tensor_is_kernel_block_view(self) -> bool: ...
+    @property
+    def group_id(self) -> int: ...
+    @property
     def layer_id(self) -> int:
         """
         Global layer id
@@ -246,9 +257,12 @@ class PyAttentionInputs:
     dtype: TypeMeta
     input_lengths: torch.Tensor
     is_cuda_graph: bool
+    is_fake_stream: bool
     is_prefill: bool
     is_s_padded: bool
     kv_cache_block_id_device: torch.Tensor
+    kv_cache_block_id_host_by_group: list[torch.Tensor]
+    kv_cache_kernel_block_id_host_by_group: list[torch.Tensor]
     kv_cache_kernel_block_id_device_by_group: list[torch.Tensor]
     kv_cache_block_id_host: torch.Tensor
     kv_cache_kernel_block_id_device: torch.Tensor

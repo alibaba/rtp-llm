@@ -52,7 +52,8 @@ void invokeReuseKVCacheIndexedBatched(
     int            compressed_kv_dim,
     int            k_pe_dim,
     int            tokens_per_block,
-    int            kv_dim,  // compressed_kv_dim + k_pe_dim
+    int64_t        kv_cache_block_stride,
+    int64_t        kv_cache_entry_stride,
     cudaStream_t   stream);
 
 }  // namespace rtp_llm
