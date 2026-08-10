@@ -65,7 +65,7 @@ def whl_deps():
             "pyrsmi==0.2.0",
             # Exception: amd_smi ships as a tar (not a wheel), so it cannot be
             # resolved via the PEP 503 index and stays as a direct URL.
-            "amdsmi@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/amd-smi/amd_smi.tar",
+            "amdsmi@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/amd-smi/amd_smi.tar#sha256=8a350c562cf6c63d562eef27b2511a8ea67adc056662c6cde85ab1312ecb22ff",
             "aiter==0.1.17.dev79+g2570b35f9.d20260623",
             "triton==3.7.0+amd.rocm7.2.0.gitd0d77a509",
             "triton-kernels==1.0.0+amd.rocm7.2.0.gitd0d77a509",
@@ -78,7 +78,7 @@ def whl_deps():
         # Keep each in lock-step with its lockfile: 2.9.0 <-> requirements_lock_cuda12_arm.txt,
         # 2.8.0 <-> requirements_lock_torch_gpu_cuda12_9.txt. Bump both together only
         # after regenerating the corresponding lockfile.
-        "@rtp_llm//:using_cuda12_arm": ["torch==2.9.0+cu129", "torchvision==0.24.0"],
+        "@rtp_llm//:using_cuda12_arm": ["torch==2.9.0+cu129", "torchvision==0.24.0+cu129"],
         # Default covers x86 cuda12_9 only.
         "//conditions:default": ["torch==2.8.0+cu129", "torchvision==0.23.0+cu129"],
     })

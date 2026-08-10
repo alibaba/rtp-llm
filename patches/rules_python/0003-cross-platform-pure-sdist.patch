@@ -1,0 +1,120 @@
+diff --git python/private/pypi/whl_installer/wheel_installer.py python/private/pypi/whl_installer/wheel_installer.py
+index 1499404..3b0a4d9 100644
+--- python/private/pypi/whl_installer/wheel_installer.py
++++ python/private/pypi/whl_installer/wheel_installer.py
+@@ -17,6 +17,7 @@ import errno
+ import glob
+ import json
+ import os
++import platform
+ import re
+ import subprocess
+ import sys
+@@ -22,7 +22,7 @@ from pathlib import Path
+ from tempfile import NamedTemporaryFile
+ from typing import Dict, List, Optional, Set, Tuple
+
+-from pip._vendor.packaging.utils import canonicalize_name
++from pip._vendor.packaging.utils import canonicalize_name, parse_wheel_filename
+
+ from python.private.pypi.whl_installer import arguments, namespace_pkgs, wheel
+
+@@ -51,6 +52,57 @@ def _configure_reproducible_wheels() -> None:
+         os.environ["PYTHONHASHSEED"] = "0"
+
+
++def _host_platform_pip_args(extra_pip_args: List[str]) -> List[str]:
++    """Drops target-only args before building a pure-Python sdist on the host."""
++    target_options = ("--abi", "--implementation", "--platform", "--python-version")
++    result = []
++    skip_value = False
++    for arg in extra_pip_args:
++        if skip_value:
++            skip_value = False
++            continue
++        if arg in target_options:
++            skip_value = True
++            continue
++        if any(arg.startswith(option + "=") for option in target_options):
++            continue
++        if arg == "--only-binary=:all:":
++            continue
++        result.append(arg)
++    return result
++
++
++def _target_platform_matches_host(extra_pip_args: List[str]) -> bool:
++    target_platforms = []
++    read_platform_value = False
++    for arg in extra_pip_args:
++        if read_platform_value:
++            target_platforms.append(arg)
++            read_platform_value = False
++        elif arg == "--platform":
++            read_platform_value = True
++        elif arg.startswith("--platform="):
++            target_platforms.append(arg.split("=", 1)[1])
++
++    if not target_platforms:
++        return True
++    host_arch = platform.machine().lower() or "x86_64"
++    aliases = {
++        "amd64": "x86_64",
++        "arm64": "aarch64",
++    }
++    host_arch = aliases.get(host_arch, host_arch)
++    return any(host_arch in target for target in target_platforms)
++
++
++def _require_pure_python_wheel(whl: Path) -> None:
++    _, _, _, tags = parse_wheel_filename(whl.name)
++    if not tags or any(tag.abi != "none" or tag.platform != "any" for tag in tags):
++        raise RuntimeError(
++            "cross-platform sdist fallback produced a platform-specific wheel: %s" % whl.name
++        )
++
++
+ def _parse_requirement_for_extra(
+     requirement: str,
+ ) -> Tuple[Optional[str], Optional[Set[str]]]:
+@@ -177,7 +229,39 @@ def main() -> None:
+         env = os.environ.copy()
+         env.update(deserialized_args["environment"])
+         # Assumes any errors are logged by pip so do nothing. This command will fail if pip fails
+-        subprocess.run(pip_args, check=True, env=env)
++        try:
++            subprocess.run(pip_args, check=True, env=env)
++        except subprocess.CalledProcessError:
++            if not args.download_only:
++                raise
++            print(
++                "Target-platform wheel download failed; trying a pure-Python sdist build",
++                file=sys.stderr,
++            )
++            host_pip_args = (
++                [sys.executable, "-m", "pip"]
++                + (["--isolated"] if args.isolated else [])
++                + ["wheel", "--no-deps"]
++                + _host_platform_pip_args(deserialized_args["extra_pip_args"])
++                + ["--no-cache-dir", "--no-binary=:all:"]
++                + ["-r", requirement_file.name]
++            )
++            host_matches_target = _target_platform_matches_host(
++                deserialized_args["extra_pip_args"]
++            )
++            fallback_env = env
++            if not host_matches_target:
++                fallback_env = env.copy()
++                fallback_env["CC"] = "false"
++            subprocess.run(host_pip_args, check=True, env=fallback_env)
++            built_wheels = [Path(path) for path in glob.glob("*.whl")]
++            if len(built_wheels) != 1:
++                raise RuntimeError(
++                    "cross-platform sdist fallback expected exactly one wheel, got %d"
++                    % len(built_wheels)
++                )
++            if not host_matches_target:
++                _require_pure_python_wheel(built_wheels[0])
+     finally:
+         try:
+             os.unlink(requirement_file.name)

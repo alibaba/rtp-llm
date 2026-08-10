@@ -42,7 +42,7 @@ uv pip compile requirements_torch_gpu_cuda12_9.txt --output-file requirements_lo
 **CUDA 12 ARM (aarch64):**
 
 ```bash
-uv pip compile requirements_cuda12_arm.txt --output-file requirements_lock_cuda12_arm.txt --python-platform aarch64-manylinux_2_28 --python-version 3.10 --generate-hashes --emit-index-url --index-strategy unsafe-best-match --index-url https://mirrors.aliyun.com/pypi/simple/ --extra-index-url https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/ --extra-index-url https://download.pytorch.org/whl/cu129/
+uv pip compile requirements_cuda12_arm.txt --output-file requirements_lock_cuda12_arm.txt --python-platform aarch64-manylinux_2_28 --python-version 3.10 --generate-hashes --emit-index-url --only-binary flash-attn --emit-build-options --index-strategy unsafe-best-match --index-url https://mirrors.aliyun.com/pypi/simple/ --extra-index-url https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/ --extra-index-url https://download.pytorch.org/whl/cu129/
 ```
 
 **ROCm x86_64:**
@@ -132,9 +132,51 @@ whl_reqs = [
 
 Note: For hardware-related packages, you need to branch and select the appropriate packages based on hardware type in the whl_deps function in the `arch_config/arch_select.bzl` file.
 
+## Installing a published CUDA 12.9 wheel
+
+The CUDA wheel local version is `+cuda129`, so publishing changes the filename
+from the former `rtp_llm-<version>+cuda121-...whl` form to
+`rtp_llm-<version>+cuda129-...whl`. The Bazel target remains
+`//rtp_llm:rtp_llm_cuda12` temporarily for downstream compatibility; consumers
+must not infer the CUDA version from that target name.
+
+The wheel's hardware dependencies are intentionally hosted outside public PyPI.
+Install it with all three unified indexes available:
+
+```bash
+python3 -m pip install \
+  --index-url https://mirrors.aliyun.com/pypi/simple/ \
+  --extra-index-url https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/ \
+  --extra-index-url https://download.pytorch.org/whl/cu129/ \
+  ./rtp_llm-<version>+cuda129-*.whl
+```
+
+Because lock generation currently uses uv's `unsafe-best-match` strategy across
+these indexes, `deps/check_lock_consistency.py` keeps an explicit allowlist for
+critical custom-wheel versions and verifies the lock index headers, Bazel wheel
+requirements, torch archives, and hashes. A deliberate custom-wheel upgrade must
+update the input pin, regenerated lockfile, and checker allowlist together.
+
 ## Appendix: Publishing custom wheels to the OSS simple index
 
 Custom wheels referenced by the requirements files (flash-attn, deep-ep, deep-gemm, etc.) are served by the PEP 503 simple index hosted on the OSS bucket: `https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/`. Any wheel **must** pass the validation below before being uploaded to that index; otherwise pip/uv will silently discard it during index-based resolution.
+
+### ARM parity publication gate
+
+Align an ARM pin with x86 only after an aarch64 wheel for the exact package
+version and source revision is available from the public OSS index. Publication
+has two owners:
+
+1. The package owner builds the wheel in the target CUDA, Python, and PyTorch
+   environment and validates it on ARM hardware.
+2. The OSS index maintainer validates the wheel metadata, uploads the artifact,
+   refreshes the package's PEP 503 page, and verifies an index-only download.
+
+Changing a wheel's platform tag or METADATA can make an already compatible
+artifact indexable. It must never be used to present a wheel built from a
+different source revision as the x86-aligned version. Keep the ARM requirement
+on its last validated version until both steps above are complete, then update
+the input pin, lockfile, and critical-pin allowlist in the same change.
 
 ### Validate METADATA version consistency (mandatory)
 

@@ -30,6 +30,23 @@ PIP_CUDA_EXTRA_ARGS = PIP_BASE_ARGS + [
     "--extra-index-url=https://download.pytorch.org/whl/cu129/",
 ]
 
+# Resolve the ARM lock by target platform even when Bazel runs on x86_64. The
+# current artifact set spans manylinux2014_aarch64 (cuSPARSELt),
+# manylinux_2_17_aarch64 (safetensors), manylinux_2_25_aarch64 (CUPTI),
+# manylinux_2_27_aarch64 (cuDNN), manylinux_2_28_aarch64 (torch), and the
+# generic linux_aarch64 tag (flash-attn), so every tag is intentional.
+PIP_CUDA_ARM_EXTRA_ARGS = PIP_CUDA_EXTRA_ARGS + [
+    "--platform=manylinux2014_aarch64",
+    "--platform=manylinux_2_17_aarch64",
+    "--platform=manylinux_2_25_aarch64",
+    "--platform=manylinux_2_27_aarch64",
+    "--platform=manylinux_2_28_aarch64",
+    "--platform=linux_aarch64",
+    "--python-version=3.10",
+    "--implementation=cp",
+    "--only-binary=:all:",
+]
+
 # ROCm uses only the base indexes (aliyun + OSS). The ROCm torch stack
 # (torch==2.9.1+git*, torchvision, triton, aiter, ...) is hosted on the OSS
 # simple index, so download.pytorch.org/whl/rocm7.2/ is redundant — and that
@@ -90,7 +107,8 @@ def pip_deps():
         name = "pip_cuda12_arm_torch",
         requirements_lock = "@rtp_deps//:requirements_lock_cuda12_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_CUDA_EXTRA_ARGS,
+        extra_pip_args = PIP_CUDA_ARM_EXTRA_ARGS,
+        download_only = True,
         timeout = 3600,
         quiet = False,
     )

@@ -32,7 +32,7 @@ pillow-heif
 portalocker
 prettytable
 protobuf==4.25
-psutil
+psutil==7.2.2
 py-spy
 # Pinned to keep aarch64 in lockstep with x86/ROCm: the uv resolver used for the
 # cuda12_arm lock otherwise settled on older pydantic/pydantic-core than pip-compile
@@ -49,7 +49,7 @@ sentencepiece==0.2.0
 setproctitle
 setuptools==60.5.0
 sympy
-thrift
+thrift==0.24.0
 tiktoken==0.7.0
 timm==0.9.12
 # Aligned with upstream (which the model/tokenizer code targets). The tokenizer

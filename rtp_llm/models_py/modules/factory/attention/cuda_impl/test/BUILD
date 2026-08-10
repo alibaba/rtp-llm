@@ -43,7 +43,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20"],
@@ -80,7 +80,7 @@ py_test(
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20", "cuda12_9"],
@@ -102,7 +102,7 @@ py_test(
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["RTX_5000_PRO"],
@@ -124,7 +124,7 @@ py_test(
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20", "cuda12_9"],
@@ -146,7 +146,7 @@ py_test(
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["RTX_5000_PRO"],
@@ -180,7 +180,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20"],
@@ -197,7 +197,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["RTX_5000_PRO"],
@@ -215,7 +215,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20"],
@@ -232,7 +232,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20"],

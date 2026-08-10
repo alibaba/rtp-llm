@@ -4,7 +4,7 @@
 # 0.1.17 declares a dependency on flydsl==0.2.1, so flydsl (consumed by
 # //rtp_llm/models_py/triton_kernels:fla) is pulled in transitively; no explicit pin.
 aiter==0.1.17.dev79+g2570b35f9.d20260623
-amdsmi @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/amd-smi/amd_smi.tar ; platform_machine == "x86_64"
+amdsmi @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/amd-smi/amd_smi.tar#sha256=8a350c562cf6c63d562eef27b2511a8ea67adc056662c6cde85ab1312ecb22ff ; platform_machine == "x86_64"
 fast-safetensors==0.7.3+torch2.1.2.rocm ; platform_machine == "x86_64"
 fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64"
 pyrsmi==0.2.0

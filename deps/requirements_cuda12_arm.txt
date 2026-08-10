@@ -10,11 +10,16 @@ flash-attn==2.8.3
 flash-attn-3==3.0.0b1
 # NOTE: arm flash-mla (+47c35a7) is built from a different commit than x86 (+ca58fed); align to the same source commit when rebuilding.
 flash-mla==1.0.0+47c35a7
+# NOTE: flashinfer-python and flashinfer-cubin 0.6.9 are platform-independent,
+# but the public OSS index lacks flashinfer-jit-cache 0.6.9 for aarch64. Keep
+# the triplet on 0.6.6 until that matching JIT-cache wheel is published.
 flashinfer-cubin==0.6.6
 flashinfer-jit-cache==0.6.6
 flashinfer-python==0.6.6
 mysql-connector-python
-nvidia-cutlass-dsl==4.4.1
+# 4.4.2 and its libs-base dependency both publish aarch64 wheels. FlashInfer
+# 0.6.6 accepts cutlass-dsl >=4.3.4, so this can align before the JIT rebuild.
+nvidia-cutlass-dsl==4.4.2
 # rtp-kernel is built per-arch, so this aarch64 wheel carries a different build
 # timestamp than the x86_64 one in requirements_torch_gpu_cuda12_9.txt. Keep both
 # pins on the SAME source commit (currently 125c29e5) and bump + regenerate both
@@ -22,4 +27,4 @@ nvidia-cutlass-dsl==4.4.1
 # rtp-kernel builds across architectures.
 rtp-kernel==0.1.0+125c29e5.20260422155252
 torch==2.9.0+cu129
-torchvision==0.24.0
+torchvision==0.24.0+cu129

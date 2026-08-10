@@ -8,6 +8,7 @@ on:
       - "deps/**"
       - "arch_config/arch_select.bzl"
       - "rtp_llm/BUILD"
+      - ".github/workflows/deps-lock-consistency.yml"
 
 permissions:
   contents: read
@@ -29,3 +30,6 @@ jobs:
 
       - name: Check source/lock consistency
         run: python3 deps/check_lock_consistency.py
+
+      - name: Test lock checker parsers
+        run: python3 -m unittest deps/check_lock_consistency_test.py

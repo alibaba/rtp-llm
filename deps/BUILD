@@ -49,6 +49,8 @@ py_library(
 # `uv pip compile` (the exact command is recorded in each lockfile header; see
 # docs/references/Update-whl-Deps.md). These targets are kept only so the
 # internal BUILD can keep referencing them; do not use them to refresh locks.
+# deps/check_lock_consistency.py rejects any resulting non-uv lockfile header,
+# so an accidental `.update` run cannot pass the dependency CI.
 compile_pip_requirements(
     name = "requirements_torch_gpu_cuda12_9",
     src = "requirements_torch_gpu_cuda12_9.txt",

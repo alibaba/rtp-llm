@@ -21,6 +21,7 @@ def git_deps():
             "@rtp_llm//patches/rules_python:0001-add-extra-data.patch",
             "@rtp_llm//patches/rules_python:0002-remove-import-from-rules_cc.patch",
             "@rtp_llm//patches/rules_python:0001-xx.patch",
+            "@rtp_llm//patches/rules_python:0003-cross-platform-pure-sdist.patch",
         ],
     )
 
