@@ -194,7 +194,7 @@ private:
                                                        uint32_t           layer_num,
                                                        size_t             kv_block_stride_bytes,
                                                        size_t             kv_scale_stride_bytes,
-                                                       KVCacheSpecPtr     spec,
+                                                       std::shared_ptr<const KVCacheSpec> spec,
                                                        const CacheConfig& cache_config,
                                                        uint32_t           local_kv_head_num,
                                                        size_t             seq_size_per_block,
