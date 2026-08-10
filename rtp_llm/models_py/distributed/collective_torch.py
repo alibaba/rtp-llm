@@ -645,6 +645,12 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     return _group_map[group_key]
 
 
+def get_process_group(group: Group) -> torch.distributed.ProcessGroup:
+    """Return RTP's initialized process group for fused collective operators."""
+
+    return _get_group(group)
+
+
 # 需要注意：调用 send/recv 时如果某些 rank 没有操作，就没有对应的 ncclgroupstart/ncclgroupend
 # 这样直接使用 torch 的 send/recv 是错误的。
 def send(tensor: torch.Tensor, dst: int, group: Group) -> None:
@@ -687,7 +693,9 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
@@ -764,6 +772,153 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
+def all_gather_into(
+    tensor: torch.Tensor,
+    output: torch.Tensor,
+    group: Group,
+) -> torch.Tensor:
+    """All-gather into a caller-owned contiguous output buffer."""
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    expected_shape = [world_size * tensor.shape[0]] + list(tensor.shape[1:])
+    if (
+        list(output.shape) != expected_shape
+        or output.dtype != tensor.dtype
+        or output.device != tensor.device
+        or not tensor.is_contiguous()
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            "all_gather_into input/output mismatch: "
+            f"input={tuple(tensor.shape)}, output={tuple(output.shape)}, "
+            f"expected={tuple(expected_shape)}"
+        )
+    if world_size <= 1:
+        output.copy_(tensor)
+        return output
+    torch.distributed.all_gather_into_tensor(output, tensor, group=process_group)
+    return output
+
+
+def all_to_all_single(
+    tensor: torch.Tensor,
+    group: Group,
+    *,
+    output: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Exchange equal contiguous dim-0 shards across a process group.
+
+    Kimi K3's Prefill KDA A2A path explicitly packs its destination-major
+    payload before calling this helper.  Accepting an optional reusable output
+    buffer keeps the measured forward free of allocator traffic.
+    """
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size <= 1:
+        if output is None:
+            return tensor
+        output.copy_(tensor)
+        return output
+    if tensor.ndim == 0 or tensor.shape[0] % world_size:
+        raise ValueError(
+            "all_to_all_single requires dim0 divisible by group size: "
+            f"shape={tuple(tensor.shape)}, world_size={world_size}"
+        )
+    if not tensor.is_contiguous():
+        raise ValueError(
+            "all_to_all_single requires a pre-packed contiguous input tensor"
+        )
+    if output is None:
+        output = torch.empty_like(tensor)
+    elif (
+        output.shape != tensor.shape
+        or output.dtype != tensor.dtype
+        or output.device != tensor.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            "all_to_all_single reusable output must match input shape/dtype/device "
+            "and be contiguous"
+        )
+    torch.distributed.all_to_all_single(output, tensor, group=process_group)
+    return output
+
+
+def reduce_scatter(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Reduce and scatter equal contiguous dim-0 shards.
+
+    Kimi K3 Sequence Parallel uses this after the attention output projection:
+    every TP rank contributes a partial ``[tokens, hidden]`` tensor and keeps
+    only its contiguous ``[tokens / tp, hidden]`` rows.
+    """
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size <= 1:
+        return tensor
+    if tensor.ndim == 0 or tensor.shape[0] % world_size:
+        raise ValueError(
+            "reduce_scatter requires dim0 divisible by group size: "
+            f"shape={tuple(tensor.shape)}, world_size={world_size}"
+        )
+    send = tensor.contiguous()
+    output = torch.empty(
+        [send.shape[0] // world_size] + list(send.shape[1:]),
+        dtype=send.dtype,
+        device=send.device,
+    )
+    torch.distributed.reduce_scatter_tensor(
+        output,
+        send,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
+    )
+    return output
+
+
+def reduce_scatter_padded(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Reduce-scatter dim-0 after zero-padding it to the group size.
+
+    Autoregressive decode schedules the number of *currently active* streams,
+    which is commonly smaller than TP and need not divide TP.  NCCL
+    ``reduce_scatter_tensor`` still requires equal receive shapes on every
+    rank.  Padding here is therefore a collective-layout detail only: callers
+    must trim the matching all-gather back to the original logical token count.
+    """
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size <= 1:
+        return tensor
+    if tensor.ndim == 0:
+        raise ValueError("reduce_scatter_padded requires a tensor with dim0")
+    padded_tokens = ((int(tensor.shape[0]) + world_size - 1) // world_size) * world_size
+    if padded_tokens != tensor.shape[0]:
+        padding = tensor.new_zeros(
+            [padded_tokens - tensor.shape[0]] + list(tensor.shape[1:])
+        )
+        tensor = torch.cat((tensor, padding), dim=0)
+    return reduce_scatter(tensor, group)
+
+
+def all_gather_trim(
+    tensor: torch.Tensor, logical_tokens: int, group: Group
+) -> torch.Tensor:
+    """All-gather equal padded shards and trim dim-0 to real tokens."""
+
+    if logical_tokens < 0:
+        raise ValueError(f"logical_tokens must be non-negative, got {logical_tokens}")
+    gathered = all_gather(tensor, group)
+    if logical_tokens > gathered.shape[0]:
+        raise ValueError(
+            "logical token count exceeds gathered rows: "
+            f"logical={logical_tokens}, gathered={gathered.shape[0]}"
+        )
+    return gathered.narrow(0, 0, logical_tokens)
+
+
 def barrier(group: Group) -> None:
     """Barrier all ranks in the group.
 
@@ -785,5 +940,10 @@ __all__ = [
     "broadcast",
     "all_reduce",
     "all_gather",
+    "all_gather_into",
+    "all_gather_trim",
+    "all_to_all_single",
+    "reduce_scatter",
+    "reduce_scatter_padded",
     "barrier",
 ]

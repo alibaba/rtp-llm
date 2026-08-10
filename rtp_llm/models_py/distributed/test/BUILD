@@ -1,3 +1,13 @@
+py_test(
+    name = "fused_all_gather_matmul_unit_test",
+    srcs = ["fused_all_gather_matmul_unit_test.py"],
+    deps = [
+        "//rtp_llm/models_py/distributed:fused_all_gather_matmul",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
 py_test (
     name = "deepep_test",
     srcs = ["deepep_test.py"],
