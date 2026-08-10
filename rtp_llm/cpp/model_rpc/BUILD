@@ -43,6 +43,12 @@ cc_library(
 )
 
 cc_library(
+    name = "prefill_peer_selector",
+    hdrs = ["PrefillPeerSelector.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
@@ -50,12 +56,16 @@ cc_library(
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h"],
+        exclude = [
+            "PrefillPeerSelector.h",
+            "RPCPool.h",
+        ],
     ),
     visibility = ["//visibility:public"],
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
+        ":prefill_peer_selector",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",

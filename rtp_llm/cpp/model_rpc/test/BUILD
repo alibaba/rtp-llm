@@ -40,6 +40,17 @@ cc_binary(
     ],
 )
 
+cc_test(
+    name = "prefill_peer_selector_test",
+    srcs = ["PrefillPeerSelectorTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:prefill_peer_selector",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/cpp/models:models",

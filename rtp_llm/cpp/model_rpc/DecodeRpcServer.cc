@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillPeerSelector.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/LockFreeThreadPool.h"
@@ -230,15 +231,13 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_partition_count(1);
     request.set_partition_id(0);
 
-    // D >= P
-    if (resource_.workers.size() % peer_addrs.size() == 0) {
-        int part_cnt = resource_.workers.size() / peer_addrs.size();
-        request.add_peer_addrs(peer_addrs[index / part_cnt]);
-    } else {
-        // P >= D, load multi block of prefill
-        int group_num = peer_addrs.size() / resource_.workers.size();
-        request.add_peer_addrs(peer_addrs[index * group_num]);
-    }
+    const auto peer_index = selectMlaPrefillPeerIndex(
+        load_context.request_id,
+        maga_init_params_.parallelism_config.dp_rank,
+        static_cast<size_t>(index),
+        resource_.workers.size(),
+        peer_addrs.size());
+    request.add_peer_addrs(peer_addrs[peer_index]);
     for (auto& cache_key : load_context.cache_keys) {
         request.add_cache_keys(cache_key);
     }
