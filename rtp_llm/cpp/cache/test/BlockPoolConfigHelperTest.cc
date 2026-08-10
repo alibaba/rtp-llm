@@ -124,7 +124,7 @@ TEST(BlockPoolConfigHelperTest, MTPSelectsRealGroupAndAccumulatesMultipleOffsets
                                                                     /*kernel_tokens_per_block=*/2,
                                                                     /*scale_stride_bytes=*/64));
     auto placeholder = makeMhaSpec("placeholder", 8, DataType::TYPE_BF16, 1, 1);
-    auto real_spec   = second->specForGroup(0);
+    auto real_spec   = makeMlaSpec("default", 8, DataType::TYPE_BF16, 4, 4);
     second->fromGroupedSpecs({placeholder, real_spec},
                              {{}, {0, 1}},
                              {CacheGroupType::FULL, CacheGroupType::FULL},
@@ -178,12 +178,13 @@ TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithMismatchedBlockNum) {
 }
 
 TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutLayerOwningGroup) {
-    auto score_config = makeSparseMlaConfig(2, 4, 4, 4, 32);
-    auto no_layers    = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 4, 4, 2, 128));
-    no_layers->setLayerIdsForGroup(0, {});
-    score_config.mtp_sub_configs = {no_layers};
-    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
-                               "no cache group containing layers");
+    auto no_layers     = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 4, 4, 2, 128));
+    auto no_layer_spec = makeMlaSpec("default", 4, DataType::TYPE_BF16, 4, 4);
+    expectRuntimeErrorContains(
+        [&no_layers, &no_layer_spec] {
+            no_layers->fromGroupedSpecs({no_layer_spec}, {{}}, {CacheGroupType::FULL}, {"default"});
+        },
+        "has no cache group");
 }
 
 TEST(BlockPoolConfigHelperTest, MTPWithoutScaleKeepsContiguousOffsets) {
