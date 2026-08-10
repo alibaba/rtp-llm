@@ -1,7 +1,11 @@
 # BUILD for rtp_llm/dash_sc: Python frontend gRPC (same pattern as model_rpc).
 load("//bazel:arch_select.bzl", "requirement")
 
-requirement(["grpcio"])
+requirement([
+    "grpcio",
+    "jsonschema",
+    "xgrammar",
+])
 
 # Scripts and data to be packaged with the wheel (dash_sc gRPC client).
 filegroup(
@@ -9,6 +13,12 @@ filegroup(
     srcs = [
         "grpc_client_run.sh",
     ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "xgrammar_core_dump_control",
+    srcs = ["inference/core_dump_control.py"],
     visibility = ["//visibility:public"],
 )
 
@@ -25,6 +35,7 @@ py_library(
         "json_format_e2e_smoke.py",
         "inference/__init__.py",
         "inference/__main__.py",
+        "inference/grammar_validator.py",
         "inference/servicer.py",
         "proxy/__init__.py",
         "proxy/__main__.py",
@@ -40,11 +51,19 @@ py_library(
     data = [":grpc_client_scripts"],
     visibility = ["//visibility:public"],
     deps = [
+        ":xgrammar_core_dump_control",
         "//rtp_llm/server:server",
         ":grpcio",
+        ":jsonschema",
+        ":xgrammar",
         "//rtp_llm/access_logger:access_logger",
+        "//rtp_llm:config",
         "//rtp_llm/dash_sc/proto:predict_v2_py_proto",
+        "//rtp_llm:frontend",
         "//rtp_llm/metrics:metrics",
+        "//rtp_llm:orjson",
+        "//rtp_llm:sentencepiece",
+        "//rtp_llm:tiktoken",
         "//rtp_llm:utils",
     ],
 )
@@ -62,6 +81,40 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "grammar_validator_test",
+    srcs = ["test/inference/grammar_validator_test.py"],
+    data = ["//:th_transformer_config"],
+    main = "test/inference/grammar_validator_test.py",
+    deps = [":dash_sc_grpc_server"],
+    imports = [],
+    exec_properties = {"gpu": "A10"},
+)
+
+py_test(
+    name = "core_dump_control_test",
+    srcs = ["test/inference/core_dump_control_test.py"],
+    main = "test/inference/core_dump_control_test.py",
+    deps = [":xgrammar_core_dump_control"],
+)
+
+py_test(
+    name = "grammar_validator_core_dump_test",
+    srcs = ["test/inference/grammar_validator_core_dump_test.py"],
+    data = ["//:th_transformer_config"],
+    main = "test/inference/grammar_validator_core_dump_test.py",
+    tags = [
+        "local",
+        "manual",
+        "no-remote",
+    ],
+    deps = [
+        ":dash_sc_grpc_server",
+        ":xgrammar",
+        ":xgrammar_core_dump_control",
+    ],
 )
 
 py_test(
@@ -123,4 +176,22 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     imports = [],
     exec_properties = {"gpu": "A10"},
+)
+
+py_binary(
+    name = "grammar_validation_smoke",
+    srcs = ["grammar_validation_smoke.py"],
+    main = "grammar_validation_smoke.py",
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_library(
+    name = "grammar_validation_smoke_lib",
+    srcs = ["grammar_validation_smoke.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":dash_sc_grpc_server",
+        "//rtp_llm:testlib",
+    ],
 )

@@ -77,6 +77,43 @@ TEST(GrammarLogitsProcessorTest, ProcessMasksDisallowedTokens) {
     EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
 }
 
+TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceReportsRejectedToken) {
+    auto backend  = makeBackend();
+    auto compiled = backend
+                        .compileNow({"json",
+                                     R"({
+  "$ref": "#/definitions/Self",
+  "definitions": {
+    "Self": {"$ref": "#/definitions/Self"}
+  }
+})"})
+                        .compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher   = backend.createMatcher(compiled, false, std::nullopt);
+    bool reported  = false;
+    auto processor = std::make_shared<GrammarLogitsProcessor>(
+        matcher,
+        /*eos_token_id=*/0,
+        [&reported](ErrorCode error_code, const std::string& message, bool) {
+            reported =
+                error_code == ErrorCode::INVALID_PARAMS && message.find("parser rejected token") != std::string::npos;
+        });
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+    processor->process(inputs, 0, 1);
+
+    for (int token_id = 0; token_id < 128; ++token_id) {
+        EXPECT_EQ(inputs.logits[0][token_id].item<float>(), BaseLogitsProcessor::neg_inf);
+    }
+
+    processor->updateStatus(torch::tensor({{static_cast<int32_t>('{')}}, torch::kInt32), 1);
+    EXPECT_TRUE(reported);
+    EXPECT_FALSE(processor->isSpecVerifyEligible());
+}
+
 TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesMatcherToTerminal) {
     auto backend  = makeBackend();
     auto compiled = backend.compileNow({"regex", "a"}).compiled;
@@ -573,6 +610,60 @@ TEST(ReasoningGrammarLogitsProcessorTest, BudgetForceCloseThenGrammar) {
     EXPECT_GT(inputs.logits[0][static_cast<int>('a')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(processor.acceptedTokenLen(), 3);
+}
+
+TEST(ReasoningGrammarLogitsProcessorTest, SingleTokenCloseAllowsEndBeforeAndAfterCommit) {
+    auto backend  = makeBackend();
+    auto compiled = backend.compileNow({"regex", "x"}).compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher = backend.createMatcher(compiled, /*require_reasoning=*/false, std::nullopt);
+    ReasoningGrammarLogitsProcessor processor(matcher,
+                                              /*eos_token_id=*/0,
+                                              /*max_thinking_tokens=*/1,
+                                              {static_cast<int>('<')},
+                                              {static_cast<int>('x')},
+                                              /*input_length=*/0);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('b')}}, torch::kInt32), 1);
+
+    SamplerInputs inputs;
+    inputs.logits           = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask    = torch::zeros({1}, torch::kBool);
+    inputs.input_lengths    = torch::tensor({0}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({1}, torch::kInt32);
+    inputs.vocab_size       = 128;
+    processor.process(inputs, 0, 1);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('x')].item<float>(), 1.0f);
+
+    inputs.logits           = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.sequence_lengths = torch::tensor({2}, torch::kInt32);
+    processor.process(inputs, 0, 1);
+    EXPECT_GT(inputs.logits[0][static_cast<int>('x')].item<float>(), BaseLogitsProcessor::neg_inf);
+
+    const size_t W               = SpecLogitsProcessor::bitmaskWordCount(128);
+    auto         accepted_tokens = [&](int32_t token_id) {
+        std::vector<int32_t> draft = {token_id};
+        std::vector<int32_t> bitmask(2 * W, SpecLogitsProcessor::kBitmaskAllowAll);
+
+        SpecLogitsProcessorRequest request;
+        request.draft_tokens       = draft.data();
+        request.propose_step       = 1;
+        request.bitmask_cpu_out    = bitmask.data();
+        request.bitmask_size_int32 = W;
+        request.vocab_size         = 128;
+        return processor.tryAcceptAndFillBitmask(request);
+    };
+    EXPECT_EQ(accepted_tokens(static_cast<int32_t>('x')), 1);
+
+    processor.updateStatus(torch::tensor({{static_cast<int32_t>('x')}}, torch::kInt32), 1);
+    inputs.logits = torch::zeros({1, 128}, torch::kFloat32);
+    processor.process(inputs, 0, 1);
+
+    EXPECT_GT(inputs.logits[0][static_cast<int>('x')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(inputs.logits[0][static_cast<int>('<')].item<float>(), BaseLogitsProcessor::neg_inf);
+    EXPECT_EQ(accepted_tokens(static_cast<int32_t>('<')), 0);
+    EXPECT_EQ(accepted_tokens(static_cast<int32_t>('x')), 1);
 }
 
 TEST(LogitsProcessorFactoryTest, GrammarThinkingCreatesReasoningGrammarAndSkipsThinkMode) {

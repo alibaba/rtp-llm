@@ -40,6 +40,10 @@ public:
         std::shared_ptr<torch::Event>      ready_event;
         std::shared_ptr<torch::Event>      consumed_event;
         bool                               has_active_processor = false;
+        // Processors skipped because isSpecVerifyEligible() was false at build
+        // time (e.g. grammar already reported an error on that stream). Their
+        // mask rows stay all-allow and their cap stays at propose_step.
+        size_t                             skipped_ineligible_processors = 0;
         std::vector<SpecLogitsProcessorId> applied_processors;
 
         // Keep H2D sources alive until ready_event has completed. The runner
@@ -54,7 +58,11 @@ public:
     LaunchResult buildInline(const LaunchTask& task);
 
 private:
-    void ensureBuffersFit(size_t total_streams, int propose_step, size_t vocab_size, size_t bitmask_words);
+    void ensureBuffersFit(size_t total_streams,
+                          size_t active_streams,
+                          int    propose_step,
+                          size_t vocab_size,
+                          size_t bitmask_words);
     void materializeDraftTokensToCpu(const LaunchTask& task);
     void unpackMergedBitmaskToVocabMask(const torch::Tensor& mask_cpu,
                                         size_t               rows,
@@ -62,11 +70,18 @@ private:
                                         size_t               bitmask_words);
 
 private:
+    struct CpuArtifactSlot {
+        torch::Tensor                 mask;
+        torch::Tensor                 cap;
+        std::shared_ptr<torch::Event> ready_event;
+    };
+
     torch::Stream copy_stream_;
     torch::Tensor draft_tokens_cpu_;
     torch::Tensor processor_bitmask_cpu_;
     torch::Tensor merged_bitmask_cpu_;
     torch::Tensor spec_cap_cpu_;
+    std::vector<CpuArtifactSlot> cpu_artifact_slots_;
 };
 
 }  // namespace rtp_llm

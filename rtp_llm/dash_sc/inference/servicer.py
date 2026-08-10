@@ -14,6 +14,7 @@ coroutine automatically.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -68,6 +69,11 @@ from rtp_llm.dash_sc.grpc_metrics import (
     report_frontend_rpc_done,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
+from rtp_llm.dash_sc.inference.grammar_validator import (
+    GrammarCheckUnavailable,
+    GrammarCompilationError,
+    GrammarValidator,
+)
 from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.frontend.request_id_generator import generate_request_id
@@ -1743,6 +1749,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         monitor_interval_s: Optional[float] = None,
         speculative_steps: int = 0,
         request_metrics: Optional[FrontendRequestMetrics] = None,
+        grammar_validator: Optional[GrammarValidator] = None,
     ):
         self._backend_visitor = backend_visitor
         self._ip = ip
@@ -1783,6 +1790,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         self._request_metrics = request_metrics or FrontendRequestMetrics(
             concurrency_report_interval_s=monitor_interval_s
         )
+        self._grammar_validator = grammar_validator
 
     def _frontend_metric_tags(self) -> dict[str, str]:
         """Tags propagated to cache-key metrics inside the shared backend visitor."""
@@ -1792,6 +1800,53 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             "source": "dash_sc",
             "protocol": "dash_sc_grpc",
         }
+
+    async def _validate_request_grammar(
+        self, sampling: SamplingParams, request_id: str
+    ) -> Optional[tuple[DashErrorSpec, str]]:
+        """Trial-compile the current branch's grammar fields before enqueue."""
+        validator = self._grammar_validator
+        if validator is None:
+            return None
+
+        try:
+            if sampling.structural_tag is not None:
+                ok = await asyncio.to_thread(
+                    validator.validate_structural_tag,
+                    sampling.structural_tag,
+                    request_id,
+                )
+                field_name = "tool_call_structural_tag"
+            elif sampling.response_format is not None:
+                ok = await asyncio.to_thread(
+                    validator.validate_response_format,
+                    sampling.response_format,
+                    request_id,
+                )
+                field_name = "response_format"
+            elif sampling.json_format:
+                ok = await asyncio.to_thread(
+                    validator.validate_json,
+                    {"type": "object"},
+                    request_id,
+                )
+                field_name = "json_format"
+            else:
+                return None
+        except GrammarCompilationError as e:
+            return DASH_ERROR_BAD_REQUEST, str(e)
+        except GrammarCheckUnavailable as e:
+            return (
+                DASH_ERROR_BAD_REQUEST,
+                f"grammar validation or compilation failed: {e}",
+            )
+
+        if ok:
+            return None
+        return (
+            DASH_ERROR_BAD_REQUEST,
+            f"invalid {field_name}: grammar validation or compilation failed",
+        )
 
     def _record_and_report_chunk(
         self,
@@ -1942,13 +1997,19 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
                         first_request = False
-                    resp = build_parameter_error_response(str(request.id), str(e))
+                    error_spec = DASH_ERROR_BAD_REQUEST
+                    resp = build_dash_error_response(
+                        str(request.id),
+                        request.model_name,
+                        error_spec=error_spec,
+                        status_message=str(e),
+                    )
                     self._record_and_report_chunk(
                         record,
                         resp,
                         delta_len=0,
                         finished=True,
-                        finish_reason=FINISH_REASON_USE_PARAMETER_STATUS,
+                        finish_reason=error_spec.finish_reason,
                     )
                     yield resp
                     return
@@ -2016,6 +2077,27 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         delta_len=0,
                         finished=True,
                         finish_reason=FINISH_REASON_USE_PARAMETER_STATUS,
+                    )
+                    yield resp
+                    return
+
+                invalid_grammar = await self._validate_request_grammar(
+                    sampling, str(request.id)
+                )
+                if invalid_grammar is not None:
+                    error_spec, status_message = invalid_grammar
+                    resp = build_dash_error_response(
+                        str(request.id),
+                        request.model_name,
+                        error_spec=error_spec,
+                        status_message=status_message,
+                    )
+                    self._record_and_report_chunk(
+                        record,
+                        resp,
+                        delta_len=0,
+                        finished=True,
+                        finish_reason=error_spec.finish_reason,
                     )
                     yield resp
                     return

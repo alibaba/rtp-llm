@@ -235,6 +235,16 @@ class OpenaiEndpoint(object):
             think_end_tag, add_special_tokens=False
         )
 
+    def _ensure_think_begin_token_ids(self, config: GenerateConfig) -> None:
+        if config.begin_think_token_ids:
+            return
+        think_start_tag = self.generate_env_config.think_start_tag.encode(
+            "utf-8"
+        ).decode("unicode_escape")
+        config.begin_think_token_ids = self.tokenizer.encode(
+            think_start_tag, add_special_tokens=False
+        )
+
     def _extract_generation_config(
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
@@ -296,10 +306,12 @@ class OpenaiEndpoint(object):
             config.max_thinking_tokens = int(request.thinking_budget)
         if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
             config.in_think_mode = True
-            self._ensure_think_end_token_ids(config)
         if request.disable_thinking():
             config.in_think_mode = False
             config.max_thinking_tokens = 0
+        if config.in_think_mode:
+            self._ensure_think_begin_token_ids(config)
+            self._ensure_think_end_token_ids(config)
         max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
         max_tokens_cap = _positive_int_or_none(request.max_tokens)
         if max_completion_tokens is not None:

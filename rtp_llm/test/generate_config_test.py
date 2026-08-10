@@ -337,6 +337,24 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [151649])
 
+    def test_add_thinking_params_does_not_check_tokenizer_length(self):
+        class Tokenizer:
+            def __len__(self):
+                raise AssertionError("tokenizer length should not be checked")
+
+            def encode(self, text, add_special_tokens=False):
+                return [123]
+
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = -1
+        generate_env_config.think_end_tag = "</think>"
+
+        generate_config = GenerateConfig()
+        generate_config.add_thinking_params(Tokenizer(), generate_env_config)
+
+        self.assertEqual(generate_config.end_think_token_ids, [123])
+
     def test_add_thinking_params_with_think_token_2(self):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
@@ -702,8 +720,14 @@ class OpenaiGenerateConfigTest(TestCase):
         config = self._extract_openai_generation_config(request, generate_env_config)
 
         self.assertEqual(config.max_new_tokens, 100)
-        self.assertEqual(config.max_thinking_tokens, 32000)
+        self.assertEqual(config.max_thinking_tokens, 131072)
         self.assertTrue(config.in_think_mode)
+        self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode(
+                generate_env_config.think_start_tag, add_special_tokens=False
+            ),
+        )
 
     def test_request_level_thinking_adds_think_end_tokens_when_env_mode_off(self):
         generate_env_config = GenerateEnvConfig()
@@ -718,6 +742,12 @@ class OpenaiGenerateConfigTest(TestCase):
 
         self.assertTrue(config.in_think_mode)
         self.assertEqual(config.max_thinking_tokens, 10)
+        self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode(
+                generate_env_config.think_start_tag, add_special_tokens=False
+            ),
+        )
         self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
@@ -739,6 +769,12 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertTrue(config.in_think_mode)
         self.assertEqual(json.loads(config.json_schema), {"type": "object"})
         self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode(
+                generate_env_config.think_start_tag, add_special_tokens=False
+            ),
+        )
+        self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
         )
@@ -759,6 +795,12 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertTrue(config.in_think_mode)
         self.assertEqual(json.loads(config.json_schema), {"type": "object"})
         self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode(
+                generate_env_config.think_start_tag, add_special_tokens=False
+            ),
+        )
+        self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),
         )
@@ -772,7 +814,8 @@ class OpenaiGenerateConfigTest(TestCase):
             messages=[],
             response_format={"type": "json_object"},
             extra_configs=GenerateConfig(
-                chat_template_kwargs={"enable_thinking": True}
+                chat_template_kwargs={"enable_thinking": True},
+                begin_think_token_ids=[7, 8],
             ),
         )
 
@@ -780,6 +823,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
         self.assertTrue(config.in_think_mode)
         self.assertEqual(json.loads(config.json_schema), {"type": "object"})
+        self.assertEqual(config.begin_think_token_ids, [7, 8])
         self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),

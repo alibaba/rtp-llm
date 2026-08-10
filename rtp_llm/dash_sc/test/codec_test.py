@@ -519,6 +519,19 @@ class DashScGrpcRequestTest(TestCase):
                     json.loads(sp.response_format), {"type": "json_object"}
                 )
 
+    def test_parse_sampling_bad_response_format_json_is_rejected(self) -> None:
+        cases = [
+            "not-json",
+            json.dumps(["not-json"], ensure_ascii=False),
+        ]
+        for payload in cases:
+            with self.subTest(payload=payload):
+                req = predict_v2_pb2.ModelInferRequest()
+                req.parameters["response_format"].string_param = payload
+
+                with self.assertRaisesRegex(DashScParameterError, "response_format"):
+                    parse_sampling_params(req)
+
     def _assert_guided_json_response_format(self, response_format, schema) -> None:
         self.assertEqual(
             json.loads(response_format),

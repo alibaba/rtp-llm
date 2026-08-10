@@ -358,16 +358,25 @@ def _assert_parameter_error_response(
         expected_message_part,
         infer.parameters["status_message"].string_param,
     )
-    payload = json.loads(infer.parameters["__messages__"].string_param)
-    header = payload["header"]
-    testcase.assertEqual(header["status_code"], 400)
-    testcase.assertEqual(header["status_name"], "InvalidParameter")
-    testcase.assertEqual(
-        header["status_message"],
-        infer.parameters["status_message"].string_param,
-    )
-    testcase.assertTrue(header["finished"])
-    testcase.assertEqual(_finish_reason(resp), 1000)
+    error_msg = infer.parameters["error_msg"].string_param
+    if error_msg:
+        testcase.assertEqual(infer.parameters["error_no"].int64_param, 8)
+        payload = json.loads(error_msg)
+        testcase.assertEqual(payload["status_code"], 400)
+        testcase.assertEqual(payload["status_name"], "InvalidParameter")
+        testcase.assertIn(expected_message_part, payload["status_message"])
+        testcase.assertEqual(_finish_reason(resp), DASH_ERROR_BAD_REQUEST.finish_reason)
+    else:
+        payload = json.loads(infer.parameters["__messages__"].string_param)
+        header = payload["header"]
+        testcase.assertEqual(header["status_code"], 400)
+        testcase.assertEqual(header["status_name"], "InvalidParameter")
+        testcase.assertEqual(
+            header["status_message"],
+            infer.parameters["status_message"].string_param,
+        )
+        testcase.assertTrue(header["finished"])
+        testcase.assertEqual(_finish_reason(resp), 1000)
     testcase.assertEqual(_gen_ids(resp), [])
 
 

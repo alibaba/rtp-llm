@@ -333,7 +333,6 @@ int ReasoningGrammarLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsPro
         }
         clearBitmaskTokenRange(row, W, grammar_vocab_size, static_cast<int64_t>(request.vocab_size));
         clearTokenFromBitmask(row, W, firstTokenOrInvalid(think_state.begin_think_token_ids));
-        clearTokenFromBitmask(row, W, firstTokenOrInvalid(think_state.end_think_token_ids));
     };
 
     auto fill_row = [&](int32_t* row) {
@@ -438,8 +437,7 @@ bool ReasoningGrammarLogitsProcessor::applyGrammarMaskLocked(const torch::Tensor
     auto          bitmask = at::full({1, words}, -1, at::dtype(at::kInt));
     DLTensor      dl      = makeSingleRowBitmaskView(bitmask.data_ptr<int32_t>(), words);
     if (!matcher_->fillBitmask(&dl, 0)) {
-        maskToken(logits, firstTokenOrInvalid(think_info_.begin_think_token_ids));
-        maskToken(logits, firstTokenOrInvalid(think_info_.end_think_token_ids));
+        maskGrammarThinkBeginToken(logits);
         return false;
     }
 
@@ -467,9 +465,12 @@ bool ReasoningGrammarLogitsProcessor::applyGrammarMaskLocked(const torch::Tensor
         logits.narrow(0, mask.size(0), logits.size(0) - mask.size(0)).fill_(BaseLogitsProcessor::neg_inf);
     }
 
-    maskToken(logits, firstTokenOrInvalid(think_info_.begin_think_token_ids));
-    maskToken(logits, firstTokenOrInvalid(think_info_.end_think_token_ids));
+    maskGrammarThinkBeginToken(logits);
     return true;
+}
+
+void ReasoningGrammarLogitsProcessor::maskGrammarThinkBeginToken(const torch::Tensor& logits) {
+    maskToken(logits, firstTokenOrInvalid(think_info_.begin_think_token_ids));
 }
 
 bool ReasoningGrammarLogitsProcessor::forceThinkEndTokenLocked(const torch::Tensor& logits) {

@@ -652,7 +652,7 @@ def _parse_response_format_value(value: Any) -> Any:
         try:
             parsed = json.loads(s)
         except Exception:
-            return s
+            raise DashScParameterError("invalid response_format") from None
     return parsed
 
 
@@ -2311,6 +2311,8 @@ def build_dash_error_response(
     infer.parameters["incremental_output"].int64_param = 1
     infer.parameters["error_no"].int64_param = int(error_spec.error_no)
     infer.parameters["error_msg"].string_param = error_msg
+    # DashScope api-server reads status_* as standalone parameters. Keep the
+    # legacy error_no/error_msg fields above for backward compatibility.
     infer.parameters["status_code"].int64_param = int(error_spec.status_code)
     infer.parameters["status_name"].string_param = error_spec.status_name
     infer.parameters["status_message"].string_param = status_message

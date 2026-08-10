@@ -17,8 +17,12 @@ import time
 import traceback
 from typing import Any, List, Optional
 
+from rtp_llm.config.grammar_tokenizer_info import (
+    build_model_grammar_tokenizer_info_json,
+)
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.dash_sc.inference.grammar_validator import GrammarValidator
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     build_think_runtime,
@@ -35,7 +39,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
-from rtp_llm.ops import SpeculativeType
+from rtp_llm.ops import SpeculativeType, TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
 _PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
@@ -524,6 +528,19 @@ class DashScApp:
                     if sp_type != SpeculativeType.NONE
                     else 0
                 )
+                grammar_config = self.py_env_configs.grammar_config
+                grammar_validator = None
+                if (
+                    model_config.task_type == TaskType.LANGUAGE_MODEL
+                    and grammar_config.grammar_backend.strip().lower() == "xgrammar"
+                ):
+                    grammar_validator = GrammarValidator(
+                        build_model_grammar_tokenizer_info_json(
+                            base_tok, model_config
+                        ),
+                        grammar_config,
+                        self.py_env_configs.grammar_admission_config,
+                    )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -541,6 +558,7 @@ class DashScApp:
                         0.1,
                     ),
                     speculative_steps=speculative_steps,
+                    grammar_validator=grammar_validator,
                 )
 
             loop = self._start_enqueue_loop()
