@@ -20,6 +20,7 @@ import inspect
 import logging
 import os
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -59,10 +60,10 @@ from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.kimi_k3.diagnostics.accuracy_trace import (
     accuracy_trace_mode,
     kimi_k3_accuracy_trace,
-    tensor_dump_enabled,
-    tensor_dump_full_router,
     mark_accuracy_fake_stream,
     record_accuracy_tensor,
+    tensor_dump_enabled,
+    tensor_dump_full_router,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda_state import KDAExecutionMode, KimiKDAState
 from rtp_llm.models_py.modules.kimi_k3.mxfp4 import dequantize_mxfp4
@@ -114,6 +115,31 @@ _CULA_LOGGED_DEVICES: set[int] = set()
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 
 
+@dataclass(frozen=True)
+class _TokenShardLayout:
+    """Equal contiguous TP shards with padding only after the logical tail."""
+
+    logical_tokens: int
+    local_tokens: int
+    local_start: int
+    local_valid_tokens: int
+
+
+def _token_shard_layout(
+    logical_tokens: int,
+    tp_size: int,
+    tp_rank: int,
+) -> _TokenShardLayout:
+    local_tokens = (logical_tokens + tp_size - 1) // tp_size
+    local_start = tp_rank * local_tokens
+    return _TokenShardLayout(
+        logical_tokens=logical_tokens,
+        local_tokens=local_tokens,
+        local_start=local_start,
+        local_valid_tokens=max(0, min(local_tokens, logical_tokens - local_start)),
+    )
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     return os.environ.get(name, "1" if default else "0").strip() == "1"
 
@@ -131,9 +157,7 @@ def _is_prefill_role(parallelism_config) -> bool:
         return True
     if role == "DECODE":
         return False
-    raise RuntimeError(
-        f"Kimi K3 只支持 PD 分离部署,role_type={role} 不受支持"
-    )
+    raise RuntimeError(f"Kimi K3 只支持 PD 分离部署,role_type={role} 不受支持")
 
 
 def _perf_fusions_enabled() -> bool:
@@ -317,12 +341,7 @@ def _sequence_parallel_column_weight(
     *,
     sequence_parallel: bool,
 ) -> torch.Tensor:
-    """Materialize an SP replica once and replace the original TP shard.
-
-    The same model process may later receive a non-divisible Prefill request
-    that falls back to replicated-token TP.  In that case return this rank's
-    logical column shard as a view of the retained full tensor.
-    """
+    """Materialize and cache the full column weight for token-sharded SP."""
 
     if tp_size <= 1:
         return weights[weight_name]
@@ -394,12 +413,19 @@ def _use_fused_prefill_ag_gemm(global_token_count: int) -> bool:
     )
 
 
-def _prefill_all_gather_input(local_input: torch.Tensor, tp_size: int) -> torch.Tensor:
-    return all_gather_into(
+def _prefill_all_gather_input(
+    local_input: torch.Tensor,
+    tp_size: int,
+    logical_tokens: Optional[int] = None,
+) -> torch.Tensor:
+    gathered = all_gather_into(
         local_input,
         local_input.new_empty((local_input.shape[0] * tp_size, *local_input.shape[1:])),
         Group.TP,
     )
+    if logical_tokens is None or gathered.shape[0] == logical_tokens:
+        return gathered
+    return gathered.narrow(0, 0, logical_tokens)
 
 
 def _prefill_all_gather_matmul(
@@ -407,10 +433,16 @@ def _prefill_all_gather_matmul(
     weight: torch.Tensor,
     *,
     tp_size: int,
+    logical_tokens: int,
 ) -> torch.Tensor:
-    """Run the configured Prefill token AllGather/packed-projection path."""
+    """Gather equal shards, project them, and return logical Prefill rows.
 
-    if _use_fused_prefill_ag_gemm(local_input.shape[0] * tp_size):
+    The fused operator consumes all physical rows. The serial fallback trims
+    the gathered tail before GEMM because fake rows have no consumers.
+    """
+
+    physical_tokens = local_input.shape[0] * tp_size
+    if _use_fused_prefill_ag_gemm(physical_tokens):
         process_group = get_process_group(Group.TP)
         _, outputs = fused_all_gather_matmul(
             local_input,
@@ -418,12 +450,21 @@ def _prefill_all_gather_matmul(
             process_group,
             return_gathered=False,
         )
-        return outputs[0]
+        output = outputs[0]
+    else:
+        with _perf_profile("k3_separate_all_gather_then_gemm", local_input):
+            gathered = _prefill_all_gather_input(
+                local_input,
+                tp_size,
+                logical_tokens,
+            )
+            output = _linear(gathered, weight)
 
-    with _perf_profile("k3_separate_all_gather_then_gemm", local_input):
-        gathered = _prefill_all_gather_input(local_input, tp_size)
-        output = _linear(gathered, weight)
-    return output
+    return (
+        output
+        if output.shape[0] == logical_tokens
+        else output.narrow(0, 0, logical_tokens)
+    )
 
 
 class _KimiK3MLALatentRMSNorm(nn.Module):
@@ -449,15 +490,15 @@ def _row_parallel_linear(
     *,
     reduce_scatter_tokens: bool = False,
     pad_reduce_scatter_tokens: bool = False,
+    use_input_dtype_reduce_scatter: bool = False,
 ) -> torch.Tensor:
     """Apply and reduce a K3 row-parallel projection.
 
-    A BF16 partial result followed by a BF16 TP reduction introduces one
-    rounding point per rank.  K3's residual and routed-MoE stack can amplify
-    those otherwise small errors enough to change a top-k expert.  Keep the
-    CUDA GEMM output and collective in FP32, then round once after the
-    reduction.  The CPU branch retains the ordinary path for unit tests and
-    environments where CUDA's ``mm(out_dtype=...)`` is unavailable.
+    Decode keeps the CUDA GEMM output and collective in FP32, then rounds once
+    after the reduction. Optimized Prefill uses BF16 partials to match its
+    established production path. The CPU branch retains the ordinary path for
+    unit tests and environments where CUDA's ``mm(out_dtype=...)`` is
+    unavailable.
     """
 
     if pad_reduce_scatter_tokens and not reduce_scatter_tokens:
@@ -475,19 +516,19 @@ def _row_parallel_linear(
         if (
             _perf_fusions_enabled()
             and reduce_scatter_tokens
-            and not pad_reduce_scatter_tokens
+            and use_input_dtype_reduce_scatter
         ):
             # The optimized SP path keeps the projection and token
             # ReduceScatter in BF16 for long Prefill rows. Decode uses the
-            # padded path below: its tiny recurrent batches are sensitive to
+            # FP32 path below: its tiny recurrent batches are sensitive to
             # a per-layer BF16 partial/collective rounding point, while the
             # FP32 collective cost is negligible at those token counts.
-            partial = torch.mm(x, weight)
-            return (
-                reduce_scatter_padded(partial, group=Group.TP)
+            partial = (
+                _matmul_with_padded_rows(x, weight, tp_size, x.dtype)
                 if pad_reduce_scatter_tokens
-                else reduce_scatter(partial, group=Group.TP)
+                else torch.mm(x, weight)
             )
+            return reduce_scatter(partial, group=Group.TP)
         output = torch.mm(x, weight, out_dtype=torch.float32)
         if reduce_scatter_tokens:
             output = (
@@ -506,6 +547,57 @@ def _row_parallel_linear(
             else reduce_scatter(output, group=Group.TP)
         )
     return all_reduce(output, group=Group.TP)
+
+
+def _matmul_with_padded_rows(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    tp_size: int,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    padded_rows = ((int(x.shape[0]) + tp_size - 1) // tp_size) * tp_size
+    output = torch.empty(
+        (padded_rows, weight.shape[1]),
+        dtype=output_dtype,
+        device=x.device,
+    )
+    valid_output = output.narrow(0, 0, x.shape[0])
+    if output_dtype == x.dtype:
+        torch.mm(x, weight, out=valid_output)
+    else:
+        torch.mm(x, weight, out_dtype=output_dtype, out=valid_output)
+    if padded_rows != x.shape[0]:
+        output.narrow(0, x.shape[0], padded_rows - x.shape[0]).zero_()
+    return output
+
+
+def _prefill_token_shard(
+    tensor: torch.Tensor,
+    layout: _TokenShardLayout,
+) -> torch.Tensor:
+    """Build one equal TP shard without materializing a global padded tensor."""
+
+    if tensor.ndim == 0 or tensor.shape[0] != layout.logical_tokens:
+        raise ValueError(
+            "padded token shard expects dim0 to equal logical tokens: "
+            f"shape={tuple(tensor.shape)}, logical={layout.logical_tokens}"
+        )
+    if layout.local_valid_tokens == layout.local_tokens:
+        return tensor.narrow(
+            0,
+            layout.local_start,
+            layout.local_tokens,
+        ).contiguous()
+    local = tensor.new_zeros((layout.local_tokens, *tensor.shape[1:]))
+    if layout.local_valid_tokens:
+        local.narrow(0, 0, layout.local_valid_tokens).copy_(
+            tensor.narrow(
+                0,
+                layout.local_start,
+                layout.local_valid_tokens,
+            )
+        )
+    return local
 
 
 def _padded_token_shard(
@@ -1492,7 +1584,7 @@ class KimiK3KDA(nn.Module):
         self,
         hidden_states: torch.Tensor,
         *,
-        prefill_input_is_sharded: bool,
+        prefill_sp_layout: Optional[_TokenShardLayout],
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -1503,11 +1595,12 @@ class KimiK3KDA(nn.Module):
     ]:
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
 
-        if prefill_input_is_sharded:
+        if prefill_sp_layout is not None:
             projected_fused = _prefill_all_gather_matmul(
                 hidden_states,
                 self.kda_fused_w,
                 tp_size=self.attn_tp_size,
+                logical_tokens=prefill_sp_layout.logical_tokens,
             )
         else:
             with _perf_profile(
@@ -2361,7 +2454,7 @@ class KimiK3KDA(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         sequence_parallel: bool = False,
-        prefill_input_is_sharded: bool = False,
+        prefill_sp_layout: Optional[_TokenShardLayout] = None,
     ) -> tuple[torch.Tensor, Optional[KimiKDAState]]:
         trace_enabled = _accuracy_trace_enabled()
         if state is not None and kv_cache is not None:
@@ -2404,15 +2497,14 @@ class KimiK3KDA(nn.Module):
         # selector until the remaining experimental post-processing code is
         # removed in a follow-up cleanup.
         a2a_prefill = False
-        if prefill_input_is_sharded and (
+        if prefill_sp_layout is not None and (
             mode != "prefill"
             or not sequence_parallel
             or self.attn_tp_size <= 1
             or not hidden_states.is_cuda
         ):
             raise ValueError(
-                "prefill_input_is_sharded requires CUDA Prefill Sequence "
-                "Parallel with TP>1"
+                "prefill_sp_layout requires CUDA Prefill Sequence Parallel with TP>1"
             )
         local_token_count = hidden_states.shape[0]
         # 这里原本只为 canonical TP 把分片输入 all_gather 回整份;canonical 已删,
@@ -2427,7 +2519,7 @@ class KimiK3KDA(nn.Module):
             output_gate_projected,
         ) = self._project_fused_kda_inputs(
             hidden_states,
-            prefill_input_is_sharded=prefill_input_is_sharded,
+            prefill_sp_layout=prefill_sp_layout,
         )
         token_count = q_projected.shape[0]
         head_shape = (1, token_count, self.local_heads, self.head_dim)
@@ -2719,10 +2811,11 @@ class KimiK3KDA(nn.Module):
                     ),
                     pad_reduce_scatter_tokens=(
                         sequence_parallel
-                        and mode == "decode"
                         and self.attn_tp_size > 1
                         and hidden_states.is_cuda
+                        and (mode == "decode" or token_count % self.attn_tp_size != 0)
                     ),
+                    use_input_dtype_reduce_scatter=(mode == "prefill"),
                 )
         if trace_enabled:
             record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
@@ -2818,6 +2911,7 @@ class KimiK3MLA(MlaAttention):
         self._sp_active_for_forward = False
         self._sp_padded_for_forward = False
         self._sp_prefill_input_is_sharded = False
+        self._sp_prefill_layout_for_forward: Optional[_TokenShardLayout] = None
 
     def _use_source_projection_boundaries(self) -> bool:
         return (
@@ -2843,16 +2937,29 @@ class KimiK3MLA(MlaAttention):
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         source_boundaries = self._use_source_projection_boundaries()
+        prefill_layout = getattr(self, "_sp_prefill_layout_for_forward", None)
         if self._sp_prefill_input_is_sharded:
             if source_boundaries:
-                hidden_states = _prefill_all_gather_input(
-                    hidden_states, self.attn_tp_size
+                hidden_states = (
+                    _prefill_all_gather_input(hidden_states, self.attn_tp_size)
+                    if prefill_layout is None
+                    else _prefill_all_gather_input(
+                        hidden_states,
+                        self.attn_tp_size,
+                        prefill_layout.logical_tokens,
+                    )
                 )
             else:
+                logical_tokens = (
+                    hidden_states.shape[0] * self.attn_tp_size
+                    if prefill_layout is None
+                    else prefill_layout.logical_tokens
+                )
                 packed = _prefill_all_gather_matmul(
                     hidden_states,
                     self._packed_qkv_gate_w,
                     tp_size=self.attn_tp_size,
+                    logical_tokens=logical_tokens,
                 )
                 return torch.split(
                     packed,
@@ -2895,12 +3002,20 @@ class KimiK3MLA(MlaAttention):
 
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
         if self._sp_active_for_forward:
+            tp_size = self.parallelism_config.get_attn_tp_size()
             return _row_parallel_linear(
                 attn_output,
                 self._o_w,
-                self.parallelism_config.get_attn_tp_size(),
+                tp_size,
                 reduce_scatter_tokens=True,
-                pad_reduce_scatter_tokens=self._sp_padded_for_forward,
+                pad_reduce_scatter_tokens=(
+                    self._sp_padded_for_forward
+                    or (
+                        self._sp_prefill_input_is_sharded
+                        and attn_output.shape[0] % tp_size != 0
+                    )
+                ),
+                use_input_dtype_reduce_scatter=(self._sp_prefill_input_is_sharded),
             )
         return super()._project_output(attn_output)
 
@@ -2911,7 +3026,7 @@ class KimiK3MLA(MlaAttention):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         sequence_parallel: bool = False,
-        prefill_input_is_sharded: bool = False,
+        prefill_sp_layout: Optional[_TokenShardLayout] = None,
     ) -> torch.Tensor:
         attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
         self._sp_active_for_forward = bool(
@@ -2920,15 +3035,16 @@ class KimiK3MLA(MlaAttention):
             and hidden_states.is_cuda
             and attn_inputs is not None
         )
-        self._sp_prefill_input_is_sharded = bool(prefill_input_is_sharded)
-        if self._sp_prefill_input_is_sharded and (
+        self._sp_prefill_input_is_sharded = prefill_sp_layout is not None
+        self._sp_prefill_layout_for_forward = prefill_sp_layout
+        if prefill_sp_layout is not None and (
             not self._sp_active_for_forward
             or attn_inputs is None
             or not attn_inputs.is_prefill
         ):
             raise ValueError(
-                "prefill_input_is_sharded requires production CUDA MLA "
-                "Prefill Sequence Parallel with TP>1"
+                "prefill_sp_layout requires production CUDA MLA Prefill "
+                "Sequence Parallel with TP>1"
             )
         self._sp_padded_for_forward = bool(
             self._sp_active_for_forward
@@ -2946,6 +3062,7 @@ class KimiK3MLA(MlaAttention):
             self._sp_active_for_forward = False
             self._sp_padded_for_forward = False
             self._sp_prefill_input_is_sharded = False
+            self._sp_prefill_layout_for_forward = None
 
     def _forward_impl(
         self,
@@ -3441,12 +3558,22 @@ class KimiK3MLA(MlaAttention):
                 f"{self.trace_prefix}.output_gate", output_gate, token_dim=0
             )
             output = output * torch.sigmoid(output_gate)
+        tp_size = self.parallelism_config.get_attn_tp_size()
         output = _row_parallel_linear(
             output.reshape(token_count, -1),
             self._o_w,
-            self.parallelism_config.get_attn_tp_size(),
+            tp_size,
             reduce_scatter_tokens=self._sp_active_for_forward,
-            pad_reduce_scatter_tokens=self._sp_padded_for_forward,
+            pad_reduce_scatter_tokens=(
+                self._sp_active_for_forward
+                and (
+                    self._sp_padded_for_forward
+                    or (
+                        self._sp_prefill_input_is_sharded and token_count % tp_size != 0
+                    )
+                )
+            ),
+            use_input_dtype_reduce_scatter=(self._sp_prefill_input_is_sharded),
         )
         record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
         return output
@@ -4587,6 +4714,7 @@ class KimiK3DecoderLayer(nn.Module):
         attention_inputs: Optional[PyAttentionInputs] = None,
         fmha_impl: Any = None,
         sequence_parallel: bool = False,
+        prefill_sp_layout: Optional[_TokenShardLayout] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         trace_prefix = f"layer.{self.layer_idx}"
         trace_enabled = _accuracy_trace_enabled()
@@ -4596,6 +4724,11 @@ class KimiK3DecoderLayer(nn.Module):
         tp_size = int(self.self_attn.parallelism_config.get_attn_tp_size())
         tp_rank = int(self.self_attn.parallelism_config.get_attn_tp_rank())
         local_valid_tokens: Optional[int] = None
+        if (
+            prefill_sp_layout is not None
+            and prefill_sp_layout.local_valid_tokens < prefill_sp_layout.local_tokens
+        ):
+            local_valid_tokens = prefill_sp_layout.local_valid_tokens
         if decode_sp_debug:
             logging.info(
                 "[K3_DECODE_SP_DEBUG] rank=%d layer=%d enter hidden=%s block=%s",
@@ -4627,9 +4760,6 @@ class KimiK3DecoderLayer(nn.Module):
             record_accuracy_tensor(
                 f"{trace_prefix}.attention_input", attention_input, token_dim=0
             )
-        prefill_input_is_sharded = bool(
-            sequence_parallel and mode == "prefill" and tp_size > 1
-        )
         if self.is_kda:
             with _perf_profile(
                 f"{trace_prefix}.KDA_attention_complete", attention_input
@@ -4641,7 +4771,7 @@ class KimiK3DecoderLayer(nn.Module):
                     kv_cache=kv_cache,
                     attention_inputs=attention_inputs,
                     sequence_parallel=sequence_parallel,
-                    prefill_input_is_sharded=prefill_input_is_sharded,
+                    prefill_sp_layout=prefill_sp_layout,
                 )
         else:
             # MLA layers use the shared ``MlaAttention`` signature and consume
@@ -4655,7 +4785,7 @@ class KimiK3DecoderLayer(nn.Module):
                     kv_cache,
                     attention_inputs=attention_inputs,
                     sequence_parallel=sequence_parallel,
-                    prefill_input_is_sharded=prefill_input_is_sharded,
+                    prefill_sp_layout=prefill_sp_layout,
                 )
         if decode_sp_debug:
             logging.info(
@@ -4818,13 +4948,14 @@ class KimiK3Model(GptModelBase):
         max_global_tokens = int(self.config.max_seq_len) * int(
             init_resource.max_context_batch_size
         )
+        max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
+        max_physical_tokens = max_local_tokens * tp_size
         if (
             init_resource.is_decode_role
             or tp_size <= 1
-            or not _use_fused_prefill_ag_gemm(max_global_tokens)
+            or not _use_fused_prefill_ag_gemm(max_physical_tokens)
         ):
             return True
-        max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
         workspace_bytes = (
             max_local_tokens
             * int(self.config.hidden_size)
@@ -5004,11 +5135,13 @@ class KimiK3Model(GptModelBase):
         tp_size = int(self.parallelism_config.get_attn_tp_size())
         # SP MoE 是 K3 modeling 唯一的流程,不再由开关决定 —— Decode TP8/EP8
         # 不走 SP 就在启动时 die,Prefill 侧生产配置同样一直是 SP。
+        tp_rank = int(self.parallelism_config.get_attn_tp_rank())
         sp_requested = tp_size > 1
-        prefill_sp = (
-            sp_requested
-            and attention_inputs.is_prefill
-            and input_ids.numel() % tp_size == 0
+        prefill_sp = sp_requested and attention_inputs.is_prefill
+        prefill_sp_layout = (
+            _token_shard_layout(int(input_ids.numel()), tp_size, tp_rank)
+            if prefill_sp
+            else None
         )
         decode_sp = sp_requested and not attention_inputs.is_prefill
         sp_active = prefill_sp or decode_sp
@@ -5045,18 +5178,6 @@ class KimiK3Model(GptModelBase):
                     "model.kda_a2a_weight_materialization.exclude_from_profile"
                 ):
                     self._materialize_kda_a2a_weights()
-        elif (
-            sp_requested
-            and attention_inputs.is_prefill
-            and not getattr(self, "_sp_shape_fallback_logged", False)
-        ):
-            logging.warning(
-                "Kimi K3 Sequence Parallel is falling back to the replicated "
-                "TP path because token count %d is not divisible by TP=%d",
-                input_ids.numel(),
-                tp_size,
-            )
-            self._sp_shape_fallback_logged = True
         if (
             any(
                 layer.is_kda
@@ -5068,7 +5189,7 @@ class KimiK3Model(GptModelBase):
         ):
             raise RuntimeError(
                 "KIMI_K3_KDA_COMM_BACKEND=a2a is Prefill-only and requires "
-                "divisible TP8/EP8 Sequence Parallel input"
+                "TP8/EP8 Sequence Parallel input"
             )
         if trace_enabled:
             mark_accuracy_fake_stream(
@@ -5084,15 +5205,15 @@ class KimiK3Model(GptModelBase):
         if trace_enabled:
             record_accuracy_tensor("embedding", hidden_states, token_dim=0)
         if prefill_sp:
-            local_tokens = hidden_states.shape[0] // tp_size
-            tp_rank = int(self.parallelism_config.get_attn_tp_rank())
+            assert prefill_sp_layout is not None
             with _perf_profile(
                 "model.embedding_to_sequence_parallel_token_shard",
                 hidden_states,
             ):
-                hidden_states = hidden_states.narrow(
-                    0, tp_rank * local_tokens, local_tokens
-                ).contiguous()
+                hidden_states = _prefill_token_shard(
+                    hidden_states,
+                    prefill_sp_layout,
+                )
         block_residual = hidden_states.new_empty(
             hidden_states.shape[0], 0, hidden_states.shape[1]
         )
@@ -5191,6 +5312,7 @@ class KimiK3Model(GptModelBase):
                     attention_inputs=attention_inputs,
                     fmha_impl=fmha_impl,
                     sequence_parallel=sp_active,
+                    prefill_sp_layout=prefill_sp_layout,
                 )
             # Loop-level cache-store is only for KDA layers. MLA publishes
             # from its wrapper immediately after concat_and_cache_mla.
@@ -5226,11 +5348,16 @@ class KimiK3Model(GptModelBase):
                 hidden_states, self.final_norm_weight, self.config.layernorm_eps
             )
         if prefill_sp:
+            assert prefill_sp_layout is not None
             with _perf_profile(
                 "model.exit_token_allgather_for_framework_contract",
                 hidden_states,
             ):
-                hidden_states = all_gather(hidden_states, group=Group.TP)
+                hidden_states = all_gather_trim(
+                    hidden_states,
+                    prefill_sp_layout.logical_tokens,
+                    group=Group.TP,
+                )
         if trace_enabled:
             record_accuracy_tensor("final_hidden", hidden_states, token_dim=0)
         fmha_params = getattr(fmha_impl, "fmha_params", None)

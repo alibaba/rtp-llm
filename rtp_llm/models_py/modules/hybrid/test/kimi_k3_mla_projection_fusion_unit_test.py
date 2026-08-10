@@ -41,6 +41,7 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         module._mla_backend = "kernel"
         module._accuracy_full_weight_cache = {}
         module._sp_prefill_input_is_sharded = False
+        module._sp_prefill_layout_for_forward = None
         projection = _CountingProjection(torch.randn(5, 14))
         module.fused_qkv_a_proj = projection
         module._packed_qkv_gate_w = projection.weight
@@ -73,13 +74,7 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {
-                "KIMI_K3_PERF_FUSIONS": "1",
-                "KIMI_K3_ACCURACY_CANONICAL_TP": "0",
-                "KIMI_K3_ACCURACY_CANONICAL_MLA": "0",
-                "KIMI_K3_ACCURACY_LOCAL_EAGER_MLA": "0",
-                "KIMI_K3_ACCURACY_TRACE_DIR": "",
-            },
+            {"KIMI_K3_TENSOR_DUMP": ""},
             clear=False,
         ):
             qkv_a, output_gate = module._project_qkv_a_input(hidden_states)
@@ -89,20 +84,14 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         torch.testing.assert_close(qkv_a, expected[:, :6], rtol=0, atol=0)
         torch.testing.assert_close(output_gate, expected[:, 6:], rtol=0, atol=0)
 
-    def test_accuracy_projects_q_kv_and_gate_with_source_gemm_boundaries(self) -> None:
+    def test_tensor_dump_restores_source_projection_boundaries(self) -> None:
         module, projection = self._projection_module()
         hidden_states = torch.randn(7, 5)
 
         with (
             patch.dict(
                 os.environ,
-                {
-                    "KIMI_K3_PERF_FUSIONS": "0",
-                    "KIMI_K3_ACCURACY_CANONICAL_TP": "0",
-                    "KIMI_K3_ACCURACY_CANONICAL_MLA": "0",
-                    "KIMI_K3_ACCURACY_LOCAL_EAGER_MLA": "0",
-                    "KIMI_K3_ACCURACY_TRACE_DIR": "",
-                },
+                {"KIMI_K3_TENSOR_DUMP": "1"},
                 clear=False,
             ),
             patch.object(kimi_k3, "_linear", wraps=kimi_k3._linear) as linear,
@@ -119,39 +108,18 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         )
         torch.testing.assert_close(output_gate, expected_gate, rtol=0, atol=0)
 
-    def test_reference_backend_restores_source_gemm_boundaries(self) -> None:
-        module, _ = self._projection_module()
-        module._mla_backend = "reference"
-        with patch.dict(
-            os.environ,
-            {
-                "KIMI_K3_PERF_FUSIONS": "1",
-                "KIMI_K3_ACCURACY_CANONICAL_TP": "0",
-                "KIMI_K3_ACCURACY_CANONICAL_MLA": "0",
-                "KIMI_K3_ACCURACY_LOCAL_EAGER_MLA": "0",
-                "KIMI_K3_ACCURACY_TRACE_DIR": "",
-            },
-            clear=False,
-        ):
-            self.assertTrue(module._use_source_projection_boundaries())
-
-    def test_sharded_accuracy_gathers_before_source_projections(self) -> None:
+    def test_sharded_tensor_dump_trims_before_source_projections(self) -> None:
         module, projection = self._projection_module()
         module.attn_tp_size = 2
         module._sp_prefill_input_is_sharded = True
+        module._sp_prefill_layout_for_forward = kimi_k3._token_shard_layout(5, 2, 0)
         local_hidden = torch.randn(3, 5)
-        gathered_hidden = torch.randn(6, 5)
+        gathered_hidden = torch.randn(5, 5)
 
         with (
             patch.dict(
                 os.environ,
-                {
-                    "KIMI_K3_PERF_FUSIONS": "0",
-                    "KIMI_K3_ACCURACY_CANONICAL_TP": "0",
-                    "KIMI_K3_ACCURACY_CANONICAL_MLA": "0",
-                    "KIMI_K3_ACCURACY_LOCAL_EAGER_MLA": "0",
-                    "KIMI_K3_ACCURACY_TRACE_DIR": "",
-                },
+                {"KIMI_K3_TENSOR_DUMP": "1"},
                 clear=False,
             ),
             patch.object(
@@ -163,7 +131,7 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
         ):
             qkv_a, output_gate = module._project_qkv_a_input(local_hidden)
 
-        gather.assert_called_once_with(local_hidden, 2)
+        gather.assert_called_once_with(local_hidden, 2, 5)
         self.assertEqual(linear.call_count, 3)
         expected_q = torch.mm(gathered_hidden, projection.weight[:, :3])
         expected_kv = torch.mm(gathered_hidden, projection.weight[:, 3:6])
@@ -172,38 +140,6 @@ class KimiK3MLAProjectionFusionUnitTest(unittest.TestCase):
             qkv_a, torch.cat((expected_q, expected_kv), dim=-1), rtol=0, atol=0
         )
         torch.testing.assert_close(output_gate, expected_gate, rtol=0, atol=0)
-
-    def test_canonical_tp_reconstructs_full_width_gate_projection(self) -> None:
-        module, projection = self._projection_module()
-        module.attn_tp_size = 2
-        module.attn_tp_rank = 1
-        hidden_states = torch.randn(7, 5)
-        expected_gate = torch.randn(7, 8)
-
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "KIMI_K3_PERF_FUSIONS": "0",
-                    "KIMI_K3_ACCURACY_CANONICAL_TP": "1",
-                },
-                clear=False,
-            ),
-            patch.object(
-                kimi_k3,
-                "_column_parallel_linear",
-                return_value=expected_gate,
-            ) as column_linear,
-        ):
-            _, output_gate = module._project_qkv_a_input(hidden_states)
-
-        args = column_linear.call_args.args
-        self.assertIs(args[0], hidden_states)
-        torch.testing.assert_close(args[1], projection.weight[:, 6:])
-        self.assertEqual(args[2:4], (2, 1))
-        self.assertIs(args[4], module._accuracy_full_weight_cache)
-        self.assertEqual(args[5], "mla_output_gate")
-        self.assertIs(output_gate, expected_gate)
 
     def test_model_config_accepts_only_bf16_without_runtime_quantization(
         self,
