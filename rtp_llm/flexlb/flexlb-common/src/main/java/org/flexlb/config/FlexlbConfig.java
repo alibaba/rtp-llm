@@ -566,6 +566,24 @@ public class FlexlbConfig {
      */
     private long autoTpmPlanCacheHitBenefitCap = 0;
 
+    /**
+     * Post-success soft timeout for AdmissionLease (ms). When prefill succeeds
+     * but decode hasn't accepted within this window, the lease is force-closed
+     * and a cancel signal is sent to the engine, releasing the pinned KV cache
+     * block. 0 disables the soft timeout (legacy behavior — leaks on OOM).
+     * Environment variable: AUTO_TPM_POST_SUCCESS_SOFT_TIMEOUT_MS.
+     */
+    private long autoTpmPostSuccessSoftTimeoutMs = 30000;
+
+    /**
+     * Backpressure limit for handed-over-but-not-accepted requests. When the
+     * active lease count (handed over but not yet accepted by decode) exceeds
+     * this, new prefill requests are rejected with 8502 (QUEUE_FULL). 0 disables
+     * the backpressure check.
+     * Environment variable: AUTO_TPM_POST_SUCCESS_BACKPRESSURE_LIMIT.
+     */
+    private int autoTpmPostSuccessBackpressureLimit = 200;
+
     // ---- Auto-TPM reserved config (design doc §18) — future phases, not wired yet ----
 
     /** Decode accepted-entry eviction switch (Phase 5, reserved). */

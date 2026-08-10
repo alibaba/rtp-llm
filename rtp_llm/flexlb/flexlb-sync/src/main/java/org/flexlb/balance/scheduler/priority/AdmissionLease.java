@@ -7,79 +7,237 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.util.Logger;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * AutoCloseable admission lease — the single ownership boundary between the
  * Auto-TPM admission scheduler and the dispatch/completion pipeline
  * (Luoli redesign §2.2).
  *
- * <p>Created at every plan-commit success point and bound to the request's
- * future. Two terminal operations, mutually exclusive via a CAS on
- * {@link #settled}:
+ * <p><b>Three-state CAS</b> (fix for the "triple-lock" OOM): the original
+ * two-state {@code settled} flag sealed the lease on prefill success, making
+ * {@code close()} a permanent no-op and leaking KV cache blocks forever. The
+ * three-state machine allows {@code close()} to transition from
+ * {@code HANDED_OVER} to {@code CLOSED}, so the soft-timeout path (or any
+ * later failure path) can still release resources after a successful handover.
+ *
  * <ul>
- *   <li>{@link #handoverToEngine()} — the <b>success</b> path: the future
- *       completed successfully, so the engine now owns the decode reservation
- *       and the prefill queue item will be consumed by the batcher's dispatch
- *       loop. The lease is sealed <em>without touching any resource</em> —
- *       releasing here would reopen the N2 oversell window (a new admission
- *       could grab the same decode slot while the engine is still using it).</li>
- *   <li>{@link #close()} — the <b>failure</b> path (timeout, dispatch error,
- *       SLO expiry, eviction): {@code tryRemove} the item from the prefill
- *       queue (idempotent — already dispatched/dispatched-and-removed items
- *       are a no-op), {@code release} the decode reservation (idempotent
- *       ConcurrentHashMap remove), and {@code unregisterInflight} (idempotent
- *       CAS remove). All three are safe to call on an already-settled item.</li>
+ *   <li>{@link #handoverToEngine()} — the <b>success</b> path (CAS 0→1):
+ *       prefill succeeded, the engine now owns the decode reservation. After
+ *       sealing, a <em>soft timeout</em> is scheduled: if the decode endpoint
+ *       hasn't accepted the request within {@code softTimeoutMs}, the lease is
+ *       force-closed and a cancel signal is sent to the engine.</li>
+ *   <li>{@link #close()} — the <b>failure</b> path (CAS 0→2 only):
+ *       timeout, dispatch error, SLO expiry, eviction. Releases all resources
+ *       (tryRemove + release + unregisterInflight). Post-handover cleanup
+ *       routes through {@link #forceCloseAfterHandover()} or
+ *       {@link #markDecodeAccepted()} only.</li>
+ *   <li>{@link #forceCloseAfterHandover()} — the <b>soft-timeout</b> path
+ *       (CAS 1→2): same resource release as {@code close()}, <em>plus</em>
+ *       sends a cancel signal ({@code finishYieldedById}) to the prefill
+ *       engine so the C++ side releases the {@code con_ref} (KV cache block)
+ *       that would otherwise stay pinned. Includes a TOCTOU double-check:
+ *       if decode accepted between the soft-timeout lambda's
+ *       {@code isConfirmedTracked} check and this CAS, only the counter is
+ *       decremented (no resource release, no cancel signal).</li>
+ *   <li>{@link #markDecodeAccepted()} — the <b>decode-accepted</b> path
+ *       (CAS 1→2): decode accepted within the soft timeout window. Only
+ *       decrements the backpressure counter; does not release resources
+ *       (the engine has taken over the decode reservation).</li>
  * </ul>
  *
- * <p>The dispatch pipeline's own terminal paths (onSuccess / onFailure /
- * onTimeout / onExpired / onOfferFailure) also clean up resources, each
- * guarded by its own CAS ({@code rollbackOnce}, {@code isDone} checks,
- * ConcurrentHashMap value-equality removes). The lease's CAS adds a second
- * exactly-once boundary so that an {@code orTimeout} firing before the
- * dispatch pipeline reaches the item still releases the stuck reservation —
- * and when the dispatch pipeline later settles the same item, every shared
- * cleanup step is an idempotent no-op (design §2.2: "已 dispatch 的请求撞上
- * 超时属于竞争窗口：close() 三步幂等无害").
+ * <p>Each resource-release step is idempotent, so concurrent terminal paths
+ * (dispatch pipeline, calibrate, soft timeout) are harmless.
  *
  * <p><b>Legacy path</b> ({@code budget == null}): never constructs a lease;
  * the legacy dispatch lifecycle is unchanged byte-for-byte.
  */
 public final class AdmissionLease implements AutoCloseable {
 
-    private final AtomicBoolean settled = new AtomicBoolean(false);
+    // ==================== Three-state CAS ====================
+
+    private static final int STATE_UNSET = 0;
+    private static final int STATE_HANDED_OVER = 1;
+    private static final int STATE_CLOSED = 2;
+
+    /**
+     * Daemon single-thread scheduler for post-success soft timeouts. A daemon
+     * thread never prevents JVM shutdown.
+     */
+    private static final ScheduledExecutorService SOFT_TIMEOUT_EXECUTOR =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "admission-lease-soft-timeout");
+                t.setDaemon(true);
+                return t;
+            });
+
+    private final AtomicInteger leaseState = new AtomicInteger(STATE_UNSET);
     private final BatchItem item;
     private final DecodeEndpoint decodeEp;
     private final PrefillQueueManager prefillQueue;
     private final InflightRegistrar registrar;
+    private final long softTimeoutMs;
+    private final Runnable onCloseCallback;
+    private volatile ScheduledFuture<?> softTimeoutFuture;
 
     /**
-     * @param item         the committed batch item (inflight-registered, queued)
-     * @param decodeEp     the decode endpoint holding the reservation
-     *                     ({@code null} when the plan has no decode endpoint)
-     * @param prefillQueue the prefill queue manager (for tryRemove on failure)
-     * @param registrar    the inflight registrar (for unregisterInflight on failure)
+     * Full constructor with soft-timeout and backpressure callback.
+     *
+     * @param item           the committed batch item (inflight-registered, queued)
+     * @param decodeEp       the decode endpoint holding the reservation
+     *                       ({@code null} when the plan has no decode endpoint)
+     * @param prefillQueue   the prefill queue manager (for tryRemove on failure)
+     * @param registrar      the inflight registrar (for unregisterInflight on failure)
+     * @param softTimeoutMs  post-success soft timeout in ms; {@code <= 0} disables
+     * @param onCloseCallback called exactly once when the lease transitions to CLOSED
+     *                       (may be {@code null})
      */
     public AdmissionLease(BatchItem item,
-                           DecodeEndpoint decodeEp,
-                           PrefillQueueManager prefillQueue,
-                           InflightRegistrar registrar) {
+                          DecodeEndpoint decodeEp,
+                          PrefillQueueManager prefillQueue,
+                          InflightRegistrar registrar,
+                          long softTimeoutMs,
+                          Runnable onCloseCallback) {
         this.item = item;
         this.decodeEp = decodeEp;
         this.prefillQueue = prefillQueue;
         this.registrar = registrar;
+        this.softTimeoutMs = softTimeoutMs;
+        this.onCloseCallback = onCloseCallback;
     }
 
     /**
-     * Failure / cleanup path: CAS exactly-once, then release every resource
-     * the admission held. Each step is idempotent so a concurrent dispatch-
-     * pipeline terminal path (or a second close) is harmless.
+     * Backward-compatible constructor (soft timeout disabled, no close callback).
+     */
+    public AdmissionLease(BatchItem item,
+                          DecodeEndpoint decodeEp,
+                          PrefillQueueManager prefillQueue,
+                          InflightRegistrar registrar) {
+        this(item, decodeEp, prefillQueue, registrar, 0, null);
+    }
+
+    // ==================== Terminal operations ====================
+
+    /**
+     * Failure / cleanup path: CAS UNSET→CLOSED only. Post-handover cleanup
+     * (from HANDED_OVER) is not allowed here — it routes through
+     * {@link #forceCloseAfterHandover()} or {@link #markDecodeAccepted()}.
+     * Each step is idempotent so a concurrent dispatch-pipeline terminal
+     * path (or a second close) is harmless.
      */
     @Override
     public void close() {
-        if (!settled.compareAndSet(false, true)) {
+        // Only UNSET→CLOSED (failure path). HANDED_OVER→CLOSED is not allowed
+        // here — post-handover cleanup routes through forceCloseAfterHandover()
+        // or markDecodeAccepted() only.
+        if (!leaseState.compareAndSet(STATE_UNSET, STATE_CLOSED)) {
             return;
         }
+        cancelSoftTimeout();
+        releaseResources();
+        notifyCloseCallback();
+        Logger.info("[auto-tpm] admission lease closed: request_id={}",
+                item.requestId());
+    }
+
+    /**
+     * Success path: CAS UNSET→HANDED_OVER. The engine now owns the decode
+     * reservation; the prefill queue item will be consumed by the batcher's
+     * dispatch loop. After sealing, a soft timeout is scheduled: if the
+     * decode endpoint hasn't accepted the request within {@code softTimeoutMs},
+     * the lease is force-closed.
+     */
+    public void handoverToEngine() {
+        if (!leaseState.compareAndSet(STATE_UNSET, STATE_HANDED_OVER)) {
+            return;
+        }
+        Logger.info("[auto-tpm] admission lease handed over to engine: request_id={}",
+                item.requestId());
+        scheduleSoftTimeout();
+    }
+
+    /**
+     * Soft-timeout force-close path: CAS HANDED_OVER→CLOSED. Releases all
+     * resources <em>and</em> sends a cancel signal ({@code finishYieldedById})
+     * to the prefill engine, triggering the C++ side to release the
+     * {@code con_ref} (KV cache block) that was pinned by the successful
+     * prefill but never consumed by decode.
+     *
+     * <p>TOCTOU fix: after the CAS succeeds, re-check
+     * {@code isConfirmedTracked}. If decode accepted between the
+     * soft-timeout lambda's check and this CAS, only decrement the counter
+     * (no resource release, no cancel signal) — the engine owns the decode
+     * reservation.
+     */
+    public void forceCloseAfterHandover() {
+        if (!leaseState.compareAndSet(STATE_HANDED_OVER, STATE_CLOSED)) {
+            return;
+        }
+        cancelSoftTimeout();
+        // TOCTOU fix: decode may have accepted between the isConfirmedTracked
+        // check in the soft-timeout lambda and this CAS. Re-check here — if
+        // decode has accepted, only decrement the counter (don't release
+        // resources or send cancel signal).
+        if (decodeEp != null && decodeEp.isConfirmedTracked(item.requestId())) {
+            notifyCloseCallback();
+            return;
+        }
+        releaseResources();
+        // Fix B: send cancel signal to engine so C++ releases con_ref.
+        // Only on the soft-timeout path — the normal close() failure path
+        // doesn't need this (the engine already knows the request failed).
+        registrar.finishYieldedById(item.requestId(), "post_success_soft_timeout");
+        notifyCloseCallback();
+        Logger.info("[auto-tpm] admission lease force-closed after handover: "
+                        + "request_id={} reason=post_success_soft_timeout",
+                item.requestId());
+    }
+
+    /**
+     * Decode-accepted path: CAS HANDED_OVER→CLOSED. Called when the decode
+     * endpoint has accepted the request within the soft timeout window.
+     * Only decrements the backpressure counter (via {@code notifyCloseCallback});
+     * does NOT release resources — the engine has taken over the decode
+     * reservation and will release them naturally.
+     */
+    void markDecodeAccepted() {
+        if (!leaseState.compareAndSet(STATE_HANDED_OVER, STATE_CLOSED)) {
+            return;
+        }
+        cancelSoftTimeout();
+        notifyCloseCallback();
+        Logger.info("[auto-tpm] admission lease marked decode-accepted: request_id={}",
+                item.requestId());
+    }
+
+    /**
+     * Bind the lease to the request future: on success →
+     * {@link #handoverToEngine()} (seal + schedule soft timeout); on any
+     * failure/timeout → {@link #close()} (release everything). The CAS on
+     * {@link #leaseState} guarantees that exactly one terminal path executes
+     * the resource release, even if the future completes while the dispatch
+     * pipeline is mid-cleanup.
+     */
+    public void bindTo(CompletableFuture<Response> future) {
+        future.whenComplete((resp, err) -> {
+            if (err == null && resp != null && resp.isSuccess()) {
+                handoverToEngine();
+            } else {
+                close();
+            }
+        });
+    }
+
+    // ==================== Internal ====================
+
+    /**
+     * Release all resources held by the admission. Each step is idempotent.
+     */
+    private void releaseResources() {
         // 1. Remove from prefill queue (no-op if already dispatched/removed).
         if (prefillQueue != null) {
             prefillQueue.tryRemove(item.requestId(), "LEASE_RELEASE");
@@ -90,38 +248,62 @@ public final class AdmissionLease implements AutoCloseable {
         }
         // 3. Unregister from inflight (no-op if already removed/tombstoned).
         registrar.unregisterInflight(item);
-        Logger.info("[auto-tpm] admission lease closed: request_id={}",
-                item.requestId());
     }
 
     /**
-     * Success path: seal the lease without touching any resource. The engine
-     * now owns the decode reservation; the prefill queue item will be consumed
-     * by the batcher's dispatch loop. Releasing here would reopen the N2
-     * oversell window (design §2.2).
+     * Schedule the post-success soft timeout. When it fires, check whether
+     * the decode endpoint has accepted the request:
+     * <ul>
+     *   <li>If accepted ({@code isConfirmedTracked} returns true) →
+     *       {@link #markDecodeAccepted()}: decrement the backpressure counter
+     *       only (no resource release — the engine owns the decode reservation).</li>
+     *   <li>If not accepted → {@link #forceCloseAfterHandover()}: release
+     *       resources + send cancel signal.</li>
+     * </ul>
      */
-    public void handoverToEngine() {
-        if (!settled.compareAndSet(false, true)) {
+    private void scheduleSoftTimeout() {
+        if (softTimeoutMs <= 0) {
             return;
         }
-        Logger.info("[auto-tpm] admission lease handed over to engine: request_id={}",
-                item.requestId());
+        if (decodeEp == null) {
+            // No decode endpoint — nothing to soft-timeout.
+            return;
+        }
+        long requestId = item.decode() != null
+                ? item.decode().getRequestId() : item.requestId();
+        softTimeoutFuture = SOFT_TIMEOUT_EXECUTOR.schedule(() -> {
+            if (decodeEp != null && decodeEp.isConfirmedTracked(requestId)) {
+                // Decode accepted — mark lease closed (decrement counter only).
+                markDecodeAccepted();
+                return;
+            }
+            // Decode not accepted within the soft timeout window — force close.
+            forceCloseAfterHandover();
+        }, softTimeoutMs, TimeUnit.MILLISECONDS);
     }
 
+    private void cancelSoftTimeout() {
+        ScheduledFuture<?> f = softTimeoutFuture;
+        if (f != null) {
+            f.cancel(false);  // don't interrupt a running task
+            softTimeoutFuture = null;
+        }
+    }
+
+    private void notifyCloseCallback() {
+        if (onCloseCallback != null) {
+            onCloseCallback.run();
+        }
+    }
+
+    // ==================== Test-visible state ====================
+
     /**
-     * Bind the lease to the request future: on success →
-     * {@link #handoverToEngine()} (seal, no resource release); on any
-     * failure/timeout → {@link #close()} (release everything). The CAS on
-     * {@link #settled} guarantees that exactly one of the two runs, even
-     * if the future completes while the dispatch pipeline is mid-cleanup.
+     * Returns the current lease state (for testing/diagnostics).
+     *
+     * @return 0=UNSET, 1=HANDED_OVER, 2=CLOSED
      */
-    public void bindTo(CompletableFuture<Response> future) {
-        future.whenComplete((resp, err) -> {
-            if (err == null && resp != null && resp.isSuccess()) {
-                handoverToEngine();
-            } else {
-                close();
-            }
-        });
+    int leaseState() {
+        return leaseState.get();
     }
 }

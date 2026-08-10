@@ -87,6 +87,11 @@ class AdmissionLeaseTest {
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
+    /**
+     * close() from HANDED_OVER is now a no-op (Warning 2 fix). Post-handover
+     * cleanup routes through forceCloseAfterHandover() or markDecodeAccepted()
+     * only.
+     */
     @Test
     void handover_then_close_is_noop() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
@@ -96,7 +101,9 @@ class AdmissionLeaseTest {
         lease.handoverToEngine();
         lease.close();
 
+        // close() from HANDED_OVER is a no-op — no resource release
         verify(registrar, never()).unregisterInflight(any());
+        assertEquals(1, lease.leaseState()); // still HANDED_OVER
     }
 
     // ==================== bindTo: success → handover ====================

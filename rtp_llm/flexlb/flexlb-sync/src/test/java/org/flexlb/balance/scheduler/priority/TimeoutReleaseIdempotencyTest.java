@@ -93,8 +93,14 @@ class TimeoutReleaseIdempotencyTest {
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
+    /**
+     * close() from HANDED_OVER is now a no-op (Warning 2 fix). After dispatch
+     * success triggers handoverToEngine (0→1), a subsequent close() does NOT
+     * transition 1→2. Post-handover cleanup routes through
+     * forceCloseAfterHandover() or markDecodeAccepted() only.
+     */
     @Test
-    void dispatch_success_then_orTimeout_handover_seals_close_is_noop() {
+    void dispatch_success_then_close_is_noop_from_handed_over() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
@@ -104,19 +110,16 @@ class TimeoutReleaseIdempotencyTest {
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar);
         lease.bindTo(future);
 
-        // Dispatch succeeds first
+        // Dispatch succeeds first → handoverToEngine (CAS 0→1)
         Response success = new Response();
         success.setSuccess(true);
         future.complete(success);
         awaitCallback(future);
 
-        // orTimeout fires later (no-op — future already completed, but simulate
-        // the bindTo callback's err branch being reached by the TimeoutException)
-        // Since the future is already completed, the orTimeout won't fire.
-        // But if it somehow did, the CAS on `settled` prevents double-execution.
-        lease.close(); // simulate the timeout path trying to close
+        // close() from HANDED_OVER is now a no-op (CAS fails)
+        lease.close();
 
-        // handoverToEngine sealed the lease — close() is a no-op
+        // No resources released — close is a no-op from HANDED_OVER
         verify(prefillQueue, never()).tryRemove(anyLong(), anyString());
         verify(decodeEp, never()).release(anyLong());
         verify(registrar, never()).unregisterInflight(any());

@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Auto-TPM priority admission scheduler.
@@ -99,6 +100,16 @@ public class PriorityAdmissionScheduler {
     private final BatchSchedulerReporter batchReporter;
     private final EngineCancelChannel cancelChannel;
 
+    /**
+     * Backpressure counter (Fix C): number of AdmissionLease objects currently
+     * in the HANDED_OVER state (prefill succeeded, decode not yet accepted).
+     * Incremented at lease creation, decremented when the lease transitions to
+     * CLOSED (close or forceCloseAfterHandover). When this exceeds
+     * {@code autoTpmPostSuccessBackpressureLimit}, new requests are rejected
+     * with 8502 to prevent KV cache exhaustion.
+     */
+    private final AtomicInteger activeLeaseCount = new AtomicInteger(0);
+
     public PriorityAdmissionScheduler(ConfigService configService,
                                       Router router,
                                       EndpointRegistry endpointRegistry,
@@ -132,6 +143,20 @@ public class PriorityAdmissionScheduler {
         int maxRetries = MAX_PLAN_RETRIES;
         boolean lockfree = isLockfreeCommit(config);
         boolean victimPresence = isVictimPresenceGuard(config);
+
+        // Fix C: backpressure check — reject new requests when too many leases
+        // are stuck in the HANDED_OVER state (prefill succeeded but decode hasn't
+        // accepted). This prevents KV cache exhaustion when decode is slow/stuck.
+        int backpressureLimit = config.getAutoTpmPostSuccessBackpressureLimit();
+        if (backpressureLimit > 0 && activeLeaseCount.get() >= backpressureLimit) {
+            Logger.info("[auto-tpm] backpressure limit exceeded, reject request_id={} "
+                            + "active_leases={} limit={}",
+                    ctx.getRequestId(), activeLeaseCount.get(), backpressureLimit);
+            completeError(future, StrategyErrorType.QUEUE_FULL,
+                    "post-success backpressure: active_leases=" + activeLeaseCount.get()
+                            + " limit=" + backpressureLimit);
+            return;
+        }
 
         // Task40 change 2: reject requests whose SLO deadline has already
         // expired (remaining <= 0) instead of leaving them in the queue.
@@ -1092,22 +1117,39 @@ public class PriorityAdmissionScheduler {
 
     /**
      * Create an {@link AdmissionLease} and bind it to the request future
-     * (PR-D §2.4). Called at every plan-commit success point after
-     * {@link #onCommitted}. The lease is the single ownership boundary:
-     * success → {@code handoverToEngine} (seal, no resource release);
-     * failure/timeout → {@code close} (tryRemove + release + unregister).
+     * (PR-D §2.4, fix for triple-lock OOM). Called at every plan-commit
+     * success point after {@link #onCommitted}. The lease is the single
+     * ownership boundary: success → {@code handoverToEngine} (seal +
+     * schedule soft timeout); failure/timeout → {@code close} (tryRemove +
+     * release + unregister). The soft timeout fires when decode hasn't
+     * accepted within {@code autoTpmPostSuccessSoftTimeoutMs} →
+     * {@code forceCloseAfterHandover} (release + cancel signal).
+     * <p>Fix C: increments {@link #activeLeaseCount} at creation and
+     * decrements when the lease closes (via the onClose callback).
      * <p>Legacy path ({@code budget == null}) never creates a lease.
      */
-    private static void bindAdmissionLease(NormalPlacementPlan plan,
-                                            InflightRegistrar registrar) {
+    private void bindAdmissionLease(NormalPlacementPlan plan,
+                                    InflightRegistrar registrar) {
         BalanceContext ctx = plan.item().ctx();
         if (ctx.budget() == null) {
             return;
         }
+        FlexlbConfig config = configService.loadBalanceConfig();
+        long softTimeoutMs = config.getAutoTpmPostSuccessSoftTimeoutMs();
         PrefillQueueManager prefillQueue = plan.prefillEp().getBatcher().queueManager();
         AdmissionLease lease = new AdmissionLease(
-                plan.item(), plan.decodeEp(), prefillQueue, registrar);
-        lease.bindTo(plan.item().future());
+                plan.item(), plan.decodeEp(), prefillQueue, registrar,
+                softTimeoutMs, activeLeaseCount::decrementAndGet);
+        // Fix C: increment after construction, before bindTo. If bindTo
+        // synchronously triggers close() (future already completed), the
+        // callback's decrementAndGet sees the counter already incremented.
+        activeLeaseCount.incrementAndGet();
+        try {
+            lease.bindTo(plan.item().future());
+        } catch (RuntimeException e) {
+            activeLeaseCount.decrementAndGet();
+            throw e;
+        }
     }
 
     private void onCommitted(BalanceContext ctx, NormalPlacementPlan plan) {
