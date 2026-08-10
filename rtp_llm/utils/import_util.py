@@ -2,9 +2,10 @@ import importlib
 import importlib.util
 import logging
 import os
+import sys
 import threading
 from functools import lru_cache
-from typing import Dict, Iterable, Optional, Set, Union
+from typing import Dict, Iterable, Optional, Sequence, Set, Union
 
 
 def load_module(module_path: str):
@@ -21,6 +22,27 @@ def load_module(module_path: str):
     else:
         raise Exception(f"ModuleSpec [{module_spec}] has no loader.")
     return imported_module
+
+
+def load_external_model_packages(
+    package_names: Optional[Sequence[str]],
+) -> None:
+    if not package_names:
+        return
+
+    loaded_packages = []
+    for package_name in package_names:
+        logging.info("Loading external model package: %s", package_name)
+        try:
+            importlib.import_module(package_name)
+        except Exception as error:
+            raise RuntimeError(
+                f"Failed to import external model package {package_name!r}; "
+                f"module search path: {sys.path!r}"
+            ) from error
+        loaded_packages.append(package_name)
+
+    logging.info("Loaded external model packages: %s", ", ".join(loaded_packages))
 
 
 @lru_cache(maxsize=None)
@@ -99,8 +121,8 @@ def has_internal_source() -> bool:
         bool: 如果 internal_source 目录存在则返回 True，否则返回 False
     """
     current_dir = os.path.dirname(os.path.abspath(__file__))  # rtp_llm/utils/
-    rtp_llm_dir = os.path.dirname(current_dir)               # rtp_llm/
-    project_root = os.path.dirname(rtp_llm_dir)              # workspace root
+    rtp_llm_dir = os.path.dirname(current_dir)  # rtp_llm/
+    project_root = os.path.dirname(rtp_llm_dir)  # workspace root
     internal_source_path = os.path.join(project_root, "internal_source")
     exists = os.path.exists(internal_source_path) and os.path.isdir(
         internal_source_path
