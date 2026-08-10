@@ -156,7 +156,6 @@ public class WorkerStatus {
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
                 updateTaskInputLength(localTask, finishedTask);
                 updateCacheHitFromEngine(localTask, finishedTask, "finished", cacheHitFeedbacks);
-                updatePrefillProgressFromEngine(localTask, finishedTask);
                 localTask.setRequestReceivedTimeMs(finishedTask.getRequestReceivedTimeMs());
                 localTask.setWaitingEnteredTimeMs(finishedTask.getWaitingEnteredTimeMs());
                 localTask.setRunningEnteredTimeMs(finishedTask.getRunningEnteredTimeMs());
@@ -203,7 +202,7 @@ public class WorkerStatus {
 
                 updateTaskInputLength(localTask, runningTask);
                 updateCacheHitFromEngine(localTask, runningTask, "running", cacheHitFeedbacks);
-                updatePrefillProgressFromEngine(localTask, runningTask);
+                updatePrefillRunningProgressFromEngine(localTask, runningTask);
                 localTask.setPrefillTime(runningTask.getPrefillTime());
                 localTask.setWaitingTime(runningTask.getWaitingTime());
                 localTask.setIterateCount(runningTask.getIterateCount());
@@ -243,10 +242,6 @@ public class WorkerStatus {
 
                 updateTaskInputLength(localTask, waitingTask);
                 updateCacheHitFromEngine(localTask, waitingTask, "waiting", cacheHitFeedbacks);
-                // A preempted request may return to WAITING after it had
-                // reported RUNNING progress. Its remaining work now follows
-                // the existing input/prefix accounting, not stale RUNNING data.
-                localTask.setPrefillProgressKnown(false);
                 if (localTask.getTaskState() == TaskStateEnum.RUNNING) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
                 }
@@ -288,17 +283,11 @@ public class WorkerStatus {
         }
     }
 
-    private void updatePrefillProgressFromEngine(TaskInfo localTask, TaskInfo engineTask) {
-        if (!engineTask.isPrefillProgressKnown()) {
-            localTask.setPrefillProgressKnown(false);
-            return;
-        }
-
+    private void updatePrefillRunningProgressFromEngine(TaskInfo localTask, TaskInfo engineTask) {
         localTask.setCompletedPrefillTokens(Math.max(0, engineTask.getCompletedPrefillTokens()));
-        localTask.setRemainingPrefillTokens(Math.max(0, engineTask.getRemainingPrefillTokens()));
+        localTask.setRemainingPrefillTokens(engineTask.getRemainingPrefillTokens());
         localTask.setLastCompletedPrefillStepId(
                 Math.max(0, engineTask.getLastCompletedPrefillStepId()));
-        localTask.setPrefillProgressKnown(true);
     }
 
     private void updateCacheHitFromEngine(TaskInfo localTask, TaskInfo engineTask, String taskState,
@@ -382,11 +371,13 @@ public class WorkerStatus {
     public void refreshRunningRemainingPrefillTokens() {
         long runningRemainingTokens = 0;
         for (TaskInfo task : localTaskMap.values()) {
-            if (task == null || task.getTaskState() != TaskStateEnum.RUNNING
-                    || !task.isPrefillProgressKnown()) {
+            if (task == null || task.getTaskState() != TaskStateEnum.RUNNING) {
                 continue;
             }
-            runningRemainingTokens += Math.max(0, task.getRemainingPrefillTokens());
+            long remainingPrefillTokens = task.getRemainingPrefillTokens();
+            runningRemainingTokens += remainingPrefillTokens >= 0
+                    ? remainingPrefillTokens
+                    : uncachedTokens(task);
         }
         this.runningRemainingPrefillTokens = runningRemainingTokens;
     }

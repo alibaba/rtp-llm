@@ -62,14 +62,10 @@ public class TaskInfo {
     @JsonProperty("completed_prefill_tokens")
     private long completedPrefillTokens;
     @JsonProperty("remaining_prefill_tokens")
-    private long remainingPrefillTokens;
+    // -1 means the engine omitted this optional field; 0 means no work remains.
+    private long remainingPrefillTokens = -1;
     @JsonProperty("last_completed_prefill_step_id")
     private long lastCompletedPrefillStepId;
-
-    // Presence is local protocol state. It keeps a legacy engine's omitted
-    // proto3 fields distinct from a valid first RUNNING snapshot (0 completed).
-    @JsonIgnore
-    private boolean prefillProgressKnown;
 
     @JsonIgnore
     private boolean kvcmMatchAvailable;

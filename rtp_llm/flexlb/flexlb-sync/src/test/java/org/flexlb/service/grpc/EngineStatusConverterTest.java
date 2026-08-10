@@ -122,25 +122,40 @@ class EngineStatusConverterTest {
         var task = EngineStatusConverter.convertToWorkerStatusResponse(workerStatus)
                 .getRunningTaskInfo().get("request-1");
 
-        assertTrue(task.isPrefillProgressKnown());
         assertEquals(0, task.getCompletedPrefillTokens());
         assertEquals(48_000, task.getRemainingPrefillTokens());
         assertEquals(0, task.getLastCompletedPrefillStepId());
     }
 
     @Test
-    void treatsMissingPrefillProgressAsUnknown() {
+    void keepsMissingRemainingPrefillTokensAsNegativeOne() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("legacy-request")
+                .setRequestId("missing-progress")
                 .build();
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
                 .addRunningTaskInfo(runningTask)
                 .build();
 
         var task = EngineStatusConverter.convertToWorkerStatusResponse(workerStatus)
-                .getRunningTaskInfo().get("legacy-request");
+                .getRunningTaskInfo().get("missing-progress");
 
-        assertFalse(task.isPrefillProgressKnown());
+        assertEquals(-1, task.getRemainingPrefillTokens());
+    }
+
+    @Test
+    void preservesExplicitZeroRemainingPrefillTokens() {
+        EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId("completed-prefill")
+                .setRemainingPrefillTokens(0)
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
+                .addRunningTaskInfo(runningTask)
+                .build();
+
+        var task = EngineStatusConverter.convertToWorkerStatusResponse(workerStatus)
+                .getRunningTaskInfo().get("completed-prefill");
+
+        assertEquals(0, task.getRemainingPrefillTokens());
     }
 
     @Test

@@ -333,7 +333,6 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
         assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
         assertEquals(16_000, workerStatus.getRunningRemainingPrefillTokens());
-        assertTrue(workerStatus.getLocalTaskMap().get(requestId).isPrefillProgressKnown());
         assertEquals(16_384,
                 workerStatus.getLocalTaskMap().get(requestId).getCompletedPrefillTokens());
         assertEquals(1,

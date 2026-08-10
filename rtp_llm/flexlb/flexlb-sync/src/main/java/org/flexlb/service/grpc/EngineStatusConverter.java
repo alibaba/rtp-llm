@@ -127,7 +127,6 @@ public class EngineStatusConverter {
             }
             if (taskInfoPB.hasRemainingPrefillTokens()) {
                 taskInfo.setRemainingPrefillTokens(taskInfoPB.getRemainingPrefillTokens());
-                taskInfo.setPrefillProgressKnown(true);
             }
             if (taskInfoPB.hasLastCompletedPrefillStepId()) {
                 taskInfo.setLastCompletedPrefillStepId(taskInfoPB.getLastCompletedPrefillStepId());

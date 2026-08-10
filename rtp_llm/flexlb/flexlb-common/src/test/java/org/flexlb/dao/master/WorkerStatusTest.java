@@ -732,13 +732,11 @@ class WorkerStatusTest {
             initialRunning.setCompletedPrefillTokens(0);
             initialRunning.setRemainingPrefillTokens(64_000);
             initialRunning.setLastCompletedPrefillStepId(0);
-            initialRunning.setPrefillProgressKnown(true);
             workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, initialRunning), Map.of());
 
             TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
             assertNotNull(updated);
             assertEquals(TaskStateEnum.RUNNING, updated.getTaskState());
-            assertTrue(updated.isPrefillProgressKnown());
             assertEquals(0, updated.getCompletedPrefillTokens());
             assertEquals(64_000, updated.getRemainingPrefillTokens());
             assertEquals(0, updated.getLastCompletedPrefillStepId());
@@ -753,13 +751,11 @@ class WorkerStatusTest {
             firstStep.setCompletedPrefillTokens(16_384);
             firstStep.setRemainingPrefillTokens(47_616);
             firstStep.setLastCompletedPrefillStepId(1);
-            firstStep.setPrefillProgressKnown(true);
             workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, firstStep), Map.of());
 
             updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
             assertNotNull(updated);
             assertEquals(TaskStateEnum.RUNNING, updated.getTaskState());
-            assertTrue(updated.isPrefillProgressKnown());
             assertEquals(16_384, updated.getCompletedPrefillTokens());
             assertEquals(47_616, updated.getRemainingPrefillTokens());
             assertEquals(1, updated.getLastCompletedPrefillStepId());
@@ -774,7 +770,6 @@ class WorkerStatusTest {
             secondStep.setCompletedPrefillTokens(32_768);
             secondStep.setRemainingPrefillTokens(31_232);
             secondStep.setLastCompletedPrefillStepId(2);
-            secondStep.setPrefillProgressKnown(true);
             workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, secondStep), Map.of());
 
             assertEquals(31_232, workerStatus.getRunningRemainingPrefillTokens());
@@ -788,32 +783,30 @@ class WorkerStatusTest {
 
             assertEquals(TaskStateEnum.CONFIRMED,
                     workerStatus.getLocalTaskMap().get(REQUEST_ID).getTaskState());
-            assertFalse(workerStatus.getLocalTaskMap().get(REQUEST_ID).isPrefillProgressKnown());
             assertEquals(0, workerStatus.getRunningRemainingPrefillTokens());
             assertEquals(1, workerStatus.getInTransitAndWaitingTaskCount());
             assertEquals(64_000, workerStatus.getInTransitAndWaitingUncachedTokens());
         }
 
         @Test
-        @DisplayName("Missing RUNNING progress clears a previously reported remaining value")
-        void missingRunningProgress_shouldNotTreatLegacyDefaultAsZeroRemaining() {
+        @DisplayName("Missing RUNNING progress falls back to full uncached work")
+        void missingRunningProgress_shouldUseUncachedTokens() {
             TaskInfo localTask = new TaskInfo();
             localTask.setRequestId(REQUEST_ID);
+            localTask.setInputLength(64_000);
+            localTask.setPredictedPrefixLength(16_000);
             workerStatus.putLocalTask(REQUEST_ID, localTask);
 
-            TaskInfo progressTask = new TaskInfo();
-            progressTask.setRequestId(REQUEST_ID);
-            progressTask.setRemainingPrefillTokens(16_384);
-            progressTask.setPrefillProgressKnown(true);
-            workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, progressTask), Map.of());
-            assertEquals(16_384, workerStatus.getRunningRemainingPrefillTokens());
+            TaskInfo runningTask = new TaskInfo();
+            runningTask.setRequestId(REQUEST_ID);
+            runningTask.setInputLength(64_000);
+            runningTask.setPrefixLength(16_000);
+            runningTask.setPrefixLengthValid(true);
+            workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, runningTask), Map.of());
 
-            TaskInfo legacyTask = new TaskInfo();
-            legacyTask.setRequestId(REQUEST_ID);
-            workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, legacyTask), Map.of());
-
-            assertFalse(workerStatus.getLocalTaskMap().get(REQUEST_ID).isPrefillProgressKnown());
-            assertEquals(0, workerStatus.getRunningRemainingPrefillTokens());
+            TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
+            assertEquals(-1, updated.getRemainingPrefillTokens());
+            assertEquals(48_000, workerStatus.getRunningRemainingPrefillTokens());
         }
 
         @Test
