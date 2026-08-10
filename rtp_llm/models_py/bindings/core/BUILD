@@ -136,6 +136,7 @@ cc_library(
         "//rtp_llm/cpp/testing:__pkg__",
         "//rtp_llm/models_py/bindings/core/test:__pkg__",
         "//rtp_llm/models_py/bindings/rocm/ops/tests:__pkg__",
+        "//internal_source/rtp_llm/cpp/disaggregate/cache_store/test:__pkg__",
     ],
 )
 
