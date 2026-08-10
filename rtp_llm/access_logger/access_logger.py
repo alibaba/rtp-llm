@@ -100,9 +100,14 @@ class AccessLogger:
             self.log_access(request, response_log)
 
     def log_exception_access(
-        self, request: Dict[str, Any], exception: BaseException
+        self,
+        request: Dict[str, Any],
+        exception: BaseException,
+        response: Optional[Dict[str, Any]] = None,
     ) -> None:
         response_log = ResponseLog()
+        if response is not None:
+            response_log.add_response(response)
         response_log.add_exception(exception)
         if not self.is_private_request(request):
             self.log_access(request, response_log)

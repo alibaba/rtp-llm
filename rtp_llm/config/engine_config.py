@@ -139,7 +139,6 @@ class EngineConfig:
 
         lines.append("\n[GrammarConfig]")
         lines.append(self.grammar_config.to_string())
-
         lines.append("\n[LoadConfig]")
         lines.append(self.load_config.to_string())
 

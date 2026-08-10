@@ -370,6 +370,8 @@ struct FIFOSchedulerConfig {
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
     std::string decode_prefill_ratio = "1";
+    bool        cp_force_single_prefill     = true;
+    int64_t     max_inited_kv_cache_streams = 0;
     std::string to_string() const;
 };
 
@@ -426,7 +428,7 @@ struct PDSepConfig {
     int64_t  decode_polling_call_prefill_ms  = 30;
     int64_t  rdma_connect_retry_times        = 0;
     int64_t  load_cache_timeout_ms           = 5000;
-    int64_t  max_rpc_timeout_ms              = 0;
+    int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
 
@@ -565,6 +567,8 @@ struct GrpcMapsConfig {
 };
 
 struct GrpcConfig: GrpcMapsConfig {
+    /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
+    int max_server_pollers = 0;
     GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;

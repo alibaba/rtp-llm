@@ -22,6 +22,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     OutputDelta,
     RenderedInputs,
     RendererParams,
+    StreamResponseObject,
     StreamStatus,
 )
 from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
@@ -343,6 +344,29 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                     existing.function.arguments = (
                         existing.function.arguments or ""
                     ) + new.function.arguments
+
+    @override
+    def _should_yield_stream_response(
+        self, response: StreamResponseObject, is_final: bool = False
+    ) -> bool:
+        if is_final:
+            return True
+
+        for choice in response.choices:
+            if choice.finish_reason is not None or choice.logprobs is not None:
+                return True
+
+            delta = choice.delta
+            if (
+                delta.role is not None
+                or delta.function_call is not None
+                or delta.tool_calls
+                or delta.content
+                or delta.reasoning_content
+            ):
+                return True
+
+        return False
 
     @override
     async def _update_single_status(

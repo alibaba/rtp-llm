@@ -47,6 +47,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         is_target_verify=False,
         graph_max_batch_size=None,
         copy_batch_size=None,
+        device_lengths=False,
     ):
         """Create PyAttentionInputs for prefill (single or multi batch)."""
         if isinstance(input_lengths, int):
@@ -58,10 +59,15 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         inp.is_cuda_graph = with_copy_params
         inp.is_prefill = True
         inp.is_target_verify = is_target_verify
-        inp.input_lengths = torch.tensor(input_lengths, dtype=torch.int32).pin_memory()
+        input_lengths_tensor = torch.tensor(input_lengths, dtype=torch.int32)
+        inp.input_lengths = (
+            input_lengths_tensor.to("cuda")
+            if device_lengths
+            else input_lengths_tensor.pin_memory()
+        )
         inp.prefix_lengths = torch.tensor(
-            prefix_lengths, dtype=torch.int32
-        ).pin_memory()
+            prefix_lengths, dtype=torch.int32, device="cuda"
+        )
         seq_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
         inp.sequence_lengths = torch.tensor(seq_lengths, dtype=torch.int32).pin_memory()
 
@@ -351,6 +357,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             input_lengths,
             prefix_lengths,
             is_target_verify=True,
+            device_lengths=True,
         )
         total_kv = prefix_lengths[0] + input_lengths[0]
         attn_inputs.cu_kv_seqlens_device = torch.tensor(

@@ -66,6 +66,7 @@ protected:
     size_t evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
     void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& waiting_streams);
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    size_t countInitedKVCacheStreams() const;
 
 protected:
     PDSepConfig                     pd_sep_config_;
@@ -79,12 +80,16 @@ protected:
     size_t                          max_seq_len_             = 0;
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
+    size_t                          max_inited_kv_cache_streams_ = 0;
     bool                            need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
+    int64_t                         last_admitted_context_batch_size_ = 0;
+    int64_t                         last_admitted_context_token_size_ = 0;
+    int64_t                         last_waiting_oldest_age_us_       = 0;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;

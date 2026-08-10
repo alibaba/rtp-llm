@@ -133,6 +133,35 @@ cc_library(
 )
 
 cc_library(
+    name = "recent_cache_key_window",
+    srcs = ["RecentCacheKeyWindow.cc"],
+    hdrs = ["RecentCacheKeyWindow.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_types",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:time_util",
+    ],
+)
+
+cc_library(
+    name = "prefill_cache_hit_metrics_reporter",
+    srcs = ["PrefillCacheHitMetricsReporter.cc"],
+    hdrs = ["PrefillCacheHitMetricsReporter.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        ":cache_types",
+        ":cp_slot_mapper",
+        ":recent_cache_key_window",
+        "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
     name = "block_pool",
     srcs = [
         "BlockCache.cc",
@@ -341,6 +370,7 @@ cc_library(
     deps = [
         ":cache_core",
         ":cp_slot_mapper",
+        ":prefill_cache_hit_metrics_reporter",
         "//rtp_llm/cpp/cache/connector",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",

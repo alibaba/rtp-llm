@@ -381,7 +381,9 @@ std::string FIFOSchedulerConfig::to_string() const {
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
         << "pdfusion_scheduler_mode: " << pdfusion_scheduler_mode << "\n"
-        << "decode_prefill_ratio: " << decode_prefill_ratio;
+        << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
+        << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
+        << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams;
     return oss.str();
 }
 
@@ -503,6 +505,7 @@ GrpcConfig::GrpcConfig(const std::string& json_str) {
 std::string GrpcConfig::to_string() const {
     std::ostringstream oss;
     append_grpc_maps_to_stream(oss, *this);
+    oss << "max_server_pollers: " << max_server_pollers << "\n";
     return oss.str();
 }
 
@@ -513,8 +516,10 @@ void GrpcConfig::from_json(const std::string& json_str) {
 
     client_config.clear();
     server_config.clear();
+    max_server_pollers = 0;
 
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
+    max_server_pollers = parse_optional_root_int_json(json_str, "max_server_pollers", 0);
 }
 
 DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {

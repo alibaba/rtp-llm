@@ -370,6 +370,28 @@ def _is_flashinfer_workspace_plan_error(error: Exception) -> bool:
     )
 
 
+def _host_i32(t):
+    """Lift a possibly CUDA-resident tensor to host for the host fill path.
+
+    The C++ fillParams reads raw host pointers; hybrid-attention models
+    (qwen3-next) and the MTP device-state fast path can hand in CUDA-resident
+    lengths/block tables even when input_lengths stays on the host.
+    """
+    return t.cpu() if t is not None and t.numel() > 0 and t.is_cuda else t
+
+
+def _device_or(device_tensor, host_tensor):
+    """Prefer the *_device mirror; fall back to the base field.
+
+    Unit tests (and some callers) construct PyAttentionInputs with only the
+    base fields populated (possibly already CUDA-resident), so the device
+    mirror may be missing.
+    """
+    if device_tensor is not None and device_tensor.numel() >= 0:
+        return device_tensor
+    return host_tensor
+
+
 class PyFlashinferPrefillPagedAttnOp(object):
     """FlashInfer Prefill Attention Op with Paged KV Cache support"""
 
@@ -637,20 +659,53 @@ class PyFlashinferPrefillPagedAttnOp(object):
         batch_size = input_lengths.size(0)
         max_q_len = int(input_lengths.max().item()) if batch_size else 0
         if attn_inputs.prefix_lengths.numel() == batch_size:
-            max_kv_len = int((attn_inputs.prefix_lengths + input_lengths).max().item())
+            if attn_inputs.prefix_lengths.device == input_lengths.device:
+                max_kv_len = int(
+                    (attn_inputs.prefix_lengths + input_lengths).max().item()
+                )
+            else:
+                max_kv_len = int(
+                    (_host_i32(attn_inputs.prefix_lengths) + _host_i32(input_lengths))
+                    .max()
+                    .item()
+                )
         elif attn_inputs.sequence_lengths.numel() > 0:
             max_kv_len = int(attn_inputs.sequence_lengths.max().item())
         else:
             max_kv_len = max_q_len
         self._plan_shape = (batch_size, max_q_len, max_kv_len)
-        self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
-            self.page_size,
-            forbid_realloc,
-        )
+
+        # Keep the same fill path for capture and replay: the host fill sizes
+        # buffers exactly while the device fill sizes for the worst case, so
+        # switching paths between capture and replay forces a forbidden realloc.
+        if input_lengths.is_cuda:
+            self.fmha_params.fill_params_mha_device(
+                _device_or(
+                    attn_inputs.prefix_lengths_device,
+                    attn_inputs.prefix_lengths,
+                ),
+                attn_inputs.sequence_lengths,
+                _device_or(
+                    attn_inputs.input_lengths_device,
+                    attn_inputs.input_lengths,
+                ),
+                _device_or(
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    attn_inputs.kv_cache_kernel_block_id,
+                ),
+                self.page_size,
+                forbid_realloc,
+            )
+        else:
+            self.fmha_params.fill_params(
+                _host_i32(attn_inputs.prefix_lengths),
+                _host_i32(attn_inputs.sequence_lengths),
+                _host_i32(attn_inputs.input_lengths),
+                _host_i32(attn_inputs.kv_cache_kernel_block_id),
+                self.page_size,
+                forbid_realloc,
+            )
+
         copy_params = attn_inputs.prefill_cuda_graph_copy_params
         qo_indptr_reallocated = False
         if copy_params is not None:
@@ -919,10 +974,10 @@ class PyFlashinferPrefillAttnOp(object):
             kv_block_id_host = torch.empty(0, dtype=torch.int32)
 
         self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            kv_block_id_host,
+            _host_i32(attn_inputs.prefix_lengths),
+            _host_i32(attn_inputs.sequence_lengths),
+            _host_i32(attn_inputs.input_lengths),
+            _host_i32(kv_block_id_host),
             self.page_size,
         )
 
@@ -1393,14 +1448,37 @@ class PyFlashinferDecodeAttnOp(object):
 
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
-        self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
-            self.seq_size_per_block,
-            forbid_realloc=forbid_realloc,
-        )
+        # The fa2/tensor-core backend plans from the HOST mirrors
+        # (decode_page_indptr_h etc. in _plan_decode_wrapper); the device fill
+        # only populates the device buffers and leaves the host mirrors at
+        # their stale capacity sizes (MIN_CACHE_BATCH_SIZE), which corrupts
+        # plan's batch size. Route tensor-core through the host fill.
+        if attn_inputs.input_lengths.is_cuda and not self.use_tensor_core:
+            self.fmha_params.fill_params_mha_device(
+                _device_or(
+                    attn_inputs.prefix_lengths_device, attn_inputs.prefix_lengths
+                ),
+                attn_inputs.sequence_lengths,
+                _device_or(attn_inputs.input_lengths_device, attn_inputs.input_lengths),
+                _device_or(
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    attn_inputs.kv_cache_kernel_block_id,
+                ),
+                self.seq_size_per_block,
+                forbid_realloc=forbid_realloc,
+            )
+        else:
+            block_id_host = attn_inputs.kv_cache_kernel_block_id
+            if block_id_host is None or block_id_host.numel() == 0:
+                block_id_host = attn_inputs.kv_cache_kernel_block_id_device
+            self.fmha_params.fill_params(
+                _host_i32(attn_inputs.prefix_lengths),
+                _host_i32(attn_inputs.sequence_lengths),
+                _host_i32(attn_inputs.input_lengths),
+                _host_i32(block_id_host),
+                self.seq_size_per_block,
+                forbid_realloc=forbid_realloc,
+            )
 
         if self.enable_cuda_graph and self.decode_wrapper._fixed_batch_size == 0:
             batch_size = attn_inputs.input_lengths.size(0)
@@ -1427,16 +1505,37 @@ class PyFlashinferDecodeAttnOp(object):
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
         """Refresh FlashInfer runtime buffers before replaying the captured graph."""
-        self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
+        if not attn_inputs.sequence_lengths.is_cuda:
+            # Host pipeline: refresh the host mirrors and, for the fa2
+            # tensor-core backend, re-plan from them — the captured kernels
+            # read plan metadata that lives in host buffers.
+            self.fmha_params.fill_params(
+                _host_i32(attn_inputs.prefix_lengths),
+                _host_i32(attn_inputs.sequence_lengths),
+                _host_i32(attn_inputs.input_lengths),
+                _host_i32(attn_inputs.kv_cache_kernel_block_id),
+                self.seq_size_per_block,
+                forbid_realloc=True,
+            )
+            if self._requires_fa2_cuda_graph_replan():
+                self._plan_decode_wrapper(attn_inputs)
+            return
+
+        # Device pipeline: update the device-resident buffers in place.
+        seq_plus_1 = attn_inputs.sequence_lengths_plus_1_device
+        if seq_plus_1 is None or not seq_plus_1.is_cuda:
+            seq_plus_1 = (attn_inputs.sequence_lengths.to(torch.int32) + 1).cuda()
+        block_id = _device_or(
+            attn_inputs.kv_cache_kernel_block_id_device,
             attn_inputs.kv_cache_kernel_block_id,
-            self.seq_size_per_block,
-            forbid_realloc=True,
         )
-        if self._requires_fa2_cuda_graph_replan():
-            self._plan_decode_wrapper(attn_inputs)
+        if block_id is not None and not block_id.is_cuda:
+            block_id = block_id.cuda()
+        self.fmha_params.fill_decode_cuda_graph_params(
+            seq_plus_1,
+            block_id,
+            self.seq_size_per_block,
+        )
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True

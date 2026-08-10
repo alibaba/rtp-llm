@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <numeric>
 #include <unordered_set>
 
@@ -9,6 +12,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
@@ -149,6 +153,11 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
     return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
 }
 
+bool cacheStatusSnapshotEnabled() {
+    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
 }  // namespace
 
 KVCacheManager::KVCacheManager(const CacheConfig&                 config,
@@ -187,6 +196,14 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                          (int)parallelism_config_.tp_size,
                          config_.seq_size_per_block,
                          cp_slot_mapper_->virtualBlockSize());
+    }
+
+    if (pd_sep_config_.role_type == RoleType::PREFILL) {
+        if (PrefillCacheHitMetricsReporter::enabled()) {
+            prefill_cache_hit_metrics_reporter_ = std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
+        } else {
+            RTP_LLM_LOG_INFO("prefill recent-cache-key metrics disabled by PREFILL_CACHE_HIT_METRIC_ENABLE");
+        }
     }
 
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
@@ -273,14 +290,28 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
-    const int seq_size_per_block = config_.seq_size_per_block;
-    if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
+    const int  seq_size_per_block = config_.seq_size_per_block;
+    const bool is_first_malloc    = !malloc_info.batch_kv_cache_resource->curBlocksNum();
+    if (is_first_malloc) {
         initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     } else {
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
+    reportPrefillCacheHitMetrics(malloc_info, is_first_malloc);
 
     return allocator_->malloc(malloc_info);
+}
+
+void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc) {
+    if (!is_first_malloc || !prefill_cache_hit_metrics_reporter_ || !malloc_info.batch_kv_cache_resource
+        || !malloc_info.complete_token_ids) {
+        return;
+    }
+    prefill_cache_hit_metrics_reporter_->record(*malloc_info.batch_kv_cache_resource,
+                                                cp_slot_mapper_,
+                                                malloc_info.request_id,
+                                                malloc_info.complete_token_ids->seqLength(),
+                                                config_.seq_size_per_block);
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {
@@ -474,6 +505,29 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
+    if (need_cache_keys && cacheStatusSnapshotEnabled()) {
+        std::shared_ptr<const KVCacheInfo> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+            snapshot = cache_status_snapshot_;
+        }
+        if (snapshot) {
+            return *snapshot;
+        }
+    }
+    return buildKVCacheInfo(latest_version, need_cache_keys);
+}
+
+void KVCacheManager::refreshKVCacheInfoSnapshot() {
+    if (!allocator_ || !cacheStatusSnapshotEnabled()) {
+        return;
+    }
+    auto snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/true));
+    std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
+    cache_status_snapshot_ = std::move(snapshot);
+}
+
+KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     KVCacheInfo info;
     info.version = latest_version;
 

@@ -91,10 +91,18 @@ if [ -z $SETENV_SETTED ]; then
         echo "INFO: OS total memory: "$memTotal"M"
         # if os memory <= 2G
         if [ $memTotal -le 2048 ]; then
-          SERVICE_OPTS="${SERVICE_OPTS} -Xms1536m -Xmx1536m"
+          DEFAULT_JVM_XMS="1536m"
+          DEFAULT_JVM_XMX="1536m"
         else
-          SERVICE_OPTS="${SERVICE_OPTS} -Xms32g -Xmx32g"
+          DEFAULT_JVM_XMS="32g"
+          DEFAULT_JVM_XMX="32g"
         fi
+
+        FLEXLB_HEAP_SIZE=${FLEXLB_JVM_HEAP_SIZE:-${MASTER_JVM_HEAP_SIZE}}
+        SERVICE_JVM_XMS=${FLEXLB_JVM_XMS:-${MASTER_JVM_XMS:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMS}}}}
+        SERVICE_JVM_XMX=${FLEXLB_JVM_XMX:-${MASTER_JVM_XMX:-${FLEXLB_HEAP_SIZE:-${DEFAULT_JVM_XMX}}}}
+        echo "INFO: JVM heap config: -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
+        SERVICE_OPTS="${SERVICE_OPTS} -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
 
         SERVICE_OPTS="${SERVICE_OPTS} -XX:MetaspaceSize=512m -XX:MaxMetaspaceSize=512m"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=2g"

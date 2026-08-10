@@ -9,6 +9,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, Union
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.config.response_format import normalize_think_tag
@@ -35,6 +36,7 @@ from rtp_llm.openai.api_datatype import (
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -427,6 +429,18 @@ class CustomChatRenderer:
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
 
+    def apply_chat_completion_constraints(
+        self, request: ChatCompletionRequest, generate_config: GenerateConfig
+    ) -> None:
+        tool_choice = getattr(request, "tool_choice", None)
+        if tool_choice is None or tool_choice in ("auto", "none"):
+            return
+        raise FtRuntimeException(
+            ExceptionType.INVALID_PARAMS,
+            f"tool_choice={tool_choice!r} is not supported by "
+            f"{self.__class__.__name__}",
+        )
+
     async def generate_choice(
         self,
         request_id: int,
@@ -435,6 +449,7 @@ class CustomChatRenderer:
         generate_config: GenerateConfig,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
+        headers: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -448,6 +463,7 @@ class CustomChatRenderer:
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
+                    headers=normalize_request_headers(headers),
                 )
             )
         )
@@ -912,6 +928,11 @@ class CustomChatRenderer:
             extra_outputs=items[-1].extra_outputs,
         )
 
+    def _should_yield_stream_response(
+        self, response: StreamResponseObject, is_final: bool = False
+    ) -> bool:
+        return True
+
     async def _flush_buffer(
         self,
         buffer_list: List[StreamStatus],
@@ -1069,17 +1090,27 @@ class CustomChatRenderer:
                         output, generate_config
                     )
                 delta_list.append(delta)
-            yield await self._generate_stream_response(delta_list, think_status_list)
+            stream_response = await self._generate_stream_response(
+                delta_list, think_status_list
+            )
+            if self._should_yield_stream_response(stream_response):
+                yield stream_response
             if self._check_all_finished(status_list):
                 break
         if index != 0:
-            yield await self._flush_buffer(
+            flush_response = await self._flush_buffer(
                 status_list,
                 generate_config.stop_words_str,
                 generate_config.is_streaming,
                 think_status_list,
             )
-            yield await self._generate_final(status_list, request, think_status_list)
+            if self._should_yield_stream_response(flush_response):
+                yield flush_response
+            final_response = await self._generate_final(
+                status_list, request, think_status_list
+            )
+            if self._should_yield_stream_response(final_response, is_final=True):
+                yield final_response
 
     def _create_empty_delta_sync(self, input_len: int, output_len: int, reuse_len: int):
         return OutputDelta(

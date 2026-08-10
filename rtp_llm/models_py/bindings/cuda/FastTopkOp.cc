@@ -10,6 +10,14 @@ void fast_topk_v2(at::Tensor&                         score,
     rtp_llm::fast_topk_v2(score, indices, lengths, row_starts);
 }
 
+void fast_topk_v2_variable(at::Tensor&                         score,
+                           at::Tensor&                         indices,
+                           at::Tensor&                         lengths,
+                           const std::optional<torch::Tensor>& row_starts,
+                           int64_t                             top_k) {
+    rtp_llm::fast_topk_v2_variable(score, indices, lengths, row_starts, top_k);
+}
+
 void fast_topk_transform_fused(at::Tensor&                         score,
                                at::Tensor&                         lengths,
                                at::Tensor&                         dst_page_table,
