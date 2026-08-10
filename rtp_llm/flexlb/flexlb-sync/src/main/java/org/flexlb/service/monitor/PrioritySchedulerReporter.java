@@ -30,11 +30,8 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREFILL_QUEUE_DEPTH;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PRIORITY_PREEMPT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_SLO_MS;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_RESCUE_COUNT;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_RESCUE_LATENCY_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_TTFT_MS;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_TRANSFER_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
 
@@ -72,9 +69,6 @@ public class PrioritySchedulerReporter {
         monitor.register(AUTO_TPM_DEADLINE_MISS_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_PRIORITY_PREEMPT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_RUNNING_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_RESCUE_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_RESCUE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_TRANSFER_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_ACCEPTED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_CANCEL_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_CANCEL_CONFIRM_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
@@ -83,7 +77,7 @@ public class PrioritySchedulerReporter {
         monitor.register(AUTO_TPM_PLAN_AGE_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_INFLIGHT_SETTLE_MISS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        log.info("PrioritySchedulerReporter initialized (24 metrics)");
+        log.info("PrioritySchedulerReporter initialized (21 metrics)");
     }
 
     /**
@@ -336,50 +330,6 @@ public class PrioritySchedulerReporter {
         monitor.report(AUTO_TPM_CANCEL_TIMEOUT_COUNT,
                 FlexMetricTags.of("endpoint", endpoint,
                         "priority", String.valueOf(incomingPriority)), 1.0);
-    }
-
-    /**
-     * Report a deadline-rescue candidate processing outcome via
-     * {@code auto_tpm.rescue.count} (§19.2).
-     *
-     * @param priority normalized priority of the candidate request
-     * @param result   success / requeue_failed / cas_skipped / limited
-     */
-    public void reportRescue(int priority, String result) {
-        monitor.report(AUTO_TPM_RESCUE_COUNT,
-                FlexMetricTags.of("priority", String.valueOf(priority), "result", result), 1.0);
-    }
-
-    /**
-     * Report one deadline-rescue migration attempt's latency via
-     * {@code auto_tpm.rescue.latency_ms} (§14.4). Auxiliary to
-     * {@link #reportRescue}: adds the endpoint dimensions without changing
-     * the existing rescue/transfer count semantics.
-     *
-     * @param priority     normalized priority of the migrated request
-     * @param result       success / requeue_failed
-     * @param fromEndpoint source prefill endpoint the request was rescued from
-     * @param toEndpoint   new prefill endpoint on success, "-" on failure
-     * @param latencyMs    milliseconds spent inside the rescueOne migration
-     */
-    public void reportRescueLatency(int priority, String result,
-                                    String fromEndpoint, String toEndpoint, long latencyMs) {
-        monitor.report(AUTO_TPM_RESCUE_LATENCY_MS,
-                FlexMetricTags.of("from_endpoint", fromEndpoint, "to_endpoint", toEndpoint,
-                        "priority", String.valueOf(priority), "result", result), latencyMs);
-    }
-
-    /**
-     * Report one cross-endpoint transfer attempt via
-     * {@code auto_tpm.transfer.count} (§19.2). Only counted when the request
-     * was actually removed from its source queue for migration.
-     *
-     * @param priority normalized priority of the migrated request
-     * @param result   success / requeue_failed
-     */
-    public void reportTransfer(int priority, String result) {
-        monitor.report(AUTO_TPM_TRANSFER_COUNT,
-                FlexMetricTags.of("priority", String.valueOf(priority), "result", result), 1.0);
     }
 
     /**

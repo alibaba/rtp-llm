@@ -21,8 +21,6 @@ public final class PriorityCostFunction {
 
     // h(case) cross-type weights (design doc 7.6). A combined slot+KV plan
     // sums its already-weighted parts and is never multiplied again.
-    /** h(PREFILL_QUEUE_FULL): cheapest, Master-queue-only removal. */
-    public static final long H_PREFILL_QUEUE_FULL = 1L;
     /** h(DECODE_SLOT_FULL): frees concurrency, may affect D admission. */
     public static final long H_DECODE_SLOT_FULL = 4L;
     /** h(DECODE_KV_FULL): KV-sensitive, released KV needs confirmation. */
