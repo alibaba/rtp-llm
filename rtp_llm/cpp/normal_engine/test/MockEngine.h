@@ -45,6 +45,8 @@ struct CustomConfig {
     bool                                    reuse_cache        = false;
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
+    std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
+    bool                                    prefill_cp_enabled = false;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -126,7 +128,14 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     // Create all config objects with defaults
     rtp_llm::MMModelConfig mm_model_config;
     model_config.mm_model_config = mm_model_config;
-    rtp_llm::ParallelismConfig           parallelism_config;
+    rtp_llm::ParallelismConfig parallelism_config;
+    model_config.output_vocab_ids = config.output_vocab_ids;
+    if (!config.output_vocab_ids.empty()) {
+        model_config.output_vocab_padded_size = static_cast<int64_t>(config.output_vocab_ids.size());
+    }
+    if (config.prefill_cp_enabled) {
+        parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    }
     rtp_llm::PDSepConfig                 pd_sep_config;
     rtp_llm::ConcurrencyConfig           concurrency_config;
     rtp_llm::FMHAConfig                  fmha_config;

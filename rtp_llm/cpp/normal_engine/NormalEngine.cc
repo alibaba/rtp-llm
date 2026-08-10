@@ -89,6 +89,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                 "output vocabulary pruning does not support speculative, MTP, or EAGLE engines");
         RTP_LLM_CHECK_WITH_INFO(!runtime_config.warm_up_with_loss,
                                 "output vocabulary pruning does not support warm_up_with_loss");
+        // forwardPostLayersLastHidden (prefill CP) is a second lm_head exit that does not
+        // narrow P-wide logits down to the output vocabulary width, so padded zero columns
+        // would reach sampling. Reject the combination until that path narrows as well.
+        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.is_enabled(),
+                                "output vocabulary pruning does not support prefill context parallelism");
     }
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;

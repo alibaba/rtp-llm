@@ -367,4 +367,11 @@ TEST_F(NormalEngineTest, testQueryReuseCacheWhenSwitchIsOff) {
     }
 }
 
+TEST_F(NormalEngineTest, testRejectOutputVocabWithPrefillCP) {
+    CustomConfig config;
+    config.output_vocab_ids   = {0, 2, 7};
+    config.prefill_cp_enabled = true;
+    EXPECT_THROW(createMockEngine(config), std::exception);
+}
+
 }  // namespace rtp_llm
