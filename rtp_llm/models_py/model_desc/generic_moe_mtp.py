@@ -9,7 +9,7 @@ from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
-from rtp_llm.models_py.modules.hybrid.glm52_cuda_dag import should_enable_glm52_cudadag
+from rtp_llm.models_py.modules.hybrid.glm5_cmp import should_enable_glm5_cmp
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -132,7 +132,7 @@ class GenericMoeMTPModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         prev_topk_indices = None
-        enable_cudadag = should_enable_glm52_cudadag(
+        enable_cmp = should_enable_glm5_cmp(
             self.layers,
             self.layer_num,
             hidden_states,
@@ -147,7 +147,7 @@ class GenericMoeMTPModel(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
-                enable_cudadag=enable_cudadag,
+                enable_cmp=enable_cmp,
             )
             hidden_states = output.hidden_states
             residual = output.residual

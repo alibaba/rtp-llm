@@ -27,10 +27,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
-from rtp_llm.models_py.modules.hybrid.glm52_cuda_dag import (
-    Glm52CudaDag,
-    resolve_glm52_cuda_dag_enabled,
-    should_enable_glm52_cudadag,
+from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
+    Glm5Cmp,
+    resolve_glm5_cmp_enabled,
+    should_enable_glm5_cmp,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
@@ -283,7 +283,7 @@ class GenericMoeLayer(nn.Module):
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
-        """Consume router/quant resources already written by cuda-dag-runtime."""
+        """Consume router/quant resources already prepared by GLM5 CMP."""
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
         experts_output = self.fused_moe.forward_prepacked(hidden_states)
@@ -481,8 +481,8 @@ class GenericMoeDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
-        self.cuda_dag = (
-            Glm52CudaDag(
+        self.cmp = (
+            Glm5Cmp(
                 layer_idx=layer_idx,
                 config=config,
                 parallelism_config=parallelism_config,
@@ -491,7 +491,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 mlp=self.mlp,
                 post_attention_layernorm=self.post_attention_layernorm,
             )
-            if resolve_glm52_cuda_dag_enabled()
+            if resolve_glm5_cmp_enabled()
             else None
         )
 
@@ -555,17 +555,17 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_input_scale_ue8m0 = self._fuse_input_scale_ue8m0
         clone._fuse_post_norm_quant = self._fuse_post_norm_quant
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
-        clone.cuda_dag = (
+        clone.cmp = (
             None
-            if self.cuda_dag is None
-            else self.cuda_dag.clone_for_cuda_graph(
+            if self.cmp is None
+            else self.cmp.clone_for_cuda_graph(
                 mlp=clone.mlp,
                 draft_prefill=draft_prefill,
             )
         )
         return clone
 
-    def _forward_cudadag(
+    def _forward_cmp(
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
@@ -573,31 +573,21 @@ class GenericMoeDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache],
         prev_topk_indices: Optional[torch.Tensor],
     ) -> DecodeLayerOutput:
-        """Run the CUDA-DAG attention and MoE preparation path."""
-        cuda_dag = self.cuda_dag
-        if cuda_dag is None:
-            raise RuntimeError("CUDA-DAG execution was not initialized")
+        """Run the GLM5 CMP attention and MoE preparation path."""
+        cmp = self.cmp
+        if cmp is None:
+            raise RuntimeError("GLM5 CMP execution was not initialized")
         # Prepare MLA inputs with internal streams and PDL.
-        output_residual, mla_query, scores_or_indices = (
-            cuda_dag.mla_prologue_without_topk(
-                hidden_states,
-                residual,
-                fmha_impl,
-                kv_cache,
-                prev_topk_indices,
-            )
+        output_residual, mla_query, topk_indices = cmp.mla_prologue(
+            hidden_states,
+            residual,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
         )
 
-        # Keep TopK explicit so RTP can replace the implementation independently.
-        if cuda_dag.has_indexer:
-            topk_indices = cuda_dag.exact_topk_and_globalize(
-                scores_or_indices, fmha_impl
-            )
-        else:
-            topk_indices = scores_or_indices
-
-        # Keep SparseMLA explicit for the same framework-level substitution point.
-        mla_output = cuda_dag.sparse_mla(
+        # Run RTP's existing FlashMLA interface explicitly.
+        mla_output = cmp.sparse_mla(
             mla_query,
             topk_indices,
             fmha_impl,
@@ -605,8 +595,10 @@ class GenericMoeDecoderLayer(nn.Module):
         )
 
         # Project attention output and optionally prepare routed MoE input.
-        mla_post = cuda_dag.mla_post_moe_pre(mla_output, output_residual, fmha_impl)
-        if cuda_dag.has_moe:
+        mla_post = cmp.mla_post_moe_pre(
+            mla_output, output_residual, fmha_impl
+        )
+        if cmp.has_moe:
             moe_hidden_states, output_residual, routed_indices, routed_weights = (
                 mla_post
             )
@@ -618,16 +610,15 @@ class GenericMoeDecoderLayer(nn.Module):
         else:
             # Dense layers preserve the existing post-attention norm + MLP.
             hidden_states, output_residual = mla_post
-            dense_input = cuda_dag.add_norm_quant(
+            output_residual, _, hidden_fp8, hidden_scale = cmp.add_norm_quant(
                 hidden_states,
                 output_residual,
             )
             hidden_states = self.mlp(
                 hidden_states,
-                x_fp8=dense_input.hidden_fp8,
-                x_scale=dense_input.hidden_scale,
+                x_fp8=hidden_fp8,
+                x_scale=hidden_scale,
             )
-            output_residual = dense_input.residual
 
         return DecodeLayerOutput(hidden_states, output_residual, topk_indices)
 
@@ -638,10 +629,10 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
-        enable_cudadag: bool = False,
+        enable_cmp: bool = False,
     ) -> DecodeLayerOutput:
-        if enable_cudadag:
-            return self._forward_cudadag(
+        if enable_cmp:
+            return self._forward_cmp(
                 hidden_states,
                 residual,
                 fmha_impl,
@@ -800,7 +791,7 @@ class GenericMoeModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         prev_topk_indices = None
-        enable_cudadag = should_enable_glm52_cudadag(
+        enable_cmp = should_enable_glm5_cmp(
             self.layers,
             self.layer_num,
             hidden_states,
@@ -815,7 +806,7 @@ class GenericMoeModel(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
-                enable_cudadag=enable_cudadag,
+                enable_cmp=enable_cmp,
             )
             hidden_states = output.hidden_states
             residual = output.residual

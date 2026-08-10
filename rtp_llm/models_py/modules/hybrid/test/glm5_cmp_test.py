@@ -9,14 +9,14 @@ import torch
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe import GLM5MegaMoE
 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8 import GLM5MegaMoEFP8
-from rtp_llm.models_py.modules.hybrid import glm52_cuda_dag as bridge
+from rtp_llm.models_py.modules.hybrid import glm5_cmp as bridge
 
 
 def test_switch_defaults_off(monkeypatch) -> None:
-    monkeypatch.delenv("RTP_LLM_GLM52_CUDA_DAG", raising=False)
-    assert bridge.resolve_glm52_cuda_dag_enabled() is False
-    monkeypatch.setenv("RTP_LLM_GLM52_CUDA_DAG", "1")
-    assert bridge.resolve_glm52_cuda_dag_enabled() is True
+    monkeypatch.delenv("RTP_LLM_GLM5_CMP", raising=False)
+    assert bridge.resolve_glm5_cmp_enabled() is False
+    monkeypatch.setenv("RTP_LLM_GLM5_CMP", "1")
+    assert bridge.resolve_glm5_cmp_enabled() is True
 
 
 def test_page_table_keeps_64_token_contract() -> None:
@@ -35,7 +35,7 @@ def test_router_weight_materializes_rtp_transpose_view() -> None:
     assert weight.shape == (256, 6144)
     assert not weight.is_contiguous()
 
-    prepared = bridge.Glm52CudaDag._prepare_router_weight(
+    prepared = bridge.Glm5Cmp._prepare_router_weight(
         SimpleNamespace(gate=SimpleNamespace(weight=weight))
     )
 
@@ -44,68 +44,71 @@ def test_router_weight_materializes_rtp_transpose_view() -> None:
     torch.testing.assert_close(prepared, weight)
 
 
-def test_dense_cudadag_requires_ue8m0_fp8_input() -> None:
-    cuda_dag = object.__new__(bridge.Glm52CudaDag)
-    cuda_dag.parallelism_config = SimpleNamespace(
+def test_dense_cmp_requires_ue8m0_fp8_input() -> None:
+    cmp = object.__new__(bridge.Glm5Cmp)
+    cmp.parallelism_config = SimpleNamespace(
         tp_size=1,
         get_attn_tp_size=lambda: 1,
         prefill_cp_config=None,
     )
-    cuda_dag.config = SimpleNamespace(
+    cmp.config = SimpleNamespace(
         model_type="glm_5",
         attn_config=SimpleNamespace(use_mla=True, kernel_tokens_per_block=64),
     )
-    cuda_dag._has_moe = False
-    cuda_dag.mlp = SimpleNamespace(
+    cmp.self_attn = SimpleNamespace(has_indexer=False)
+    cmp._has_moe = False
+    cmp.mlp = SimpleNamespace(
         accepts_fp8_input=True,
         up_proj=SimpleNamespace(scale_ue8m0=True),
     )
 
-    assert cuda_dag._static_disabled_reason() is None
-    cuda_dag.mlp.up_proj.scale_ue8m0 = False
-    assert cuda_dag._static_disabled_reason() == (
-        "Dense CUDA-DAG requires FP8 input with UE8M0 scales"
+    assert cmp._static_disabled_reason() is None
+    cmp.mlp.up_proj.scale_ue8m0 = False
+    assert cmp._static_disabled_reason() == (
+        "Dense GLM5 CMP requires FP8 input with UE8M0 scales"
     )
 
 
-def _selection_cuda_dag(*, has_indexer: bool, reuses_indexer: bool, has_moe: bool):
-    cuda_dag = object.__new__(bridge.Glm52CudaDag)
-    cuda_dag._disabled_reason = None
-    cuda_dag._has_moe = has_moe
-    cuda_dag.self_attn = SimpleNamespace(
+def _selection_cmp(*, has_indexer: bool, reuses_indexer: bool, has_moe: bool):
+    cmp = object.__new__(bridge.Glm5Cmp)
+    cmp._disabled_reason = None
+    cmp._has_moe = has_moe
+    cmp.self_attn = SimpleNamespace(
         has_indexer=has_indexer,
         reuse_topk_indices=reuses_indexer,
     )
-    cuda_dag.mlp = SimpleNamespace(
+    cmp.mlp = SimpleNamespace(
         fused_moe=SimpleNamespace(prepacked_input_views=lambda rows: object())
     )
-    return cuda_dag
+    return cmp
 
 
 def test_model_execution_is_selected_once_for_all_layers() -> None:
-    full = _selection_cuda_dag(has_indexer=True, reuses_indexer=False, has_moe=False)
-    main = _selection_cuda_dag(has_indexer=False, reuses_indexer=True, has_moe=True)
+    full = _selection_cmp(has_indexer=True, reuses_indexer=False, has_moe=False)
+    main = _selection_cmp(has_indexer=False, reuses_indexer=True, has_moe=True)
     full._unsupported_call_reason = lambda *args: None
     layers = [
-        SimpleNamespace(cuda_dag=full),
-        SimpleNamespace(cuda_dag=main),
+        SimpleNamespace(cmp=full),
+        SimpleNamespace(cmp=main),
     ]
     kv_cache = SimpleNamespace(get_layer_cache=lambda _: object())
-    assert bridge.should_enable_glm52_cudadag(
+    assert bridge.should_enable_glm5_cmp(
         layers, 2, torch.empty((16, 6144)), object(), kv_cache
     )
 
     full._disabled_reason = "unsupported"
-    assert not bridge.should_enable_glm52_cudadag(
+    assert not bridge.should_enable_glm5_cmp(
         layers, 2, torch.empty((16, 6144)), object(), kv_cache
     )
 
 
-def test_bridge_has_no_whole_attention_resource_cache() -> None:
-    source = inspect.getsource(bridge.Glm52CudaDag)
+def test_integration_has_no_whole_attention_resource_cache() -> None:
+    source = inspect.getsource(bridge.Glm5Cmp)
     assert "_LayerResources" not in source
     assert "_get_resources" not in source
-    assert "_glm_cuda_dag_scratch" not in source
+    assert "paged_indexer_score_qblock" not in source
+    assert "exact_topk_and_globalize" not in source
+    assert "ops.sparse_mla" not in source
 
 
 def test_side_streams_are_shared_once_per_device(monkeypatch) -> None:
@@ -117,11 +120,11 @@ def test_side_streams_are_shared_once_per_device(monkeypatch) -> None:
 
     monkeypatch.setattr(bridge, "_is_capturing", lambda: False)
     monkeypatch.setattr(bridge.torch.cuda, "Stream", make_stream)
-    monkeypatch.setattr(bridge.Glm52CudaDag, "_streams_by_device", {})
+    monkeypatch.setattr(bridge.Glm5Cmp, "_streams_by_device", {})
 
-    first = bridge.Glm52CudaDag._side_streams(torch.device("cuda:2"))
-    second = bridge.Glm52CudaDag._side_streams(torch.device("cuda:2"))
-    other = bridge.Glm52CudaDag._side_streams(torch.device("cuda:3"))
+    first = bridge.Glm5Cmp._side_streams(torch.device("cuda:2"))
+    second = bridge.Glm5Cmp._side_streams(torch.device("cuda:2"))
+    other = bridge.Glm5Cmp._side_streams(torch.device("cuda:3"))
 
     assert first is second
     assert other is not first
@@ -136,51 +139,48 @@ def test_side_streams_are_shared_once_per_device(monkeypatch) -> None:
 
 
 def test_dense_post_norm_quant_calls_the_op_directly() -> None:
-    outputs = SimpleNamespace(
-        residual=torch.empty((16, 6144)),
-        norm=torch.empty((16, 6144)),
-        hidden_fp8=torch.empty((16, 6144), dtype=torch.float8_e4m3fn),
-        hidden_scale=torch.empty((16, 12), dtype=torch.int32),
+    outputs = (
+        torch.empty((16, 6144)),
+        torch.empty((16, 6144)),
+        torch.empty((16, 6144), dtype=torch.float8_e4m3fn),
+        torch.empty((16, 12), dtype=torch.int32),
     )
     attention_output = torch.empty((16, 6144))
     residual = torch.empty((16, 6144))
-    cuda_dag = object.__new__(bridge.Glm52CudaDag)
-    cuda_dag.post_attention_layernorm = SimpleNamespace(
+    cmp = object.__new__(bridge.Glm5Cmp)
+    cmp.post_attention_layernorm = SimpleNamespace(
         weight=SimpleNamespace(data=torch.empty(6144)),
         variance_epsilon=1.0e-6,
     )
     runtime = Mock(add_norm_quant=Mock(return_value=outputs))
-    cuda_dag.ops = runtime
+    cmp.ops = runtime
 
-    result = cuda_dag.add_norm_quant(attention_output, residual)
+    result = cmp.add_norm_quant(attention_output, residual)
 
     assert result is outputs
     runtime.add_norm_quant.assert_called_once_with(
         attention_output,
         residual,
-        cuda_dag.post_attention_layernorm.weight.data,
+        cmp.post_attention_layernorm.weight.data,
         epsilon=1.0e-6,
     )
 
 
-def test_decoder_forward_exposes_pre_topk_flashmla_post_ffn_order() -> None:
+def test_decoder_forward_consumes_cmp_topk_before_flashmla() -> None:
     calls: list[str] = []
     topk_indices = torch.empty((16, 2048), dtype=torch.int32)
-    mla_output = torch.empty((1, 16, 64, 512))
+    mla_output = torch.empty((16, 64, 512))
     residual = torch.empty((16, 6144))
     query = torch.empty((16, 64, 576))
-    scores = torch.empty((16, 256))
     moe_hidden = torch.empty((16, 6144))
     routed_indices = torch.empty((16, 8), dtype=torch.int64)
     routed_weights = torch.empty((16, 8))
-    cuda_dag = SimpleNamespace(
+    cmp = SimpleNamespace(
         has_indexer=True,
         has_moe=True,
-        mla_prologue_without_topk=Mock(
-            side_effect=lambda *args: calls.append("pre") or (residual, query, scores)
-        ),
-        exact_topk_and_globalize=Mock(
-            side_effect=lambda *args: calls.append("topk") or topk_indices
+        mla_prologue=Mock(
+            side_effect=lambda *args: calls.append("pre")
+            or (residual, query, topk_indices)
         ),
         sparse_mla=Mock(
             side_effect=lambda *args: calls.append("flashmla") or mla_output
@@ -197,7 +197,7 @@ def test_decoder_forward_exposes_pre_topk_flashmla_post_ffn_order() -> None:
     )
     layer = object.__new__(GenericMoeDecoderLayer)
     torch.nn.Module.__init__(layer)
-    layer.cuda_dag = cuda_dag
+    layer.cmp = cmp
     layer.mlp = mlp
 
     result = layer.forward(
@@ -206,29 +206,31 @@ def test_decoder_forward_exposes_pre_topk_flashmla_post_ffn_order() -> None:
         object(),
         object(),
         None,
-        enable_cudadag=True,
+        enable_cmp=True,
     )
 
-    assert calls == ["pre", "topk", "flashmla", "post", "ffn"]
-    assert cuda_dag.sparse_mla.call_args.args[1] is topk_indices
+    assert calls == ["pre", "flashmla", "post", "ffn"]
+    assert cmp.sparse_mla.call_args.args[1] is topk_indices
     assert result.topk_indices is topk_indices
 
 
-def test_dense_decoder_uses_a0_post_norm_and_returns_its_residual() -> None:
+def test_dense_decoder_uses_post_norm_quant_and_returns_its_residual() -> None:
     topk_indices = torch.empty((16, 2048), dtype=torch.int32)
-    mla_output = torch.empty((1, 16, 64, 512))
+    mla_output = torch.empty((16, 64, 512))
     residual = torch.empty((16, 6144))
     query = torch.empty((16, 64, 576))
     attention_output = torch.empty((16, 6144))
-    dense_post = SimpleNamespace(
-        residual=torch.empty((16, 6144)),
-        hidden_fp8=torch.empty((16, 6144), dtype=torch.float8_e4m3fn),
-        hidden_scale=torch.empty((16, 12), dtype=torch.int32),
+    dense_residual = torch.empty((16, 6144))
+    dense_post = (
+        dense_residual,
+        torch.empty((16, 6144)),
+        torch.empty((16, 6144), dtype=torch.float8_e4m3fn),
+        torch.empty((16, 12), dtype=torch.int32),
     )
-    cuda_dag = SimpleNamespace(
+    cmp = SimpleNamespace(
         has_indexer=False,
         has_moe=False,
-        mla_prologue_without_topk=Mock(return_value=(residual, query, topk_indices)),
+        mla_prologue=Mock(return_value=(residual, query, topk_indices)),
         sparse_mla=Mock(return_value=mla_output),
         mla_post_moe_pre=Mock(return_value=(attention_output, residual)),
         add_norm_quant=Mock(return_value=dense_post),
@@ -237,7 +239,7 @@ def test_dense_decoder_uses_a0_post_norm_and_returns_its_residual() -> None:
     mlp.up_proj = SimpleNamespace(scale_ue8m0=True)
     layer = object.__new__(GenericMoeDecoderLayer)
     torch.nn.Module.__init__(layer)
-    layer.cuda_dag = cuda_dag
+    layer.cmp = cmp
     layer.mlp = mlp
     layer._fuse_post_norm_quant = True
 
@@ -247,16 +249,35 @@ def test_dense_decoder_uses_a0_post_norm_and_returns_its_residual() -> None:
         object(),
         object(),
         None,
-        enable_cudadag=True,
+        enable_cmp=True,
     )
 
-    cuda_dag.add_norm_quant.assert_called_once_with(attention_output, residual)
+    cmp.add_norm_quant.assert_called_once_with(attention_output, residual)
     mlp.assert_called_once_with(
         attention_output,
-        x_fp8=dense_post.hidden_fp8,
-        x_scale=dense_post.hidden_scale,
+        x_fp8=dense_post[2],
+        x_scale=dense_post[3],
     )
-    assert result.residual is dense_post.residual
+    assert result.residual is dense_residual
+
+
+def test_sparse_mla_calls_rtp_flashmla_directly() -> None:
+    query = torch.empty((16, 64, 576))
+    cache = torch.empty((32, 64, 1, 656), dtype=torch.uint8)
+    topk = torch.empty((16, 2048), dtype=torch.int32)
+    output = torch.empty((16, 64, 512))
+    flashmla = SimpleNamespace(expects_paged_kv=True, forward=Mock(return_value=output))
+    implementation = SimpleNamespace(fmha_impl=flashmla)
+    cmp = object.__new__(bridge.Glm5Cmp)
+    cmp.layer_idx = 3
+    cmp._attention_impl = Mock(return_value=implementation)
+
+    result = cmp.sparse_mla(
+        query, topk, object(), SimpleNamespace(kv_cache_base=cache)
+    )
+
+    assert result is output
+    flashmla.forward.assert_called_once_with(query, cache, topk, layer_id=3)
 
 
 @pytest.mark.parametrize(

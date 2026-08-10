@@ -1,4 +1,4 @@
-"""Opt-in GLM-5 decode bridge to the external ``cuda_dag_runtime`` package."""
+"""GLM5 CMP execution path using CUDA Graph, multistream, and PDL."""
 
 from __future__ import annotations
 
@@ -11,15 +11,18 @@ import torch
 
 from rtp_llm.utils.model_weight import W
 
-_ENABLE_ENV = "RTP_LLM_GLM52_CUDA_DAG"
+_ENABLE_ENV = "RTP_LLM_GLM5_CMP"
 _SUPPORTED_MODEL_TYPES = frozenset(("glm_5", "glm_5_mtp"))
 
 
 def _load_ops() -> Any:
-    return importlib.import_module("cuda_dag_runtime.ops")
+    ops = importlib.import_module("rtp_kernel.glm5")
+    deep_gemm = importlib.import_module("deep_gemm")
+    deep_gemm.set_pdl(ops.get_pdl())
+    return ops
 
 
-def resolve_glm52_cuda_dag_enabled() -> bool:
+def resolve_glm5_cmp_enabled() -> bool:
     value = os.environ.get(_ENABLE_ENV, "0").strip().lower()
     if value in ("1", "true", "yes", "on"):
         return True
@@ -38,16 +41,16 @@ def _is_capturing() -> bool:
 def get_weight_and_scale_from_linear(
     linear: Any,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the FP8 weight pair required by CUDA-DAG kernels."""
+    """Return the FP8 weight pair required by RTP-kernel operators."""
     weight = getattr(linear, "weight", None)
     scale = getattr(linear, "weight_scales", None)
     if not isinstance(weight, torch.Tensor) or not isinstance(scale, torch.Tensor):
-        raise TypeError("CUDA-DAG requires FP8 weight and weight_scales")
+        raise TypeError("RTP-kernel requires FP8 weight and weight_scales")
     return weight, scale
 
 
 def _page_block_table(attn_inputs: Any) -> torch.Tensor | None:
-    """Return RTP's request-local table at CUDA-DAG's 64-token granularity."""
+    """Return RTP's request-local table at the 64-token kernel granularity."""
     table = getattr(attn_inputs, "kv_cache_block_id_device", None)
     return table if isinstance(table, torch.Tensor) and table.numel() > 0 else None
 
@@ -84,9 +87,9 @@ def _unsupported_parallelism_reason(parallelism: Any) -> str | None:
             or bool(getattr(cp, "kv_cache_sharded", False))
             or int(getattr(cp, "prefill_cp_size", 0) or 0) > 1
         ):
-            return "CUDA-DAG requires CP=1 and an unsharded KV cache"
+            return "GLM5 CMP requires CP=1 and an unsharded KV cache"
     if raw_tp != 1 or attn_tp != 1:
-        return "CUDA-DAG requires TP=1"
+        return "GLM5 CMP requires TP=1"
     return None
 
 
@@ -98,11 +101,15 @@ class _StreamEvents:
     qkv_to_indexer_q: torch.cuda.Event
     indexer_q_to_score: torch.cuda.Event
     q_path_complete: torch.cuda.Event
-    indexer_score_complete: torch.cuda.Event
+    indexer_complete: torch.cuda.Event
 
 
-class Glm52CudaDag:
-    """Run GLM-5 fused Ops with explicit streams and optional PDL."""
+class Glm5Cmp:
+    """Coordinate GLM5 CUDA Graph, multistream, and PDL (CMP) execution.
+
+    CMP names the scheduling scheme, not a kernel provider. Its operators may
+    come from RTP-kernel, DeepGEMM, or existing RTP-LLM implementations.
+    """
 
     _streams_by_device: dict[int, tuple[Any, Any, Any]] = {}
 
@@ -168,7 +175,11 @@ class Glm52CudaDag:
         if not bool(getattr(attn, "use_mla", False)):
             return "attention is not MLA"
         if int(getattr(attn, "kernel_tokens_per_block", 0)) != 64:
-            return "CUDA-DAG requires 64-token KV pages"
+            return "GLM5 CMP requires 64-token KV pages"
+        if self.has_indexer and os.environ.get(
+            "GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent"
+        ).strip().lower() != "topk_v3":
+            return "GLM5 CMP requires GLM5_INDEXER_TOPK_BACKEND=topk_v3"
 
         if not self._has_moe:
             if not (
@@ -177,10 +188,10 @@ class Glm52CudaDag:
                     getattr(getattr(self.mlp, "up_proj", None), "scale_ue8m0", False)
                 )
             ):
-                return "Dense CUDA-DAG requires FP8 input with UE8M0 scales"
+                return "Dense GLM5 CMP requires FP8 input with UE8M0 scales"
             return None
 
-        # CUDA-DAG writes router outputs directly into MegaMoE's stable input
+        # RTP-kernel writes router outputs directly into MegaMoE's stable input
         # buffers. Keep this first integration limited to the deployed ABI.
         config = self.config
         if (
@@ -230,7 +241,7 @@ class Glm52CudaDag:
         *,
         mlp: Any,
         draft_prefill: bool = False,
-    ) -> Glm52CudaDag:
+    ) -> Glm5Cmp:
         clone = object.__new__(type(self))
         clone.layer_idx = self.layer_idx
         clone.config = self.config
@@ -266,7 +277,7 @@ class Glm52CudaDag:
     def _unsupported_call_reason(
         self, hidden_states: torch.Tensor, fmha_impl: Any, kv_cache: Any
     ) -> str | None:
-        """Validate the dynamic call once before the model enters CUDA-DAG."""
+        """Validate the dynamic call once before the model enters GLM5 CMP."""
         implementation = self._attention_impl(fmha_impl)
         attn_inputs = implementation.attn_inputs
         params = implementation.fmha_params
@@ -306,7 +317,7 @@ class Glm52CudaDag:
         if streams is None:
             if _is_capturing():
                 raise RuntimeError(
-                    "CUDA-DAG side streams must be created before capture"
+                    "GLM5 CMP side streams must be created before capture"
                 )
             stream_device = torch.device("cuda", device_index)
             streams = (
@@ -320,7 +331,7 @@ class Glm52CudaDag:
     @staticmethod
     def _new_events(device: torch.device) -> _StreamEvents:
         if _is_capturing():
-            raise RuntimeError("CUDA-DAG events must be created before capture")
+            raise RuntimeError("GLM5 CMP events must be created before capture")
         events = _StreamEvents(
             *(torch.cuda.Event(enable_timing=False) for _ in range(7))
         )
@@ -330,7 +341,7 @@ class Glm52CudaDag:
             event.record()
         return events
 
-    def mla_prologue_without_topk(
+    def mla_prologue(
         self,
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
@@ -356,7 +367,7 @@ class Glm52CudaDag:
                 raise RuntimeError("main-only layer requires prior TopK indices")
             # Residual add + RMSNorm, then group-128 FP8 quantization for the
             # following attention projections.
-            norm = ops.add_norm_quant(
+            residual_out, _, hidden_fp8, hidden_scale = ops.add_norm_quant(
                 hidden_states,
                 residual,
                 self.input_layernorm.weight.data,
@@ -364,15 +375,15 @@ class Glm52CudaDag:
             )
             # Fused Q/KV-A FP8 projection; the output packs Q-LoRA, latent KV,
             # and the positional-key slice in one BF16 tensor.
-            projected = ops.project_qkv_a(
-                norm.hidden_fp8,
-                norm.hidden_scale,
+            projected = ops.qkv_a_proj(
+                hidden_fp8,
+                hidden_scale,
                 qkv_weight,
                 qkv_scale,
             )
             # Split the projection, RMSNorm and quantize Q/latent-KV, apply
             # RoPE to K-PE, and write the latent KV and K-PE to the MLA cache.
-            q_fp8, q_scale, mla_cache = ops.finalize_qkv_a_projection(
+            q_fp8, q_scale, mla_cache = ops.qkv_rmsnorm_quant_rope_cached(
                 projected,
                 attention.q_a_layernorm.weight.data,
                 attention.kv_a_layernorm.weight.data,
@@ -385,39 +396,25 @@ class Glm52CudaDag:
             )
             # Project Q-LoRA into per-head [NoPE | PE], keep NoPE for the
             # absorbed BMM, and RoPE the PE suffix of the SparseMLA query.
-            q_nope, q_for_sparse_mla = ops.proj_q_b(
+            q_nope, q_for_sparse_mla = ops.q_b_proj(
                 q_fp8,
                 q_scale,
                 q_b_weight,
                 q_b_scale,
-                cos_sin=implementation._cos_sin_cache,
-                positions=params.positions_d,
+                implementation._cos_sin_cache,
+                params.positions_d,
             )
             # Apply the per-head absorbed Q-NoPE x W_KC BMM and fill the NoPE
             # prefix, completing the [absorbed NoPE | RoPE] SparseMLA query.
-            ops.apply_absorbed_q_nope_bmm(
+            ops.absorbed_q_nope_bmm(
                 q_nope,
                 implementation.weights[self.layer_idx][W.mla_kc],
-                q_for_sparse_mla,
+                out=q_for_sparse_mla,
             )
-            return norm.residual, q_for_sparse_mla, prev_topk_indices
+            return residual_out, q_for_sparse_mla, prev_topk_indices
 
         block_table = _page_block_table(implementation.attn_inputs)
         assert block_table is not None
-        context_lens = params.expanded_seq_lens
-        request_ids = params.batch_indice_d
-        metadata = implementation._cuda_dag_indexer_metadata
-        if metadata is None:
-            if _is_capturing():
-                raise RuntimeError("warm up Indexer metadata before capture")
-            # Build graph-stable schedules and valid-length views shared by
-            # paged Indexer scoring and exact TopK.
-            metadata = ops.prepare_indexer_attention_metadata(
-                context_lens=context_lens,
-                request_ids=request_ids,
-                request_bs=int(block_table.size(0)),
-            )
-            implementation._cuda_dag_indexer_metadata = metadata
         if self._events is None:
             self._events = self._new_events(hidden_states.device)
         events = self._events
@@ -430,7 +427,7 @@ class Glm52CudaDag:
                 raise RuntimeError("warm up head-gate weight packing before capture")
             # Pack the FP32 Head-Gate projection weight once for the CUDA
             # kernel layout; this performs no per-token computation.
-            self._packed_head_gate_weight = ops.pack_qkv_a_head_gate_weight(
+            self._packed_head_gate_weight = ops.pack_head_gate_weight(
                 indexer.weights_proj.weight.float().contiguous()
             )
         indexer_cache = kv_cache.kv_scale_base
@@ -439,8 +436,8 @@ class Glm52CudaDag:
         indexer_cache = indexer_cache.view(-1, 64, 1, 132)
         indexer_k_weight, indexer_k_scale = self._indexer_k_projection
         indexer_q_weight, indexer_q_scale = self._indexer_q_projection
-        # At long KV, E1 is heavy enough that overlapping it with D0/D2 slows
-        # the critical path; serialize it after the main-Q branch instead.
+        # At long KV, paged Indexer scoring is heavy enough that overlapping it
+        # with both main-query projections slows the critical path.
         serialize_score_after_q_path = int(block_table.size(1)) * 64 >= (1 << 19)
 
         events.caller_to_main.record()
@@ -451,30 +448,29 @@ class Glm52CudaDag:
             )
             # Residual add + RMSNorm, then emit both BF16 normalized hidden
             # states and group-128 FP8 input for the projection branches.
-            norm = ops.add_norm_quant(
+            residual_out, norm_out, hidden_fp8, hidden_scale = ops.add_norm_quant(
                 hidden_states,
                 residual,
                 self.input_layernorm.weight.data,
                 epsilon=float(self.input_layernorm.variance_epsilon),
-                gate_output=gate_output,
+                head_gate=gate_output,
                 notify_event=events.norm_to_indexer_k,
             )
 
             # Run Q/KV-A projection and the independent Head-Gate linear
             # together; gate_output is raw Linear(norm), before Q-scale folding.
-            projected, _ = ops.project_qkv_a_and_head_gate(
-                norm.hidden_fp8,
-                norm.hidden_scale,
+            projected = ops.qkv_a_proj(
+                hidden_fp8,
+                hidden_scale,
                 qkv_weight,
                 qkv_scale,
-                None,
-                norm.norm,
-                self._packed_head_gate_weight,
-                gate_output,
+                head_gate_norm=norm_out,
+                head_gate_weight=self._packed_head_gate_weight,
+                gate_output=gate_output,
             )
             # Split Q/KV-A, RMSNorm and quantize Q/latent-KV, apply K-PE RoPE,
             # and write the latent KV plus K-PE into the paged MLA cache.
-            q_fp8, q_scale, mla_cache = ops.finalize_qkv_a_projection(
+            q_fp8, q_scale, mla_cache = ops.qkv_rmsnorm_quant_rope_cached(
                 projected,
                 attention.q_a_layernorm.weight.data,
                 attention.kv_a_layernorm.weight.data,
@@ -489,20 +485,20 @@ class Glm52CudaDag:
 
             # Project Q-LoRA into per-head [NoPE | PE], retain NoPE for the
             # absorbed BMM, and RoPE the PE suffix of the SparseMLA query.
-            q_nope, q_for_sparse_mla = ops.proj_q_b(
+            q_nope, q_for_sparse_mla = ops.q_b_proj(
                 q_fp8,
                 q_scale,
                 q_b_weight,
                 q_b_scale,
-                cos_sin=implementation._cos_sin_cache,
-                positions=params.positions_d,
+                implementation._cos_sin_cache,
+                params.positions_d,
             )
             # Apply Q-NoPE x W_KC per head and fill the query prefix, producing
             # the complete [absorbed NoPE | RoPE] input consumed by SparseMLA.
-            ops.apply_absorbed_q_nope_bmm(
+            ops.absorbed_q_nope_bmm(
                 q_nope,
                 implementation.weights[self.layer_idx][W.mla_kc],
-                q_for_sparse_mla,
+                out=q_for_sparse_mla,
             )
             if serialize_score_after_q_path:
                 events.q_path_complete.record()
@@ -511,20 +507,19 @@ class Glm52CudaDag:
                 events.qkv_to_indexer_q.wait()
                 # FP8-project Q-LoRA to 32 x 128 Indexer-Q values. RoPE,
                 # Hadamard, quantization, and Head-Gate folding follow below.
-                indexer_q = ops.project_indexer_q_producer(
+                indexer_q = ops.indexer_q_proj(
                     q_fp8,
                     q_scale,
                     indexer_q_weight,
                     indexer_q_scale,
-                    cos_sin=implementation._cos_sin_cache,
-                    positions=params.positions_d,
-                    gate_raw=gate_output,
                 )
                 # Apply RoPE + Hadamard + FP8 quantization and fold the per-head
                 # Q scale into the early gate result: head_weight=gate_raw*q_scale/64.
-                ops.finalize_indexer_q_projection(
-                    indexer_q.descriptor_workspace,
+                indexer_q_fp8, head_weights = ops.indexer_q_rope_quant(
                     indexer_q,
+                    implementation._cos_sin_cache,
+                    params.positions_d,
+                    gate_output,
                     notify_event=events.indexer_q_to_score,
                 )
 
@@ -532,9 +527,9 @@ class Glm52CudaDag:
                 events.norm_to_indexer_k.wait()
                 # Project Indexer-K, apply LayerNorm + RoPE + Hadamard + FP8
                 # quantization, and write K plus its scale to the paged cache.
-                ops.indexer_k_projection_cache(
-                    norm.hidden_fp8,
-                    norm.hidden_scale,
+                ops.indexer_k_cache(
+                    hidden_fp8,
+                    hidden_scale,
                     indexer_k_weight,
                     indexer_k_scale,
                     indexer.k_norm.weight.data,
@@ -548,43 +543,21 @@ class Glm52CudaDag:
                 events.indexer_q_to_score.wait()
                 if serialize_score_after_q_path:
                     events.q_path_complete.wait()
-                # Compute FP32 paged Indexer logits: sum over 32 heads of
-                # head_weight * ReLU(Q_fp8 dot K_fp8), including cached K scale.
-                scores = ops.paged_indexer_score_qblock(
-                    indexer_q.q_fp8,
-                    indexer_q.head_weights,
-                    indexer_cache,
-                    metadata.context_lens,
-                    block_table,
-                    metadata.indexer_score_schedule,
-                    request_ids=request_ids,
+                # Compute paged Indexer logits with DeepGEMM, then immediately
+                # select request-local TopK indices on the same stream.
+                topk_indices = indexer.indexer_op._get_topk_paged(
+                    indexer_q_fp8,
+                    head_weights,
+                    kv_cache,
+                    params,
+                    implementation.attn_inputs,
                 )
-                events.indexer_score_complete.record()
+                events.indexer_complete.record()
 
-            events.indexer_score_complete.wait()
+            events.indexer_complete.wait()
             events.side_streams_complete.record()
         events.side_streams_complete.wait()
-        return norm.residual, q_for_sparse_mla, scores
-
-    def exact_topk_and_globalize(
-        self, scores: torch.Tensor, fmha_impl: Any
-    ) -> torch.Tensor:
-        implementation = self._attention_impl(fmha_impl)
-        block_table = _page_block_table(implementation.attn_inputs)
-        assert block_table is not None
-        params = implementation.fmha_params
-        metadata = implementation._cuda_dag_indexer_metadata
-        if metadata is None:
-            raise RuntimeError("Indexer metadata was not prepared by MLA prologue")
-        # Select exact TopK within each row's valid KV length, then convert
-        # request-local token indices to physical paged-cache slots.
-        return self.ops.exact_topk_and_globalize(
-            scores,
-            metadata.seq_lens,
-            block_table,
-            metadata=metadata.topk_metadata,
-            request_ids=params.batch_indice_d,
-        )
+        return residual_out, q_for_sparse_mla, topk_indices
 
     def sparse_mla(
         self,
@@ -595,19 +568,10 @@ class Glm52CudaDag:
     ) -> torch.Tensor:
         implementation = self._attention_impl(fmha_impl)
         cache = kv_cache.kv_cache_base
-        if cache.dtype != torch.uint8:
-            cache = cache.view(torch.uint8)
-        cache = cache.view(-1, 64, 1, 656)
-        indices = topk_indices
-        if indices.ndim == 2:
-            indices = indices.unsqueeze(0)
-        # Run only sparse attention over the absorbed query and selected
-        # physical KV slots; the input/output absorbed BMMs live outside.
-        return self.ops.sparse_mla(
-            query,
-            cache,
-            indices,
-            softmax_scale=float(implementation.fmha_impl.scale),
+        if not implementation.fmha_impl.expects_paged_kv:
+            cache = cache.view(-1, 1, cache.size(-1))
+        return implementation.fmha_impl.forward(
+            query, cache, topk_indices, layer_id=self.layer_idx
         )
 
     def mla_post_moe_pre(
@@ -619,12 +583,12 @@ class Glm52CudaDag:
         """Project the MLA output and prepare an optional routed MoE input."""
         ops = self.ops
         implementation = self._attention_impl(fmha_impl)
-        rows = int(mla_output.size(1))
+        rows = int(mla_output.size(0))
         mla_weight = implementation.weights[self.layer_idx][W.mla_vc]
         # Apply the per-head absorbed attention-output x W_VC BMM and quantize
         # the expanded [M, 16384] activation for the output projection.
         quantized, quant_scale = ops.mla_absorbed_output_bmm_quant(
-            mla_output.squeeze(0), mla_weight
+            mla_output, mla_weight
         )
         output_weight, output_scale = self._output_projection
         # FP8 output projection from the expanded 64-head activation to the
@@ -642,28 +606,27 @@ class Glm52CudaDag:
             )
             # Post-attention residual add + RMSNorm, while writing BF16 Router
             # input and group-32 FP8/UE8M0 activation directly to MegaMoE buffers.
-            moe_residual, moe_norm, moe_activation, moe_scale = (
-                ops.add_rms_norm_mega_moe_quant(
-                    attention_output,
-                    residual,
-                    self.post_attention_layernorm.weight.data,
-                    epsilon=float(self.post_attention_layernorm.variance_epsilon),
-                    hidden_fp8=moe_activation,
-                    hidden_scale=moe_scale,
-                )
+            moe_residual = torch.empty_like(attention_output)
+            moe_norm = torch.empty_like(attention_output)
+            ops.add_rms_norm_mega_moe_quant(
+                attention_output,
+                residual,
+                self.post_attention_layernorm.weight.data,
+                out=(moe_residual, moe_norm, moe_activation, moe_scale),
+                epsilon=float(self.post_attention_layernorm.variance_epsilon),
             )
             # Project normalized hidden states to FP32 logits for 256 experts.
-            router_logits = ops.project_router(
+            router_logits = ops.router_proj(
                 moe_norm,
                 self._router_weight,
             )
             # Apply sigmoid and correction bias, select corrected Top-8 experts,
             # normalize/scale their weights, and pack MegaMoE routing buffers.
-            ops.finalize_router_topk_pack(
+            ops.router_topk(
                 router_logits,
                 self.mlp.correction_bias,
-                routed_indices,
-                routed_weights,
+                topk_indices=routed_indices,
+                topk_weights=routed_weights,
             )
             return moe_norm, moe_residual, routed_indices, routed_weights
         return attention_output, residual
@@ -673,7 +636,7 @@ class Glm52CudaDag:
         attention_output: torch.Tensor,
         residual: torch.Tensor,
     ) -> Any:
-        """Prepare the Dense FFN input with the same direct A0 Op API."""
+        """Prepare the Dense FFN input with the direct add-norm-quant Op."""
         # Dense-layer post-attention residual add + RMSNorm, followed by the
         # group-128 FP8 quantization expected by the existing Dense MLP.
         return self.ops.add_norm_quant(
@@ -684,44 +647,46 @@ class Glm52CudaDag:
         )
 
 
-def should_enable_glm52_cudadag(
+def should_enable_glm5_cmp(
     layers: Any,
     layer_num: int,
     hidden_states: torch.Tensor,
     fmha_impl: Any,
     kv_cache: Any,
 ) -> bool:
-    """Return whether the complete model forward should use CUDA-DAG."""
+    """Return whether the complete model forward should use GLM5 CMP."""
     if layer_num <= 0:
         return False
 
-    # GLM-5.2 starts with dense layers. Layer 0 validates the shared attention
-    # contract; the first MoE layer validates the shared MegaMoE contract.
-    cuda_dag = layers[0].cuda_dag
-    if cuda_dag is None or cuda_dag._disabled_reason is not None:
+    # Layer 0 validates the shared attention contract; the first MoE layer
+    # validates the shared MegaMoE contract.
+    cmp = layers[0].cmp
+    if cmp is None or cmp._disabled_reason is not None:
         return False
 
-    moe_cuda_dag = next(
+    moe_cmp = next(
         (
-            layer.cuda_dag
+            layer.cmp
             for layer in layers[:layer_num]
-            if layer.cuda_dag is not None and layer.cuda_dag._has_moe
+            if layer.cmp is not None and layer.cmp._has_moe
         ),
         None,
     )
-    if moe_cuda_dag is None or moe_cuda_dag._disabled_reason is not None:
+    if moe_cmp is None or moe_cmp._disabled_reason is not None:
         return False
 
-    # Layer 0 must seed the global TopK indices reused by main-only layers.
+    # Layer 0 must seed the request-local TopK indices reused by main-only layers.
     first_cache = kv_cache.get_layer_cache(0) if kv_cache is not None else None
     if (
-        not cuda_dag.has_indexer
-        or cuda_dag._unsupported_call_reason(hidden_states, fmha_impl, first_cache)
+        not cmp.has_indexer
+        or cmp._unsupported_call_reason(hidden_states, fmha_impl, first_cache)
         is not None
     ):
         return False
     try:
-        moe_cuda_dag.mlp.fused_moe.prepacked_input_views(int(hidden_states.size(0)))
+        moe_cmp.mlp.fused_moe.prepacked_input_views(
+            int(hidden_states.size(0))
+        )
     except (AttributeError, TypeError, ValueError, RuntimeError):
         return False
     return True
