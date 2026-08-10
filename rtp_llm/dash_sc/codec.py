@@ -68,7 +68,10 @@ DASHSERVING_INNER_ENGINE_ERROR_NO = 19
 
 DASH_ERROR_BAD_REQUEST = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    # USE_PARAMETER_STATUS tells DashScope api-server to use the explicit
+    # status_* response parameters instead of mapping STOP_ENGINE_PARAM to a
+    # generic 500 EngineAbort. Keep error_no=8 for compatibility and metrics.
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=400,
     status_name="InvalidParameter",
 )
@@ -1438,4 +1441,9 @@ def build_dash_error_response(
     infer.parameters["incremental_output"].int64_param = 1
     infer.parameters["error_no"].int64_param = int(error_spec.error_no)
     infer.parameters["error_msg"].string_param = error_msg
+    # DashScope api-server reads status_* as standalone parameters. Keep the
+    # legacy error_no/error_msg fields above for backward compatibility.
+    infer.parameters["status_code"].int64_param = int(error_spec.status_code)
+    infer.parameters["status_name"].string_param = error_spec.status_name
+    infer.parameters["status_message"].string_param = status_message
     return resp
