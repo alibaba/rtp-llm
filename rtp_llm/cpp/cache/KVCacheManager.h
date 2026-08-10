@@ -140,10 +140,10 @@ public:
     }
 
 private:
-    void initConnectorCoordinator();
-    void allocateAndSync();
-    void reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    void        initConnectorCoordinator();
+    void        allocateAndSync();
+    void        reportMetricsLoop();
+    void        reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool cache_keys_initialized_now);
     KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 成员变量
