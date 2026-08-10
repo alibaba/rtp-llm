@@ -9,6 +9,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -44,6 +45,15 @@ public class RouteService {
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(flexlbConfig);
+
+        // Prefill seq_len admission gate: reject oversized requests before they
+        // enter any scheduling/batch queue (fail-fast) — an oversized prompt can
+        // OOM-crash the prefill engine, so it must never be dispatched.
+        Response rejected = checkSeqLenLimit(balanceContext, flexlbConfig);
+        if (rejected != null) {
+            balanceContext.setResponse(rejected);
+            return CompletableFuture.completedFuture(rejected);
+        }
 
         ScheduleModeEnum mode = flexlbConfig.getDefaultScheduleModeEnum();
         balanceContext.setScheduleMode(mode);
@@ -97,6 +107,30 @@ public class RouteService {
     private boolean hasValidGenerateInput(BalanceContext ctx) {
         byte[] bytes = ctx.getGenerateInputPbBytes();
         return bytes != null && bytes.length > 0;
+    }
+
+    /**
+     * Prefill seq_len admission check. Returns a non-retryable INVALID_REQUEST
+     * error response when the request's seq_len exceeds the configured
+     * maxPrefillSeqLen, or {@code null} when the request is admitted.
+     * A limit of 0 (default) disables the check.
+     */
+    private Response checkSeqLenLimit(BalanceContext ctx, FlexlbConfig config) {
+        long maxSeqLen = config.getMaxPrefillSeqLen();
+        if (maxSeqLen <= 0 || ctx.getRequest() == null) {
+            return null;
+        }
+        long seqLen = ctx.getRequest().getSeqLen();
+        if (seqLen <= maxSeqLen) {
+            return null;
+        }
+        String message = "SEQ_LEN_EXCEEDED: seq_len=" + seqLen
+                + " exceeds max_prefill_seq_len=" + maxSeqLen;
+        Logger.warn("reject oversized prefill request: request_id={} seq_len={} max_prefill_seq_len={}",
+                ctx.getRequestId(), seqLen, maxSeqLen);
+        Response response = Response.error(StrategyErrorType.INVALID_REQUEST);
+        response.setErrorMessage(StrategyErrorType.INVALID_REQUEST.buildErrorMessage(message));
+        return response;
     }
 
     public RequestLifecycleSnapshot getRequestState(long requestId,
