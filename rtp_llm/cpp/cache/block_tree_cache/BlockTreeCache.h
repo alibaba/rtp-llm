@@ -57,11 +57,6 @@ struct BlockTreeCacheConfig {
     TierWatermark watermark_host;
     TierWatermark watermark_disk;
 
-    // ---- Reverse (leaf) cascade eviction control ----
-    // When true, evicting any group set on a leaf node cascades to all other
-    // group sets, regardless of group priority.
-    bool enable_reverse_eviction{false};
-
     // ---- Per-tier eviction policy ----
     EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
     EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};

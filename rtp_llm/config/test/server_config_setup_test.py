@@ -61,7 +61,6 @@ class GenerateConfigTest(TestCase):
         self.assertFalse(config.enable_prefix_tree_memory_cache)
         self.assertTrue(config.enable_legacy_memory_connector_fallback)
         self.assertEqual(config.memory_cache_disk_staging_block_count, 4)
-        self.assertFalse(config.enable_reverse_eviction)
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.host_eviction_policy, "lru")
         self.assertEqual(config.disk_eviction_policy, "fifo")
@@ -81,7 +80,6 @@ class GenerateConfigTest(TestCase):
         config = KVCacheConfig()
         config.memory_cache_disk_staging_block_count = 8
         config.enable_disk_cache = False
-        config.enable_reverse_eviction = True
         config.device_eviction_policy = "fifo"
         config.host_eviction_policy = "lfu"
         config.disk_eviction_policy = "lru"
@@ -90,12 +88,11 @@ class GenerateConfigTest(TestCase):
         config.disk_watermark_ratio = 0.85
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 63)
+        self.assertEqual(len(state), 62)
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.memory_cache_disk_staging_block_count, 8)
         self.assertFalse(restored.enable_disk_cache)
-        self.assertTrue(restored.enable_reverse_eviction)
         self.assertEqual(restored.device_eviction_policy, "fifo")
         self.assertEqual(restored.host_eviction_policy, "lfu")
         self.assertEqual(restored.disk_eviction_policy, "lru")
@@ -106,29 +103,6 @@ class GenerateConfigTest(TestCase):
         config.enable_disk_cache = True
         restored_enabled = pickle.loads(pickle.dumps(config))
         self.assertTrue(restored_enabled.enable_disk_cache)
-
-        # Legacy states preserve defaults for fields they did not serialize.
-        for legacy_size in (43, 54, 55, 56, 60):
-            legacy = KVCacheConfig.__new__(KVCacheConfig)
-            legacy.__setstate__(tuple(state)[:legacy_size])
-            self.assertFalse(legacy.enable_disk_cache)
-            if legacy_size < 55:
-                self.assertEqual(legacy.memory_cache_disk_staging_block_count, 4)
-            else:
-                self.assertEqual(legacy.memory_cache_disk_staging_block_count, 8)
-            if legacy_size < 60:
-                self.assertFalse(legacy.enable_reverse_eviction)
-                self.assertEqual(legacy.device_eviction_policy, "lru")
-                self.assertEqual(legacy.host_eviction_policy, "lru")
-                self.assertEqual(legacy.disk_eviction_policy, "fifo")
-            else:
-                self.assertTrue(legacy.enable_reverse_eviction)
-                self.assertEqual(legacy.device_eviction_policy, "fifo")
-                self.assertEqual(legacy.host_eviction_policy, "lfu")
-                self.assertEqual(legacy.disk_eviction_policy, "lru")
-            self.assertEqual(legacy.device_watermark_ratio, 0.9)
-            self.assertEqual(legacy.host_watermark_ratio, 0.9)
-            self.assertEqual(legacy.disk_watermark_ratio, 0.9)
 
     def test_engine_config_propagates_role_to_parallelism_config(self):
         py_env_configs = PyEnvConfigs()

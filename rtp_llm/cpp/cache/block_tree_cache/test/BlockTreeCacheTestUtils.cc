@@ -727,10 +727,9 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
                                                             options.enable_disk ? environment->disk_pools[1] : nullptr);
     environment->groups = {full, swa};
     BlockTreeCacheConfig config;
-    config.enable_device_cache     = true;
-    config.enable_memory_cache     = true;
-    config.enable_disk_cache       = options.enable_disk;
-    config.enable_reverse_eviction = options.enable_reverse_eviction;
+    config.enable_device_cache = true;
+    config.enable_memory_cache = true;
+    config.enable_disk_cache   = options.enable_disk;
 
     environment->scripted_per_rank_transfer_engine =
         std::make_shared<ScriptedPerRankBlockTransferEngine>(environment->groups);

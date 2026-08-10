@@ -20,7 +20,6 @@ bool BlockTreeEvictor::EvictionPlan::needsCopy() const {
 
 BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    ExecuteTransferFn              execute_transfer,
-                                   bool                           enable_reverse_eviction,
                                    const BlockTransferDispatcher* transfer_dispatcher,
                                    BlockTreeTaskPool*             task_pool,
                                    BlockTreeCacheMetricsReporter& metrics_reporter,
@@ -41,8 +40,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                                       disk_timeout_ms,
                                                       std::move(is_tier_enabled),
                                                       std::move(settled),
-                                                      std::move(remote_write))),
-    enable_reverse_eviction_(enable_reverse_eviction) {}
+                                                      std::move(remote_write))) {}
 
 BlockTreeEvictor::~BlockTreeEvictor() {
     std::lock_guard<std::mutex> lock(pending_release_mutex_);
@@ -512,8 +510,8 @@ std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(Transf
     };
     attach_full_prune(plan.primary_desc);
 
-    for (size_t cascade_group_set_id : selectCascadeGroupSets(
-             eviction_desc.node, eviction_desc.group_set_id, eviction_desc.source_tier, enable_reverse_eviction_)) {
+    for (size_t cascade_group_set_id :
+         selectCascadeGroupSets(eviction_desc.node, eviction_desc.group_set_id, eviction_desc.source_tier)) {
         TransferDescriptor cascade_desc =
             makeDesc(eviction_desc.node, cascade_group_set_id, eviction_desc.source_tier, eviction_desc.target_tier);
 
@@ -898,8 +896,7 @@ void BlockTreeEvictor::finalizeFullPrune(const EvictionPlan& plan) {
 
 std::vector<size_t> BlockTreeEvictor::selectCascadeGroupSets(const TreeNode* node,
                                                              size_t          source_group_set_id,
-                                                             Tier            tier,
-                                                             bool            enable_reverse_eviction) const {
+                                                             Tier            tier) const {
     std::vector<size_t> result;
 
     const GroupSetPtr* source_group_set = nullptr;
@@ -914,7 +911,7 @@ std::vector<size_t> BlockTreeEvictor::selectCascadeGroupSets(const TreeNode* nod
         return result;
     }
 
-    if (enable_reverse_eviction && tree_->isLeafAtTier(node, source_group_set_id, tier)) {
+    if (tree_->isLeafAtTier(node, source_group_set_id, tier)) {
         for (const auto& group_set : tree_->groupSets()) {
             if (group_set->groupSetId() != source_group_set_id) {
                 result.push_back(group_set->groupSetId());

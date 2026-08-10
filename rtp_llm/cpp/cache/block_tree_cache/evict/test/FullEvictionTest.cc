@@ -647,8 +647,7 @@ TEST(FullPruneTest, ReverseDirectDropPrunesCascadedFullSubtree) {
         128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, nullptr, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache     = true;
-    config.enable_reverse_eviction = true;
+    config.enable_memory_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa}, config);
     ASSERT_NE(cache, nullptr);
 
@@ -683,8 +682,7 @@ TEST(FullPruneTest, ReverseDirectDropAttachesOneClosureForMultipleFullGroups) {
         128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, nullptr, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache     = true;
-    config.enable_reverse_eviction = true;
+    config.enable_memory_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full0, full1, swa}, config);
     ASSERT_NE(cache, nullptr);
 

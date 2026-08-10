@@ -1624,7 +1624,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     ASSERT_FALSE(keys_b.empty());
     struct SwaCachedSlotSnapshot {
         size_t                    group_set_id;
-        TreeNode*                 node;
+        CacheKeysType             path_keys;
         std::vector<BlockIdxType> device_blocks;
         uint64_t                  last_access_seq;
     };
@@ -1646,16 +1646,22 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
                 ASSERT_LT(pool->freeBlocksNum(), 2u)
                     << "SWA pool must not satisfy the next request without eviction, group_set_id=" << group_set_id;
             }
-            for (const auto* path : {&find_a, &find_b}) {
-                for (TreeNode* node : *path) {
+            auto snapshot_path = [&](const CacheKeysType& keys, const std::vector<TreeNode*>& path) {
+                for (size_t path_index = 0; path_index < path.size(); ++path_index) {
+                    TreeNode*               node = path[path_index];
                     const GroupSetResource& slot = node->group_set_resources[group_set_id];
                     if (!slot.hasTier(Tier::DEVICE)) {
                         continue;
                     }
                     swa_cached_before.push_back(SwaCachedSlotSnapshot{
-                        group_set_id, node, slot.device_blocks, slot.candidate_meta.last_access_seq});
+                        group_set_id,
+                        CacheKeysType(keys.begin(), keys.begin() + path_index + 1),
+                        slot.device_blocks,
+                        slot.candidate_meta.last_access_seq});
                 }
-            }
+            };
+            snapshot_path(keys_a, find_a);
+            snapshot_path(keys_b, find_b);
         }
     }
     ASSERT_FALSE(swa_group_set_ids.empty());
@@ -1675,18 +1681,18 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     auto result_c = manager->malloc(malloc_c);
     ASSERT_TRUE(result_c.success) << "3rd allocation must succeed via SWA eviction";
 
-    // Independently exhausting and evicting the SWA pools must not disturb the
-    // older request's FULL prefix. Validate the FULL group_set path directly so
-    // a missing SWA tail cannot hide preservation behind the joint ready boundary.
+    // SWA pressure selects the older request's tier leaf. Reverse cascading
+    // removes every group set on that leaf, including FULL, while preserving
+    // the older request's reachable prefix.
     {
         const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
-        ASSERT_EQ(find_a.size(), keys_a.size());
+        ASSERT_EQ(find_a.size() + 1, keys_a.size());
         const auto& group_sets = manager->blockTreeCache()->groupSets();
         for (const FullPrefixSnapshot& snapshot : full_prefix_before_swa_pressure) {
             ASSERT_LT(snapshot.group_set_id, group_sets.size());
             const auto& group_set = group_sets[snapshot.group_set_id];
             auto        validator = group_set->createMatchValidator();
-            ASSERT_EQ(snapshot.blocks_per_node.size(), find_a.size());
+            ASSERT_EQ(snapshot.blocks_per_node.size(), keys_a.size());
             for (size_t path_index = 0; path_index < find_a.size(); ++path_index) {
                 const GroupSetResource& slot = find_a[path_index]->group_set_resources[snapshot.group_set_id];
                 ASSERT_TRUE(validator->validate(slot));
@@ -1704,24 +1710,32 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     // resource is older than every surviving one within its group set), and
     // surviving slots keep their exact device blocks.
     {
+        auto current_device_slot = [&](const SwaCachedSlotSnapshot& snapshot) -> const GroupSetResource* {
+            const auto path = manager->blockTreeCache()->tree()->findNode(snapshot.path_keys);
+            if (path.size() != snapshot.path_keys.size()) {
+                return nullptr;
+            }
+            const GroupSetResource& slot = path.back()->group_set_resources[snapshot.group_set_id];
+            return slot.hasTier(Tier::DEVICE) ? &slot : nullptr;
+        };
+
         size_t evicted_count = 0;
         for (const SwaCachedSlotSnapshot& snapshot : swa_cached_before) {
-            const GroupSetResource& slot = snapshot.node->group_set_resources[snapshot.group_set_id];
-            if (!slot.hasTier(Tier::DEVICE)) {
+            const GroupSetResource* slot = current_device_slot(snapshot);
+            if (slot == nullptr) {
                 ++evicted_count;
                 continue;
             }
-            EXPECT_EQ(slot.device_blocks, snapshot.device_blocks)
+            EXPECT_EQ(slot->device_blocks, snapshot.device_blocks)
                 << "surviving SWA slot changed, group_set_id=" << snapshot.group_set_id;
         }
         ASSERT_GT(evicted_count, 0u) << "third allocation must evict from the SWA cache";
         for (const SwaCachedSlotSnapshot& evicted : swa_cached_before) {
-            if (evicted.node->group_set_resources[evicted.group_set_id].hasTier(Tier::DEVICE)) {
+            if (current_device_slot(evicted) != nullptr) {
                 continue;
             }
             for (const SwaCachedSlotSnapshot& survivor : swa_cached_before) {
-                if (survivor.group_set_id != evicted.group_set_id
-                    || !survivor.node->group_set_resources[survivor.group_set_id].hasTier(Tier::DEVICE)) {
+                if (survivor.group_set_id != evicted.group_set_id || current_device_slot(survivor) == nullptr) {
                     continue;
                 }
                 EXPECT_LT(evicted.last_access_seq, survivor.last_access_seq)

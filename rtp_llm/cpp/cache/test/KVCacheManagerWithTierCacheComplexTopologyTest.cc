@@ -398,11 +398,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         }
     }
 
-    // Select one real HOST victim per FULL group set. Path 2 is colder than the
-    // re-heated path 1, and the first FULL plan cascades that same node to all
-    // lower-priority SWA group sets. Using individual primary plans is important
-    // here: a watermark batch computes each group-set excess before asynchronous
-    // cascades settle and can intentionally schedule more than one logical path.
+    // Select a real HOST victim from one FULL group set. Path 2 is colder than
+    // the re-heated path 1, and reverse cascading moves every group set on that
+    // tier leaf to DISK in the same plan.
     std::vector<size_t> full_group_set_ids;
     for (const auto& group_set : cache->groupSets()) {
         if (group_set->groupType() == CacheGroupType::FULL) {
@@ -410,10 +408,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         }
     }
     ASSERT_FALSE(full_group_set_ids.empty());
-    for (const size_t group_set_id : full_group_set_ids) {
-        ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, group_set_id, Tier::HOST));
-        cache->waitForPendingTasks();
-    }
+    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, full_group_set_ids.front(), Tier::HOST));
+    cache->waitForPendingTasks();
     auto mixed = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(mixed.has_value());
     ASSERT_EQ(mixed->size(), 3u);

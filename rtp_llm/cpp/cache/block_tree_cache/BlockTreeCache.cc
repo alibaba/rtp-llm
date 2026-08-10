@@ -28,7 +28,6 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
     evictor_(
         tree_.get(),
         [this](const TransferDescriptor& descriptor) { return executeTransfer(descriptor); },
-        config_.enable_reverse_eviction,
         transfer_dispatcher_.get(),
         task_pool_.get(),
         metrics_reporter_,

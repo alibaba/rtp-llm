@@ -1542,6 +1542,12 @@ protected:
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
             cache->waitForPendingTasks();
         } else if (failure_source == LoadFailureSource::MIXED) {
+            // A tier-leaf eviction normally reverse-cascades every group set.
+            // Let the primary and most cascades succeed while one cascade copy
+            // fails, producing the mixed HOST/DISK state that this rollback
+            // scenario needs through the real eviction completion path.
+            pausable_engine->enqueueResult(/*success=*/true);
+            pausable_engine->enqueueResult(/*success=*/false);
             ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, /*group_set_id=*/0, Tier::HOST));
             cache->waitForPendingTasks();
         }

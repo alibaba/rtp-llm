@@ -826,7 +826,6 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTa
     options.usable_device_blocks    = 4;
     options.usable_host_blocks      = 4;
     options.enable_disk             = false;
-    options.enable_reverse_eviction = false;
     auto environment                = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     ASSERT_NE(environment->cache, nullptr);

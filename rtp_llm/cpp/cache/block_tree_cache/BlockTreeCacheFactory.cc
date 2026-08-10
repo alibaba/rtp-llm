@@ -469,14 +469,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     }
 
     BlockTreeCacheConfig config;
-    config.enable_device_cache     = kv_cache_config.enable_device_cache;
-    config.enable_memory_cache     = host_enabled;
-    config.enable_disk_cache       = disk_enabled;
-    config.enable_remote_cache     = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
-    config.enable_reverse_eviction = kv_cache_config.enable_reverse_eviction;
-    config.device_eviction_policy  = *device_eviction_policy;
-    config.host_eviction_policy    = *host_eviction_policy;
-    config.disk_eviction_policy    = *disk_eviction_policy;
+    config.enable_device_cache    = kv_cache_config.enable_device_cache;
+    config.enable_memory_cache    = host_enabled;
+    config.enable_disk_cache      = disk_enabled;
+    config.enable_remote_cache    = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
+    config.device_eviction_policy = *device_eviction_policy;
+    config.host_eviction_policy   = *host_eviction_policy;
+    config.disk_eviction_policy   = *disk_eviction_policy;
     if (config.enable_device_cache) {
         config.watermark_device.ratio = kv_cache_config.device_watermark_ratio;
     }

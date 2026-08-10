@@ -1173,10 +1173,9 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     }
 
     FullSWAEnvironmentOptions options;
-    options.path_length             = 1;
-    options.enable_disk             = true;
-    options.enable_reverse_eviction = true;
-    auto environment                = FullSWAEnvironment::create(options);
+    options.path_length = 1;
+    options.enable_disk = true;
+    auto environment    = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
@@ -1279,15 +1278,14 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionRejectsNonCanonicalTargetBeforeCop
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneIsNotNormalized) {
+TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutCopy) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
 
     FullSWAEnvironmentOptions options;
-    options.path_length             = 1;
-    options.enable_reverse_eviction = false;
-    auto environment                = FullSWAEnvironment::create(options);
+    options.path_length = 1;
+    auto environment    = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
@@ -1296,9 +1294,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneIsNotNormalized) {
     EXPECT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::NONE));
     environment->cache->waitForPendingTasks();
     auto result = environment->cache->tree()->findNode(environment->keys);
-    ASSERT_FALSE(result.empty());
-    EXPECT_EQ(result.back()->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_EQ(result.back()->group_set_resources[1].getTopTier(), Tier::NONE);
+    EXPECT_TRUE(result.empty());
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 }
 
@@ -2225,8 +2221,7 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     }
 
     FullSWAEnvironmentOptions options;
-    options.enable_reverse_eviction = false;
-    auto environment                = FullSWAEnvironment::create(options);
+    auto environment = FullSWAEnvironment::create(options);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
 

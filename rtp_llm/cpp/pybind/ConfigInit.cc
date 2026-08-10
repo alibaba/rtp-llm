@@ -425,7 +425,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
                        &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
         .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
-        .def_readwrite("enable_reverse_eviction", &KVCacheConfig::enable_reverse_eviction)
         .def_readwrite("device_eviction_policy", &KVCacheConfig::device_eviction_policy)
         .def_readwrite("host_eviction_policy", &KVCacheConfig::host_eviction_policy)
         .def_readwrite("disk_eviction_policy", &KVCacheConfig::disk_eviction_policy)
@@ -515,7 +514,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.load_cache_retry_times,
                                       self.memory_cache_disk_staging_block_count,
                                       self.enable_disk_cache,
-                                      self.enable_reverse_eviction,
                                       self.device_eviction_policy,
                                       self.host_eviction_policy,
                                       self.disk_eviction_policy,
@@ -524,8 +522,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_watermark_ratio);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 55 && t.size() != 56 && t.size() != 60
-                    && t.size() != 63)
+                if (t.size() != 62)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -572,36 +569,25 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.reco_put_broadcast_timeout           = t[40].cast<int>();
                     c.reco_client_config                   = t[41].cast<std::string>();
                     c.ssm_state_dtype                      = t[42].cast<std::string>();
-                    if (t.size() >= 54) {
-                        c.enable_memory_cache_disk                = t[43].cast<bool>();
-                        c.memory_cache_disk_paths                 = t[44].cast<std::string>();
-                        c.memory_cache_disk_size_mb               = t[45].cast<int64_t>();
-                        c.memory_cache_disk_buffered_io           = t[46].cast<bool>();
-                        c.memory_cache_disk_sync_timeout_ms       = t[47].cast<int64_t>();
-                        c.enable_gpu_prefix_tree                  = t[48].cast<bool>();
-                        c.enable_prefix_tree_memory_cache         = t[49].cast<bool>();
-                        c.enable_legacy_memory_connector_fallback = t[50].cast<bool>();
-                        c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
-                        c.enable_independent_group_eviction       = t[52].cast<bool>();
-                        c.load_cache_retry_times                  = t[53].cast<int>();
-                    }
-                    if (t.size() >= 55) {
-                        c.memory_cache_disk_staging_block_count = t[54].cast<int64_t>();
-                    }
-                    if (t.size() >= 56) {
-                        c.enable_disk_cache = t[55].cast<bool>();
-                    }
-                    if (t.size() >= 60) {
-                        c.enable_reverse_eviction = t[56].cast<bool>();
-                        c.device_eviction_policy  = t[57].cast<std::string>();
-                        c.host_eviction_policy    = t[58].cast<std::string>();
-                        c.disk_eviction_policy    = t[59].cast<std::string>();
-                    }
-                    if (t.size() >= 63) {
-                        c.device_watermark_ratio = t[60].cast<double>();
-                        c.host_watermark_ratio   = t[61].cast<double>();
-                        c.disk_watermark_ratio   = t[62].cast<double>();
-                    }
+                    c.enable_memory_cache_disk                = t[43].cast<bool>();
+                    c.memory_cache_disk_paths                 = t[44].cast<std::string>();
+                    c.memory_cache_disk_size_mb               = t[45].cast<int64_t>();
+                    c.memory_cache_disk_buffered_io           = t[46].cast<bool>();
+                    c.memory_cache_disk_sync_timeout_ms       = t[47].cast<int64_t>();
+                    c.enable_gpu_prefix_tree                  = t[48].cast<bool>();
+                    c.enable_prefix_tree_memory_cache         = t[49].cast<bool>();
+                    c.enable_legacy_memory_connector_fallback = t[50].cast<bool>();
+                    c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
+                    c.enable_independent_group_eviction       = t[52].cast<bool>();
+                    c.load_cache_retry_times                  = t[53].cast<int>();
+                    c.memory_cache_disk_staging_block_count   = t[54].cast<int64_t>();
+                    c.enable_disk_cache                       = t[55].cast<bool>();
+                    c.device_eviction_policy                  = t[56].cast<std::string>();
+                    c.host_eviction_policy                    = t[57].cast<std::string>();
+                    c.disk_eviction_policy                    = t[58].cast<std::string>();
+                    c.device_watermark_ratio                  = t[59].cast<double>();
+                    c.host_watermark_ratio                    = t[60].cast<double>();
+                    c.disk_watermark_ratio                    = t[61].cast<double>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
                 }

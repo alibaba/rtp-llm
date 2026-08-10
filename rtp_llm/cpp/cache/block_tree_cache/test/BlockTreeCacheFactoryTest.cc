@@ -686,14 +686,12 @@ TEST_F(BlockTreeCacheFactoryTest, ProductionEvictionConfigurationPropagatesToBlo
     auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
 
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_reverse_eviction = true;
     kv_cache_config.device_eviction_policy  = "FIFO";
     kv_cache_config.host_eviction_policy    = "lfu";
     kv_cache_config.disk_eviction_policy    = "LrU";
 
     auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
-    EXPECT_TRUE(cache->config().enable_reverse_eviction);
     EXPECT_EQ(cache->config().device_eviction_policy, EvictionPolicy::FIFO);
     EXPECT_EQ(cache->config().host_eviction_policy, EvictionPolicy::LFU);
     EXPECT_EQ(cache->config().disk_eviction_policy, EvictionPolicy::LRU);
@@ -1009,6 +1007,12 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     ASSERT_EQ(find.size(), 1u);
     TreeNode* node = find.back();
     ASSERT_EQ(node->group_set_resources.size(), 2u);
+    auto clear_group_set_a = [&](BlockIdxType block) {
+        const MultiNodeResource device_resource{0, Tier::DEVICE, {{node, {block}}}};
+        group_set_a->unmapDeviceBlocksFromTreeNode(device_resource);
+        node->group_set_resources[0].evictFromTier(Tier::DEVICE);
+        group_set_a->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
+    };
 
     const int    b_layer = config.layerIdsForGroup(1).front();
     const size_t b_bytes = config.kvBlockStrideBytesForGroup(1) + config.kvScaleStrideBytesForGroup(1);
@@ -1016,8 +1020,9 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     writeDevicePattern(
         allocator->cacheGroups()[1]->convertIndexToAddr(b_layer, original_blocks[1]).kv_addr, b_bytes, 0x5a);
 
-    ASSERT_EQ(cache->evictForGroup(0, 1), 1);
-    cache->waitForPendingTasks();
+    // Simulate a partial resource left by an interrupted workflow. Leaf eviction
+    // now cascades to every group set and cannot create this state by itself.
+    clear_group_set_a(original_blocks[0]);
     ASSERT_TRUE(node->group_set_resources[0].is_empty());
     ASSERT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{original_blocks[1]}));
     const size_t b_ref_before  = group_set_b->devicePools()[0]->refCount(original_blocks[1]);
@@ -1075,8 +1080,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), a_ref_before_duplicate);
     allocator->cacheGroups()[0]->blockPool()->decRef(*nonempty_replacement, BlockRefType::REQUEST);
 
-    ASSERT_EQ(cache->evictForGroup(0, 1), 1);
-    cache->waitForPendingTasks();
+    clear_group_set_a(refill_a->front());
     ASSERT_TRUE(node->group_set_resources[0].is_empty());
 
     const BlockIdxType host_a = group_set_a->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);

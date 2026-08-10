@@ -74,7 +74,6 @@ public:
 
     BlockTreeEvictor(BlockTree*                     tree,
                      ExecuteTransferFn              execute_transfer,
-                     bool                           enable_reverse_eviction,
                      const BlockTransferDispatcher* transfer_dispatcher,
                      BlockTreeTaskPool*             task_pool,
                      BlockTreeCacheMetricsReporter& metrics_reporter,
@@ -153,8 +152,7 @@ private:
     EvictionTimingSnapshot makeTimingSnapshot(const TransferDescriptor& eviction_desc) const;
     std::vector<size_t> selectCascadeGroupSets(const TreeNode* node,
                                                size_t          source_group_set_id,
-                                               Tier            tier,
-                                               bool            enable_reverse_eviction) const;
+                                               Tier            tier) const;
     bool                prepareDesc(TransferDescriptor& eviction_desc);
     FullPruneClosure    collectFullPruneClosure(const TransferDescriptor& eviction_desc) const;
     void                reserveSource(const TransferDescriptor& eviction_desc);
@@ -172,7 +170,6 @@ private:
 
     BlockTree*                          tree_;
     std::unique_ptr<EvictionTaskRunner> task_runner_;
-    bool                                enable_reverse_eviction_{false};
 
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupSetTierHeaps>          heaps_;

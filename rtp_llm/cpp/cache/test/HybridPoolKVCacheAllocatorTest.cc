@@ -1409,12 +1409,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
     const auto after_target_reclaim = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
     EXPECT_GT(after_target_reclaim.version, before.version);
 
-    // The allocator publishes to BlockTreeCache, so eviction is observed through
-    // the tree rather than the legacy allocator pop-resource facade.
-    EXPECT_GT(BlockTreeCacheTestPeer::reclaimBlocksForTest(*allocator->blockTreeCacheOwner(), /*num_blocks=*/4096), 0);
-    const auto after = allocator->blockTreeCacheOwner()->getKeySnapshot(expected_canonical.size() + 1);
-    EXPECT_GT(after.version, before.version);
-    EXPECT_TRUE(after.keys.empty());
+    // Reverse cascading includes every group set on a tier leaf. The pressure
+    // eviction above therefore prunes the complete cached path; there is
+    // nothing left for a second explicit reclaim.
+    EXPECT_TRUE(after_target_reclaim.keys.empty());
 }
 
 }  // namespace test
