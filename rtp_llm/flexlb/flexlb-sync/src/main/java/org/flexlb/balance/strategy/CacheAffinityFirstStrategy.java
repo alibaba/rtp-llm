@@ -65,16 +65,25 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         // leader falls directly back to the shortest eligible TTFT worker.
         ScoredWorker cacheLeader = findCacheLeader(workersByTtft);
 
-        CacheLeaderDecision decision = eligibleWorkers.contains(cacheLeader)
-                ? evaluateCacheLeader(cacheLeader, shortestTtftWorker, config)
-                : rejectCacheLeaderForOutstandingWatermark(cacheLeader, shortestTtftWorker, config);
+        CacheLeaderDecision decision;
+        if (!cacheLeaderMeetsMinimumHitRate(cacheLeader, seqLen, config)) {
+            decision = rejectCacheLeaderForLowCacheHit(cacheLeader, shortestTtftWorker, config);
+        } else if (eligibleWorkers.contains(cacheLeader)) {
+            decision = evaluateCacheLeader(cacheLeader, shortestTtftWorker, config);
+        } else {
+            decision = rejectCacheLeaderForOutstandingWatermark(cacheLeader, shortestTtftWorker, config);
+        }
 
-        // The preferred worker may have been selected concurrently, so try ordered fallbacks.
-        ScoredWorker selectedWorker = selectWorkerByCacheAffinity(
-                decision.preferredWorker(), eligibleWorkers, shortestTtftWorker, config);
+        // Low effective cache hit makes cache affinity meaningless, so preserve TTFT order
+        // even if the original shortest worker was selected concurrently.
+        ScoredWorker selectedWorker = decision.cacheAffinityEnabled()
+                ? selectWorkerByCacheAffinity(
+                        decision.preferredWorker(), eligibleWorkers, shortestTtftWorker, config)
+                : selectFirstWorkerWithoutConcurrentConflict(eligibleWorkers, shortestTtftWorker);
         String selectionReason = selectedWorker.equals(decision.preferredWorker())
                 ? decision.selectionReason()
-                : satisfiesCacheAffinityTolerance(selectedWorker, shortestTtftWorker, config)
+                : decision.cacheAffinityEnabled()
+                        && satisfiesCacheAffinityTolerance(selectedWorker, shortestTtftWorker, config)
                         ? "CACHE_AFFINITY_FALLBACK"
                         : "SHORTEST_TTFT_FALLBACK";
 
@@ -120,7 +129,22 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
                 cacheLeadTokens,
                 extraTtft,
                 configuredMaxExtraWork(config),
-                "SHORTEST_TTFT_OUTSTANDING_GUARD");
+                "SHORTEST_TTFT_OUTSTANDING_GUARD",
+                true);
+    }
+
+    private CacheLeaderDecision rejectCacheLeaderForLowCacheHit(ScoredWorker cacheLeader,
+                                                                 ScoredWorker shortestTtftWorker,
+                                                                 FlexlbConfig config) {
+        long cacheLeadTokens = Math.max(0, cacheLeader.hitCacheTokens() - shortestTtftWorker.hitCacheTokens());
+        long extraTtft = cacheLeader.ttft() - shortestTtftWorker.ttft();
+        return new CacheLeaderDecision(
+                shortestTtftWorker,
+                cacheLeadTokens,
+                extraTtft,
+                configuredMaxExtraWork(config),
+                "SHORTEST_TTFT_LOW_CACHE_HIT",
+                false);
     }
 
     /**
@@ -142,10 +166,10 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         // Prefer cache only when its final TTFT cost stays within the configured tolerance.
         if (extraTtft <= toleratedExtraTtft) {
             return new CacheLeaderDecision(
-                    cacheLeader, cacheLeadTokens, extraTtft, toleratedExtraTtft, "CACHE_LEADER");
+                    cacheLeader, cacheLeadTokens, extraTtft, toleratedExtraTtft, "CACHE_LEADER", true);
         }
         return new CacheLeaderDecision(
-                shortestTtftWorker, cacheLeadTokens, extraTtft, toleratedExtraTtft, "SHORTEST_TTFT");
+                shortestTtftWorker, cacheLeadTokens, extraTtft, toleratedExtraTtft, "SHORTEST_TTFT", true);
     }
 
     /**
@@ -215,12 +239,28 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         return Math.max(0L, config.getCacheAffinityFirstOutstandingUncachedTokensThreshold());
     }
 
+    private boolean cacheLeaderMeetsMinimumHitRate(ScoredWorker cacheLeader,
+                                                    long seqLen,
+                                                    FlexlbConfig config) {
+        double minimumHitRatePct = configuredMinimumHitRatePct(config);
+        return minimumHitRatePct <= 0 || (seqLen > 0
+                && cacheLeader.hitCacheTokens() * 100.0 / seqLen >= minimumHitRatePct);
+    }
+
+    private double configuredMinimumHitRatePct(FlexlbConfig config) {
+        return Math.max(0, config.getCacheAffinityFirstMinHitRate());
+    }
+
     private boolean outstandingUncachedTokensGuardEnabled(RoleType roleType,
                                                           FlexlbConfig config) {
         return (roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION)
                 && configuredOutstandingUncachedTokensThreshold(config) > 0;
     }
 
-    private record CacheLeaderDecision(ScoredWorker preferredWorker, long cacheLeadTokens,
-                                       long extraTtft, long toleratedExtraTtft, String selectionReason) {}
+    private record CacheLeaderDecision(ScoredWorker preferredWorker,
+                                       long cacheLeadTokens,
+                                       long extraTtft,
+                                       long toleratedExtraTtft,
+                                       String selectionReason,
+                                       boolean cacheAffinityEnabled) {}
 }

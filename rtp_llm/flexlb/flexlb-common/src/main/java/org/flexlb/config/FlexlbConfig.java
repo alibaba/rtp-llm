@@ -107,6 +107,12 @@ public class FlexlbConfig {
     private long cacheAffinityFirstOutstandingUncachedTokensThreshold = 0;
 
     /**
+     * Minimum effective cache-hit percentage needed before CACHE_AFFINITY_FIRST may prefer cache.
+     * A value of 0 disables this gate; 5 means 5%.
+     */
+    private double cacheAffinityFirstMinHitRate = 5;
+
+    /**
      * KV cache available threshold for DECODE role (percentage)
      * When Worker's KV cache usage is below this threshold, the Worker is considered available
      * Range: 1-100, default 90 means Worker is unavailable when usage exceeds 90%

@@ -104,6 +104,77 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
+    void usesShortestTtftWhenBestCacheHitRateIsBelowMinimum() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(List.of(cacheLeader, shortestTtftWorker), Map.of());
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMinHitRate(5);
+        BalanceContext balanceContext = new BalanceContext();
+
+        ScoredWorker selected = strategy.selectBestWorker(
+                List.of(
+                        scored(cacheLeader, 20_000, 2_000),
+                        scored(shortestTtftWorker, 10_000, 0)),
+                balanceContext,
+                RoleType.PREFILL,
+                null,
+                INPUT_TOKENS,
+                config);
+
+        Assertions.assertSame(shortestTtftWorker, selected.worker());
+        Assertions.assertEquals(
+                "SHORTEST_TTFT_LOW_CACHE_HIT",
+                balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL).selectionReason());
+    }
+
+    @Test
+    void keepsCacheAffinityAtMinimumCacheHitRate() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(List.of(cacheLeader, shortestTtftWorker), Map.of());
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMinHitRate(5);
+        BalanceContext balanceContext = new BalanceContext();
+
+        ScoredWorker selected = strategy.selectBestWorker(
+                List.of(
+                        scored(cacheLeader, 20_000, 2_000),
+                        scored(shortestTtftWorker, 10_000, 0)),
+                balanceContext,
+                RoleType.PREFILL,
+                null,
+                40_000,
+                config);
+
+        Assertions.assertSame(cacheLeader, selected.worker());
+        Assertions.assertEquals(
+                "CACHE_LEADER",
+                balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL).selectionReason());
+    }
+
+    @Test
+    void disablesMinimumCacheHitRateGateAtZero() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(List.of(cacheLeader, shortestTtftWorker), Map.of());
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMinHitRate(0);
+
+        ScoredWorker selected = strategy.selectBestWorker(
+                List.of(
+                        scored(cacheLeader, 20_000, 2_000),
+                        scored(shortestTtftWorker, 10_000, 0)),
+                new BalanceContext(),
+                RoleType.PREFILL,
+                null,
+                INPUT_TOKENS,
+                config);
+
+        Assertions.assertSame(cacheLeader, selected.worker());
+    }
+
+    @Test
     void usesCacheLeaderWhenExtraWorkIsWithinConfiguredTolerance() {
         WorkerStatus cacheLeader = createWorker("127.0.0.1", 13000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
@@ -193,13 +264,15 @@ class CacheAffinityFirstStrategyTest {
         CacheAffinityFirstStrategy strategy = createStrategy(
                 List.of(cacheLeader, cacheFallback, shortestTtftWorker), Map.of());
         BalanceContext balanceContext = new BalanceContext();
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMinHitRate(0);
 
         ScoredWorker selectedWorker = strategy.selectBestWorker(
                 List.of(
                         new ScoredWorker(cacheLeader, 2000, 2000, 100),
                         new ScoredWorker(cacheFallback, 1500, 1500, 200),
                         new ScoredWorker(shortestTtftWorker, 1000, 1000, 300)),
-                balanceContext, RoleType.PREFILL, null, INPUT_TOKENS, cacheAffinityConfig());
+                balanceContext, RoleType.PREFILL, null, INPUT_TOKENS, config);
 
         Assertions.assertSame(cacheFallback, selectedWorker.worker());
         var decision = balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
@@ -321,12 +394,13 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void cacheAffinityGuardsAreDisabledByDefault() {
+    void cacheAffinityDefaultsKeepQueueGuardsDisabledAndUseFivePercentMinimumHitRate() {
         FlexlbConfig config = new FlexlbConfig();
 
         Assertions.assertEquals(0, config.getCacheAffinityFirstMaxExtraWorkTokens());
         Assertions.assertEquals(
                 0, config.getCacheAffinityFirstOutstandingUncachedTokensThreshold());
+        Assertions.assertEquals(5, config.getCacheAffinityFirstMinHitRate());
     }
 
     private CacheAffinityFirstStrategy createStrategy(
