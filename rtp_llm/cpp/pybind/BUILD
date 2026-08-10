@@ -84,6 +84,8 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/comm:collective_backend_pybind_hdrs",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/runtime:cuda_runtime_hdrs",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",

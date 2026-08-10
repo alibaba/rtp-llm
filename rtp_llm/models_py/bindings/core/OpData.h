@@ -32,9 +32,12 @@ struct GptModelInputs {
     mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
     torch::Tensor         input_lengths;      // [batch_size]
     torch::Tensor         sequence_lengths;   // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;  // [sum(lm_output_lengths)]
-    torch::Tensor         lm_output_lengths;  // [total_batch_size]
-    torch::Tensor         prefix_lengths;     // [context_batch_size]
+    torch::Tensor         lm_output_indexes;  // selected output rows
+    // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
+    // scheduling redesign no longer populates it (stays undefined).
+    torch::Tensor lm_output_lengths;        // [total_batch_size]
+    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -73,7 +76,7 @@ struct GptModelInputs {
     bool   decode_entrance           = false;
     bool   use_opaque_kv_cache_store = false;
 
-    bool need_all_logits = false;
+    bool need_all_logits        = false;
     // Set when any stream requests return_all_hidden_states. Gates whether the
     // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
     // (true) or may gather only the last-token rows lm_head needs (false).

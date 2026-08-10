@@ -87,6 +87,7 @@ cc_library(
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/core:copy_ops_hdrs",
+        "//rtp_llm/models_py/bindings/core:op_data",
         "@havenask//aios/autil:json",
     ] + select({
         "//:using_cuda": [
