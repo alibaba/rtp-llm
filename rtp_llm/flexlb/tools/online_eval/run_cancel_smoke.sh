@@ -272,6 +272,7 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \
     --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
+    --flexlb.auto-tpm.engine-cancel-enabled=true \
     --spring.profiles.active="${SPRING_PROFILE:-default}" \
     >"${RUN_DIR}/flexlb.log" 2>&1 &
   FLEXLB_PID="$!"
