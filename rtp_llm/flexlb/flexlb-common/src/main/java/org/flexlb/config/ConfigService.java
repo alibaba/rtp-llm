@@ -304,8 +304,6 @@ public class ConfigService {
             config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode());
         log.info("workerTimeoutMs={}",
             config.getWorkerTimeoutMs());
-        log.info("maxPrefillSeqLen={}",
-            config.getMaxPrefillSeqLen());
         log.info("==========================================");
     }
 

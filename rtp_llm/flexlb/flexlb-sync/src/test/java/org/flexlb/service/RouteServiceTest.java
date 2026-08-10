@@ -5,9 +5,7 @@ import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,10 +14,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import reactor.core.publisher.Mono;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -104,64 +99,6 @@ class RouteServiceTest {
         verify(defaultRouter).route(balanceContext);
         verify(balanceContext).setResponse(response);
         verify(recentCacheKeyTraceReporter, never()).report(any(BalanceContext.class));
-    }
-
-    // ---- Prefill seq_len admission gate ----
-
-    @Test
-    void should_not_reject_any_request_when_max_prefill_seq_len_is_default_zero() {
-        Response response = successResponse();
-        when(flexlbConfig.getMaxPrefillSeqLen()).thenReturn(0L);
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.DIRECT);
-        BalanceContext ctx = contextWithSeqLen(1L, 850_000L);
-        when(defaultRouter.route(ctx)).thenReturn(response);
-
-        Response actual = routeService.route(ctx).join();
-
-        assertSame(response, actual);
-        verify(defaultRouter).route(ctx);
-    }
-
-    @Test
-    void should_reject_request_exceeding_max_prefill_seq_len_with_seq_len_exceeded_message() {
-        when(flexlbConfig.getMaxPrefillSeqLen()).thenReturn(262_144L);
-        BalanceContext ctx = contextWithSeqLen(2L, 300_000L);
-
-        Response actual = routeService.route(ctx).join();
-
-        assertFalse(actual.isSuccess());
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), actual.getCode());
-        assertTrue(actual.getErrorMessage().contains("SEQ_LEN_EXCEEDED"),
-                "error message should carry the SEQ_LEN_EXCEEDED tag: " + actual.getErrorMessage());
-        assertTrue(actual.getErrorMessage().contains("seq_len=300000"));
-        assertTrue(actual.getErrorMessage().contains("max_prefill_seq_len=262144"));
-        verify(defaultRouter, never()).route(any(BalanceContext.class));
-        verify(flexlbBatchScheduler, never()).submit(any(BalanceContext.class));
-        verify(queueManager, never()).tryRouteAsync(any(BalanceContext.class));
-        verify(recentCacheKeyTraceReporter, never()).report(any(BalanceContext.class));
-    }
-
-    @Test
-    void should_admit_request_below_max_prefill_seq_len() {
-        Response response = successResponse();
-        when(flexlbConfig.getMaxPrefillSeqLen()).thenReturn(262_144L);
-        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.DIRECT);
-        BalanceContext ctx = contextWithSeqLen(3L, 100_000L);
-        when(defaultRouter.route(ctx)).thenReturn(response);
-
-        Response actual = routeService.route(ctx).join();
-
-        assertSame(response, actual);
-        verify(defaultRouter).route(ctx);
-    }
-
-    private static BalanceContext contextWithSeqLen(long requestId, long seqLen) {
-        Request request = new Request();
-        request.setRequestId(requestId);
-        request.setSeqLen(seqLen);
-        BalanceContext ctx = new BalanceContext();
-        ctx.setRequest(request);
-        return ctx;
     }
 
     private static Response successResponse() {

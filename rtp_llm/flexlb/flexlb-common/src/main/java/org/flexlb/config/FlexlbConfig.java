@@ -614,19 +614,6 @@ public class FlexlbConfig {
      */
     private String autoTpmVictimGuardMode = "victim_presence";
 
-    // ========== Prefill Admission Configuration ==========
-
-    /**
-     * Hard upper bound on request seq_len admitted for prefill scheduling.
-     * <p>Requests whose seq_len exceeds this limit are rejected at the routing
-     * entry (fail-fast, before entering any scheduling/batch queue) with a
-     * SEQ_LEN_EXCEEDED error — an oversized prompt can OOM-crash the prefill
-     * engine, so it must never be dispatched.
-     * <p>Default: 0 (no limit, backward compatible).
-     * Environment variable: MAX_PREFILL_SEQ_LEN.
-     */
-    private long maxPrefillSeqLen = 0;
-
     // ========== Worker Expiration Configuration ==========
 
     /**
