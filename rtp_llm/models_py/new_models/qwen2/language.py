@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.layers.activation import silu_and_mul
 from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbedding
 from rtp_llm.models_py.layers.linear import (
@@ -68,7 +69,7 @@ class Qwen2MLP(RtpModule):
 
 
 class Qwen2Attention(RtpModule):
-    """Qwen2 attention with biased Q/K/V projections and no Q/K norm."""
+    """Dense GQA attention with configurable Q/K/V bias and no Q/K norm."""
 
     def __init__(
         self,
@@ -82,6 +83,7 @@ class Qwen2Attention(RtpModule):
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: torch.dtype = torch.float16,
         prefix: str = "self_attn",
+        qkv_bias: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -100,7 +102,7 @@ class Qwen2Attention(RtpModule):
             tp_rank=tp_rank,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
-            bias=True,
+            bias=qkv_bias,
             params_dtype=params_dtype,
         )
         self.o_proj = RowParallelLinear(
@@ -146,6 +148,7 @@ class Qwen2DecoderLayer(RtpModule):
         params_dtype: torch.dtype = torch.float16,
         rms_norm_eps: float = 1e-6,
         prefix: str = "layer",
+        qkv_bias: bool = True,
     ):
         super().__init__()
         self.input_layernorm = RMSNorm(
@@ -162,6 +165,7 @@ class Qwen2DecoderLayer(RtpModule):
             quant_config=quant_config,
             params_dtype=params_dtype,
             prefix=f"{prefix}.self_attn",
+            qkv_bias=qkv_bias,
         )
         self.post_attention_layernorm = RMSNorm(
             hidden_size, eps=rms_norm_eps, params_dtype=params_dtype
@@ -300,17 +304,17 @@ def _extract_config_values(
             raise ValueError(f"Invalid {name} partition: rank={rank}, size={size}")
     if (attn_tp_size, attn_tp_rank) != (tp_size, tp_rank):
         raise ValueError(
-            "Context parallelism is not supported by the Qwen2 dense newloader slice"
+            "Context parallelism is not supported by the dense GQA newloader path"
         )
     if (ffn_tp_size, ffn_tp_rank) != (attn_tp_size, attn_tp_rank):
         raise ValueError(
             "Independent FFN TP/sequence parallelism is not supported by the "
-            "Qwen2 dense newloader slice"
+            "dense GQA newloader path"
         )
     if (lm_head_tp_size, lm_head_tp_rank) != (tp_size, tp_rank):
         raise ValueError(
-            "A separate LM head topology is not supported by the Qwen2 dense "
-            "newloader slice"
+            "A separate LM head topology is not supported by the dense GQA "
+            "newloader path"
         )
 
     return dict(
@@ -343,17 +347,19 @@ def _validate_supported_parallelism(parallelism_config: Any) -> None:
             checker = getattr(prefill_cp, checker_name, None)
             if callable(checker) and bool(checker()):
                 raise ValueError(
-                    "Context parallelism is not supported by the Qwen2 dense "
-                    "newloader slice"
+                    "Context parallelism is not supported by the dense GQA "
+                    "newloader path"
                 )
     ffn_disaggregate = getattr(parallelism_config, "ffn_disaggregate_config", None)
     if bool(getattr(ffn_disaggregate, "enable_ffn_disaggregate", False)):
         raise ValueError(
-            "FFN disaggregation is not supported by the Qwen2 dense newloader slice"
+            "FFN disaggregation is not supported by the dense GQA newloader path"
         )
 
 
 class Qwen2ForCausalLM(GptModelBase):
+
+    QKV_BIAS = True
 
     WEIGHTS_MAPPER = WeightsMapper(
         prefix_mapping={"model.": ""},
@@ -381,8 +387,9 @@ class Qwen2ForCausalLM(GptModelBase):
         # the embedding weights into lm_head so the projection isn't random.
         if not has_lm_head and self.tie_word_embeddings:
             logging.info(
-                "[Qwen2ForCausalLM] lm_head.weight not found in ckpt; "
-                "tying lm_head to embed_tokens (tie_word_embeddings)"
+                "[%s] lm_head.weight not found in ckpt; "
+                "tying lm_head to embed_tokens (tie_word_embeddings)",
+                type(self).__name__,
             )
             self.lm_head._copy_local_tied_weight(self.embed_tokens.weight.data)
 
@@ -402,7 +409,7 @@ class Qwen2ForCausalLM(GptModelBase):
     def __init__(self, model_config: Any, load_config: Any):
         parallelism_config = getattr(load_config, "parallelism_config", None)
         if parallelism_config is None:
-            raise ValueError("Qwen2 newloader requires parallelism_config")
+            raise ValueError("Dense GQA newloader requires parallelism_config")
         fmha_config = getattr(load_config, "fmha_config", None)
         device_resource_config = getattr(load_config, "device_resource_config", None)
 
@@ -467,6 +474,7 @@ class Qwen2ForCausalLM(GptModelBase):
                     params_dtype=cfg["params_dtype"],
                     rms_norm_eps=cfg["rms_norm_eps"],
                     prefix=f"layers.{i}",
+                    qkv_bias=self.QKV_BIAS,
                 )
                 for i in range(cfg["num_layers"])
             ]
