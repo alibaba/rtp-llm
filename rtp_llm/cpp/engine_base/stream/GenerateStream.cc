@@ -517,6 +517,11 @@ bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
     return generate_status_->hasEvent(event);
 }
 
+bool GenerateStream::consumeCanRunAdmission() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return generate_status_->consumeCanRunAdmission();
+}
+
 StreamState GenerateStream::getStatus() const {
     return generate_status_->getStatus();
 }

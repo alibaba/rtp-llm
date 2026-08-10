@@ -1,7 +1,14 @@
 import importlib
 import os
+import pickle
 import sys
+from argparse import ArgumentTypeError
 from unittest import TestCase, main
+
+from rtp_llm.server.server_args.fifo_scheduler_group_args import (
+    MAX_CONTEXT_BATCH_COALESCING_WINDOW_MS,
+    parse_context_batch_coalescing_window_ms,
+)
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -30,6 +37,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
+        os.environ["CONTEXT_BATCH_COALESCING_WINDOW_MS"] = "25"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["MAX_RPC_TIMEOUT_MS"] = "21600000"
@@ -60,6 +68,19 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
         )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.context_batch_coalescing_window_ms,
+            25,
+        )
+        restored_fifo_config = pickle.loads(
+            pickle.dumps(py_env_configs.runtime_config.fifo_scheduler_config)
+        )
+        self.assertEqual(restored_fifo_config.max_context_batch_size, 32)
+        self.assertEqual(
+            restored_fifo_config.max_batch_tokens_size,
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_size,
+        )
+        self.assertEqual(restored_fifo_config.context_batch_coalescing_window_ms, 25)
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
@@ -89,6 +110,8 @@ class ServerArgsSetTest(TestCase):
             "128",
             "--max_context_batch_size",
             "64",
+            "--context_batch_coalescing_window_ms",
+            "40",
             "--warm_up",
             "0",
             "--cache_store_rdma_io_thread_count",
@@ -126,6 +149,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             64,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.context_batch_coalescing_window_ms,
+            40,
         )
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
@@ -271,6 +298,34 @@ class ServerArgsSetTest(TestCase):
             1,
         )
 
+    def test_context_batch_coalescing_window_parser(self):
+        self.assertEqual(parse_context_batch_coalescing_window_ms("0"), 0)
+        self.assertEqual(parse_context_batch_coalescing_window_ms("25"), 25)
+        self.assertEqual(
+            parse_context_batch_coalescing_window_ms(
+                str(MAX_CONTEXT_BATCH_COALESCING_WINDOW_MS)
+            ),
+            MAX_CONTEXT_BATCH_COALESCING_WINDOW_MS,
+        )
+        for value in (
+            "-1",
+            str(MAX_CONTEXT_BATCH_COALESCING_WINDOW_MS + 1),
+            "not-an-int",
+        ):
+            with self.subTest(value=value), self.assertRaises(ArgumentTypeError):
+                parse_context_batch_coalescing_window_ms(value)
+
+    def test_invalid_context_batch_coalescing_window_env_is_rejected(self):
+        for value in ("-1", str(MAX_CONTEXT_BATCH_COALESCING_WINDOW_MS + 1)):
+            with self.subTest(value=value):
+                os.environ["CONTEXT_BATCH_COALESCING_WINDOW_MS"] = value
+                sys.argv = ["prog"]
+
+                import rtp_llm.server.server_args.server_args
+
+                importlib.reload(rtp_llm.server.server_args.server_args)
+                with self.assertRaises(SystemExit):
+                    rtp_llm.server.server_args.server_args.setup_args()
 
 if __name__ == "__main__":
     main()

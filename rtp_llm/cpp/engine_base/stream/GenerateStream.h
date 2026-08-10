@@ -241,6 +241,7 @@ public:
 
     void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
     bool         hasEvent(StreamEvents::EventType event) const;
+    bool         consumeCanRunAdmission();
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
     std::string  stopReason();

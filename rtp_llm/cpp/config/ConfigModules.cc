@@ -351,7 +351,8 @@ std::string BatchDecodeSchedulerConfig::to_string() const {
 std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
-        << "max_batch_tokens_size: " << max_batch_tokens_size;
+        << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
+        << "context_batch_coalescing_window_ms: " << context_batch_coalescing_window_ms;
     return oss.str();
 }
 

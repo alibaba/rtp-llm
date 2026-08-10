@@ -39,6 +39,10 @@ public:
         return events_.has(event);
     }
 
+    bool consumeCanRunAdmission() {
+        return events_.consumeCanRunAdmission();
+    }
+
     StreamState moveToNext();
 
     StreamState getStatus() const {

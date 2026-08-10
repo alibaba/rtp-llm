@@ -1,4 +1,9 @@
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -18,6 +23,351 @@ class FIFOSchedulerTest: public DeviceTestBase {
 public:
     FIFOSchedulerTest() {}
 };
+
+class ObservableFIFOScheduler: public FIFOScheduler {
+public:
+    using FIFOScheduler::FIFOScheduler;
+
+    bool waitUntilContextBatchCoalescing() {
+        std::unique_lock<std::mutex> lock(coalescing_lock_);
+        return coalescing_cond_.wait_for(
+            lock, std::chrono::seconds(1), [this] { return context_batch_coalescing_wait_entered_; });
+    }
+
+    bool contextBatchCoalescingWaitEntered() {
+        std::lock_guard<std::mutex> lock(coalescing_lock_);
+        return context_batch_coalescing_wait_entered_;
+    }
+
+protected:
+    void onContextBatchCoalescingWait() override {
+        {
+            std::lock_guard<std::mutex> lock(coalescing_lock_);
+            context_batch_coalescing_wait_entered_ = true;
+        }
+        coalescing_cond_.notify_all();
+    }
+
+private:
+    std::mutex              coalescing_lock_;
+    std::condition_variable coalescing_cond_;
+    bool                    context_batch_coalescing_wait_entered_ = false;
+};
+
+class ContextBatchSchedulerHarness {
+public:
+    ContextBatchSchedulerHarness(int64_t  max_context_batch_size,
+                                 int64_t  coalescing_window_ms,
+                                 RoleType role_type = RoleType::PDFUSION) {
+        auto cache_config =
+            rtp_llm::test::makeSimpleMhaCacheConfig(1, 65, 8, rtp_llm::DataType::TYPE_FP16, 1, 4);
+        cache_manager     = std::make_shared<KVCacheManager>(cache_config);
+        if (!cache_manager->init()) {
+            throw std::runtime_error("failed to initialize test cache manager");
+        }
+        resource_context.cache_manager = cache_manager;
+        resource_context.role_type     = role_type;
+
+        model_config.max_seq_len = 8192;
+        runtime_config.max_generate_batch_size = 32;
+        runtime_config.fifo_scheduler_config.max_context_batch_size = max_context_batch_size;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size  = 8192;
+        runtime_config.fifo_scheduler_config.context_batch_coalescing_window_ms = coalescing_window_ms;
+        pd_sep_config.role_type = role_type;
+        scheduler = std::make_unique<ObservableFIFOScheduler>(runtime_config,
+                                                              model_config,
+                                                              pd_sep_config,
+                                                              parallelism_config,
+                                                              model_specific_config,
+                                                              cache_manager);
+    }
+
+    GenerateStreamPtr makeStream(bool context_stream = true) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor({1}, torch::kInt32);
+        query->generate_config = std::make_shared<GenerateConfig>();
+        query->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto stream = std::make_shared<NormalGenerateStream>(
+            query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(context_stream);
+        return stream;
+    }
+
+    GenerateStreamPtr makeStreamWithBatchSize(int batch_size) {
+        auto query                                  = std::make_shared<GenerateInput>();
+        query->input_ids                            = torch::tensor({1}, torch::kInt32);
+        query->generate_config                      = std::make_shared<GenerateConfig>();
+        query->generate_config->num_return_sequences = batch_size;
+        query->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto stream = std::make_shared<NormalGenerateStream>(
+            query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(true);
+        return stream;
+    }
+
+    GenerateStreamPtr makeExpiredForceBatchStream(int batch_size) {
+        auto query                                      = std::make_shared<GenerateInput>();
+        query->input_ids                                = torch::tensor({1}, torch::kInt32);
+        query->generate_config                          = std::make_shared<GenerateConfig>();
+        query->generate_config->num_return_sequences    = batch_size;
+        query->generate_config->force_batch             = true;
+        query->generate_config->batch_group_timeout     = 1;
+        query->batch_group_id                           = 17;
+        query->batch_group_size                         = batch_size + 1;
+        query->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - 1000 * 1000;
+        auto stream = std::make_shared<NormalGenerateStream>(
+            query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(true);
+        return stream;
+    }
+
+    GenerateStreamPtr makeAgedCompleteForceBatchStream(int64_t group_id, int group_size, int batch_size) {
+        auto query                                      = std::make_shared<GenerateInput>();
+        query->input_ids                                = torch::tensor({1}, torch::kInt32);
+        query->generate_config                          = std::make_shared<GenerateConfig>();
+        query->generate_config->num_return_sequences    = batch_size;
+        query->generate_config->force_batch             = true;
+        query->generate_config->batch_group_timeout     = 1;
+        query->batch_group_id                           = group_id;
+        query->batch_group_size                         = group_size;
+        query->begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - 1000 * 1000;
+        auto stream = std::make_shared<NormalGenerateStream>(
+            query, model_config, runtime_config, resource_context, nullptr);
+        stream->setIsContextStream(true);
+        return stream;
+    }
+
+    std::shared_ptr<KVCacheManager> cache_manager;
+    ResourceContext                 resource_context;
+    ModelConfig                     model_config;
+    RuntimeConfig                   runtime_config;
+    PDSepConfig                     pd_sep_config;
+    ParallelismConfig               parallelism_config;
+    ModelSpecificConfig             model_specific_config;
+    std::unique_ptr<ObservableFIFOScheduler> scheduler;
+};
+
+TEST_F(FIFOSchedulerTest, testIdleContextBatchReleasesImmediatelyWhenFull) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/3, /*coalescing_window_ms=*/5000);
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+
+    auto schedule_future =
+        std::async(std::launch::async, [&harness] { return harness.scheduler->schedule(); });
+    ASSERT_TRUE(harness.scheduler->waitUntilContextBatchCoalescing());
+
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+    ASSERT_EQ(schedule_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto result = schedule_future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 3);
+    EXPECT_EQ(harness.scheduler->waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testIdleContextBatchFallsBackWhenWindowExpires) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/4, /*coalescing_window_ms=*/100);
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+
+    auto schedule_future =
+        std::async(std::launch::async, [&harness] { return harness.scheduler->schedule(); });
+    ASSERT_TRUE(harness.scheduler->waitUntilContextBatchCoalescing());
+    ASSERT_EQ(schedule_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto result = schedule_future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testContextBatchCoalescingDisabledKeepsImmediateScheduling) {
+    for (const auto [max_context_batch_size, coalescing_window_ms] :
+         std::vector<std::pair<int64_t, int64_t>>{{4, 0}, {1, 5000}}) {
+        ContextBatchSchedulerHarness harness(max_context_batch_size, coalescing_window_ms);
+        ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+        ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+
+        auto schedule_future =
+            std::async(std::launch::async, [&harness] { return harness.scheduler->schedule(); });
+        const auto wait_status = schedule_future.wait_for(std::chrono::seconds(1));
+        if (wait_status != std::future_status::ready) {
+            ASSERT_TRUE(harness.scheduler->stop().ok());
+        }
+        ASSERT_EQ(wait_status, std::future_status::ready);
+        auto result = schedule_future.get();
+        ASSERT_TRUE(result.ok());
+        EXPECT_EQ(result->size(), 2);
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testStopWakesContextBatchCoalescingWait) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/4, /*coalescing_window_ms=*/10000);
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+
+    auto schedule_future =
+        std::async(std::launch::async, [&harness] { return harness.scheduler->schedule(); });
+    ASSERT_TRUE(harness.scheduler->waitUntilContextBatchCoalescing());
+    ASSERT_TRUE(harness.scheduler->stop().ok());
+    ASSERT_EQ(schedule_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto result = schedule_future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
+}
+
+TEST_F(FIFOSchedulerTest, testCancellationBreaksActiveContextBatchCoalescingWait) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/4, /*coalescing_window_ms=*/10000);
+    auto                         live_stream      = harness.makeStream();
+    auto                         cancelled_stream = harness.makeStream();
+    ASSERT_TRUE(harness.scheduler->enqueue(live_stream).ok());
+    ASSERT_TRUE(harness.scheduler->enqueue(cancelled_stream).ok());
+
+    auto schedule_future =
+        std::async(std::launch::async, [&harness] { return harness.scheduler->schedule(); });
+    ASSERT_TRUE(harness.scheduler->waitUntilContextBatchCoalescing());
+    cancelled_stream->reportError(ErrorCode::CANCELLED, "cancelled while waiting for batch");
+    ASSERT_EQ(schedule_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    auto result = schedule_future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), live_stream);
+    EXPECT_TRUE(cancelled_stream->isFinished());
+}
+
+TEST_F(FIFOSchedulerTest, testEnabledContextCoalescingCapsBatchAtConfiguredSize) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/2, /*coalescing_window_ms=*/5000);
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+
+    auto result = harness.scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 2);
+    EXPECT_EQ(harness.scheduler->waitingStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testFirstOversizedContextStreamMakesProgressUnderSoftCap) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/2, /*coalescing_window_ms=*/5000);
+    auto                         oversized_stream = harness.makeStreamWithBatchSize(/*batch_size=*/3);
+    ASSERT_TRUE(harness.scheduler->enqueue(oversized_stream).ok());
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+
+    auto result = harness.scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 1);
+    EXPECT_EQ(result->front(), oversized_stream);
+    EXPECT_EQ(oversized_stream->currentBatchSize(), 3);
+    EXPECT_EQ(harness.scheduler->waitingStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testExpiredForceBatchFallbackRespectsContextBatchCap) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/2, /*coalescing_window_ms=*/5000);
+    auto normal_stream        = harness.makeStream();
+    auto expired_force_stream = harness.makeExpiredForceBatchStream(/*batch_size=*/2);
+    harness.scheduler->waiting_streams_.push_back(normal_stream);
+    harness.scheduler->waiting_streams_.push_back(expired_force_stream);
+
+    harness.scheduler->evaluateWaitingStreams(harness.scheduler->waiting_streams_);
+
+    EXPECT_TRUE(normal_stream->hasEvent(StreamEvents::CanRun));
+    EXPECT_FALSE(expired_force_stream->hasEvent(StreamEvents::CanRun));
+    harness.scheduler->waiting_streams_.clear();
+}
+
+TEST_F(FIFOSchedulerTest, testExpiredForceBatchFallbackCompletesCoalescingBatch) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/2, /*coalescing_window_ms=*/5000);
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream()).ok());
+    ASSERT_TRUE(harness.scheduler->enqueue(harness.makeExpiredForceBatchStream(/*batch_size=*/1)).ok());
+
+    auto schedule_future =
+        std::async(std::launch::async, [&harness] { return harness.scheduler->schedule(); });
+    const auto wait_status = schedule_future.wait_for(std::chrono::seconds(1));
+    if (wait_status != std::future_status::ready) {
+        ASSERT_TRUE(harness.scheduler->stop().ok());
+    }
+    ASSERT_EQ(wait_status, std::future_status::ready);
+    auto result = schedule_future.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result->size(), 2);
+    EXPECT_FALSE(harness.scheduler->contextBatchCoalescingWaitEntered());
+}
+
+TEST_F(FIFOSchedulerTest, testAgedCompleteForceBatchRemainsAtomicAboveContextBatchCap) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/2, /*coalescing_window_ms=*/5000);
+    constexpr int64_t            group_id = 23;
+    auto first = harness.makeAgedCompleteForceBatchStream(group_id, /*group_size=*/2, /*batch_size=*/2);
+    auto second = harness.makeAgedCompleteForceBatchStream(group_id, /*group_size=*/2, /*batch_size=*/2);
+    ASSERT_TRUE(harness.scheduler->enqueue(first).ok());
+    ASSERT_TRUE(harness.scheduler->enqueue(second).ok());
+
+    auto result = harness.scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 2);
+    EXPECT_EQ(result->front(), first);
+    EXPECT_EQ(result->back(), second);
+    EXPECT_EQ(harness.scheduler->waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, testSchedulingRoundKeepsContextAndDecodePhasesSeparate) {
+    for (const bool first_is_context : {true, false}) {
+        ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/4, /*coalescing_window_ms=*/0);
+        ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream(first_is_context)).ok());
+        ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream(!first_is_context)).ok());
+
+        auto result = harness.scheduler->schedule();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result->size(), 1);
+        EXPECT_EQ(result->front()->isContextStream(), first_is_context);
+        EXPECT_EQ(harness.scheduler->waitingStreamsSize(), 1);
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testLoadingStreamDoesNotConstrainPDFusionExecutionPhase) {
+    ContextBatchSchedulerHarness harness(/*max_context_batch_size=*/4, /*coalescing_window_ms=*/0);
+    auto loading_context = harness.makeStream(/*context_stream=*/true);
+    auto waiting_decode  = harness.makeStream(/*context_stream=*/false);
+    auto waiting_context = harness.makeStream(/*context_stream=*/true);
+    harness.scheduler->loading_cache_streams_.push_back(loading_context);
+    harness.scheduler->waiting_streams_.push_back(waiting_decode);
+    harness.scheduler->waiting_streams_.push_back(waiting_context);
+
+    harness.scheduler->evaluateWaitingStreams(harness.scheduler->waiting_streams_);
+
+    EXPECT_TRUE(waiting_decode->hasEvent(StreamEvents::CanRun));
+    EXPECT_FALSE(waiting_context->hasEvent(StreamEvents::CanRun));
+    harness.scheduler->loading_cache_streams_.clear();
+    harness.scheduler->waiting_streams_.clear();
+}
+
+TEST_F(FIFOSchedulerTest, testContextCoalescingIsDisabledForDedicatedRoles) {
+    for (const auto role_type : {RoleType::PREFILL, RoleType::DECODE}) {
+        ContextBatchSchedulerHarness harness(
+            /*max_context_batch_size=*/4, /*coalescing_window_ms=*/5000, role_type);
+        ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream(/*context_stream=*/true)).ok());
+        ASSERT_TRUE(harness.scheduler->enqueue(harness.makeStream(/*context_stream=*/false)).ok());
+
+        auto schedule_future =
+            std::async(std::launch::async, [&harness] { return harness.scheduler->schedule(); });
+        const auto wait_status = schedule_future.wait_for(std::chrono::seconds(1));
+        if (wait_status != std::future_status::ready) {
+            ASSERT_TRUE(harness.scheduler->stop().ok());
+        }
+        ASSERT_EQ(wait_status, std::future_status::ready);
+        auto result = schedule_future.get();
+        ASSERT_TRUE(result.ok());
+        if (role_type == RoleType::DECODE) {
+            EXPECT_TRUE(result->empty());
+            result = harness.scheduler->schedule();
+            ASSERT_TRUE(result.ok());
+        }
+        EXPECT_EQ(result->size(), 2);
+        EXPECT_FALSE(harness.scheduler->contextBatchCoalescingWaitEntered());
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testContextCoalescingWindowBounds) {
+    EXPECT_NO_THROW((ContextBatchSchedulerHarness(/*max_context_batch_size=*/4, /*coalescing_window_ms=*/60000)));
+    EXPECT_THROW((ContextBatchSchedulerHarness(/*max_context_batch_size=*/4, /*coalescing_window_ms=*/-1)),
+                 std::invalid_argument);
+    EXPECT_THROW((ContextBatchSchedulerHarness(/*max_context_batch_size=*/4, /*coalescing_window_ms=*/60001)),
+                 std::invalid_argument);
+}
 
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);

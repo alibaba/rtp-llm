@@ -148,7 +148,7 @@ inline std::string StreamStateToString(StreamState state) {
 
 // 事件集合：外部通过 reportEvent() 投递事件，状态机在 moveToNext() 中统一消费。
 // 内部使用 bit flag 组合多个并发事件。
-// 所有事件均为永久事件：一旦设置即保留，不会被自动清除。
+// Most events are permanent. A scheduler may explicitly consume CanRun when fresh admission is required.
 class StreamEvents {
 public:
     enum EventType : uint32_t {
@@ -166,6 +166,14 @@ public:
 
     bool has(EventType event) const {
         return (flags_ & event) != 0;
+    }
+
+    bool consumeCanRunAdmission() {
+        if (!has(CanRun)) {
+            return false;
+        }
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(CanRun));
+        return true;
     }
 
 private:

@@ -1,7 +1,15 @@
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
+#include <cstddef>
+#include <list>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <queue>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 #include <atomic>
 #include <unordered_map>
@@ -12,6 +20,12 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 namespace rtp_llm {
+
+enum class ForceBatchMode {
+    NORMAL,
+    WAITING,
+    ATOMIC,
+};
 
 class FIFOScheduler: public SchedulerBase {
 public:
@@ -51,10 +65,29 @@ public:
     int64_t                                   onflightStreams() override;
 
 private:
+    struct ForceBatchAdmissionIdentity {
+        int64_t                                   group_id             = -1;
+        int                                       expected_size        = 0;
+        int64_t                                   fallback_deadline_ms = 0;
+        bool                                      broken               = false;
+        std::unordered_set<const GenerateStream*> members;
+    };
+
     int64_t lastScheduleTime() override;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     void accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool waitPredicate();
+    size_t coalescibleContextBatchSize() const;
+    bool   shouldCoalesceContextBatch() const;
+    void   waitForContextBatch(std::unique_lock<std::mutex>& lock);
+    bool   contextLoadCohortEnabled() const;
+    bool   waitForContextLoadCohort(std::unique_lock<std::mutex>& lock);
+    void   removeFromContextLoadCohort(const GenerateStreamPtr& stream);
+    ForceBatchMode effectiveForceBatchMode(const GenerateStreamPtr& stream,
+                                           ForceBatchMode             base_mode,
+                                           int64_t                    now_ms) const;
+    void trackCompleteForceBatchAdmissions(const std::list<GenerateStreamPtr>& admitted_streams, int64_t now_ms);
+    void removeFromForceBatchAdmission(const GenerateStreamPtr& stream, bool broken_before_run);
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
@@ -62,6 +95,7 @@ private:
 
 protected:
     void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
+    virtual void onContextBatchCoalescingWait() {}
 
 protected:
     PDSepConfig                     pd_sep_config_;
@@ -75,6 +109,14 @@ protected:
     size_t                          max_seq_len_             = 0;
     size_t                          max_batch_tokens_size_   = 0;
     size_t                          max_generate_batch_size_ = 1;
+    size_t                          max_context_batch_size_  = 1;
+    int64_t                         context_batch_coalescing_window_ms_ = 0;
+    std::unordered_set<const GenerateStream*> context_load_cohort_;
+    std::optional<std::chrono::steady_clock::time_point> context_load_cohort_deadline_;
+    std::unordered_map<const GenerateStream*, std::shared_ptr<ForceBatchAdmissionIdentity>>
+        force_batch_admission_by_member_;
+    std::unordered_set<int64_t> active_force_batch_group_ids_;
+    bool                            admit_context_load_cohort_only_ = false;
     const bool                      need_fill_fake_stream_   = false;
     std::atomic<bool>               stop_                    = false;
     bool                            schedule_trigger_        = false;
