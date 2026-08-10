@@ -1,0 +1,60 @@
+diff --git a/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp b/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp
+index bdd3bf5..2d03560 100644
+--- a/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp
++++ b/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp
+@@ -2,0 +3 @@
++#include <cstring>
+@@ -53,0 +55,6 @@ public:
++    static uint32_t float_bits(const float value) {
++        uint32_t bits;
++        std::memcpy(&bits, &value, sizeof(bits));
++        return bits;
++    }
++
+@@ -92,3 +99,3 @@ static void __instantiate_kernel() {{
+-    to_string(args.activation_clamp),
+-    to_string(args.activation_beta),
+-    to_string(args.activation_linear_beta),
++    float_bits(args.activation_clamp),
++    float_bits(args.activation_beta),
++    float_bits(args.activation_linear_beta),
+diff --git a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh
+index 301afd5..86c48b1 100644
+--- a/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh
+@@ -37,3 +37,3 @@ template <
+-    float kActivationClamp,
+-    float kActivationBeta,
+-    float kActivationLinearBeta,
++    uint32_t kActivationClampBits,
++    uint32_t kActivationBetaBits,
++    uint32_t kActivationLinearBetaBits,
+@@ -1004,4 +1004,5 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
+-                            if constexpr (kActivationClamp != cute::numeric_limits<float>::infinity()) {
+-                                bf16_gate = __hmin2(bf16_gate, {kActivationClamp, kActivationClamp});
+-                                bf16_up = __hmax2(bf16_up, {-kActivationClamp, -kActivationClamp});
+-                                bf16_up = __hmin2(bf16_up, {kActivationClamp, kActivationClamp});
++                            if constexpr (kActivationClampBits != 0x7f800000u) {
++                                const float activation_clamp = __uint_as_float(kActivationClampBits);
++                                bf16_gate = __hmin2(bf16_gate, {activation_clamp, activation_clamp});
++                                bf16_up = __hmax2(bf16_up, {-activation_clamp, -activation_clamp});
++                                bf16_up = __hmin2(bf16_up, {activation_clamp, activation_clamp});
+@@ -1023,0 +1025 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
++                                const float activation_beta = __uint_as_float(kActivationBetaBits);
+@@ -1025,4 +1027,5 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
+-                                    kFastMath ? __tanhf(raw_gate.x / kActivationBeta) : tanhf(raw_gate.x / kActivationBeta),
+-                                    kFastMath ? __tanhf(raw_gate.y / kActivationBeta) : tanhf(raw_gate.y / kActivationBeta));
+-                                gate = __fmul2_rn(sigmoid, __fmul2_rn(tanh_gate, {kActivationBeta, kActivationBeta}));
+-                                if constexpr (kActivationLinearBeta > 0.0f) {
++                                    kFastMath ? __tanhf(raw_gate.x / activation_beta) : tanhf(raw_gate.x / activation_beta),
++                                    kFastMath ? __tanhf(raw_gate.y / activation_beta) : tanhf(raw_gate.y / activation_beta));
++                                gate = __fmul2_rn(sigmoid, __fmul2_rn(tanh_gate, {activation_beta, activation_beta}));
++                                if constexpr (kActivationLinearBetaBits != 0u) {
++                                    const float activation_linear_beta = __uint_as_float(kActivationLinearBetaBits);
+@@ -1030,3 +1033,3 @@ sm100_fp8_fp4_mega_moe_impl(void* y,
+-                                        kFastMath ? __tanhf(up.x / kActivationLinearBeta) : tanhf(up.x / kActivationLinearBeta),
+-                                        kFastMath ? __tanhf(up.y / kActivationLinearBeta) : tanhf(up.y / kActivationLinearBeta));
+-                                    up = __fmul2_rn(tanh_up, {kActivationLinearBeta, kActivationLinearBeta});
++                                        kFastMath ? __tanhf(up.x / activation_linear_beta) : tanhf(up.x / activation_linear_beta),
++                                        kFastMath ? __tanhf(up.y / activation_linear_beta) : tanhf(up.y / activation_linear_beta));
++                                    up = __fmul2_rn(tanh_up, {activation_linear_beta, activation_linear_beta});
