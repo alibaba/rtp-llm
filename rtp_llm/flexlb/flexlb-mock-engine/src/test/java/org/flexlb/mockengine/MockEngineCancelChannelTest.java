@@ -88,7 +88,7 @@ class MockEngineCancelChannelTest {
         awaitInflight(prefill, 1, 1_000);
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(null, endpoint(prefill.getGrpcPort()), 0L), 1L, CancelReason.PRIORITY_PREEMPTED)
+                .cancel(CancelTarget.of(endpoint(prefill.getGrpcPort()), 0L), 1L, CancelReason.PRIORITY_PREEMPTED)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome.ack(),
                 "mid-flight cancel must register the intent");
@@ -122,7 +122,7 @@ class MockEngineCancelChannelTest {
         awaitAllInflightZero(5_000);
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(null, endpoint(prefill.getGrpcPort()), 0L), 11L, CancelReason.USER_CANCELLED)
+                .cancel(CancelTarget.of(endpoint(prefill.getGrpcPort()), 0L), 11L, CancelReason.USER_CANCELLED)
                 .get(2, TimeUnit.SECONDS);
         // Intent registration: the ack carries no terminal info — a cancel
         // landing after completion is still ACCEPTED (engine-side no-op).
@@ -142,12 +142,12 @@ class MockEngineCancelChannelTest {
         awaitInflight(prefill, 1, 1_000);
 
         CancelOutcome first = channel
-                .cancel(CancelTarget.of(null, endpoint(prefill.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(endpoint(prefill.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, first.ack());
 
         CancelOutcome second = channel
-                .cancel(CancelTarget.of(null, endpoint(prefill.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(endpoint(prefill.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, second.ack(), "second cancel must be idempotent");
         awaitAllInflightZero(10_000);
@@ -161,7 +161,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(null, endpoint(prefillServices.get(0).getGrpcPort()), 0L), 424242L,
+                .cancel(CancelTarget.of(endpoint(prefillServices.get(0).getGrpcPort()), 0L), 424242L,
                         CancelReason.PRIORITY_PREEMPTED)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome.ack(),
@@ -180,7 +180,7 @@ class MockEngineCancelChannelTest {
         assertFalse(channel.isSupported(endpoint(59999)));
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(null, endpoint(59999), 0L), 1L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(endpoint(59999), 0L), 1L, CancelReason.ADMIN)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.UNSUPPORTED, outcome.ack());
     }

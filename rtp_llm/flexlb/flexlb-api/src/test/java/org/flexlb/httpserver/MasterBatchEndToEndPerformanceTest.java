@@ -16,7 +16,6 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.Router;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
@@ -77,8 +76,6 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -223,10 +220,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         when(consistencyService.isNeedConsistency()).thenReturn(false);
         activeRequestCounter = new ActiveRequestCounter();
         latencyRecorder = new ServerScheduleLatencyRecorder();
-        EngineCancelChannel cancelChannel = mock(EngineCancelChannel.class, withSettings().stubOnly());
-        when(cancelChannel.cancel(any(), anyLong(), any())).thenReturn(
-                CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.unsupported()));
-
         FlexlbServiceImpl service = new FlexlbServiceImpl(
                 routeService,
                 consistencyService,
@@ -239,9 +232,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 new PrioritySloPolicy(
                         PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
-                mock(PrioritySchedulerReporter.class, withSettings().stubOnly()),
-                cancelChannel,
-                scheduler);
+                mock(PrioritySchedulerReporter.class, withSettings().stubOnly()));
 
         int grpcPort;
         try (ServerSocket socket = new ServerSocket(0)) {

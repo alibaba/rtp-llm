@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler.priority;
 import io.grpc.Context;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -14,8 +13,8 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Production {@link EngineCancelChannel} that forwards cancel intents to the
- * original Prefill lifecycle owner via the engine gRPC {@code RpcService.Cancel}
- * method.
+ * Decode worker currently holding the victim via the engine gRPC
+ * {@code RpcService.Cancel} method.
  *
  * <p>Conditional wiring: the bean only exists when
  * {@code flexlb.auto-tpm.engine-cancel-enabled=true}. When absent, Spring wires
@@ -46,8 +45,8 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
     }
 
     /**
-     * gRPC cancel is available for all workers (cancel always
-     * targets the original Prefill owner, which is a gRPC endpoint).
+     * gRPC cancel is available for all workers (every engine process
+     * serves the {@code RpcService.Cancel} method).
      */
     @Override
     public boolean isSupported(DecodeEndpoint endpoint) {
@@ -58,13 +57,12 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
     public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
                                                    long requestId,
                                                    CancelReason reason) {
-        PrefillEndpoint lifecycleOwner = target.lifecycleOwner();
-        if (lifecycleOwner == null) {
-            // No recorded owner — the cancel cannot be routed. Report the
-            // transport-failure branch: the intent never reached the engine,
-            // but release is still settled by the WorkerStatus report, never
-            // by this ack (iron rule 4).
-            log.warn("[auto-tpm] cancel has no lifecycle owner for request_id={}, not routed",
+        DecodeEndpoint destination = target.decodeEndpoint();
+        if (destination == null) {
+            // No routable endpoint — report the transport-failure branch: the
+            // intent never reached the engine, but release is still settled by
+            // the WorkerStatus report, never by this ack (iron rule 4).
+            log.warn("[auto-tpm] cancel has no decode endpoint for request_id={}, not routed",
                     requestId);
             return CompletableFuture.completedFuture(CancelOutcome.failed());
         }
@@ -76,15 +74,15 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
                 .build();
 
         // Fire-and-forget contract: fork the gRPC Context so that when the
-        // caller is a server handler (e.g. the Frontend cancel entry point),
-        // the server call completing does not cascade-cancel this in-flight
-        // outbound RPC ("io.grpc.Context was cancelled without error").
+        // caller is a server handler, the server call completing does not
+        // cascade-cancel this in-flight outbound RPC ("io.grpc.Context was
+        // cancelled without error").
         Context fork = Context.current().fork();
         Context previous = fork.attach();
         try {
             return engineGrpcClient.cancelAsync(
-                            lifecycleOwner.getIp(),
-                            lifecycleOwner.getGrpcPort(),
+                            destination.getIp(),
+                            destination.getGrpcPort(),
                             requestPB,
                             CANCEL_RPC_TIMEOUT_MS)
                     // The response body carries no decision-relevant fields — the

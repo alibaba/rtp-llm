@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -14,11 +13,9 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>Contract highlights:
  * <ul>
- *   <li>the real engine cancel ALWAYS targets the victim's original
- *       <b>Prefill lifecycle owner</b> (looked up from the request's
- *       inflight entry via {@link InflightRegistrar#getDispatchTarget}),
- *       never the current Decode
- *       endpoint;</li>
+ *   <li>the cancel targets the Decode endpoint currently holding the
+ *       victim — the accepted-eviction path always knows it (the victim was
+ *       planned on that endpoint), so no separate owner lookup exists;</li>
  *   <li>the engine Cancel RPC always answers {@code ACCEPTED} (intent
  *       registration semantics) — no protocol branch carries release or
  *       terminal-state information, so the ack is diagnostics only;</li>
@@ -56,23 +53,18 @@ public interface EngineCancelChannel {
     /**
      * Cancel routing information.
      *
-     * @param lifecycleOwner     original Prefill owner — the REAL engine cancel
-     *                           destination; may be null when the owner
-     *                           resolver has no record (cancel then cannot be
-     *                           routed and resolves to {@code FAILED}, no
-     *                           release assumed)
-     * @param decodeEndpoint     current Decode endpoint — used only by the
-     *                           TEST-ONLY mock control plane routing
+     * @param decodeEndpoint     Decode endpoint currently holding the victim —
+     *                           the cancel destination for both the production
+     *                           gRPC channel and the TEST-ONLY mock control
+     *                           plane routing
      * @param batchId            diagnostics only, never used for fencing
      */
-    record CancelTarget(PrefillEndpoint lifecycleOwner,
-                        DecodeEndpoint decodeEndpoint,
+    record CancelTarget(DecodeEndpoint decodeEndpoint,
                         long batchId) {
 
-        public static CancelTarget of(PrefillEndpoint owner,
-                                      DecodeEndpoint decodeEndpoint,
+        public static CancelTarget of(DecodeEndpoint decodeEndpoint,
                                       long batchId) {
-            return new CancelTarget(owner, decodeEndpoint, batchId);
+            return new CancelTarget(decodeEndpoint, batchId);
         }
     }
 

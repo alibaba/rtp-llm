@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler.priority;
 
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
 
 /**
@@ -67,25 +66,5 @@ public interface InflightRegistrar {
      */
     default boolean markCancelRequested(long requestId, String detail) {
         return false;
-    }
-
-    /**
-     * Look up the Prefill endpoint an inflight request was dispatched to
-     * (the cancel routing target). Returns null when the id is not inflight
-     * — cancel of a non-inflight request is meaningless on the Master side
-     * (release is confirmed via WorkerStatus regardless).
-     */
-    default PrefillEndpoint getDispatchTarget(long requestId) {
-        return null;
-    }
-
-    /**
-     * Look up an inflight request's normalized Auto-TPM priority (for the
-     * priority tag on cancel metrics). Returns 0 (the NO_PRIORITY sentinel)
-     * when the id is not inflight or the item carried no budget — metrics
-     * report the raw value either way.
-     */
-    default int getInflightPriority(long requestId) {
-        return 0;
     }
 }

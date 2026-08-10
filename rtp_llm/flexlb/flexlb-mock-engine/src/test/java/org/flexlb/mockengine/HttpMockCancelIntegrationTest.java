@@ -110,7 +110,7 @@ class HttpMockCancelIntegrationTest {
         assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(2L), -1, null));
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 2L, CancelReason.PRIORITY_PREEMPTED)
+                .cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 2L, CancelReason.PRIORITY_PREEMPTED)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome.ack(),
                 "queued request cancel over HTTP must register the intent (ACCEPTED)");
@@ -155,12 +155,12 @@ class HttpMockCancelIntegrationTest {
 
         assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(21L), -1, null));
         CancelOutcome first = channel
-                .cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, first.ack());
 
         CancelOutcome second = channel
-                .cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, second.ack(), "second cancel must be idempotent");
     }
@@ -171,7 +171,7 @@ class HttpMockCancelIntegrationTest {
         EngineCancelChannel channel = channel();
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 424242L,
+                .cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 424242L,
                         CancelReason.PRIORITY_PREEMPTED)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome.ack(),
@@ -189,7 +189,7 @@ class HttpMockCancelIntegrationTest {
                 "a configured control URL supports every endpoint");
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(null, endpoint(59999), 0L), 1L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(endpoint(59999), 0L), 1L, CancelReason.ADMIN)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.UNSUPPORTED, outcome.ack(),
                 "unknown engine port (HTTP 404) → UNSUPPORTED");
@@ -201,7 +201,7 @@ class HttpMockCancelIntegrationTest {
         // Port 1 is never listening — connection refused.
         EngineCancelChannel channel = new HttpMockEngineCancelChannel("http://127.0.0.1:1");
 
-        var future = channel.cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 1L, CancelReason.ADMIN);
+        var future = channel.cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 1L, CancelReason.ADMIN);
         assertNotNull(future, "cancel must never throw synchronously");
         assertThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS),
                 "transport failure must surface as a failed future");

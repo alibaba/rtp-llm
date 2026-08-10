@@ -1,11 +1,8 @@
 package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
-import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
@@ -45,9 +42,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final PrioritySloPolicy prioritySloPolicy;
     private final PrioritySchedulerReporter prioritySchedulerReporter;
-    private final EngineCancelChannel cancelChannel;
-    private final InflightRegistrar inflightRegistrar;
-
     public FlexlbServiceImpl(RouteService routeService,
                              LBStatusConsistencyService lbStatusConsistencyService,
                              EngineHealthReporter engineHealthReporter,
@@ -57,9 +51,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              BatchSchedulerReporter batchSchedulerReporter,
                              ServerScheduleLatencyRecorder serverLatencyRecorder,
                              PrioritySloPolicy prioritySloPolicy,
-                             PrioritySchedulerReporter prioritySchedulerReporter,
-                             EngineCancelChannel cancelChannel,
-                             InflightRegistrar inflightRegistrar) {
+                             PrioritySchedulerReporter prioritySchedulerReporter) {
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
@@ -70,8 +62,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.serverLatencyRecorder = serverLatencyRecorder;
         this.prioritySloPolicy = prioritySloPolicy;
         this.prioritySchedulerReporter = prioritySchedulerReporter;
-        this.cancelChannel = cancelChannel;
-        this.inflightRegistrar = inflightRegistrar;
     }
 
     @Override
@@ -157,135 +147,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
         responseObserver.onNext(response.build());
         responseObserver.onCompleted();
-    }
-
-    /**
-     * Frontend-to-Master cancel entry point.
-     * <p>
-     * This is the Frontend-initiated cancel lifecycle interface — distinct
-     * from the Master-to-Engine {@code RpcService.Cancel} wire API. The
-     * Frontend asks the Master to cancel an inflight request (user cancel or
-     * deadline). The Master looks up the request, resolves the original
-     * Prefill lifecycle owner, and propagates the cancel intent through the
-     * {@link EngineCancelChannel}. Release confirmation remains the periodic
-     * WorkerStatus report (iron rule 4) — the response only confirms the
-     * request was found and carries its current lifecycle snapshot.
-     * <p>
-     * Pattern mirrors {@link #getRequestState}: forward to the master when
-     * this node is not the master (the lifecycle is master-owned), then fall
-     * back to local handling.
-     */
-    @Override
-    public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
-                        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
-        long requestId = request.getRequestId();
-
-        // Forward to master when this node is not the master (same pattern as
-        // getRequestState): the request lifecycle is owned by the master.
-        if (shouldForwardToMaster()) {
-            FlexlbScheduleProtocol.FlexlbCancelResponsePB forwarded =
-                    grpcForwarder.forwardCancelToMaster(request);
-            if (forwarded != null && forwarded.getFound()) {
-                responseObserver.onNext(forwarded);
-                responseObserver.onCompleted();
-                return;
-            }
-            // Fall through to local handling when master is unreachable.
-        }
-
-        try {
-            // Look up the inflight/terminal request by request_id. A
-            // batch_id of 0 means "any batch" (see batchMatches).
-            RequestLifecycleSnapshot snapshot = routeService.getRequestState(
-                    requestId, request.getBatchId());
-            boolean found = snapshot != null;
-
-            FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response =
-                    FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder().setFound(found);
-
-            if (found) {
-                response.setLifecycle(toLifecycleProto(snapshot));
-
-                // Only propagate the cancel to the engine when the request is
-                // still inflight (non-terminal). A terminal request is already
-                // done — the cancel is a no-op.
-                if (!snapshot.state().isTerminal()) {
-                    propagateCancel(requestId, request.getBatchId(), request.getReason());
-                }
-            }
-
-            responseObserver.onNext(response.build());
-            responseObserver.onCompleted();
-        } catch (Exception e) {
-            Logger.error("FlexlbService.cancel error, request_id={}", requestId, e);
-            responseObserver.onNext(FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
-                    .setFound(false).build());
-            responseObserver.onCompleted();
-        }
-    }
-
-    /**
-     * Propagate a Frontend-initiated cancel to the engine via the
-     * {@link EngineCancelChannel}, fire-and-forget: the engine ack is intent
-     * registration only (always ACCEPTED), so nothing gates on it — the
-     * outcome is logged asynchronously and release is confirmed later via
-     * WorkerStatus (iron rule 4). The cancel targets the original Prefill
-     * lifecycle owner (looked up from the request's inflight entry via
-     * {@link InflightRegistrar#getDispatchTarget}), never the current Decode
-     * endpoint.
-     */
-    private void propagateCancel(long requestId, long batchId,
-                                FlexlbScheduleProtocol.CancelReasonPB protoReason) {
-        // Look up the original Prefill lifecycle owner from the inflight
-        // entry: cancel ALWAYS targets the original Prefill owner, never the
-        // current Decode endpoint. A miss means the cancel cannot be routed
-        // — never treated as released.
-        PrefillEndpoint owner = inflightRegistrar.getDispatchTarget(requestId);
-        if (owner == null) {
-            Logger.warn("[auto-tpm] cancel: no lifecycle owner for request_id={}, "
-                    + "cancel not propagated (will settle via WorkerStatus)", requestId);
-            return;
-        }
-
-        EngineCancelChannel.CancelReason reason = mapCancelReason(protoReason);
-        // Cancel QPS with priority + reason tags, counted at initiation — the
-        // report is a lock-free in-memory accumulate, off the cancel RPC path.
-        prioritySchedulerReporter.reportCancel(
-                inflightRegistrar.getInflightPriority(requestId), reason.name());
-        // decodeEndpoint is null: the production GrpcEngineCancelChannel routes
-        // solely via lifecycleOwner; the mock control-plane path would report
-        // UNSUPPORTED, which is acceptable for the Frontend cancel path.
-        EngineCancelChannel.CancelTarget target = EngineCancelChannel.CancelTarget.of(
-                owner, /*decodeEndpoint=*/null, batchId);
-
-        // Fire-and-forget intent injection — the caller's response never
-        // depends on the ack; the request stays inflight until settled by
-        // WorkerStatus either way.
-        cancelChannel.cancel(target, requestId, reason).whenComplete((outcome, e) -> {
-            if (e != null) {
-                Logger.warn("[auto-tpm] cancel propagate failed for request_id={}: {}",
-                        requestId, e.getMessage());
-            } else {
-                Logger.info("[auto-tpm] cancel propagated: request_id={} ack={}",
-                        requestId, outcome.ack());
-            }
-        });
-    }
-
-    /**
-     * Map the Frontend-facing {@link FlexlbScheduleProtocol.CancelReasonPB}
-     * to the engine-side {@link EngineCancelChannel.CancelReason}.
-     */
-    private static EngineCancelChannel.CancelReason mapCancelReason(
-            FlexlbScheduleProtocol.CancelReasonPB protoReason) {
-        if (protoReason == null) {
-            return EngineCancelChannel.CancelReason.USER_CANCELLED;
-        }
-        return switch (protoReason) {
-            case CANCEL_REASON_DEADLINE_EXCEEDED -> EngineCancelChannel.CancelReason.DEADLINE_EXCEEDED;
-            case CANCEL_REASON_CLIENT_CANCELLED -> EngineCancelChannel.CancelReason.USER_CANCELLED;
-            default -> EngineCancelChannel.CancelReason.USER_CANCELLED;
-        };
     }
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {

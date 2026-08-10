@@ -523,13 +523,11 @@ public class PriorityAdmissionScheduler {
      * Metrics hook for an accepted-eviction victim settled by the later
      * WorkerStatus CANCELLED report (outside the commit wait window): counts
      * the late release confirmation. Called by the batch scheduler's
-     * attribution path (Phase 5).
-     *
-     * @param victimPriority the settled victim's normalized priority (0 when
-     *                       the item carried no Auto-TPM budget)
+     * attribution path (Phase 5). The settled item's priority is not carried
+     * on this path — the confirm is tagged with the 0 (no-budget) sentinel.
      */
-    public void onAcceptedPreemptSettled(String endpoint, int victimPriority) {
-        priorityReporter.reportCancelConfirm(endpoint, victimPriority);
+    public void onAcceptedPreemptSettled(String endpoint) {
+        priorityReporter.reportCancelConfirm(endpoint, 0);
         priorityReporter.reportPriorityPreempt("decode_accepted");
     }
 
@@ -782,12 +780,11 @@ public class PriorityAdmissionScheduler {
             priorityReporter.reportCancelRequest(endpointKey, victim.priority());
             priorityReporter.reportCancel(victim.priority(),
                     EngineCancelChannel.CancelReason.PRIORITY_PREEMPTED.name());
-            // AutoTPM Cancel: route to the victim's original
-            // Prefill lifecycle owner — looked up from the victim's inflight
-            // entry (a miss yields FAILED, which is NEVER treated as
-            // released). The mock control-plane path keeps using decodeEp.
+            // AutoTPM Cancel: route to the Decode worker holding the victim
+            // — the plan picked the victim on this endpoint, so no separate
+            // owner lookup is needed; release confirmation still comes only
+            // from this worker's status reports.
             EngineCancelChannel.CancelTarget target = EngineCancelChannel.CancelTarget.of(
-                    registrar.getDispatchTarget(victim.requestId()),
                     decodeEp,
                     /*batchId=*/0L);
             cancels.add(cancelChannel.cancel(target, victim.requestId(),

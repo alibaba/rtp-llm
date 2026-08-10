@@ -308,9 +308,9 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     }
 
     /**
-     * AutoTPM Cancel: single-shot cancel to the original
-     * Prefill lifecycle owner. No transport retry (channel is built with
-     * disableRetry); idempotency rides on request_id.
+     * AutoTPM Cancel: single-shot cancel to the engine worker holding the
+     * victim. No transport retry (channel is built with disableRetry);
+     * idempotency rides on request_id.
      */
     public CompletableFuture<EngineRpcService.CancelResponsePB> cancelAsync(String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
         return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request), requestTimeoutMs, ServiceType.ENGINE_CANCEL);
