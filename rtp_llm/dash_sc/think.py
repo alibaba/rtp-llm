@@ -16,30 +16,6 @@ DEFAULT_MAX_THINKING_TOKENS = 32000
 INT32_MAX = 2_147_483_647
 
 
-def normalize_think_mode(mode: object) -> str:
-    """Normalize startup think mode.
-
-    RTP historically treats ``THINK_MODE=1`` as "enabled". For dash-sc's
-    pre-tokenized path, map that enabled value to Auto so requests that already
-    carry ``<think>`` keep their exact prefix while requests without it only get
-    the single BOS token appended. String values are accepted for targeted tests
-    and future config plumbing.
-    """
-
-    if isinstance(mode, str):
-        mode_lower = mode.strip().lower()
-        if mode_lower in {"force", "forced", "2"}:
-            return THINK_MODE_FORCE
-        if mode_lower in {"auto", "1", "true", "yes", "on"}:
-            return THINK_MODE_AUTO
-        return THINK_MODE_AUTO
-    if isinstance(mode, bool):
-        return THINK_MODE_AUTO if mode else THINK_MODE_AUTO
-    if isinstance(mode, int):
-        return THINK_MODE_FORCE if mode == 2 else THINK_MODE_AUTO
-    return THINK_MODE_AUTO
-
-
 @dataclass(frozen=True)
 class DashScThinkConfig:
     enabled: bool = False
