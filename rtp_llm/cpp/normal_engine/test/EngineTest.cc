@@ -374,4 +374,12 @@ TEST_F(NormalEngineTest, testRejectOutputVocabWithPrefillCP) {
     EXPECT_THROW(createMockEngine(config), std::exception);
 }
 
+TEST_F(NormalEngineTest, testRejectOutputVocabWithDeviceInput) {
+    CustomConfig config;
+    config.output_vocab_ids = {0, 2, 7};
+    setenv("RTP_LLM_DEVICE_INPUT", "1", 1);
+    EXPECT_THROW(createMockEngine(config), std::exception);
+    unsetenv("RTP_LLM_DEVICE_INPUT");
+}
+
 }  // namespace rtp_llm

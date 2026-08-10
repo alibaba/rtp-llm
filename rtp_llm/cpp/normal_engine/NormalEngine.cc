@@ -55,6 +55,14 @@ bool cacheStatusSnapshotEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
+// Must keep the same parsing semantics as NormalExecutor::useDeviceInput()
+// (RTP_LLM_DEVICE_INPUT == "1"); the guard below rejects combinations that
+// the executor's device-input path cannot handle.
+bool deviceInputEnabled() {
+    const char* env = std::getenv("RTP_LLM_DEVICE_INPUT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
 bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<GenerateStreamPtr>& streams) {
     if (!cacheStatusSnapshotEnabled() || (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION)) {
         return false;
@@ -94,6 +102,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         // would reach sampling. Reject the combination until that path narrows as well.
         RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.is_enabled(),
                                 "output vocabulary pruning does not support prefill context parallelism");
+        // publishNormalDeviceState stores sampler token ids as the next step's device
+        // input without restoration; under pruning those are compact ids, which would
+        // be fed to the embedding lookup as-is. Reject until that path restores them.
+        RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
+                                "output vocabulary pruning does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
     }
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
