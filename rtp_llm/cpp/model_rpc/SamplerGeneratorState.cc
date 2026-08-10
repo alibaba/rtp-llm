@@ -58,6 +58,10 @@ absl::Status restoreSamplerGeneratorState(uint32_t            wire_version,
         if (!serialized_state.empty()) {
             return absl::InvalidArgumentError("legacy request contains sampler generator state");
         }
+        if (has_explicit_seed) {
+            return absl::InvalidArgumentError(
+                "legacy seeded request cannot continue without sampler generator state");
+        }
         return absl::OkStatus();
     }
     if (wire_version != kCurrentSamplerGeneratorStateVersion) {

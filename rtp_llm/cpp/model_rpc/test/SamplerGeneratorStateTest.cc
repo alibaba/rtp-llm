@@ -60,16 +60,25 @@ TEST(SamplerGeneratorStateTest, UnseededRequestDoesNotRequireState) {
                     .ok());
 }
 
-TEST(SamplerGeneratorStateTest, LegacySeededRequestKeepsInitialGeneratorState) {
-    auto legacy    = makeGenerator(7);
-    auto reference = makeGenerator(7);
+TEST(SamplerGeneratorStateTest, LegacySeededRequestWithoutStateIsRejected) {
+    auto legacy       = makeGenerator(7);
+    auto initial_state = legacy.get_state().clone();
 
     const auto status = restoreSamplerGeneratorState(kLegacySamplerGeneratorStateVersion,
                                                      /*has_explicit_seed=*/true,
                                                      legacy,
                                                      /*serialized_state=*/"");
-    ASSERT_TRUE(status.ok()) << status;
-    EXPECT_TRUE(at::equal(draw(legacy, 31), draw(reference, 31)));
+    EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_EQ(status.message(), "legacy seeded request cannot continue without sampler generator state");
+    EXPECT_TRUE(at::equal(legacy.get_state(), initial_state));
+}
+
+TEST(SamplerGeneratorStateTest, LegacyUnseededRequestWithoutStateIsAccepted) {
+    EXPECT_TRUE(restoreSamplerGeneratorState(kLegacySamplerGeneratorStateVersion,
+                                             /*has_explicit_seed=*/false,
+                                             at::Generator(),
+                                             /*serialized_state=*/"")
+                    .ok());
 }
 
 TEST(SamplerGeneratorStateTest, CurrentVersionSeededRequestRejectsMissingState) {
