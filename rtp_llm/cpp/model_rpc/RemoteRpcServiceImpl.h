@@ -69,6 +69,16 @@ public:
         return prefill_server_->FetchResponse(context, request, writer);
     }
 
+    // AutoTPM Cancel: Prefill role only; Decode role
+    // returns gRPC UNIMPLEMENTED.
+    grpc::Status
+    Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response) override {
+        if (!prefill_server_) {
+            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "Cancel is only supported on Prefill role");
+        }
+        return prefill_server_->Cancel(context, request, response);
+    }
+
     grpc::Status RemoteLoad(grpc::ServerContext*          context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response) override {

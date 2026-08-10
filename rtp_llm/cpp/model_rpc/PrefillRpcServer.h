@@ -36,6 +36,13 @@ public:
 
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
+    // AutoTPM Cancel: record the cancel intent into the scheduler's
+    // CancelIntentMap and ack ACCEPTED immediately ("intent registered").
+    // Consumption happens at the enqueue checkpoint (R1) and inside
+    // FIFOScheduler::schedule() (R2); the master confirms release via
+    // WorkerStatus finished records only.
+    grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response);
+
 protected:
     // Shared with the derived batch server (each batch slot reuses these).
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);

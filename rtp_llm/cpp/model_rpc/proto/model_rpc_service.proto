@@ -406,6 +406,55 @@ enum TaskPhase {
     TASK_PHASE_RECEIVED = 1;
     TASK_PHASE_KV_ALLOCATED = 2;
     TASK_PHASE_RUNNING = 3;
+    // AutoTPM Cancel: finer-grained phases (backward-compatible extension).
+    TASK_PHASE_KV_ALLOCATING = 4;
+    TASK_PHASE_CACHE_LOADING = 5;
+    TASK_PHASE_SELECTED = 6;
+    TASK_PHASE_FORWARD = 7;
+    TASK_PHASE_OUTPUT = 8;
+    TASK_PHASE_FINISHING = 9;
+    TASK_PHASE_FINISHED = 10;
+}
+
+// ==================== AutoTPM Cancel ====================
+
+enum CancelStatePB {
+    CANCEL_STATE_ACTIVE = 0;
+    CANCEL_STATE_REQUESTED = 1;
+    CANCEL_STATE_PROPAGATED = 2;
+    CANCEL_STATE_RELEASING = 3;
+    CANCEL_STATE_RELEASED = 4;
+}
+
+enum ReleaseStatePB {
+    RELEASE_STATE_HELD = 0;
+    RELEASE_STATE_QUIESCING = 1;
+    RELEASE_STATE_RELEASING = 2;
+    RELEASE_STATE_RELEASED = 3;
+}
+
+enum TerminalKindPB {
+    TERMINAL_KIND_NONE = 0;
+    TERMINAL_KIND_SUCCESS = 1;
+    TERMINAL_KIND_REMOVED_BEFORE_FORWARD = 2;
+    TERMINAL_KIND_CANCELLED = 3;
+    TERMINAL_KIND_FAILED = 4;
+}
+
+enum EngineCancelReasonPB {
+    ENGINE_CANCEL_REASON_UNSPECIFIED = 0;
+    ENGINE_CANCEL_REASON_PRIORITY_PREEMPTED = 1;
+    ENGINE_CANCEL_REASON_USER_CANCELLED = 2;
+    ENGINE_CANCEL_REASON_DEADLINE_EXCEEDED = 3;
+    ENGINE_CANCEL_REASON_ADMIN_CANCELLED = 4;
+}
+
+enum EngineCancelAckPB {
+    ENGINE_CANCEL_ACK_UNSPECIFIED = 0;
+    ENGINE_CANCEL_ACK_ACCEPTED = 1;
+    ENGINE_CANCEL_ACK_NOT_CANCELLABLE = 2;
+    ENGINE_CANCEL_ACK_ALREADY_FINISHED = 3;
+    ENGINE_CANCEL_ACK_NOT_FOUND = 4;
 }
 
 message TaskInfoPB {
@@ -424,6 +473,14 @@ message TaskInfoPB {
     int64 batch_id = 11;
     TaskPhase phase = 12;
     int64 execution_time_ms = 13;
+    int32 priority = 15;
+    CancelStatePB cancel_state = 16;
+    EngineCancelReasonPB cancel_reason = 17;
+    ReleaseStatePB release_state = 18;
+    bool resource_released = 19;
+    TerminalKindPB terminal_kind = 20;
+    uint64 batch_membership_version = 21;
+    uint64 lifecycle_revision = 22;
 }
 
 message UpdateWeightsRequestPB {
@@ -460,6 +517,9 @@ message WorkerStatusPB {
     // avoid constructing a group that the Engine can never admit.
     int64 max_seq_len = 21;
     int64 max_batch_tokens_size = 22;
+    // AutoTPM Cancel: process-start epoch (millis), stable until restart.
+    // Release waiters must fail and re-baseline when this changes.
+    uint64 worker_epoch = 23;
 }
 
 message EmbeddingInputPB {
@@ -703,6 +763,15 @@ message FetchRequestPB {
 
 message CancelRequestPB {
     int64 request_id = 1;
+    int64 batch_id = 3;  // diagnostics only, never used for fencing
+    EngineCancelReasonPB reason = 4;
+}
+
+message CancelResponsePB {
+    EngineCancelAckPB ack = 1;
+    TaskPhase observed_phase = 2;
+    uint64 lifecycle_revision = 3;
+    ErrorDetailsPB terminal_error = 4;  // only set for ALREADY_FINISHED
 }
 
 service RpcService {
@@ -733,6 +802,10 @@ service RpcService {
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
+    // AutoTPM Cancel: single-shot cancel, Prefill role only.
+    // Decode role returns gRPC UNIMPLEMENTED. Semantic branches are carried in
+    // CancelResponsePB.ack with transport status OK.
+    rpc Cancel(CancelRequestPB) returns (CancelResponsePB);
 }
 
 service MultimodalRpcService {

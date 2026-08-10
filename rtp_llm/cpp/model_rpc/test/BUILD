@@ -101,7 +101,7 @@ cc_test(
         "//rtp_llm/cpp/cache:recent_cache_key_window",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ],
+    ] + cuda13_torch_link_deps,
 )
 
 cc_test(
@@ -150,6 +150,42 @@ cc_test(
     ],
     copts = test_copts,
     deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+# AutoTPM Cancel: CancelIntentMap unit tests — write/overwrite, R1/R2
+# consumption (generation fencing, idempotency), TTL sweep and capacity cap.
+# CPU-only logic.
+cc_test(
+    name = "cancel_primitives_test",
+    srcs = [
+        "CancelPrimitivesTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+# AutoTPM Cancel: phase × mode matrix — QUEUE/streaming (R1/R2 vs waiting/
+# running/finished/generation-mismatch) and BATCH (R1 slot filter + deferred
+# fetch semantics), plus attribution and finished-visibility contracts.
+cc_test(
+    name = "cancel_phase_matrix_test",
+    srcs = [
+        "CancelPhaseMatrixTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

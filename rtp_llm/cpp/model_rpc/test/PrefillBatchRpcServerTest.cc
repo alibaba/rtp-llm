@@ -14,7 +14,38 @@ namespace {
 
 class PartialEnqueueEngine: public EngineBase {
 public:
-    PartialEnqueueEngine(): EngineBase(EngineInitParams()) {}
+    // enqueueGroupStreams touches engine_->getScheduler().cancelIntentMap()
+    // (AutoTPM Cancel R1 checkpoint), so the stub engine must carry a real,
+    // if inert, scheduler.
+    class NoopScheduler: public SchedulerBase {
+    public:
+        absl::Status enqueue(const GenerateStreamPtr&) override {
+            return absl::OkStatus();
+        }
+        std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+        enqueueGroup(const std::vector<GenerateStreamPtr>&) override {
+            return {{}, {}};
+        }
+        absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
+            return std::list<GenerateStreamPtr>();
+        }
+        absl::Status stop() override {
+            return absl::OkStatus();
+        }
+        bool empty() override {
+            return true;
+        }
+        int64_t lastScheduleTime() override {
+            return 0;
+        }
+        int64_t onflightStreams() override {
+            return 0;
+        }
+    };
+
+    PartialEnqueueEngine(): EngineBase(EngineInitParams()) {
+        scheduler_ = std::make_unique<NoopScheduler>();
+    }
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
         return nullptr;

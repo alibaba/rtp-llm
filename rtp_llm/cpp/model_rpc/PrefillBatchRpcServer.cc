@@ -543,6 +543,32 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
     if (ready_slots.empty()) {
         return grpc::Status::OK;
     }
+    // AutoTPM Cancel: R1 checkpoint — reject slots with a matching cancel
+    // intent before enqueue. tryConsume claims the entry atomically
+    // (consume-then-act is safe here: rejectSlot always writes the error to
+    // the response and cannot fail, so a claimed intent is always honored).
+    auto& cancel_intents = *engine_->getScheduler().cancelIntentMap();
+    if (!cancel_intents.empty()) {
+        std::vector<ReadySlot> live_slots;
+        live_slots.reserve(ready_slots.size());
+        for (auto& ready_slot : ready_slots) {
+            const auto& input  = ready_slot.slot->input;
+            const auto  intent = cancel_intents.tryConsume(input->request_id());
+            if (intent) {
+                rejectSlot(ready_slot,
+                           statusFromErrorInfo(ErrorInfo(intent->terminal_code,
+                                                         "cancelled before enqueue: "
+                                                             + ErrorCodeToString(intent->terminal_code))),
+                           response);
+                continue;
+            }
+            live_slots.push_back(std::move(ready_slot));
+        }
+        ready_slots = std::move(live_slots);
+        if (ready_slots.empty()) {
+            return grpc::Status::OK;
+        }
+    }
     std::vector<std::shared_ptr<GenerateInput>> generate_inputs;
     generate_inputs.reserve(ready_slots.size());
     for (auto& ready_slot : ready_slots) {
