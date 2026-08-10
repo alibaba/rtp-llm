@@ -43,7 +43,8 @@ std::string GptModelInputs::debugString(bool force) const {
     debug_string << "GptModelInputs { "
                  << "trace_ids: " << combineStrings(trace_ids) << ", combo_tokens: " << tb(combo_tokens)
                  << ", input_lengths: " << tb(input_lengths) << ", sequence_lengths: " << tb(sequence_lengths)
-                 << ", prefix_lengths: " << tb(prefix_lengths);
+                 << ", prefix_lengths: " << tb(prefix_lengths)
+                 << ", dspark_call_phase: " << dsparkCallPhaseName(dspark_call_phase);
     if (sequence_lengths_plus_1.defined()) {
         debug_string << ", sequence_lengths_plus_1: " << tb(sequence_lengths_plus_1);
     }
