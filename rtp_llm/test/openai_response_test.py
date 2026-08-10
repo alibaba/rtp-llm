@@ -20,6 +20,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
@@ -2548,27 +2549,24 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             f"completion_tokens_details mismatch\nFull response.usage: {response.usage}",
         )
 
-    async def test_escape(self):
+    async def test_normalize_think_tag(self):
         think_start_tag = "<think>\n"
-        self.assertEqual(
-            think_start_tag, think_start_tag.encode("utf-8").decode("unicode_escape")
-        )
+        self.assertEqual(think_start_tag, normalize_think_tag(think_start_tag))
         think_end_tag = "</think>\n\n"
-        self.assertEqual(
-            think_end_tag, think_end_tag.encode("utf-8").decode("unicode_escape")
-        )
+        self.assertEqual(think_end_tag, normalize_think_tag(think_end_tag))
         think_start_tag_from_env = "<think>\\n"
         self.assertEqual(
             think_start_tag,
-            think_start_tag_from_env.encode("utf-8").decode("unicode_escape"),
+            normalize_think_tag(think_start_tag_from_env),
         )
         self.assertNotEqual(think_start_tag, think_start_tag_from_env)
         think_end_tag_from_env = "</think>\\n\\n"
         self.assertEqual(
             think_end_tag,
-            think_end_tag_from_env.encode("utf-8").decode("unicode_escape"),
+            normalize_think_tag(think_end_tag_from_env),
         )
         self.assertNotEqual(think_end_tag, think_end_tag_from_env)
+        self.assertEqual(r"<think>\t", normalize_think_tag(r"<think>\t"))
 
     class ExtraOutputsTestSuite(QwenToolTestSuite):
         def __init__(

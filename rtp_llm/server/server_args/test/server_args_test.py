@@ -35,6 +35,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
         os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
+        os.environ["LOADER_RECYCLE_HANDLES"] = "false"
+        os.environ["MOE_PURE_TP_PRESHARD"] = "false"
 
         sys.argv = ["prog"]
 
@@ -79,6 +81,11 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
+
+        # Verify load_config: the flag came from LOADER_RECYCLE_HANDLES=false.
+        self.assertFalse(py_env_configs.load_config.loader_recycle_handles)
+        # MOE_PURE_TP_PRESHARD=false must override the True default.
+        self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -153,6 +160,10 @@ class ServerArgsSetTest(TestCase):
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
+
+        # Pins the shipped defaults: neither env nor argv sets the flags here.
+        self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
+        self.assertTrue(py_env_configs.load_config.moe_pure_tp_preshard)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -405,6 +416,91 @@ class ServerArgsSetTest(TestCase):
             config["server_config"]["grpc.max_receive_message_length"],
             64 * 1024 * 1024,
         )
+
+
+class ServerArgsGrammarConfigTest(TestCase):
+    """Cover every CLI-wired field on GrammarConfig (--grammar_* /
+    --constrained_json_*): default values and CLI binding."""
+
+    def setUp(self):
+        environ_backup = os.environ.copy()
+        argv_backup = sys.argv.copy()
+
+        # Register restoration BEFORE mutating global state so it runs even if
+        # setUp itself (or _setup) raises — a bare tearDown would be skipped on a
+        # setUp failure and leave os.environ cleared for the rest of the suite.
+        def _restore():
+            os.environ.clear()
+            os.environ.update(environ_backup)
+            sys.argv = argv_backup
+
+        self.addCleanup(_restore)
+
+        os.environ.clear()
+        sys.argv = ["prog"]
+
+    def _setup(self):
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        return rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_grammar_defaults(self):
+        """All fields match defaults when no input is given.
+        Regression guard for the wiring in init_grammar_group_args."""
+        py_env_configs = self._setup()
+        g = py_env_configs.grammar_config
+
+        self.assertEqual(g.constrained_json_disable_any_whitespace, False)
+        self.assertEqual(g.terminate_without_stop_token, False)
+        self.assertEqual(g.num_workers, 8)
+        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+
+    def test_grammar_parser_defaults_override_config_initial_values(self):
+        """The CLI declaration is the source of truth for grammar defaults."""
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.grammar_group_args import (
+            init_grammar_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        cfgs = PyEnvConfigs()
+        g = cfgs.grammar_config
+        g.constrained_json_disable_any_whitespace = True
+        g.terminate_without_stop_token = True
+        g.num_workers = 17
+        g.compiler_cache_bytes = 1
+
+        parser = EnvArgumentParser()
+        parser.set_root_config(cfgs)
+        init_grammar_group_args(parser, g)
+        parser.parse_args([])
+
+        self.assertEqual(g.constrained_json_disable_any_whitespace, False)
+        self.assertEqual(g.terminate_without_stop_token, False)
+        self.assertEqual(g.num_workers, 8)
+        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+
+    def test_grammar_cmd_args(self):
+        """Every CLI flag binds to the right config field, with correct types."""
+        sys.argv = [
+            "prog",
+            "--constrained_json_disable_any_whitespace",
+            "1",
+            "--grammar_terminate_without_stop_token",
+            "1",
+            "--grammar_num_workers",
+            "7",
+            "--grammar_compiler_cache_bytes",
+            "67108864",
+        ]
+
+        cfgs = self._setup()
+        g = cfgs.grammar_config
+        self.assertEqual(g.constrained_json_disable_any_whitespace, True)
+        self.assertEqual(g.terminate_without_stop_token, True)
+        self.assertEqual(g.num_workers, 7)
+        self.assertEqual(g.compiler_cache_bytes, 67108864)
 
 
 if __name__ == "__main__":

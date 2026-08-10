@@ -227,6 +227,9 @@ py_library(
     srcs = glob([
         "ops/**/*.py",
     ]),
+    data = [
+        "//:th_grammar_tokenizer_info",
+    ],
     deps = [
         ":torch",
         ":utils",

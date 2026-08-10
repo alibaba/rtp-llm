@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from rtp_llm.config.response_format import parse_response_format
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
@@ -701,6 +702,17 @@ class SamplingParams:
         """Build ``GenerateConfig``; request controls supply non-sampling knobs."""
         from rtp_llm.config.generate_config import GenerateConfig
 
+        structural_tag = self.structural_tag
+        if self.response_format is not None:
+            # Preserve Dash precedence at its protocol boundary: an explicit
+            # response_format wins over the direct structural_tag control.
+            response_format = parse_response_format(self.response_format)
+            structural_tag = None
+        elif self.json_format and structural_tag is None:
+            response_format = parse_response_format({"type": "json_object"})
+        else:
+            response_format = None
+
         return_input_ids = (
             request_controls.return_input_ids if request_controls is not None else False
         )
@@ -738,9 +750,8 @@ class SamplingParams:
             max_thinking_tokens=max_thinking_tokens,
             return_input_ids=return_input_ids,
             is_streaming=True,
-            response_format=self.response_format,
-            json_format=self.json_format,
-            structural_tag=self.structural_tag,
+            response_format=response_format,
+            structural_tag=structural_tag,
         )
 
 

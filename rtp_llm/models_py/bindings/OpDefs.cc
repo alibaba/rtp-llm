@@ -93,6 +93,9 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyCacheStoreInputs>(m, "PyCacheStoreInputs").def(pybind11::init<>());
 
+    pybind11::class_<rtp_llm::CacheStoreWriter, std::shared_ptr<rtp_llm::CacheStoreWriter>>(m, "CacheStoreWriter")
+        .def("write", &rtp_llm::CacheStoreWriter::write);
+
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())
         .def(
@@ -153,7 +156,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readonly("input_lengths_device", &PyAttentionInputs::input_lengths_device)
         .def_readwrite("decode_cu_seqlens_device", &PyAttentionInputs::decode_cu_seqlens_device)
         .def_readwrite("decode_cu_seqlens", &PyAttentionInputs::decode_cu_seqlens)
-        .def_readwrite("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
+        .def_readonly("cache_store_inputs", &PyAttentionInputs::cache_store_inputs)
+        .def_readonly("cache_store_writer", &PyAttentionInputs::cache_store_writer)
         .def_readwrite("context_parallel_info", &PyAttentionInputs::context_parallel_info)
         .def_readwrite("combo_position_ids", &PyAttentionInputs::combo_position_ids)
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })

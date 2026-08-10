@@ -8,6 +8,7 @@ from fastapi import Request
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
@@ -16,6 +17,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -181,9 +183,7 @@ class OpenaiEndpoint(object):
         if end_token_id != -1:
             config.end_think_token_ids = [end_token_id]
             return
-        think_end_tag = self.generate_env_config.think_end_tag.encode("utf-8").decode(
-            "unicode_escape"
-        )
+        think_end_tag = normalize_think_tag(self.generate_env_config.think_end_tag)
         config.end_think_token_ids = self.tokenizer.encode(
             think_end_tag, add_special_tokens=False
         )
@@ -193,20 +193,18 @@ class OpenaiEndpoint(object):
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
+        if request.extra_configs is not None and (
+            config.response_format is not None
+            or GrammarConstraint.collect_from_config(config)
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "structured output must use top-level response_format, not extra_configs",
+            )
         if request.response_format is not None:
-            # TODO: enable response_format when grammar-constrained decoding is
-            # wired through the backend for this branch.
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "response_format is not supported yet",
-            )
-        if request.json_format:
-            # TODO: enable json_format with the response_format / grammar path
-            # when grammar-constrained decoding is wired through this branch.
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "json_format is not supported yet",
-            )
+            config.response_format = request.response_format
+        elif request.json_format:
+            config.response_format = ResponseFormat(type="json_object")
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -273,16 +271,14 @@ class OpenaiEndpoint(object):
             and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
-        # add_thinking_params now accepts generate_env_config parameter
-        config.add_thinking_params(self.tokenizer, self.generate_env_config)
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+        enable_thinking = bool(self.generate_env_config.think_mode)
         if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
-            config.in_think_mode = True
-            self._ensure_think_end_token_ids(config)
+            enable_thinking = True
         if request.disable_thinking():
-            config.in_think_mode = False
+            enable_thinking = False
             config.max_thinking_tokens = 0
         max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
         max_tokens_cap = _positive_int_or_none(request.max_tokens)
@@ -293,6 +289,12 @@ class OpenaiEndpoint(object):
             config.max_new_tokens = backend_max_new_tokens
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
+        config.add_thinking_params(
+            self.tokenizer,
+            self.generate_env_config,
+            enable_thinking=enable_thinking,
+            reasoning_format=self.chat_renderer.get_reasoning_format(),
+        )
         if request.debug_info:
             config.return_output_ids = True
         return config
@@ -664,9 +666,10 @@ class OpenaiEndpoint(object):
 
         prompt_logits_data = None
         if generate_config.return_prompt_logits:
-            output_generator, prompt_logits_data = (
-                await renderer._extract_prompt_logits(output_generator)
-            )
+            (
+                output_generator,
+                prompt_logits_data,
+            ) = await renderer._extract_prompt_logits(output_generator)
 
         merged_gen = await renderer._merge_non_streaming_outputs(output_generator)
         choice_generator = renderer.render_response_stream(

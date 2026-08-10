@@ -190,6 +190,17 @@ except BaseException as e:
     raise e
 
 
+def serialize_grammar_tokenizer_info(
+    encoded_vocab: List[str],
+    tokenizer_metadata_json: str,
+) -> str:
+    from libth_grammar_tokenizer_info import (
+        serialize_grammar_tokenizer_info as serialize,
+    )
+
+    return serialize(encoded_vocab, tokenizer_metadata_json)
+
+
 def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:
     try:
         # split token_ids into chunks of size block_size, dropping the last chunk if it is smaller than block_size
@@ -214,11 +225,21 @@ try:
     import librtp_compute_ops
     from .compute_ops import rtp_llm_ops
     # Export LayerKVCache and other types from librtp_compute_ops
-    from librtp_compute_ops import LayerKVCache, KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs, PyModelInitResources, PyCacheStoreInputs
+    from librtp_compute_ops import (
+        CacheStoreWriter,
+        KVCache,
+        LayerKVCache,
+        PyAttentionInputs,
+        PyCacheStoreInputs,
+        PyModelInitResources,
+        PyModelInputs,
+        PyModelOutputs,
+    )
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
     rtp_llm_ops = EmptyClass
-    LayerKVCache = KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
+    CacheStoreWriter = LayerKVCache = KVCache = PyAttentionInputs = EmptyClass
+    PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
 
 try:
 

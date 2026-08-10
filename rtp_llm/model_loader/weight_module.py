@@ -96,6 +96,9 @@ class WeightModule(ABC):
     def from_params(cls, params):
         return cls(**params)
 
+    # Constructor params a subclass forbids copying onto clones (see MoeAtomicWeight).
+    _CLONE_EXCLUDED: frozenset = frozenset()
+
     @classmethod
     def extract_params(
         cls,
@@ -122,6 +125,9 @@ class WeightModule(ABC):
                 params["src_weight_info"] = weight_info
                 continue
 
+            if param.name in weight_info._CLONE_EXCLUDED:
+                continue  # Clone falls back to the constructor default.
+
             if hasattr(weight_info, param.name):
                 value = getattr(weight_info, param.name)
                 # 递归创建子权重
@@ -138,6 +144,8 @@ class WeightModule(ABC):
 
         if need_var_key:
             for k, v in weight_info.__dict__.items():
+                if k in weight_info._CLONE_EXCLUDED:
+                    continue
                 if isinstance(v, WeightModule):
                     continue
                 if k in params:

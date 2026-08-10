@@ -702,6 +702,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             scale_name = w_name + QS_SUFFIX
             opt1 = identity
             opt2 = stack_
+        preshard = src_weight_info.enable_pure_tp_preshard and opt1 is identity
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             W.moe_w2,
@@ -709,6 +710,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             opt2,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
@@ -722,6 +724,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             opt2,
             data_type=torch.float32,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         return [kernel, scale]
 
@@ -739,6 +742,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             scale_names = [w_name + QS_SUFFIX for w_name in w_names]
             opt1 = identity
             opt2 = stack_moe_w1
+        preshard = src_weight_info.enable_pure_tp_preshard and opt1 is identity
 
         kernel = create_w8a8_fp8_per_block_weight(
             src_weight_info,
@@ -747,6 +751,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             opt2,
             data_type=torch.float8_e4m3fn,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
@@ -755,6 +760,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             opt2,
             data_type=torch.float32,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         return [kernel, scale]
 

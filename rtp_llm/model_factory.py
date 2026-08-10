@@ -25,7 +25,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType
+from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, TaskType
 from rtp_llm.utils.util import check_with_info
 
 
@@ -92,6 +92,8 @@ class ModelFactory:
             merge_lora=merge_lora,
             device_resource_config=engine_config.device_resource_config,
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
+            loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
+            moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
         )
         return model
 
@@ -160,6 +162,8 @@ class ModelFactory:
                 device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
+                loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
+                moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
             )
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)
@@ -209,6 +213,10 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
         )
+        if model_config.task_type == TaskType.LANGUAGE_MODEL:
+            engine_config.grammar_config.tokenizer_info_json = (
+                model.build_grammar_tokenizer_info()
+            )
 
         model_type = model_config.model_type
         if model_type == "fake_model":
