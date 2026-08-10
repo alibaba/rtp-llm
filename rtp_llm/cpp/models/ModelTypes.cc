@@ -2,6 +2,8 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
+#include <limits>
+
 namespace rtp_llm {
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
@@ -9,8 +11,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         return;
     }
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
-    auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
-    auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
+    auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt64).pin_memory();
+    auto         shape_hints_ptr  = shape_hints_t.data_ptr<int64_t>();
+    auto sizeToHint = [](size_t value, const char* field_name) -> int64_t {
+        RTP_LLM_CHECK_WITH_INFO(value <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
+                                "%s exceeds the model-input header range",
+                                field_name);
+        return static_cast<int64_t>(value);
+    };
     shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] =
         inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
@@ -65,6 +73,21 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::cacheKeysNumel] =
+        inputs.pd_separation && inputs.cache_keys.defined() ? inputs.cache_keys.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::kvBlockStrideBytes] =
+        sizeToHint(inputs.kv_block_stride_bytes, "kv_block_stride_bytes");
+    shape_hints_ptr[GptModelInputIndex::kvScaleStrideBytes] =
+        sizeToHint(inputs.kv_scale_stride_bytes, "kv_scale_stride_bytes");
+    shape_hints_ptr[GptModelInputIndex::seqSizePerBlock] =
+        sizeToHint(inputs.seq_size_per_block, "seq_size_per_block");
+    shape_hints_ptr[GptModelInputIndex::kernelSeqSizePerBlock] =
+        sizeToHint(inputs.kernel_seq_size_per_block, "kernel_seq_size_per_block");
+    shape_hints_ptr[GptModelInputIndex::pdSeparation]    = inputs.pd_separation;
+    shape_hints_ptr[GptModelInputIndex::decodeEntrance] = inputs.decode_entrance;
+    shape_hints_ptr[GptModelInputIndex::needMoeGating]  = inputs.need_moe_gating;
+    shape_hints_ptr[GptModelInputIndex::warmup]          = inputs.warmup;
+    shape_hints_ptr[GptModelInputIndex::isTargetVerify]  = inputs.is_target_verify;
     execBroadcast({{shape_hints_t}, 0});
     execSyncCommunication(false);
     cudaSyncAndCheck();
@@ -75,13 +98,30 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // extra-input (model-specific, treated as opaque flat 1-D tensors) per-tensor element count
     torch::Tensor mm_extra_input_shape_t;
     int64_t*      mm_extra_input_shape_ptr = nullptr;
+    auto hintToSize = [&](GptModelInputIndex index, const char* field_name) -> size_t {
+        const int64_t value = shape_hints_ptr[index];
+        RTP_LLM_CHECK_WITH_INFO(value >= 0, "%s must not be negative", field_name);
+        return static_cast<size_t>(value);
+    };
     inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    inputs.kv_block_stride_bytes =
+        hintToSize(GptModelInputIndex::kvBlockStrideBytes, "kv_block_stride_bytes");
+    inputs.kv_scale_stride_bytes =
+        hintToSize(GptModelInputIndex::kvScaleStrideBytes, "kv_scale_stride_bytes");
+    inputs.seq_size_per_block = hintToSize(GptModelInputIndex::seqSizePerBlock, "seq_size_per_block");
+    inputs.kernel_seq_size_per_block =
+        hintToSize(GptModelInputIndex::kernelSeqSizePerBlock, "kernel_seq_size_per_block");
+    inputs.pd_separation   = shape_hints_ptr[GptModelInputIndex::pdSeparation] != 0;
+    inputs.decode_entrance = shape_hints_ptr[GptModelInputIndex::decodeEntrance] != 0;
+    inputs.need_moe_gating = shape_hints_ptr[GptModelInputIndex::needMoeGating] != 0;
+    inputs.warmup          = shape_hints_ptr[GptModelInputIndex::warmup] != 0;
+    inputs.is_target_verify = shape_hints_ptr[GptModelInputIndex::isTargetVerify] != 0;
     if (inputs.skip_run) {
         return;
     }
-    const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
+    const size_t mm_features_num = hintToSize(GptModelInputIndex::mmFeaturesNum, "multimodal feature count");
     if (mm_features_num) {
         mm_features_shape_t   = torch::empty({(int64_t)mm_features_num}, torch::kInt32).pin_memory();
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int32_t>();
@@ -96,7 +136,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // extra-input element counts broadcast: each extra-input is an opaque flat 1-D tensor,
     // so we send its element count first ("先传shape") and allocate a 1-D buffer on non-root.
-    const size_t mm_extra_input_num = (size_t)shape_hints_ptr[GptModelInputIndex::mmHasExtraInput];
+    const size_t mm_extra_input_num =
+        hintToSize(GptModelInputIndex::mmHasExtraInput, "multimodal extra-input count");
     if (mm_extra_input_num) {
         mm_extra_input_shape_t   = torch::empty({(int64_t)mm_extra_input_num}, torch::kInt64).pin_memory();
         mm_extra_input_shape_ptr = mm_extra_input_shape_t.data_ptr<int64_t>();
@@ -109,16 +150,37 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         cudaSyncAndCheck();
     }
 
-    auto   max_kernel_blocks       = (size_t)shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
-    auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
-    auto   kv_cache_group_num      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
-    auto   layer_to_group_len      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen];
-    auto   group_types_len         = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
-    auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
-    auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
-    auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
-    auto   hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
-    size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
+    const size_t max_kernel_blocks =
+        hintToSize(GptModelInputIndex::maxKernelBlocksPerBatch, "maximum kernel blocks per batch");
+    const size_t max_blocks = hintToSize(GptModelInputIndex::maxBlocksPerBatch, "maximum blocks per batch");
+    const size_t kv_cache_group_num = hintToSize(GptModelInputIndex::kvCacheGroupNum, "KV cache group count");
+    const size_t layer_to_group_len =
+        hintToSize(GptModelInputIndex::kvCacheLayerToGroupLen, "KV cache layer-to-group length");
+    const size_t group_types_len =
+        hintToSize(GptModelInputIndex::kvCacheGroupTypesLen, "KV cache group-types length");
+    const size_t combo_position_ids_size =
+        hintToSize(GptModelInputIndex::comboPositionIds, "position-id count");
+    const size_t text_tokens_mask_size =
+        hintToSize(GptModelInputIndex::textTokensMask, "text-token mask count");
+    const size_t mm_features_locs_size =
+        hintToSize(GptModelInputIndex::mmFeaturesLocs, "multimodal feature-location count");
+    const size_t hidden_states_size =
+        hintToSize(GptModelInputIndex::mtpHiddenStates, "MTP hidden-state element count");
+    const size_t request_length =
+        hintToSize(GptModelInputIndex::gptModelRequestLength, "model request count");
+    const size_t context_batch_size =
+        hintToSize(GptModelInputIndex::prefixLengths, "context batch size");
+    const size_t cache_keys_numel = hintToSize(GptModelInputIndex::cacheKeysNumel, "cache-key element count");
+
+    RTP_LLM_CHECK_WITH_INFO(context_batch_size == 0
+                                || max_blocks <= std::numeric_limits<size_t>::max() / context_batch_size,
+                            "cache-key shape overflows size_t");
+    const size_t expected_cache_keys_numel = context_batch_size * max_blocks;
+    RTP_LLM_CHECK_WITH_INFO(cache_keys_numel == (inputs.pd_separation ? expected_cache_keys_numel : 0),
+                            "cache-key schema mismatch: elements=%zu, expected=%zu, pd_separation=%d",
+                            cache_keys_numel,
+                            expected_cache_keys_numel,
+                            inputs.pd_separation);
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<size_t>     dims,
@@ -139,8 +201,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     bool is_non_root = parallelism_config.tp_rank != 0;
     if (is_non_root) {
-        auto context_batch_size = (size_t)shape_hints_ptr[GptModelInputIndex::prefixLengths];
-
         inputs.combo_tokens =
             allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]});
         inputs.input_lengths =
@@ -159,7 +219,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.kv_cache_block_id =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
-            if (inputs.pd_separation) {
+            if (cache_keys_numel != 0) {
                 inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64, {context_batch_size, max_blocks});
             }
         }
@@ -239,7 +299,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (group_types_len) {
             collect(inputs.kv_cache_group_types);
         }
-        if (inputs.pd_separation) {
+        if (cache_keys_numel != 0) {
             collect(inputs.cache_keys);
         }
         collect(inputs.kv_cache_update_mapping);

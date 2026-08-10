@@ -80,6 +80,16 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    cacheKeysNumel,
+    kvBlockStrideBytes,
+    kvScaleStrideBytes,
+    seqSizePerBlock,
+    kernelSeqSizePerBlock,
+    pdSeparation,
+    decodeEntrance,
+    needMoeGating,
+    warmup,
+    isTargetVerify,
     gptModelInputLength,
 };
 
