@@ -303,7 +303,12 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        sequence = self._global_controller.increment() % 4096  # 12 bits
+        try:
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+        except ConcurrencyException as e:
+            # Map concurrency-limit overflow to 429 (409_CONCURRENCY_LIMIT_ERROR)
+            # instead of leaking through ASGI as an opaque 500.
+            return self._handle_exception({}, e)
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
             self.py_env_configs.server_config.server_port,
