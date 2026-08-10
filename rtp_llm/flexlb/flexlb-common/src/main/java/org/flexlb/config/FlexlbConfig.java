@@ -97,7 +97,14 @@ public class FlexlbConfig {
      * Maximum token-equivalent work that CACHE_AFFINITY_FIRST may add relative to the
      * shortest estimated-work worker.
      */
-    private long cacheAffinityFirstMaxExtraWorkTokens = 25_000;
+    private long cacheAffinityFirstMaxExtraWorkTokens = 0;
+
+    /**
+     * Existing outstanding uncached-token watermark for CACHE_AFFINITY_FIRST admission.
+     * The incoming request is not included in this check. A value less than or equal to
+     * zero disables the watermark.
+     */
+    private long cacheAffinityFirstOutstandingUncachedTokensThreshold = 0;
 
     /**
      * KV cache available threshold for DECODE role (percentage)

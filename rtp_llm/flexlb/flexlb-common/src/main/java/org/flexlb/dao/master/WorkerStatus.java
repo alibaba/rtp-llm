@@ -84,6 +84,10 @@ public class WorkerStatus {
         Logger.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
     }
 
+    public long getOutstandingUncachedTokens() {
+        return Math.max(0, inTransitAndWaitingUncachedTokens) + Math.max(0, runningRemainingPrefillTokens);
+    }
+
     /**
      * Remove task from local running queue
      * @param requestId Request ID

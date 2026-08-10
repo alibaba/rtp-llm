@@ -13,6 +13,7 @@ import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.ScoredWorker;
@@ -207,6 +208,76 @@ class CacheAffinityFirstStrategyTest {
         Assertions.assertEquals("127.0.0.3:8080", decision.cacheAffinityDecision().shortestTtftWorkerIpPort());
     }
 
+    @Test
+    void usesShortestTtftWhenCacheLeaderReachesOutstandingThreshold() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
+        putPendingTask(cacheLeader, "existing", 1_000_000, 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker, thirdWorker),
+                Map.of(
+                        cacheLeader.getIpPort(), 25,
+                        shortestTtftWorker.getIpPort(), 15,
+                        thirdWorker.getIpPort(), 10));
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
+        config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
+
+        ServerStatus selected = select(strategy, config, "watermark-fallback");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+    }
+
+    @Test
+    void admitsUsingExistingWatermarkThenBlocksLaterRequests() {
+        WorkerStatus worker = createWorker("127.0.0.1", 0);
+        putPendingTask(worker, "existing", 990_000, 0);
+        CacheAffinityFirstStrategy strategy = createStrategy(List.of(worker), Map.of());
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
+
+        ServerStatus first = select(strategy, config, "crosses-watermark");
+        ServerStatus second = select(strategy, config, "blocked-after-crossing");
+
+        Assertions.assertTrue(first.isSuccess());
+        Assertions.assertEquals(1_040_000, worker.getOutstandingUncachedTokens());
+        Assertions.assertFalse(second.isSuccess());
+        Assertions.assertFalse(worker.getLocalTaskMap().containsKey("blocked-after-crossing"));
+    }
+
+    @Test
+    void usesLatestRunningRemainingTokensForOutstandingWatermark() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
+        putPendingTask(cacheLeader, "running-request", 1_200_000, 0);
+        updateRunningProgress(cacheLeader, "running-request", 1_200_000, 1_000_000);
+        CacheAffinityFirstStrategy strategy = createStrategy(
+                List.of(cacheLeader, shortestTtftWorker),
+                Map.of(
+                        cacheLeader.getIpPort(), 25,
+                        shortestTtftWorker.getIpPort(), 15));
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMaxExtraWorkTokens(2_000_000);
+        config.setCacheAffinityFirstOutstandingUncachedTokensThreshold(1_000_000);
+
+        ServerStatus atThreshold = select(strategy, config, "at-threshold");
+        updateRunningProgress(cacheLeader, "running-request", 1_200_000, 900_000);
+        ServerStatus belowThreshold = select(strategy, config, "below-threshold");
+
+        Assertions.assertEquals(shortestTtftWorker.getIp(), atThreshold.getServerIp());
+        Assertions.assertEquals(cacheLeader.getIp(), belowThreshold.getServerIp());
+    }
+
+    @Test
+    void cacheAffinityGuardsAreDisabledByDefault() {
+        FlexlbConfig config = new FlexlbConfig();
+
+        Assertions.assertEquals(0, config.getCacheAffinityFirstMaxExtraWorkTokens());
+        Assertions.assertEquals(
+                0, config.getCacheAffinityFirstOutstandingUncachedTokensThreshold());
+    }
+
     private CacheAffinityFirstStrategy createStrategy(
             List<WorkerStatus> workers, Map<String, Integer> cacheMatches) {
         Map<String, WorkerStatus> prefillWorkers =
@@ -266,6 +337,31 @@ class CacheAffinityFirstStrategyTest {
         cacheStatus.setAvailableKvCache(1000000);
         worker.setCacheStatus(cacheStatus);
         return worker;
+    }
+
+    private void putPendingTask(WorkerStatus worker,
+                                String requestId,
+                                long inputTokens,
+                                long predictedHitTokens) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setInputLength(inputTokens);
+        task.setPrefixLength(predictedHitTokens);
+        task.setPredictedPrefixLength(predictedHitTokens);
+        worker.putLocalTask(requestId, task);
+    }
+
+    private void updateRunningProgress(WorkerStatus worker,
+                                       String requestId,
+                                       long inputTokens,
+                                       long remainingPrefillTokens) {
+        TaskInfo runningTask = new TaskInfo();
+        runningTask.setRequestId(requestId);
+        runningTask.setInputLength(inputTokens);
+        runningTask.setPrefixLength(0);
+        runningTask.setPrefixLengthValid(true);
+        runningTask.setRemainingPrefillTokens(remainingPrefillTokens);
+        worker.updateTaskStates(Map.of(), Map.of(requestId, runningTask), Map.of());
     }
 
     private void clearWorkerStatuses() {

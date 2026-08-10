@@ -51,19 +51,27 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
             return null;
         }
 
-        // The first worker is the lowest predicted completion time for this request.
+        // Keep every scored worker visible in the decision snapshot, but apply the
+        // outstanding-work watermark inside this strategy before choosing a target.
         List<ScoredWorker> workersByTtft = sortByTTFT(scoredWorkers);
-        ScoredWorker shortestTtftWorker = workersByTtft.getFirst();
+        List<ScoredWorker> eligibleWorkers = filterByOutstandingUncachedTokens(
+                workersByTtft, roleType, config);
+        if (eligibleWorkers.isEmpty()) {
+            return null;
+        }
+        ScoredWorker shortestTtftWorker = eligibleWorkers.getFirst();
 
-        // Evaluate cache affinity against the TTFT minimum, not an average worker.
+        // The global cache leader is checked before fallback so an overloaded cache
+        // leader falls directly back to the shortest eligible TTFT worker.
         ScoredWorker cacheLeader = findCacheLeader(workersByTtft);
 
-        // Cache lead buys a bounded amount of additional TTFT; otherwise keep the TTFT minimum.
-        CacheLeaderDecision decision = evaluateCacheLeader(cacheLeader, shortestTtftWorker, config);
+        CacheLeaderDecision decision = eligibleWorkers.contains(cacheLeader)
+                ? evaluateCacheLeader(cacheLeader, shortestTtftWorker, config)
+                : rejectCacheLeaderForOutstandingWatermark(cacheLeader, shortestTtftWorker, config);
 
         // The preferred worker may have been selected concurrently, so try ordered fallbacks.
         ScoredWorker selectedWorker = selectWorkerByCacheAffinity(
-                decision.preferredWorker(), workersByTtft, shortestTtftWorker, config);
+                decision.preferredWorker(), eligibleWorkers, shortestTtftWorker, config);
         String selectionReason = selectedWorker.equals(decision.preferredWorker())
                 ? decision.selectionReason()
                 : satisfiesCacheAffinityTolerance(selectedWorker, shortestTtftWorker, config)
@@ -73,7 +81,7 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         reportCacheAffinityDecision(roleType, selectedWorker.worker().getIp(), selectionReason);
 
         // Preserve the decision path in the debug snapshot, including a concurrent fallback.
-        recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, workersByTtft, List.of(),
+        recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, eligibleWorkers, List.of(),
                 shortestTtftWorker.ttft(), 0, roleType, group, seqLen, selectionReason,
                 new CacheAffinityDecision(
                         cacheLeader.worker().getIpPort(),
@@ -86,6 +94,31 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
 
     private ScoredWorker findCacheLeader(List<ScoredWorker> workers) {
         return workers.stream().min(CACHE_LEADER_ORDER).orElseThrow();
+    }
+
+    private List<ScoredWorker> filterByOutstandingUncachedTokens(List<ScoredWorker> workers,
+                                                                 RoleType roleType,
+                                                                 FlexlbConfig config) {
+        if (!outstandingUncachedTokensGuardEnabled(roleType, config)) {
+            return workers;
+        }
+        long threshold = configuredOutstandingUncachedTokensThreshold(config);
+        return workers.stream()
+                .filter(worker -> worker.worker().getOutstandingUncachedTokens() < threshold)
+                .toList();
+    }
+
+    private CacheLeaderDecision rejectCacheLeaderForOutstandingWatermark(ScoredWorker cacheLeader,
+                                                                         ScoredWorker shortestTtftWorker,
+                                                                         FlexlbConfig config) {
+        long cacheLeadTokens = Math.max(0, cacheLeader.hitCacheTokens() - shortestTtftWorker.hitCacheTokens());
+        long extraTtft = cacheLeader.ttft() - shortestTtftWorker.ttft();
+        return new CacheLeaderDecision(
+                shortestTtftWorker,
+                cacheLeadTokens,
+                extraTtft,
+                configuredMaxExtraWork(config),
+                "SHORTEST_TTFT_OUTSTANDING_GUARD");
     }
 
     /**
@@ -174,6 +207,16 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
 
     private long configuredMaxExtraWork(FlexlbConfig config) {
         return Math.max(0L, config.getCacheAffinityFirstMaxExtraWorkTokens());
+    }
+
+    private long configuredOutstandingUncachedTokensThreshold(FlexlbConfig config) {
+        return Math.max(0L, config.getCacheAffinityFirstOutstandingUncachedTokensThreshold());
+    }
+
+    private boolean outstandingUncachedTokensGuardEnabled(RoleType roleType,
+                                                          FlexlbConfig config) {
+        return (roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION)
+                && configuredOutstandingUncachedTokensThreshold(config) > 0;
     }
 
     private record CacheLeaderDecision(ScoredWorker preferredWorker, long cacheLeadTokens,
