@@ -135,6 +135,7 @@ class EnvArgumentGroup:
         self,
         *args,
         env_name: Optional[str] = None,
+        enable_env: bool = True,
         bind_to: Optional[
             Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]]
         ] = None,
@@ -146,6 +147,7 @@ class EnvArgumentGroup:
         Args:
             *args: 标准 argparse add_argument 参数
             env_name: 环境变量名称（保留用于兼容，但不再自动更新到 os.environ）
+            enable_env: 是否允许通过环境变量配置该参数
             bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name')、
                 'path.to.attr' 字符串或这些目标的列表
             **kwargs: 其他 argparse add_argument 参数
@@ -165,7 +167,8 @@ class EnvArgumentGroup:
             self._parser._register_config_binding(action, bind_to)
 
         # 保留 env 映射（用于兼容和日志）
-        self._parser._register_env_mapping(action, args, env_name)
+        if enable_env:
+            self._parser._register_env_mapping(action, args, env_name)
         return action
 
     def __getattr__(self, name):
@@ -213,14 +216,19 @@ class EnvArgumentParser(argparse.ArgumentParser):
         return EnvArgumentGroup(group, self)
 
     def add_argument(
-        self, *args, env_name: Optional[str] = None, **kwargs
+        self,
+        *args,
+        env_name: Optional[str] = None,
+        enable_env: bool = True,
+        **kwargs,
     ) -> argparse.Action:
         if args and isinstance(args[0], str) and not args[0].startswith("-"):
             action = self._positionals.add_argument(*args, **kwargs)
         else:
             action = self._optionals.add_argument(*args, **kwargs)
 
-        self._register_env_mapping(action, args, env_name)
+        if enable_env:
+            self._register_env_mapping(action, args, env_name)
         return action
 
     def _register_env_mapping(
