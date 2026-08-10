@@ -38,7 +38,7 @@ from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
 from rtp_llm.dash_sc.client import build_model_infer_request
-from rtp_llm.dash_sc.codec import SamplingParams
+from rtp_llm.dash_sc.codec import LLMFinishReason, SamplingParams
 from rtp_llm.dash_sc.inference.grammar_validator import GrammarValidator
 from rtp_llm.dash_sc.inference.servicer import DashScInferenceServicer
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
@@ -486,7 +486,36 @@ def _dash_error(
 ) -> dict[str, Any] | None:
     infer = response.infer_response
     raw = infer.parameters["error_msg"].string_param
-    return json.loads(raw) if raw else None
+    if not raw:
+        return None
+    error = json.loads(raw)
+    finish_reason = next(
+        (
+            int.from_bytes(raw_value, byteorder="little", signed=True)
+            for output, raw_value in zip(
+                infer.outputs, infer.raw_output_contents, strict=True
+            )
+            if output.name == "finish_reason"
+        ),
+        None,
+    )
+    status_code = infer.parameters["status_code"]
+    status_name = infer.parameters["status_name"]
+    status_message = infer.parameters["status_message"]
+    if (
+        finish_reason != LLMFinishReason.USE_PARAMETER_STATUS
+        or not status_code.HasField("int64_param")
+        or status_code.int64_param != error.get("status_code")
+        or status_name.string_param != error.get("status_name")
+        or status_message.string_param != error.get("status_message")
+    ):
+        raise AssertionError(
+            "Dash error standalone status parameters do not match error_msg: "
+            f"finish_reason={finish_reason} status_code={status_code} "
+            f"status_name={status_name} "
+            f"status_message={status_message} error_msg={error}"
+        )
+    return error
 
 
 def _stop_validator_workers(validator: GrammarValidator) -> None:
