@@ -183,6 +183,7 @@ class ModelFactory:
         vit_config: Optional[VitConfig] = None,
         merge_lora: bool = False,
         propose_model_config: Optional[ModelConfig] = None,
+        defer_deepep_init: bool = False,
     ):
         """Create engine from independent config objects, with optional propose model.
 
@@ -213,6 +214,22 @@ class ModelFactory:
             vit_config=vit_config,
             merge_lora=merge_lora,
         )
+
+        if defer_deepep_init:
+            if not (
+                engine_config.moe_config.use_deepep_moe
+                and model_config.expert_num > 0
+                and engine_config.parallelism_config.world_size > 1
+                and not engine_config.moe_config.use_all_gather
+            ):
+                raise RuntimeError(
+                    "deferred DeepEP initialization requested for an incompatible "
+                    "model configuration"
+                )
+            from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
+
+            logging.info("initialize deferred DeepEP wrapper after model loading")
+            init_deepep_wrapper(engine_config, model_config)
 
         model_type = model_config.model_type
         if model_type == "fake_model":

@@ -195,6 +195,11 @@ def _register_builtin_lazy_models() -> None:
         "deepseek-v3-mtp", "rtp_llm.models.deepseek_v2", ["DeepseekV3ForCausalLMNextN"]
     )
     register_lazy_model("kimi_k2", "rtp_llm.models.deepseek_v2")
+    register_lazy_model(
+        "kimi_k3",
+        "rtp_llm.models.kimi_k3.kimi_k3",
+        ["KimiK3ForConditionalGeneration", "KimiLinearForCausalLM"],
+    )
     register_lazy_model("deepseek_v31", "rtp_llm.models.deepseek_v2")
     register_lazy_model(
         "deepseek_v32", "rtp_llm.models.deepseek_v2", ["DeepseekV32ForCausalLM"]

@@ -13,11 +13,18 @@ deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn = ["flash_attn","flash-attn-3"]
+# cuLA is the default KDA Prefill backend on cuda13/sm103a; it needs the exact
+# patched FLA runtime pinned next to it in the cuda13 lock.  Both are pip
+# packages resolved by Bazel — pip_parse is lazy, so without this declaration
+# the wheels sit in the lock and never reach runfiles, and the server dies on
+# its first Prefill request with "No module named 'cula'".
+linear_attention = ["cuda-linear-attention", "flash-linear-attention"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
+requirement(linear_attention)
 
 
 filegroup(
@@ -81,6 +88,11 @@ py_library(
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
+        "//conditions:default": [],
+    }) + select({
+        # cuLA + its patched FLA runtime: cuda13 x86 only (the .cu132 wheel
+        # carries the sm_103a extension; no other lock pins them).
+        "@//:using_cuda13_x86": linear_attention,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -146,6 +158,7 @@ py_library(
         ":kernels",
         ":configs",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py/distributed:fused_all_gather_matmul",
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda",
