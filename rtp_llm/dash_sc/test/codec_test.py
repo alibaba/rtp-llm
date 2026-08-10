@@ -812,6 +812,28 @@ class DashScGrpcRequestTest(TestCase):
                 self.assertEqual(sp.max_new_tokens, value)
                 self.assertTrue(sp.max_new_tokens_from_completion_alias)
 
+    def test_default_thinking_budget_follows_max_new_tokens(self) -> None:
+        generate_config = SamplingParams(max_new_tokens=123).to_generate_config(
+            other=OtherParams(enable_thinking=True)
+        )
+
+        self.assertEqual(generate_config.max_new_tokens, 123)
+        self.assertEqual(generate_config.max_thinking_tokens, 123)
+
+    def test_default_thinking_budget_follows_resolved_completion_alias(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+            max_total_tokens=80,
+        )
+
+        generate_config = sampling.to_generate_config(
+            other=OtherParams(enable_thinking=True)
+        )
+
+        self.assertEqual(generate_config.max_new_tokens, 80)
+        self.assertEqual(generate_config.max_thinking_tokens, 80)
+
     def test_completion_alias_thinking_budget_keeps_backend_limit(
         self,
     ) -> None:

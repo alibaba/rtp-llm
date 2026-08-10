@@ -641,12 +641,6 @@ class SamplingParams:
         request_max_think = self.max_new_think_tokens
         if request_max_think is None and other is not None:
             request_max_think = other.max_new_think_tokens
-        if request_max_think is None:
-            max_thinking_tokens = 32000
-        elif request_max_think < 0:
-            max_thinking_tokens = _INT32_MAX
-        else:
-            max_thinking_tokens = request_max_think
         backend_max_new_tokens = self.max_new_tokens
         if (
             other is not None
@@ -657,6 +651,12 @@ class SamplingParams:
                 backend_max_new_tokens = min(
                     backend_max_new_tokens, int(self.max_total_tokens)
                 )
+        if request_max_think is None:
+            max_thinking_tokens = backend_max_new_tokens
+        elif request_max_think < 0:
+            max_thinking_tokens = _INT32_MAX
+        else:
+            max_thinking_tokens = request_max_think
         return GenerateConfig(
             max_new_tokens=backend_max_new_tokens,
             num_return_sequences=self.num_return_sequences,

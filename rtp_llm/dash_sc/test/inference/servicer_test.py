@@ -1927,7 +1927,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.max_new_tokens, 3)
         self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.thinking_mode, ThinkingMode.ADAPTIVE)
-        self.assertEqual(generate_config.max_thinking_tokens, 32000)
+        self.assertEqual(generate_config.max_thinking_tokens, 3)
 
     async def test_dash_generation_enable_thinking_true_without_budget_keeps_thinking(
         self,
