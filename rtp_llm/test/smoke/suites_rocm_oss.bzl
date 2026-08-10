@@ -41,6 +41,13 @@ def rocm_oss_suites():
                 envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
                 gpu_type=["MI308X-ROCM7"]
             ),
+            smoke_test(
+                name="rocm_dense_llama_3b_newloader",
+                task_info="data/model/llama/q_r_3b.json",
+                smoke_args="--warm_up 1 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type BF16",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                gpu_type=["MI308X-ROCM7"],
+            ),
             # Simplified from Qwen3-32B-FP8-Dynamic → Qwen3-8B; result placeholder, needs rewrite_smoke regen on MI308X
             smoke_test(
                 name="rocm_dense_qwen3_8b_ptpc",
