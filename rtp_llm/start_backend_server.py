@@ -38,9 +38,37 @@ from rtp_llm.utils.process_manager import (
 
 setup_logging()
 
+STARTUP_TIMEOUT_S_ENV = "RTP_LLM_STARTUP_TIMEOUT_S"
+DEFAULT_STARTUP_TIMEOUT_S = 3600.0
+
 
 class BackendStartupInterrupted(Exception):
     pass
+
+
+def _startup_timeout_s() -> float:
+    raw_value = os.environ.get(STARTUP_TIMEOUT_S_ENV, "")
+    if not raw_value:
+        return DEFAULT_STARTUP_TIMEOUT_S
+    try:
+        timeout_s = float(raw_value)
+    except ValueError:
+        logging.warning(
+            "Invalid %s=%r; using default %.1fs",
+            STARTUP_TIMEOUT_S_ENV,
+            raw_value,
+            DEFAULT_STARTUP_TIMEOUT_S,
+        )
+        return DEFAULT_STARTUP_TIMEOUT_S
+    if timeout_s <= 0:
+        logging.warning(
+            "Non-positive %s=%r; using default %.1fs",
+            STARTUP_TIMEOUT_S_ENV,
+            raw_value,
+            DEFAULT_STARTUP_TIMEOUT_S,
+        )
+        return DEFAULT_STARTUP_TIMEOUT_S
+    return timeout_s
 
 
 def _install_hot_hook_runtime(role: str) -> None:
@@ -310,7 +338,12 @@ def _wait_for_ranks_startup(
     # Track which ranks have reported
     ranks_received = [False] * local_world_size
     poll_timeout = 0.5  # seconds per poll
-    max_wait_time = 3600  # Maximum 1 hour wait
+    max_wait_time = _startup_timeout_s()
+    logging.info(
+        "Rank startup timeout is %.1fs (override with %s)",
+        max_wait_time,
+        STARTUP_TIMEOUT_S_ENV,
+    )
     start_time = time.time()
 
     try:
@@ -415,9 +448,7 @@ def multi_rank_start(
 
     # Wait for all ranks to report startup status
     try:
-        _wait_for_ranks_startup(
-            processes, rank_pipe_readers, local_world_size, manager
-        )
+        _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size, manager)
 
         # Report success via external pipe
         if pipe_writer is not None:

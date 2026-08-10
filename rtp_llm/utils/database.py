@@ -265,6 +265,9 @@ class CkptDatabase(BaseDatabase):
         device: str,
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
+        *,
+        serialize_staging_batches: bool = False,
+        files_per_batch: int = 0,
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
 
@@ -301,7 +304,18 @@ class CkptDatabase(BaseDatabase):
                 nogds=use_nogds,
             )
             if stacked_key_config:
-                loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
+                if serialize_staging_batches:
+                    # ParallelLoader's queue_size=0 acknowledges a batch as
+                    # soon as the consumer dequeues it.  queue_size=-1 defers
+                    # that acknowledgement until FilesBufferOnDevice.close(),
+                    # so the next GPU staging batch cannot overlap the current
+                    # materialization.
+                    loader_kwargs["queue_size"] = -1
+                loader = PerExpertParallelLoader(
+                    stacked_key_config,
+                    files_per_batch=files_per_batch,
+                    **loader_kwargs,
+                )
             else:
                 loader = ParallelLoader(**loader_kwargs)
             try:

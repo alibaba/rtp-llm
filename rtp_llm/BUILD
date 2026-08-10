@@ -550,6 +550,24 @@ py_library(
     ]
 )
 
+# Canonical Bazel launcher for production services and model-specific
+# workflows.  Keep the entry point with the server implementation so examples
+# do not have to own duplicate py_binary wrappers.
+py_binary(
+    name = "rtp_llm_server",
+    srcs = ["start_server.py"],
+    main = "start_server.py",
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":rtp_llm_lib",
+        ":sdk",
+    ],
+)
+
 py_library(
     name = "rtp_llm_package_libs",
     deps = [

@@ -41,10 +41,37 @@ from rtp_llm.utils.version_info import VersionInfo
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
+STARTUP_TIMEOUT_S_ENV = "RTP_LLM_STARTUP_TIMEOUT_S"
+DEFAULT_STARTUP_TIMEOUT_S = 3600.0
 FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
 DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
 PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
+
+
+def _startup_timeout_s() -> float:
+    raw_value = os.environ.get(STARTUP_TIMEOUT_S_ENV, "")
+    if not raw_value:
+        return DEFAULT_STARTUP_TIMEOUT_S
+    try:
+        timeout_s = float(raw_value)
+    except ValueError:
+        logging.warning(
+            "Invalid %s=%r; using default %.1fs",
+            STARTUP_TIMEOUT_S_ENV,
+            raw_value,
+            DEFAULT_STARTUP_TIMEOUT_S,
+        )
+        return DEFAULT_STARTUP_TIMEOUT_S
+    if timeout_s <= 0:
+        logging.warning(
+            "Non-positive %s=%r; using default %.1fs",
+            STARTUP_TIMEOUT_S_ENV,
+            raw_value,
+            DEFAULT_STARTUP_TIMEOUT_S,
+        )
+        return DEFAULT_STARTUP_TIMEOUT_S
+    return timeout_s
 
 
 def _pre_stop_drain_seconds() -> float:
@@ -313,7 +340,12 @@ class FrontendApp(object):
         """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
         if self.frontend_server.is_embedding:
             return
-        timeout_s = 3600
+        timeout_s = _startup_timeout_s()
+        logging.info(
+            "Backend health-check startup timeout is %.1fs (override with %s)",
+            timeout_s,
+            STARTUP_TIMEOUT_S_ENV,
+        )
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             try:

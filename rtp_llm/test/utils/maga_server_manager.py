@@ -16,6 +16,7 @@ import requests
 
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.test.utils.port_util import PortManager
+from rtp_llm.utils.util import str_to_bool
 
 CHECKPOINT_PATH = "CHECKPOINT_PATH"
 MODEL_TYPE = "MODEL_TYPE"
@@ -130,6 +131,29 @@ class MagaServerManager(object):
             self.print_process_log()
         return result
 
+    @staticmethod
+    def _resolve_runfile(path: str) -> str:
+        """Resolve a launcher/runtime dependency from a Bazel runfiles tree."""
+        if os.path.isabs(path):
+            if os.path.exists(path):
+                return path
+            raise FileNotFoundError(f"runfile does not exist: {path}")
+
+        candidates = [os.path.join(os.getcwd(), path)]
+        test_srcdir = os.environ.get("TEST_SRCDIR")
+        test_workspace = os.environ.get("TEST_WORKSPACE")
+        if test_srcdir and test_workspace:
+            candidates.insert(0, os.path.join(test_srcdir, test_workspace, path))
+        if test_srcdir:
+            candidates.append(os.path.join(test_srcdir, path))
+
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return os.path.realpath(candidate)
+        raise FileNotFoundError(
+            f"unable to resolve runfile {path!r}; checked {candidates}"
+        )
+
     def start_server(
         self,
         model_path: Optional[str] = None,
@@ -168,6 +192,7 @@ class MagaServerManager(object):
             current_env[PTUNING_PATH] = ptuning_path
 
         current_env["START_PORT"] = str(self._port)
+        current_env["SMOKE_ROLE_NAME"] = self._role_name
         if self._device_ids:
             current_env["CUDA_VISIBLE_DEVICES"] = ",".join(
                 [str(_) for _ in self._device_ids]
@@ -182,6 +207,12 @@ class MagaServerManager(object):
 
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         cwd_path = os.environ.get("MAGA_SERVER_WORK_DIR", bazel_outputs_dir)
+        smoke_runtime_root = os.environ.get("TEST_TMPDIR", bazel_outputs_dir)
+        current_env.setdefault(
+            "SMOKE_ROLE_RUNTIME_DIR",
+            os.path.join(smoke_runtime_root, "smoke_role_runtime", self._role_name),
+        )
+        os.makedirs(current_env["SMOKE_ROLE_RUNTIME_DIR"], exist_ok=True)
         # 创建一个文件来存储子进程的日志
         self._log_file = (
             f"{bazel_outputs_dir}/{role_log_name}/{self._process_file_name}"
@@ -250,7 +281,7 @@ class MagaServerManager(object):
             ] + parsed_args
 
         p = subprocess.Popen(
-            ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
+            command,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,

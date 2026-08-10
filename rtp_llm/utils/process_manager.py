@@ -138,9 +138,7 @@ class ProcessManager:
         if shutdown_group not in self.shutdown_group_order:
             self.shutdown_group_order.append(shutdown_group)
 
-    def set_processes(
-        self, processes: List[Process], shutdown_group: str = "default"
-    ):
+    def set_processes(self, processes: List[Process], shutdown_group: str = "default"):
         """Set the processes to manage (replaces existing list)"""
         self.processes = processes if processes else []
         self.process_groups = {}
@@ -155,9 +153,7 @@ class ProcessManager:
             self._register_group(shutdown_group)
             self.process_groups[shutdown_group].append(process)
 
-    def add_processes(
-        self, processes: List[Process], shutdown_group: str = "default"
-    ):
+    def add_processes(self, processes: List[Process], shutdown_group: str = "default"):
         """Add multiple processes to manage"""
         if processes:
             self.processes.extend(processes)
@@ -453,9 +449,7 @@ class ProcessManager:
             self._terminate_process_list(
                 group_processes,
                 group_name,
-                force_immediate=(
-                    self._defer_first_sigterm and group_name == "default"
-                ),
+                force_immediate=(self._defer_first_sigterm and group_name == "default"),
             )
             if group_name in self.DRAIN_GROUPS:
                 result = self._wait_process_list_exit(
@@ -710,7 +704,10 @@ class ProcessManager:
                 # Unexpected death → escalate to failure shutdown.
                 for proc in self.processes:
                     if not proc.is_alive():
-                        logging.error(f"Process {proc.pid} died unexpectedly")
+                        logging.error(
+                            f"Process {proc.name} pid={proc.pid} died unexpectedly "
+                            f"with exitcode={proc.exitcode}"
+                        )
                 self.failure_detected = True
                 logging.error("Some processes died unexpectedly, terminating all...")
                 self._terminate_processes(drain_timeout=0, staged=False)
