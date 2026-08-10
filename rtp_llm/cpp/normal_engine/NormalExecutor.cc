@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -19,6 +20,40 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+bool hasStandaloneNormalDeviceState(const GenerateStream::NormalAsyncDeviceState& state) {
+    return state.last_sample_token_gpu.defined() && state.last_sample_token_gpu.is_cuda()
+           && state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda();
+}
+
+bool hasBatchedNormalDeviceState(const GenerateStream::NormalAsyncDeviceState& state) {
+    return state.device_batch_index >= 0 && state.batched_last_sample_tokens_gpu.defined()
+           && state.batched_last_sample_tokens_gpu.is_cuda() && state.batched_last_sample_tokens_gpu.dim() == 1
+           && state.device_batch_index < state.batched_last_sample_tokens_gpu.size(0)
+           && state.batched_next_seq_lens_gpu.defined() && state.batched_next_seq_lens_gpu.is_cuda()
+           && state.batched_next_seq_lens_gpu.dim() == 1
+           && state.device_batch_index < state.batched_next_seq_lens_gpu.size(0);
+}
+
+bool hasNormalNextSeqLenState(const GenerateStream::NormalAsyncDeviceState& state) {
+    if (state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda()) {
+        return true;
+    }
+    return state.device_batch_index >= 0 && state.batched_next_seq_lens_gpu.defined()
+           && state.batched_next_seq_lens_gpu.is_cuda() && state.batched_next_seq_lens_gpu.dim() == 1
+           && state.device_batch_index < state.batched_next_seq_lens_gpu.size(0);
+}
+
+bool hasNormalDeviceState(const GenerateStream::NormalAsyncDeviceState& state) {
+    return hasStandaloneNormalDeviceState(state) || hasBatchedNormalDeviceState(state);
+}
+
+torch::Tensor normalDeviceNextSeqLenView(const GenerateStream::NormalAsyncDeviceState& state) {
+    if (state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda()) {
+        return state.next_seq_len_gpu;
+    }
+    return state.batched_next_seq_lens_gpu.narrow(0, state.device_batch_index, 1);
+}
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -518,8 +553,7 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
             return false;
         }
         const auto& state = stream->getNormalAsyncDeviceState();
-        if (!state.last_sample_token_gpu.defined() || !state.last_sample_token_gpu.is_cuda()
-            || !state.next_seq_len_gpu.defined() || !state.next_seq_len_gpu.is_cuda()) {
+        if (!hasNormalDeviceState(state)) {
             return false;
         }
     }
@@ -538,8 +572,7 @@ void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_gro
             continue;
         }
         const auto& state = stream->getNormalAsyncDeviceState();
-        if (state.last_sample_token_gpu.defined() && state.last_sample_token_gpu.is_cuda()
-            && state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda()) {
+        if (hasNormalDeviceState(state)) {
             continue;
         }
         if (stream->outputTokenLen() != 1) {
@@ -616,42 +649,100 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         return;
     }
 
-    int64_t batch_idx_out = 0;
-    for (auto& stream : all_streams) {
-        torch::Tensor last_sample_token_gpu;
-        if (token_ids_gpu.dim() == 1) {
-            last_sample_token_gpu = token_ids_gpu.narrow(0, batch_idx_out, 1).to(torch::kInt32);
-        } else {
-            const int64_t last_col = token_ids_gpu.size(-1) - 1;
-            last_sample_token_gpu =
-                token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1}).to(torch::kInt32);
-        }
+    // Build current sequence lengths in stream order, then increment the whole
+    // batch once. The old loop launched one tiny add kernel per request and,
+    // on first publish, one tiny fill kernel per request as well.
+    std::vector<int>           cur_real_seq_lens;
+    std::vector<torch::Tensor> cur_seq_len_slices_gpu;
+    cur_real_seq_lens.reserve(all_streams.size());
+    cur_seq_len_slices_gpu.reserve(all_streams.size());
 
-        // Mirror next_seq_len_gpu on host for the next iter's scheduler.
-        // Fall back to live seqLength only on first publish (no prior worker).
+    size_t        valid_device_seq_lens = 0;
+    torch::Tensor shared_prev_next_seq_lens_gpu;
+    bool          can_reuse_batched_seq_lens = true;
+    int64_t       prev_batch_idx             = 0;
+    for (const auto& stream : all_streams) {
         const auto& prev_state = stream->getNormalAsyncDeviceState();
         const int   cur_real_seq_len =
             prev_state.next_real_seq_len > 0 ? prev_state.next_real_seq_len : stream->seqLength();
+        cur_real_seq_lens.push_back(cur_real_seq_len);
+        valid_device_seq_lens += hasNormalNextSeqLenState(prev_state);
 
-        torch::Tensor cur_seq_len_gpu;
-        const auto&   prev_next_seq_len = prev_state.next_seq_len_gpu;
-        if (prev_next_seq_len.defined() && prev_next_seq_len.is_cuda()) {
-            cur_seq_len_gpu = prev_next_seq_len;
-        } else {
-            cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
+        const auto& batched_seq_lens = prev_state.batched_next_seq_lens_gpu;
+        if (!hasBatchedNormalDeviceState(prev_state) || prev_state.device_batch_index != prev_batch_idx
+            || batched_seq_lens.size(0) != static_cast<int64_t>(all_streams.size())) {
+            can_reuse_batched_seq_lens = false;
+        } else if (!shared_prev_next_seq_lens_gpu.defined()) {
+            shared_prev_next_seq_lens_gpu = batched_seq_lens;
+        } else if (shared_prev_next_seq_lens_gpu.unsafeGetTensorImpl() != batched_seq_lens.unsafeGetTensorImpl()) {
+            can_reuse_batched_seq_lens = false;
         }
+        prev_batch_idx += 1;
+    }
 
+    torch::Tensor fallback_cur_seq_lens_gpu;
+    if (valid_device_seq_lens != all_streams.size()) {
+        const auto pinned_i32                 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+        auto       fallback_cur_seq_lens_host = torch::empty({static_cast<int64_t>(all_streams.size())}, pinned_i32);
+        std::copy(cur_real_seq_lens.begin(), cur_real_seq_lens.end(), fallback_cur_seq_lens_host.data_ptr<int32_t>());
+        buffer_holder_.hold_host(fallback_cur_seq_lens_host);
+        fallback_cur_seq_lens_gpu = fallback_cur_seq_lens_host.to(cuda_i32, /*non_blocking=*/true);
+    }
+
+    torch::Tensor cur_seq_lens_gpu;
+    if (can_reuse_batched_seq_lens && shared_prev_next_seq_lens_gpu.defined()) {
+        // Steady decode path: all stream states refer to the same batch in the
+        // same order, so reuse it without materializing per-stream views or a
+        // cat output.
+        cur_seq_lens_gpu = shared_prev_next_seq_lens_gpu;
+    } else if (valid_device_seq_lens == 0) {
+        // On the first publish every stream uses the host fallback. It is
+        // already in stream order, so avoid 128 views followed by a cat.
+        cur_seq_lens_gpu = fallback_cur_seq_lens_gpu;
+    } else {
+        int64_t batch_idx_out = 0;
+        for (const auto& stream : all_streams) {
+            const auto& prev_state = stream->getNormalAsyncDeviceState();
+            if (hasNormalNextSeqLenState(prev_state)) {
+                cur_seq_len_slices_gpu.push_back(normalDeviceNextSeqLenView(prev_state));
+            } else {
+                cur_seq_len_slices_gpu.push_back(fallback_cur_seq_lens_gpu.narrow(0, batch_idx_out, 1));
+            }
+            batch_idx_out += 1;
+        }
+        cur_seq_lens_gpu =
+            cur_seq_len_slices_gpu.size() == 1 ? cur_seq_len_slices_gpu.front() : torch::cat(cur_seq_len_slices_gpu, 0);
+    }
+
+    auto next_seq_lens_gpu = (cur_seq_lens_gpu + 1).to(torch::kInt32);
+    auto batch_token_ids_gpu = token_rows == static_cast<int64_t>(all_streams.size()) ?
+                                   token_ids_gpu :
+                                   token_ids_gpu.narrow(0, 0, static_cast<int64_t>(all_streams.size()));
+    // Select the sampled-token column once for the whole batch. The old loop
+    // constructed a row narrow, select, and reshape for every stream.
+    auto last_sample_tokens_gpu = batch_token_ids_gpu.dim() == 1 ?
+                                      batch_token_ids_gpu :
+                                      batch_token_ids_gpu.select(-1, batch_token_ids_gpu.size(-1) - 1);
+    last_sample_tokens_gpu      = last_sample_tokens_gpu.contiguous();
+
+    int64_t batch_idx_out = 0;
+    for (auto& stream : all_streams) {
+        torch::Tensor processor_token_view;
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
             if (processor != nullptr && processor->supportsNormalAsyncDeviceState()) {
-                processor->prepareNormalAsyncUpdate(last_sample_token_gpu, 1);
+                if (!processor_token_view.defined()) {
+                    processor_token_view = last_sample_tokens_gpu.narrow(0, batch_idx_out, 1);
+                }
+                processor->prepareNormalAsyncUpdate(processor_token_view, 1);
             }
         }
 
         GenerateStream::NormalAsyncDeviceState state;
-        state.last_sample_token_gpu = std::move(last_sample_token_gpu);
-        state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
-        state.last_real_seq_len     = cur_real_seq_len;
-        state.next_real_seq_len     = cur_real_seq_len + 1;
+        state.batched_last_sample_tokens_gpu = last_sample_tokens_gpu;
+        state.batched_next_seq_lens_gpu      = next_seq_lens_gpu;
+        state.device_batch_index             = batch_idx_out;
+        state.last_real_seq_len              = cur_real_seq_lens[batch_idx_out];
+        state.next_real_seq_len              = cur_real_seq_lens[batch_idx_out] + 1;
         stream->setNormalAsyncDeviceState(std::move(state));
         batch_idx_out += 1;
     }

@@ -26,6 +26,19 @@ torch::Tensor copyToPinnedCpuAsync(const torch::Tensor& tensor, bool& need_sync)
 
     auto cpu_tensor = torch::empty(
         tensor.sizes(), torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true));
+#if USING_CUDA
+    // The copy goes on at::cuda::getCurrentCUDAStream(), but the sampler that
+    // produced `tensor` may have run on cuda_graph::graphGetCurrentStream().
+    // Those are different streams, so the copy can overtake the producer and
+    // read the tensor before it is written.  Syncing only the copy's own stream
+    // (as syncPinnedCpuCopies does) does not close this: it orders the copy
+    // against the host, not against the producer.  Make the producer's work
+    // visible first.
+    const auto producer_stream = cuda_graph::graphGetCurrentStream().stream();
+    if (producer_stream != at::cuda::getCurrentCUDAStream().stream()) {
+        cuda_graph::graphGetCurrentStream().synchronize();
+    }
+#endif
     cpu_tensor.copy_(tensor, /*non_blocking=*/true);
     need_sync = true;
     return cpu_tensor;
@@ -38,7 +51,22 @@ void syncPinnedCpuCopies(bool need_sync) {
     // Keep D2H waiting explicit here instead of hiding it inside Tensor::cpu().
     // The copy launch returns quickly; only this worker thread blocks on its
     // stream while the main engine thread can continue issuing CUDA work.
+    //
+    // Sync the stream the copy was actually enqueued on.  Tensor::copy_ with
+    // non_blocking=true uses at::cuda::getCurrentCUDAStream(); this used to
+    // synchronize cuda_graph::graphGetCurrentStream() instead, which is a
+    // separate abstraction that graphSetCurrentStream() swaps out during graph
+    // capture, so the two are not guaranteed to be the same stream.  When they
+    // differ the sync returns without waiting, the freshly allocated pinned
+    // buffer still reads as zero, and those zeros reach the caller as sampled
+    // token ids -- token 0 is a legitimate '!' in the K3 tokenizer, so nothing
+    // downstream rejects them.  That was the intermittent trailing-zero output
+    // (3/8 under mixed load, always a trailing run, preceding tokens exact).
+#if USING_CUDA
+    at::cuda::getCurrentCUDAStream().synchronize();
+#else
     cuda_graph::graphGetCurrentStream().synchronize();
+#endif
 }
 
 }  // namespace
@@ -182,8 +210,42 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
     for (size_t i = 0; i < next_batch_size; ++i) {
-        new_tokens.data_ptr<int32_t>()[i] =
+        const int32_t sampled =
             new_all_token_ids.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+        // Token 0 is a legitimate '!' in some tokenizers, so CompleteTokenIds'
+        // `0 <= id < vocab_size` check waves it through -- which is how an
+        // unsynchronized D2H copy of the sampler output stayed invisible for a
+        // while, surfacing only as occasional trailing zeros in the response.
+        // A freshly allocated pinned staging buffer also reads as zero, so a
+        // zero here is far more likely to be an unfilled slot than a genuine
+        // '!'.  Log it rather than reject it: rejecting would break any model
+        // whose vocabulary really does start at a usable token.
+        if (sampled == 0) {
+            // Re-read the same element straight off the device, synchronously.
+            // If the device holds a real token while the pinned copy read 0, the
+            // D2H is racing its producer; if the device holds 0 too, the sampler
+            // itself emitted it and the copy is innocent.  This is the one
+            // observation that separates the two, so pay a sync for it -- it only
+            // runs on the rare bad step.
+            long device_truth = -1;
+#if USING_CUDA
+            if (sampler_output.token_ids.defined() && sampler_output.token_ids.is_cuda()) {
+                at::cuda::getCurrentCUDAStream().synchronize();
+                const auto row = sampler_output.token_ids.narrow(0, batch_idx_out + i, 1).cpu();
+                device_truth   = row.data_ptr<int32_t>()[row.numel() - 1];
+            }
+#endif
+            RTP_LLM_LOG_WARNING(
+                "stream [%ld] sampled token id 0 at batch %zu (num_new=%d stride=%zu "
+                "device_truth=%ld); token 0 is a legitimate '!' so nothing downstream "
+                "rejects it, but a fresh pinned staging slot also reads as 0",
+                stream->streamId(),
+                batch_idx_out + i,
+                (int)next_batch_size,
+                token_stride,
+                device_truth);
+        }
+        new_tokens.data_ptr<int32_t>()[i] = sampled;
     }
 
     torch::Tensor current_softmax_result;
