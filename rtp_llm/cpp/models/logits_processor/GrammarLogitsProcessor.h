@@ -30,6 +30,13 @@ public:
         return {MtpProcessorMode::SPEC_VERIFY, {}};
     }
 
+    // Grammar state advances per committed token. It does not publish its own
+    // device-side next-step state, so the normal-decode async device-state
+    // fast path must keep the pre-sampler wait for streams carrying it.
+    bool isStateful() const override {
+        return true;
+    }
+
     ErrorResult<int> prepareSpeculative(const SpecLogitsProcessorRequest& request) override;
 
     std::optional<int64_t> committedOutputLen() const override;

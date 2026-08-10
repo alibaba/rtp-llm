@@ -21,5 +21,10 @@ def register_multimodal_mixin(name: Union[str, List[str]], multimodal_mixin: Any
 
 def get_multimodal_mixin_cls(name: str) -> Type[Any]:
     if name not in _multimodal_mixin_factory:
+        # Mixins self-register on package import; with lazy model imports the
+        # package may not have been pulled in yet, so load it on first miss.
+        import rtp_llm.multimodal.multimodal_mixins  # noqa: F401
+
+    if name not in _multimodal_mixin_factory:
         raise ValueError(f"Multimodal mixin {name} not found")
     return _multimodal_mixin_factory[name]

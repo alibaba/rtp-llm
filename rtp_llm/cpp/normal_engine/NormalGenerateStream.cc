@@ -248,10 +248,15 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       isStreaming(),
                       update_info.update_remote_generate);
 
-    if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
+    if (queryPdSep() && update_info.update_remote_generate) {
+        // Hold KV cache even when the stream already finished in prefill
+        // (e.g. stop words hit): the decode role still issues RemoteLoad for
+        // these blocks and would hang if they were freed here.
         holdKVCacheForPDSep();
-        reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
-        reportEventWithoutLock(StreamEvents::GenerateDone);
+        if (!finished_) {
+            reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+            reportEventWithoutLock(StreamEvents::GenerateDone);
+        }
     }
 
     bool pd_sep_first_token = queryPdSep();

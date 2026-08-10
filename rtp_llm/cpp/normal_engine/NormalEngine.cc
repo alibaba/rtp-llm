@@ -17,6 +17,10 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <list>
 #include <memory>
 #include <thread>
 #include <random>
@@ -46,6 +50,19 @@ void releaseHostMemoryCache() {
 #endif
 }
 
+bool cacheStatusSnapshotEnabled() {
+    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
+bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<GenerateStreamPtr>& streams) {
+    if (!cacheStatusSnapshotEnabled() || (role_type != RoleType::PREFILL && role_type != RoleType::PDFUSION)) {
+        return false;
+    }
+    return std::any_of(streams.begin(), streams.end(), [](const GenerateStreamPtr& stream) {
+        return stream && !stream->isFakeStream() && stream->isContextStream();
+    });
+}
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -73,6 +90,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_CHECK_WITH_INFO(!runtime_config.warm_up_with_loss,
                                 "output vocabulary pruning does not support warm_up_with_loss");
     }
+    if (propose_params_) {
+        reserve_step_ = propose_params_->gen_num_per_circle + 1;
+    } else {
+        reserve_step_ = 0;
+    }
+    RTP_LLM_LOG_INFO("normal engine speculative reserve_step is %d", reserve_step_);
 #if !USING_CUDA
     // On ROCm, this constructor runs on a gRPC handler thread that defaults to
     // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go
@@ -108,11 +131,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO("create cache manager done");
 
     initExecutor(params, propose_params_);
-    if (propose_params_) {
-        reserve_step_ = propose_params_->gen_num_per_circle + 1;
-    } else {
-        reserve_step_ = 0;
-    }
 
     RTP_LLM_LOG_INFO("create normal executor done");
 
@@ -131,7 +149,15 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
         executor_.reset(new MtpExecutor(
             params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
-        executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, mla_ops_type_));
+        executor_.reset(new NormalExecutor(
+            params,
+            resource_context_.cache_manager,
+            false,
+            false,
+            0,
+            mla_ops_type_,
+            [this]() { step_profiler_.startStep(); },
+            [this]() { step_profiler_.finishStep(); }));
     }
 }
 
@@ -188,13 +214,13 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          nullptr,
                                                          0,
                                                          mode == preRunMode::prefill_warm_up);
+    stream->setReserveStep(reserve_step_);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
         size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
         size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
         stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
-        stream->setReserveStep(reserve_step_);
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
     std::list<GenerateStreamPtr> streams{stream};
@@ -243,12 +269,32 @@ std::shared_ptr<GenerateInput> NormalEngine::makeFakeInput(size_t seq_len) {
     return fake_input;
 }
 
+size_t NormalEngine::getWarmUpInputLength() const {
+    const auto max_seq_len  = static_cast<size_t>(model_config_.max_seq_len);
+    const auto reserve_step = reserve_step_ > 0 ? static_cast<size_t>(reserve_step_) : 0;
+    if (reserve_step > 0) {
+        RTP_LLM_CHECK_WITH_INFO(max_seq_len > reserve_step,
+                                "max_seq_len [%zu] should be greater than speculative reserve_step [%zu]",
+                                max_seq_len,
+                                reserve_step);
+        const auto input_len = max_seq_len - reserve_step;
+        RTP_LLM_LOG_INFO("framework warm up input len adjusted by speculative reserve_step, "
+                         "max_seq_len=%zu, reserve_step=%zu, input_len=%zu",
+                         max_seq_len,
+                         reserve_step,
+                         input_len);
+        return input_len;
+    }
+    RTP_LLM_CHECK_WITH_INFO(max_seq_len > 1, "max_seq_len [%zu] should be greater than 1", max_seq_len);
+    return max_seq_len - 1;
+}
+
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
 #if !USING_CUDA
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
+    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
@@ -269,7 +315,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("decodeWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput((size_t)model_config_.max_seq_len - 1);
+    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
@@ -319,6 +365,14 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
                                      torch::Tensor(),
                                      false};
         stream->update(update_info);
+        const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .epoch                 = 0,
+            .last_sample_token_gpu = torch::zeros({1}, cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+            .last_real_seq_len     = stream->seqLength(),
+            .next_real_seq_len     = stream->seqLength(),
+        });
     }
     return stream;
 }
@@ -459,6 +513,7 @@ absl::Status NormalEngine::step() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
+    int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
@@ -482,7 +537,8 @@ absl::Status NormalEngine::step() {
     absl::Status status             = absl::OkStatus();
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
-    // active yet, configure the profiler so the next stepScope() captures THIS step.
+    // active yet, configure the profiler so the executor-driven step window
+    // captures THIS step.
     if (!step_profiler_.enabled()) {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
@@ -494,9 +550,23 @@ absl::Status NormalEngine::step() {
     }
 
     {
-        [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
+        // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
+        // has no callbacks yet, so bracket the propose path here on the engine
+        // loop thread (Kineto requires enable/disable on the same thread).
+        if (propose_params_) {
+            step_profiler_.startStep();
+        }
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
-        status = executor_->process(streams);
+        const bool refresh_cache_status_snapshot =
+            resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
+        status = executor_->process(streams, tps_schedule_time_us);
+        if (status.ok() && refresh_cache_status_snapshot) {
+            RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
+            resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+        }
+        if (propose_params_) {
+            step_profiler_.finishStep();
+        }
     }
 
     // report step metrics
@@ -536,7 +606,8 @@ bool NormalEngine::isEagle() {
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
-        int propose_step = sp_config.gen_num_per_cycle;
+        int propose_step   = sp_config.gen_num_per_cycle;
+        int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -547,7 +618,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -566,7 +637,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
                 }
                 break;
             }

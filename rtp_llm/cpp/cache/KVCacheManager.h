@@ -24,6 +24,7 @@ class CPSlotMapper;
 class CacheStore;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
+class PrefillCacheHitMetricsReporter;
 
 class KVCacheManager {
 public:
@@ -107,6 +108,8 @@ public:
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    void                    refreshKVCacheInfoSnapshot();
+    KVCacheInfo             buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -167,6 +170,7 @@ private:
     void initConnectorCoordinator();
     void allocateAndSync();
     void reportMetricsLoop();
+    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
 
     // 成员变量
     CacheConfig         config_;
@@ -181,12 +185,16 @@ private:
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
 
-    std::shared_ptr<CPSlotMapper> cp_slot_mapper_;
+    std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
+    std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
     std::shared_ptr<KVCacheConnectorCoordinator> coordinator_;
+
+    mutable std::mutex                 cache_status_snapshot_mutex_;
+    std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

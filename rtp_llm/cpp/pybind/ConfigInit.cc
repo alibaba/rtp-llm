@@ -265,6 +265,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(pybind11::init<>())  // Default constructor
         .def(pybind11::init<const std::string&>(),
              pybind11::arg("json_str"))  // JSON string constructor
+        .def_readwrite("max_server_pollers", &GrpcConfig::max_server_pollers)
         .def("to_string", &GrpcConfig::to_string)
         .def("from_json", &GrpcConfig::from_json, "Initialize from JSON string")
         .def("get_client_config", &GrpcConfig::get_client_config)
@@ -282,15 +283,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 for (const auto& pair : server_config) {
                     server_dict[py::str(pair.first)] = pair.second;
                 }
-                return py::make_tuple(client_dict, server_dict);
+                return py::make_tuple(client_dict, server_dict, self.max_server_pollers);
             },
             [](py::tuple t) {
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid state!");
                 GrpcConfig c;
                 try {
                     py::dict client_dict = t[0].cast<py::dict>();
                     py::dict server_dict = t[1].cast<py::dict>();
+                    int      max_pollers = (t.size() == 3) ? t[2].cast<int>() : 0;
 
                     // Convert Python dicts to JSON string
                     std::ostringstream oss;
@@ -310,7 +312,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         first = false;
                         oss << "\"" << py::str(item.first).cast<std::string>() << "\": " << py::cast<int>(item.second);
                     }
-                    oss << "}}";
+                    oss << "}";
+                    if (max_pollers > 0) {
+                        oss << ", \"max_server_pollers\": " << max_pollers;
+                    }
+                    oss << "}";
                     c.from_json(oss.str());
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("GrpcConfig unpickle error: ") + e.what());
@@ -1292,24 +1298,32 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_batch_tokens_size", &FIFOSchedulerConfig::max_batch_tokens_size)
         .def_readwrite("pdfusion_scheduler_mode", &FIFOSchedulerConfig::pdfusion_scheduler_mode)
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
+        .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
+        .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
         .def("to_string", &FIFOSchedulerConfig::to_string)
         .def(py::pickle(
             [](const FIFOSchedulerConfig& self) {
                 return py::make_tuple(self.max_context_batch_size,
                                       self.max_batch_tokens_size,
                                       self.pdfusion_scheduler_mode,
-                                      self.decode_prefill_ratio);
+                                      self.decode_prefill_ratio,
+                                      self.cp_force_single_prefill,
+                                      self.max_inited_kv_cache_streams);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
                     c.max_context_batch_size = t[0].cast<int64_t>();
                     c.max_batch_tokens_size  = t[1].cast<int64_t>();
-                    if (t.size() == 4) {
+                    if (t.size() >= 4) {
                         c.pdfusion_scheduler_mode = t[2].cast<std::string>();
                         c.decode_prefill_ratio    = t[3].cast<std::string>();
+                    }
+                    if (t.size() == 6) {
+                        c.cp_force_single_prefill     = t[4].cast<bool>();
+                        c.max_inited_kv_cache_streams = t[5].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
@@ -1891,6 +1905,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("embedding_size", &ModelConfig::embedding_size)
         .def_readwrite("moe_normalize_expert_scale", &ModelConfig::moe_normalize_expert_scale)
         .def_readwrite("scoring_func", &ModelConfig::scoring_func)
+        .def_readwrite("hc_mult", &ModelConfig::hc_mult)
+        .def_readwrite("hc_sinkhorn_iters", &ModelConfig::hc_sinkhorn_iters)
+        .def_readwrite("hc_eps", &ModelConfig::hc_eps)
+        .def_readwrite("swiglu_limit", &ModelConfig::swiglu_limit)
+        .def_readwrite("num_hash_layers", &ModelConfig::num_hash_layers)
         .def_readwrite("has_positional_encoding", &ModelConfig::has_positional_encoding)
         .def_readwrite("has_pre_decoder_layernorm", &ModelConfig::has_pre_decoder_layernorm)
         .def_readwrite("has_post_decoder_layernorm", &ModelConfig::has_post_decoder_layernorm)

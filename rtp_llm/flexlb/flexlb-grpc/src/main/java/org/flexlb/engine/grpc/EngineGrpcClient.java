@@ -88,14 +88,14 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
             // Record statistics
             long duration = endTime - startTime;
-            grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, false);
+            grpcReporter.reportCallMetrics(serviceType.getSuffix(), duration, responseSize, false);
 
             return response;
         } catch (StatusRuntimeException e) {
             if (isConnectionBrokenError(e)) {
                 invoker.markExpired();
                 long connectionDuration = invoker.getConnectionDuration();
-                grpcReporter.reportConnectionDuration(ip, serviceType.getOperationName(), connectionDuration);
+                grpcReporter.reportConnectionDuration(serviceType.getSuffix(), connectionDuration);
                 Logger.warn("Connection broken for {}:{} {}, duration: {}μs, recreating channel and retrying once, msh:{}",
                         ip, port, serviceType, connectionDuration, e.getMessage());
                 return retryWithNewChannel(channelKey, invoker, grpcCall, requestTimeoutMs, ip, port, serviceType);
@@ -144,7 +144,7 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
         // Record retry statistics
         long duration = endTime - startTime;
-        grpcReporter.reportCallMetrics(ip, serviceType.getOperationName(), duration, responseSize, true);
+        grpcReporter.reportCallMetrics(serviceType.getSuffix(), duration, responseSize, true);
 
         return response;
     }

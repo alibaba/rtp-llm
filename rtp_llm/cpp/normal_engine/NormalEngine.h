@@ -1,10 +1,7 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
-#include <iostream>
 #include <memory>
-#include <thread>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -59,6 +56,7 @@ private:
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
+    size_t                          getWarmUpInputLength() const;
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);

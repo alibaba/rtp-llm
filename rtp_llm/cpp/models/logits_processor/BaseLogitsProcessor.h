@@ -55,6 +55,24 @@ public:
         return std::nullopt;
     }
 
+
+    // --- async decode extensions (stream-async / grpc device-state pipelines) ---
+    // Stateful processors advance internal state per committed token; the async
+    // pipelines use these hooks to keep bookkeeping off the hot path.
+    virtual bool isStateful() const {
+        return false;
+    }
+    virtual bool supportsNormalAsyncDeviceState() const {
+        return false;
+    }
+    virtual void prepareNormalAsyncUpdate(const torch::Tensor& new_tokens, int32_t num_new_tokens) {
+        (void)new_tokens;
+        (void)num_new_tokens;
+    }
+    virtual int64_t acceptedTokenLen() const {
+        return 0;
+    }
+
     void          memFill(const torch::Tensor& new_tokens_logits, size_t vocab_size, size_t index);
     void          maskLogits(torch::Tensor& new_token_logits, const torch::Tensor& vocab_mask);
     torch::Tensor generateVocabMask(size_t                                  batch_size,

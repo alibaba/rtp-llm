@@ -127,6 +127,11 @@ struct Weights {
     std::shared_ptr<const LayerNormWeights> final_layernorm;
     std::shared_ptr<const DenseWeights>     linear_bias_slopes;
     std::shared_ptr<const DenseWeights>     lm_head;
+
+    // for sp decode prune vocab (draft<->target vocab mapping)
+    torch::Tensor d2t_map;
+    // Reserved for future target-to-draft mapping (e.g. logit projection). Loaded but not yet used at runtime.
+    torch::Tensor t2d_map;
 };
 
 using WeightsPtr = std::shared_ptr<const Weights>;

@@ -4,6 +4,7 @@
 #include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "torch/all.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -12,6 +13,8 @@
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 
 namespace rtp_llm {
+
+struct TensorHolder;
 
 struct NormalModelInputGathererConfig {
     size_t                      num_layers{};
@@ -40,13 +43,21 @@ class NormalModelInputGatherer {
 public:
     explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
 
-    absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups) const;
+    absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
+
+    // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
+    // Read-only over streams: no step(), no sibling kv_cache_block_id, no
+    // other gather sub-step. Empty input returns an undefined tensor.
+    absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups& stream_groups,
+                                                             TensorHolder&       host_holder) const;
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
     absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
-    absl::Status   processContextStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
+    absl::Status   processContextStreams(GptModelInputs&     model_input,
+                                         const StreamGroups& stream_groups,
+                                         TensorHolder&       host_holder) const;
 
     NormalModelInputGathererConfig config_;
 };

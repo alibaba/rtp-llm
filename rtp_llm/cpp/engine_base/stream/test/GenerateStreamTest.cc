@@ -30,11 +30,10 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids, int max_new_tokens = 8192) {
+    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
         ResourceContext                 resource_context;
-        generate_config->max_new_tokens = max_new_tokens;
         generate_input->generate_config = generate_config;
         generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         generate_input->input_ids =
@@ -107,34 +106,6 @@ void waitForConsumer(std::future<T>& future, const std::shared_ptr<NormalGenerat
     EXPECT_EQ(status, std::future_status::ready);
     future.wait();
 }
-
-class RecordingLogitsProcessor final: public BaseLogitsProcessor {
-public:
-    explicit RecordingLogitsProcessor(std::optional<int64_t> reported_output_len = std::nullopt):
-        reported_output_len_(reported_output_len) {}
-
-    std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {
-        return std::nullopt;
-    }
-
-    void updateMultiSeqStatus(const std::vector<int>&) override {}
-
-    std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override {
-        ++commit_calls;
-        committed_tokens.assign(new_tokens.data_ptr<int32_t>(), new_tokens.data_ptr<int32_t>() + num_new_tokens);
-        return std::nullopt;
-    }
-
-    std::optional<int64_t> committedOutputLen() const override {
-        return reported_output_len_;
-    }
-
-    int                  commit_calls = 0;
-    std::vector<int32_t> committed_tokens;
-
-private:
-    std::optional<int64_t> reported_output_len_;
-};
 
 TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
@@ -536,88 +507,83 @@ TEST_F(GenerateStreamTest, publicReadinessReaderIsSafeDuringPublication) {
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
 }
 
-TEST_F(GenerateStreamTest, CommitsFinalTokenBeforePublishingFinishedOutput) {
-    auto builder   = GenerateStreamBuilder();
-    auto stream    = builder.createContextStream({1, 2, 3}, /*max_new_tokens=*/1);
-    auto processor = std::make_shared<RecordingLogitsProcessor>();
-    stream->logits_processor_list_.push_back(processor);
-    stream->setIsContextStream(false);
-    stream->generate_status_->status = StreamState::RUNNING;
+// clearMtpAsyncDeviceState rejects stale epochs. A worker that
+// captured epoch N must not clear state that step N+1 already published
+// under epoch N+1.
+TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateStaleEpochReject) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
-    auto             new_tokens = torch::tensor({{42}}, torch::kInt32);
-    StreamUpdateInfo update_info{new_tokens,
-                                 1,
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor()};
+    // Start: epoch counter is 0, state is default-constructed.
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().epoch, 0u);
+    ASSERT_FALSE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
 
-    stream->update(update_info);
+    // Step 1: publish state, capture epoch_1.
+    GenerateStream::MtpAsyncDeviceState s1;
+    s1.accept_len_gpu      = torch::ones({1}, torch::kInt32);
+    const uint64_t epoch_1 = stream->setMtpAsyncDeviceState(std::move(s1));
+    ASSERT_EQ(epoch_1, 1u);
+    ASSERT_TRUE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
 
-    EXPECT_TRUE(stream->generate_status_->checkFinished());
-    EXPECT_FALSE(stream->hasError());
-    EXPECT_EQ(stream->outputTokenLen(), 1);
-    EXPECT_EQ(processor->commit_calls, 1);
-    EXPECT_EQ(processor->committed_tokens, std::vector<int32_t>({42}));
+    // Step 2: another publish before the worker for epoch_1 ran. Counter
+    // bumps; old epoch should now be stale.
+    GenerateStream::MtpAsyncDeviceState s2;
+    s2.accept_len_gpu      = torch::ones({1}, torch::kInt32) * 2;
+    const uint64_t epoch_2 = stream->setMtpAsyncDeviceState(std::move(s2));
+    ASSERT_EQ(epoch_2, 2u);
+    ASSERT_NE(epoch_1, epoch_2);
+
+    // Stale worker for epoch_1 attempts to clear: must be rejected, state
+    // for epoch_2 must remain intact.
+    ASSERT_FALSE(stream->clearMtpAsyncDeviceState(epoch_1));
+    ASSERT_TRUE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().epoch, epoch_2);
+
+    // Worker for epoch_2 clears successfully.
+    ASSERT_TRUE(stream->clearMtpAsyncDeviceState(epoch_2));
+    ASSERT_FALSE(stream->getMtpAsyncDeviceState().accept_len_gpu.defined());
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().epoch, 0u);
+
+    // Repeated stale clear after the live state is gone is also a no-op
+    // (epoch 0 != epoch_2 since state was reset to default).
+    ASSERT_FALSE(stream->clearMtpAsyncDeviceState(epoch_2));
 }
 
-TEST_F(GenerateStreamTest, IgnoresUpdateAfterStreamIsFinished) {
-    auto builder   = GenerateStreamBuilder();
-    auto stream    = builder.createContextStream({1, 2, 3});
-    auto processor = std::make_shared<RecordingLogitsProcessor>();
-    stream->logits_processor_list_.push_back(processor);
-    stream->generate_status_->status = StreamState::FINISHED;
-    const auto output_len_before     = stream->outputTokenLen();
+TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateTracksRealAndUpperBoundSeqLen) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
-    auto             new_tokens = torch::tensor({{42}}, torch::kInt32);
-    StreamUpdateInfo update_info{new_tokens,
-                                 1,
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor()};
+    GenerateStream::MtpAsyncDeviceState state;
+    state.last_real_seq_len = stream->seqLength();
+    state.next_real_seq_len = state.last_real_seq_len + 2;
+    stream->setMtpAsyncDeviceState(std::move(state));
 
-    stream->update(update_info);
-
-    EXPECT_EQ(stream->outputTokenLen(), output_len_before);
-    EXPECT_EQ(processor->commit_calls, 0);
-    EXPECT_FALSE(stream->hasOutput());
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().last_real_seq_len, stream->seqLength());
+    ASSERT_EQ(stream->getMtpAsyncDeviceState().next_real_seq_len, stream->seqLength() + 2);
 }
 
-TEST_F(GenerateStreamTest, RejectsProcessorLengthMismatchBeforePublishingOutput) {
-    auto builder   = GenerateStreamBuilder();
-    auto stream    = builder.createContextStream({1, 2, 3});
-    auto processor = std::make_shared<RecordingLogitsProcessor>(/*reported_output_len=*/0);
-    stream->logits_processor_list_.push_back(processor);
-    stream->setIsContextStream(false);
-    stream->generate_status_->status = StreamState::RUNNING;
+// setSpecDecodeDeviceState / clearSpecDecodeDeviceState
+// continue to work as wrappers around the new struct API.
+TEST_F(GenerateStreamTest, testMtpAsyncDeviceStateBackCompatWrappers) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
 
-    auto             new_tokens = torch::tensor({{42}}, torch::kInt32);
-    StreamUpdateInfo update_info{new_tokens,
-                                 1,
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor(),
-                                 torch::Tensor()};
+    auto accept_len     = torch::ones({1}, torch::kInt32);
+    auto accept_tokens  = torch::ones({1, 2}, torch::kInt32);
+    auto next_seq_len   = torch::ones({1}, torch::kInt32) * 7;
+    auto propose_tokens = torch::ones({1, 4}, torch::kInt32);
 
-    stream->update(update_info);
+    stream->setSpecDecodeDeviceState(accept_len, accept_tokens, next_seq_len, propose_tokens);
+    ASSERT_TRUE(stream->getAcceptLenGpu().defined());
+    ASSERT_TRUE(stream->getAcceptTokensGpu().defined());
+    ASSERT_TRUE(stream->getNextSeqLenGpu().defined());
+    ASSERT_TRUE(stream->getProposeTokensGpu().defined());
 
-    EXPECT_EQ(processor->commit_calls, 1);
-    EXPECT_TRUE(stream->hasError());
-    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::UNKNOWN_ERROR);
-    EXPECT_FALSE(stream->hasOutput());
+    stream->clearSpecDecodeDeviceState();
+    ASSERT_FALSE(stream->getAcceptLenGpu().defined());
+    ASSERT_FALSE(stream->getAcceptTokensGpu().defined());
+    ASSERT_FALSE(stream->getNextSeqLenGpu().defined());
+    ASSERT_FALSE(stream->getProposeTokensGpu().defined());
 }
 TEST_F(GenerateStreamTest, testDynamicBeamLayoutDependsOnCurrentTransition) {
     ModelConfig model_config;

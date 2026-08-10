@@ -1,6 +1,9 @@
 package org.flexlb.balance.scheduler;
 
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.flexlb.balance.policy.GroupRoutingDecision;
+import org.flexlb.balance.policy.GroupRoutingPolicy;
 import org.flexlb.balance.strategy.LoadBalanceStrategyFactory;
 import org.flexlb.balance.strategy.LoadBalancer;
 import org.flexlb.config.ConfigService;
@@ -30,8 +33,10 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
+    private final GroupRoutingPolicy groupRoutingPolicy;
 
-    public DefaultRouter(ConfigService configService) {
+    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy) {
+        this.groupRoutingPolicy = groupRoutingPolicy;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
@@ -111,7 +116,13 @@ public class DefaultRouter implements Router {
      */
     public RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
         List<ServerStatus> serverStatusList = new ArrayList<>();
-        String group = null;
+        GroupRoutingDecision groupRoutingDecision = groupRoutingPolicy.route(balanceContext);
+        String policyGroup = groupRoutingDecision.group();
+        String group = policyGroup;
+        if (groupRoutingDecision.hasGroup()) {
+            Logger.info("Group routing policy selected group, requestId: {}, policy: {}, group: {}",
+                    balanceContext.getRequestId(), groupRoutingDecision.policyName(), group);
+        }
 
         for (RoleType roleType : roleTypeList) {
             LoadBalancer loadBalancer = getLoadBalancer(roleType);
@@ -127,7 +138,9 @@ public class DefaultRouter implements Router {
             serverStatusList.add(serverStatus);
 
             // Update group for affinity-based selection of subsequent roles
-            group = serverStatus.getGroup();
+            if (StringUtils.isBlank(policyGroup)) {
+                group = serverStatus.getGroup();
+            }
         }
 
         return RoutingResult.success(serverStatusList);

@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import re
 from datetime import timedelta
 from enum import Enum
 from typing import Dict, List, Optional, Union
@@ -10,17 +11,13 @@ from typing import Dict, List, Optional, Union
 import torch
 import torch.distributed
 
-from rtp_llm.models_py.distributed import rocm_rccl
-from rtp_llm.models_py.distributed.symm_mem import (
-    get_symm_mem_communicator,
-    init_symm_mem_communicator,
-)
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 # ParallelMode enum values matching C++ rtp_llm::ParallelMode in OpData.h
 _CPP_PARALLEL_MODE_TP = 0
 _CPP_PARALLEL_MODE_DP = 1
 _CPP_PARALLEL_MODE_DP_AND_TP = 2
+_UDS_SUN_PATH_LIMIT = 108
 
 
 class Group(Enum):
@@ -36,6 +33,83 @@ class Group(Enum):
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
+_cpu_tp_broadcaster_base_path: Optional[str] = None
+_rocm_rccl = None
+_symm_mem = None
+
+
+def _get_rocm_rccl():
+    """Lazily import ROCm RCCL helpers.
+
+    The module self-gates on non-ROCm runtimes via its internal
+    ``_is_rocm_runtime`` checks (same semantics as the eager import on main),
+    so callers may invoke its wrappers unconditionally.
+    """
+    global _rocm_rccl
+    if _rocm_rccl is None:
+        from rtp_llm.models_py.distributed import rocm_rccl
+
+        _rocm_rccl = rocm_rccl
+    return _rocm_rccl
+
+
+def _get_symm_mem():
+    global _symm_mem
+    if _symm_mem is None:
+        from rtp_llm.models_py.distributed import symm_mem
+
+        _symm_mem = symm_mem
+    return _symm_mem
+
+
+def _make_cpu_tp_broadcaster_base_path(
+    parallelism_config: ParallelismConfig,
+    nccl_init_port: int,
+) -> str:
+    session_id = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_ID")
+    if not session_id:
+        session_id = f"ppid{os.getppid()}_port{nccl_init_port}"
+    session_id = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+
+    base_dir = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_DIR")
+    if not base_dir:
+        base_dir = os.path.join(
+            os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
+        )
+    os.makedirs(base_dir, mode=0o700, exist_ok=True)
+    base_path = os.path.join(
+        base_dir, f"rtp_llm_tp_{session_id}_dp{parallelism_config.dp_rank}"
+    )
+    rank0_path = f"{base_path}_0.sock"
+    if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
+        raise ValueError(
+            f"CpuTpBroadcaster UDS path too long ({len(os.fsencode(rank0_path))} "
+            f"bytes, limit {_UDS_SUN_PATH_LIMIT - 1}): {rank0_path}"
+        )
+    return base_path
+
+
+def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
+    # Process-group construction below uses this world-rank layout. Keep the
+    # explicit config fields in sync for callsites that only fill sizes/ranks.
+    if parallelism_config.tp_size > 0:
+        old_tp_rank = parallelism_config.tp_rank
+        old_dp_rank = parallelism_config.dp_rank
+        tp_rank = parallelism_config.world_rank % parallelism_config.tp_size
+        dp_rank = parallelism_config.world_rank // parallelism_config.tp_size
+        if (old_tp_rank, old_dp_rank) != (tp_rank, dp_rank):
+            logging.warning(
+                "Normalize ParallelismConfig ranks from tp_rank=%s, dp_rank=%s "
+                "to tp_rank=%s, dp_rank=%s for world_rank=%s, tp_size=%s",
+                old_tp_rank,
+                old_dp_rank,
+                tp_rank,
+                dp_rank,
+                parallelism_config.world_rank,
+                parallelism_config.tp_size,
+            )
+        parallelism_config.tp_rank = tp_rank
+        parallelism_config.dp_rank = dp_rank
 
 
 def init_distributed_environment(
@@ -60,7 +134,7 @@ def init_distributed_environment(
     Raises:
         RuntimeError: If already initialized and not destroyed
     """
-    global _group_map, _parallelism_config, _initialized
+    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -69,11 +143,21 @@ def init_distributed_environment(
         )
         # Still need to create groups if they don't exist
         if not _group_map:
+            _normalize_parallelism_ranks(parallelism_config)
+            _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
+                parallelism_config, nccl_init_port
+            )
             _create_process_groups(parallelism_config, backend, timedelta(days=36500))
             _register_process_groups_to_cpp()
-        if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+        rocm_rccl = _get_rocm_rccl()
+        if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
+
+    _normalize_parallelism_ranks(parallelism_config)
+    _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
+        parallelism_config, nccl_init_port
+    )
 
     assert backend in ["nccl"], "backend current only supports nccl"
     ip = nccl_comm_config.nccl_ip
@@ -82,7 +166,9 @@ def init_distributed_environment(
     world_size = parallelism_config.world_size
     local_rank = parallelism_config.local_rank
 
-    rocm_rccl.configure_process_groups(parallelism_config)
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
+        rocm_rccl.configure_process_groups(parallelism_config)
     os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
 
     # If torch.distributed is already initialized (e.g., by external code),
@@ -93,7 +179,7 @@ def init_distributed_environment(
         _parallelism_config = parallelism_config
         _initialized = True
         _register_process_groups_to_cpp()
-        if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+        if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
 
@@ -127,7 +213,7 @@ def init_distributed_environment(
     _parallelism_config = parallelism_config
     _initialized = True
     _register_process_groups_to_cpp()
-    if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
+    if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
 
@@ -199,13 +285,13 @@ def _create_process_groups(
                         f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                     )
 
-                init_symm_mem_communicator(tp_group)
+                _get_symm_mem().init_symm_mem_communicator(tp_group)
 
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
         # Single TP group: WORLD is the TP group, init symm_mem for it
-        init_symm_mem_communicator(torch.distributed.group.WORLD)
+        _get_symm_mem().init_symm_mem_communicator(torch.distributed.group.WORLD)
 
 
 def _register_process_groups_to_cpp():
@@ -356,12 +442,30 @@ def _register_process_groups_to_cpp():
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             return
-        device_id = torch.cuda.current_device()
-        rank = pg.rank()
         world_size = pg.size()
+        device_id: Optional[int] = None
+        rank = pg.rank() if inplace else 0
         for i, recv_buf in enumerate(recv_buffers):
-            data_num = recv_buf.numel() // world_size
             recv_on_cpu = not recv_buf.is_cuda
+            data_num = recv_buf.numel() // world_size
+            if not inplace:
+                send_tensor = send_buffers[i]
+                if (
+                    not recv_on_cpu
+                    and send_tensor.is_cuda
+                    and recv_buf.is_contiguous()
+                    and send_tensor.is_contiguous()
+                ):
+                    # Fast path for C++ explicit-send allgather: keep the 2D
+                    # output shape so c10d can launch directly without local
+                    # rank-slice packing or Python-side CUDA promotion.
+                    torch.distributed.all_gather_into_tensor(
+                        recv_buf, send_tensor, group=pg
+                    )
+                    continue
+
+            if device_id is None:
+                device_id = torch.cuda.current_device()
             gpu_recv = (
                 recv_buf.to(torch.device("cuda", device_id))
                 if recv_on_cpu
@@ -373,8 +477,7 @@ def _register_process_groups_to_cpp():
                     0, rank * data_num, data_num
                 ).contiguous()
             else:
-                send_t = send_buffers[i]
-                send_tensor, _ = _ensure_cuda(send_t, device_id)
+                send_tensor, _ = _ensure_cuda(send_tensor, device_id)
             torch.distributed.all_gather_into_tensor(
                 gpu_recv_flat, send_tensor, group=pg
             )
@@ -385,6 +488,29 @@ def _register_process_groups_to_cpp():
     logging.info(
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )
+
+    # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
+    # Lazy C++ init can race if a peer reaches tpSyncModelInputs before rank 0
+    # binds; cross-node TP keeps the NCCL fallback.
+    if (
+        _parallelism_config is not None
+        and _parallelism_config.tp_size > 1
+        and _parallelism_config.tp_size <= _parallelism_config.local_world_size
+        and hasattr(librtp_compute_ops, "init_cpu_tp_broadcaster")
+    ):
+        # Parent PID plus NCCL init port gives peers a shared per-init UDS path.
+        # dp_rank disambiguates DP groups on the same node.
+        base_path = _cpu_tp_broadcaster_base_path
+        assert base_path is not None
+        librtp_compute_ops.init_cpu_tp_broadcaster(
+            _parallelism_config.tp_rank,
+            _parallelism_config.tp_size,
+            base_path,
+        )
+        logging.info(
+            f"Initialized CpuTpBroadcaster (tp_rank={_parallelism_config.tp_rank}, "
+            f"tp_size={_parallelism_config.tp_size}, base_path={base_path})"
+        )
 
 
 def distributed_environment_initialized() -> bool:
@@ -426,7 +552,7 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized
+    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -445,13 +571,16 @@ def destroy_distributed_environment():
 
         if hasattr(librtp_compute_ops, "clear_comm_ops"):
             librtp_compute_ops.clear_comm_ops()
+        if hasattr(librtp_compute_ops, "destroy_cpu_tp_broadcaster"):
+            librtp_compute_ops.destroy_cpu_tp_broadcaster()
     except ImportError:
         pass
 
     # Clean up ROCm RCCL capture comm before destroying process groups,
     # so that re-init will bootstrap a fresh communicator instead of
     # reusing the stale one from the destroyed environment.
-    if rocm_rccl.is_available_runtime():
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
         rocm_rccl.destroy_capture_comm()
 
     if torch.distributed.is_initialized():
@@ -459,6 +588,7 @@ def destroy_distributed_environment():
     _group_map.clear()
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
+    _cpu_tp_broadcaster_base_path = None
     _initialized = False
     gc.collect()
 
@@ -571,12 +701,14 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     Returns:
         All-reduced tensor (same as input tensor)
     """
-    rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
-    if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-        return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
+        rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+        if rocm_rccl.should_use_capture_collectives(group == Group.TP):
+            return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
 
     if group == Group.TP:
-        symm_mem_comm = get_symm_mem_communicator()
+        symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
         ):
@@ -600,13 +732,15 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
         Concatenated tensor containing all gathered tensors
         (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
     """
-    rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
-    if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-        process_group = _get_group(group)
-        return rocm_rccl.capture_all_gather(tensor, process_group)
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
+        rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
+        if rocm_rccl.should_use_capture_collectives(group == Group.TP):
+            process_group = _get_group(group)
+            return rocm_rccl.capture_all_gather(tensor, process_group)
 
     if group == Group.TP:
-        symm_mem_comm = get_symm_mem_communicator()
+        symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allgather(
             tensor
         ):

@@ -107,6 +107,7 @@ struct EngineInitParams {
     MiscellaneousConfig          misc_config;
     ArpcConfig                   arpc_config;
     GrpcConfig                   grpc_config;
+    GrammarConfig                grammar_config;
     FfnDisAggregateConfig        ffn_disaggregate_config;
     VitConfig                    vit_config;
     rtp_llm::Weights             gpt_weights;
@@ -114,7 +115,6 @@ struct EngineInitParams {
     py::object                   py_eplb;
     py::object                   py_sp_model;
     py::object                   weight_manager;
-    GrammarConfig                grammar_config;
     kmonitor::MetricsReporterPtr metrics_reporter = nullptr;
 
 public:

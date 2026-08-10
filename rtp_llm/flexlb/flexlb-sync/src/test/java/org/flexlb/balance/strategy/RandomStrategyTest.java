@@ -1,6 +1,10 @@
 package org.flexlb.balance.strategy;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.balance.resource.ResourceMeasure;
+import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -13,6 +17,7 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -32,10 +37,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RandomStrategyTest {
 
     private RandomStrategy randomStrategy;
+    private ResourceMeasure resourceMeasure;
 
     @BeforeEach
     void setUp() {
-        randomStrategy = new RandomStrategy(new EngineWorkerStatus(new ModelMetaConfig()));
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        resourceMeasure = Mockito.mock(ResourceMeasure.class);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
+        Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
+        randomStrategy = new RandomStrategy(
+                new EngineWorkerStatus(new ModelMetaConfig()),
+                configService,
+                resourceMeasureFactory);
     }
 
     @AfterEach
@@ -269,7 +284,7 @@ class RandomStrategyTest {
     }
 
     @Test
-    void should_select_dead_workers_with_warning() {
+    void should_skip_dead_workers() {
         // Given: Model with mix of alive and dead workers
         Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
@@ -302,10 +317,38 @@ class RandomStrategyTest {
             }
         }
 
-        // Then: Both workers should be selected (RandomStrategy doesn't filter dead workers)
-        // Note: RandomStrategy doesn't filter dead workers, it just warns
-        assertTrue(selectionCount.containsKey("127.0.0.1") || selectionCount.containsKey("127.0.0.2"));
-        assertEquals(totalRuns, selectionCount.getOrDefault("127.0.0.1", 0) + selectionCount.getOrDefault("127.0.0.2", 0));
+        // Then: Only alive workers should be selected
+        assertFalse(selectionCount.containsKey("127.0.0.1"));
+        assertEquals(totalRuns, selectionCount.getOrDefault("127.0.0.2", 0));
+    }
+
+    @Test
+    void should_skip_workers_rejected_by_resource_measure() {
+        // Given: Model with one resource-unavailable worker and one available worker
+        Map<String, WorkerStatus> decodeStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus unavailableWorker = createWorkerStatus("127.0.0.1");
+        WorkerStatus availableWorker = createWorkerStatus("127.0.0.2");
+        decodeStatusMap.put("127.0.0.1:8080", unavailableWorker);
+        decodeStatusMap.put("127.0.0.2:8080", availableWorker);
+
+        Mockito.when(resourceMeasure.isResourceAvailable(unavailableWorker)).thenReturn(false);
+        Mockito.when(resourceMeasure.isResourceAvailable(availableWorker)).thenReturn(true);
+
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setRequestId(12345L);
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+
+        // When: Select a decode worker
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.DECODE, null);
+
+        // Then: RandomStrategy should honor serviceability filtering
+        assertTrue(result.isSuccess());
+        assertEquals("127.0.0.2", result.getServerIp());
+        assertTrue(availableWorker.getLocalTaskMap().containsKey(12345L));
     }
 
     @Test

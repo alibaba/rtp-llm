@@ -1,7 +1,10 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
@@ -40,25 +43,32 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 @Component
 public class HttpLoadBalanceServer {
     private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
+    private static final String AUTHORIZATION_HEADER = "Authorization";
+    private static final String X_API_KEY_HEADER = "X-Api-Key";
+    private static final String API_KEY_HEADER = "Api-Key";
+    private static final String BEARER_PREFIX = "Bearer ";
     private final GeneralHttpNettyService generalHttpNettyService;
     private final RouteService routeService;
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final EngineHealthReporter engineHealthReporter;
     private final QueueManager queueManager;
     private final ActiveRequestCounter activeRequestCounter;
+    private final ConfigService configService;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
                                  LBStatusConsistencyService lbStatusConsistencyService,
                                  EngineHealthReporter engineHealthReporter,
                                  QueueManager queueManager,
-                                 ActiveRequestCounter activeRequestCounter) {
+                                 ActiveRequestCounter activeRequestCounter,
+                                 ConfigService configService) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
+        this.configService = configService;
     }
 
     @Bean
@@ -74,6 +84,8 @@ public class HttpLoadBalanceServer {
                         this::notifyParticipant)
                 .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
                         this::debugMode)
+                .POST("/rtp_llm/update_traffic_policy", accept(MediaType.APPLICATION_JSON),
+                        this::updateTrafficPolicy)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
                 .build();
@@ -92,6 +104,7 @@ public class HttpLoadBalanceServer {
                     if (req.getRequestId() == 0) {
                         throw new IllegalArgumentException("requestId is 0");
                     }
+                    populateApiKeyFromHeaders(req, request);
                     ctx.setRequest(req);
                     return Mono.using(
                             activeRequestCounter::acquire,
@@ -100,6 +113,34 @@ public class HttpLoadBalanceServer {
                 })
                 .onErrorResume(e -> handleRequestError(ctx, e))
                 .doFinally(signal -> finalizeRequestContext(ctx));
+    }
+
+    private void populateApiKeyFromHeaders(Request req, ServerRequest serverRequest) {
+        if (StringUtils.isNotBlank(req.getApiKey())) {
+            return;
+        }
+
+        String apiKey = firstNonBlank(
+                serverRequest.headers().firstHeader(X_API_KEY_HEADER),
+                serverRequest.headers().firstHeader(API_KEY_HEADER),
+                extractBearerToken(serverRequest.headers().firstHeader(AUTHORIZATION_HEADER)));
+        req.setApiKey(apiKey);
+    }
+
+    private String extractBearerToken(String authorization) {
+        if (StringUtils.isBlank(authorization) || !authorization.startsWith(BEARER_PREFIX)) {
+            return null;
+        }
+        return authorization.substring(BEARER_PREFIX.length()).trim();
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (StringUtils.isNotBlank(value)) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private Mono<ServerResponse> processScheduledRequest(BalanceContext ctx, Request req) {
@@ -127,6 +168,21 @@ public class HttpLoadBalanceServer {
                             .body(Mono.just("Success! logLevel=" + Logger.getGlobalLogLevel()), String.class);
                 }).onErrorResume(e -> {
                     Logger.error("update logLevel error", e);
+                    return ServerResponse.status(500)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(Mono.just(e.getMessage()), String.class);
+                });
+    }
+
+    private Mono<ServerResponse> updateTrafficPolicy(ServerRequest serverRequest) {
+        return serverRequest.bodyToMono(TrafficPolicyConfig.class)
+                .flatMap(trafficPolicyConfig -> {
+                    configService.updateTrafficPolicy(trafficPolicyConfig);
+                    return ServerResponse.ok()
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(Mono.just(trafficPolicyConfig), TrafficPolicyConfig.class);
+                }).onErrorResume(e -> {
+                    Logger.error("update traffic policy error", e);
                     return ServerResponse.status(500)
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(e.getMessage()), String.class);
