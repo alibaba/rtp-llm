@@ -526,6 +526,22 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     }
                 }
             }
+
+            // AutoTPM Cancel: an explicit finished record is
+            // the release-confirmation event — feed the ReleaseTracker so the
+            // accepted-eviction wait completes. Task DISAPPEARANCE deliberately
+            // does NOT feed the tracker (absence is never release proof).
+            for (TaskInfo task : finishedTaskInfo.values()) {
+                org.flexlb.balance.scheduler.priority.ReleaseTracker.global().onWorkerStatus(
+                        new org.flexlb.balance.scheduler.priority.ReleaseTracker.ReleaseObservation(
+                                ipPort(),
+                                /*workerEpoch=*/0L,
+                                /*statusVersion=*/0L,
+                                task.getRequestId(),
+                                /*resourceReleased=*/true,
+                                /*lifecycleRevision=*/0L,
+                                (int) task.getErrorCode()));
+            }
         }
 
         // N2: keep the queued-phase set consistent with the reserved entries

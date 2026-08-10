@@ -28,8 +28,14 @@ class FlexlbScheduleProtocolTest {
                 EngineRpcService.GenerateInputPB.getDescriptor().findFieldByNumber(10);
         assertEquals("priority", priority.getName());
         assertEquals(Descriptors.FieldDescriptor.Type.INT32, priority.getType());
+        // AutoTPM Cancel: TaskInfoPB carries the per-request priority; the
+        // former generation-fencing field 14 was removed as dead plumbing and
+        // must stay absent.
         assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(14));
-        assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(15));
+        Descriptors.FieldDescriptor taskPriority =
+                EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(15);
+        assertEquals("priority", taskPriority.getName());
+        assertEquals(Descriptors.FieldDescriptor.Type.INT32, taskPriority.getType());
         assertEquals(Descriptors.FieldDescriptor.Type.STRING,
                 EngineRpcService.WorkerStatusPB.getDescriptor().findFieldByNumber(1).getType());
         assertNull(FlexlbScheduleProtocol.FlexlbServerStatusPB.getDescriptor().findFieldByNumber(5));

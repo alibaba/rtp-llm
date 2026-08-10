@@ -2,8 +2,6 @@ package org.flexlb.mockengine;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
-import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.enums.TaskPhase;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -11,9 +9,13 @@ import java.util.concurrent.CompletableFuture;
 /**
  * Test-only {@link EngineCancelChannel} backed by the in-process mock engine
  * cluster. Resolves the target {@link JavaMockEngineCluster.FastRpcService} by
- * the endpoint's gRPC port and drives the mock cancel behaviour: on the found
- * branch the request is removed and a CANCELLED completion surfaces in the
- * next WorkerStatus finished list, exactly like a real engine would report.
+ * the endpoint's gRPC port and drives the mock cancel behaviour: a live
+ * request is removed and a CANCELLED completion surfaces in the next
+ * WorkerStatus finished list, exactly like a real engine would report.
+ * Mirrors the simplified engine contract: any cancel that reaches an engine
+ * acks ACCEPTED (intent registration) — including cancels landing after
+ * completion or for unknown ids — the observable effect lives in the mock
+ * engine state, never in the ack.
  *
  * <p><b>Wiring:</b> this class is NOT a Spring component. Production contexts
  * keep {@code UnsupportedEngineCancelChannel}; tests inject this channel
@@ -37,38 +39,21 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public CompletableFuture<CancelOutcome> cancel(DecodeEndpoint endpoint,
-                                                   long requestId,
-                                                   CancelReason reason) {
+    public CompletableFuture<CancelOutcome> cancel(CancelTarget target, long requestId, CancelReason reason) {
+        DecodeEndpoint endpoint = target.decodeEndpoint();
         JavaMockEngineCluster.FastRpcService service = services.get(endpoint.getGrpcPort());
         if (service == null) {
-            return CompletableFuture.completedFuture(CancelOutcome.unsupportedEndpoint());
+            return CompletableFuture.completedFuture(CancelOutcome.unsupported());
         }
         try {
-            JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
-            if (result.found()) {
-                return CompletableFuture.completedFuture(
-                        CancelOutcome.accepted(toTaskPhase(result.phase())));
-            }
-            if (result.alreadyFinished()) {
-                return CompletableFuture.completedFuture(CancelOutcome.finishedBeforeCancel());
-            }
-            return CompletableFuture.completedFuture(CancelOutcome.notFound());
+            // The mock engine applies the cancel side effects (removal +
+            // CANCELLED WorkerStatus record for a live request; no-op for a
+            // finished/unknown one); the ack is ACCEPTED either way.
+            service.cancelRequest(requestId);
+            return CompletableFuture.completedFuture(CancelOutcome.accepted());
         } catch (Exception e) {
             // Contract: never throw synchronously; surface as a failed future.
             return CompletableFuture.failedFuture(e);
         }
-    }
-
-    private static TaskPhase toTaskPhase(EngineRpcService.TaskPhase phase) {
-        if (phase == null) {
-            return null;
-        }
-        return switch (phase) {
-            case TASK_PHASE_PENDING -> TaskPhase.PENDING;
-            case TASK_PHASE_RECEIVED -> TaskPhase.RECEIVED;
-            case TASK_PHASE_KV_ALLOCATED -> TaskPhase.KV_ALLOCATED;
-            case TASK_PHASE_RUNNING, UNRECOGNIZED -> TaskPhase.RUNNING;
-        };
     }
 }

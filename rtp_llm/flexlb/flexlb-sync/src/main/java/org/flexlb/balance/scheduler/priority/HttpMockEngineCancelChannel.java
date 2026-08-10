@@ -1,10 +1,8 @@
 package org.flexlb.balance.scheduler.priority;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.enums.TaskPhase;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Primary;
@@ -43,7 +41,7 @@ import java.util.concurrent.CompletableFuture;
  * <p>Contract mirror of MockEngineCancelChannel: a cancel is an intent
  * injection only — release confirmation remains the next WorkerStatus report
  * (iron rule 4). Never throws synchronously; transport failures surface as a
- * failed future, protocol branches as a completed {@code CancelOutcome}.
+ * failed future, local branches as a completed {@code CancelOutcome}.
  */
 @Slf4j
 @Component
@@ -88,10 +86,16 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public CompletableFuture<CancelOutcome> cancel(DecodeEndpoint endpoint,
+    public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
                                                    long requestId,
                                                    CancelReason reason) {
         try {
+            // TEST-ONLY routing: the mock control plane resolves the target
+            // engine by the Decode endpoint's gRPC port (110 topology).
+            DecodeEndpoint endpoint = target.decodeEndpoint();
+            if (endpoint == null) {
+                return CompletableFuture.completedFuture(CancelOutcome.unsupported());
+            }
             String body = MAPPER.createObjectNode()
                     .put("port", endpoint.getGrpcPort())
                     .put("request_id", requestId)
@@ -112,46 +116,21 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
     }
 
     /**
-     * Maps the control-plane JSON ({@code {found, phase, already_finished}})
-     * onto the {@link CancelOutcome} three-branch contract: found →
-     * accepted(phase), already_finished → finishedBeforeCancel, otherwise
-     * notFound. A 404 (unknown engine/port) maps to the unsupported branch —
+     * Maps the control-plane HTTP status onto the simplified intent contract:
+     * any 200 is an intent registration — accepted() regardless of the JSON
+     * body (found / already_finished carry no decision-relevant information
+     * anymore). A 404 (unknown engine/port) maps to the unsupported branch —
      * the planning gate should have kept us away from that endpoint.
      */
     private CancelOutcome mapResponse(HttpResponse<String> response, long requestId) {
         if (response.statusCode() == 404) {
-            return CancelOutcome.unsupportedEndpoint();
+            return CancelOutcome.unsupported();
         }
         if (response.statusCode() != 200) {
             throw new IllegalStateException("mock cancel control plane returned HTTP "
                     + response.statusCode() + " for request " + requestId
                     + ": " + response.body());
         }
-        try {
-            JsonNode json = MAPPER.readTree(response.body());
-            if (json.path("found").asBoolean(false)) {
-                return CancelOutcome.accepted(parsePhase(json.path("phase").asText(null)));
-            }
-            if (json.path("already_finished").asBoolean(false)) {
-                return CancelOutcome.finishedBeforeCancel();
-            }
-            return CancelOutcome.notFound();
-        } catch (Exception e) {
-            throw new IllegalStateException("failed to parse mock cancel response for request "
-                    + requestId + ": " + response.body(), e);
-        }
-    }
-
-    /** Engine proto phase names (TASK_PHASE_*) → scheduler {@link TaskPhase}. */
-    private static TaskPhase parsePhase(String phase) {
-        if (phase == null || phase.isEmpty()) {
-            return null;
-        }
-        return switch (phase) {
-            case "TASK_PHASE_PENDING" -> TaskPhase.PENDING;
-            case "TASK_PHASE_RECEIVED" -> TaskPhase.RECEIVED;
-            case "TASK_PHASE_KV_ALLOCATED" -> TaskPhase.KV_ALLOCATED;
-            default -> TaskPhase.RUNNING;
-        };
+        return CancelOutcome.accepted();
     }
 }

@@ -307,6 +307,15 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
         return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().enqueueBatch(request), requestTimeoutMs, ServiceType.BATCH_ENQUEUE);
     }
 
+    /**
+     * AutoTPM Cancel: single-shot cancel to the original
+     * Prefill lifecycle owner. No transport retry (channel is built with
+     * disableRetry); idempotency rides on request_id.
+     */
+    public CompletableFuture<EngineRpcService.CancelResponsePB> cancelAsync(String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request), requestTimeoutMs, ServiceType.ENGINE_CANCEL);
+    }
+
     @Override
     protected ManagedChannel createChannel(String channelKey) {
         String[] parts = parseServiceKey(channelKey);

@@ -346,7 +346,10 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         CACHE_STATUS("cache", "GetCacheStatus"),
         MULTIMODAL_WORKER_STATUS("multimodal_worker", "GetWorkerStatus"),
         MULTIMODAL_CACHE_STATUS("multimodal_cache", "GetCacheStatus"),
-        BATCH_ENQUEUE("batch_enqueue", "EnqueueBatch");
+        BATCH_ENQUEUE("batch_enqueue", "EnqueueBatch"),
+        // AutoTPM Cancel: single-shot engine cancel, reuses
+        // the pooled channel of the target Prefill engine.
+        ENGINE_CANCEL("engine_cancel", "Cancel");
 
         @Getter
         private final String suffix;

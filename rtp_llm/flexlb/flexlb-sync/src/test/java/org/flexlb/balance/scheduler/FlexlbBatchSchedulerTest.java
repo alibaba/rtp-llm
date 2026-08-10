@@ -31,6 +31,8 @@ import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -101,6 +103,31 @@ class FlexlbBatchSchedulerTest {
     @AfterEach
     void tearDown() {
         scheduler.shutdown();
+    }
+
+    @Test
+    void getDispatchTarget_uses_inflight_entry_as_owner_table() throws Exception {
+        CompletableFuture<Response> first = scheduler.submit(context(1));
+        CompletableFuture<Response> second = scheduler.submit(context(2));
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
+
+        // Inflight hit: the cancel routing target is the Prefill endpoint the
+        // BatchItem was dispatched to.
+        assertSame(endpointRegistry.getPrefill("10.0.0.1:8080"), scheduler.getDispatchTarget(1));
+        // Miss: not inflight — cancel routing yields no owner (failed + WARN).
+        assertNull(scheduler.getDispatchTarget(999));
+
+        // Terminal (decode completion) removes the inflight entry — and with
+        // it the owner record.
+        TaskInfo finished = new TaskInfo();
+        finished.setRequestId(1L);
+        finished.setBatchId(sentBatches.getFirst().getBatchId());
+        WorkerStatusResponse status = new WorkerStatusResponse();
+        status.setRole(RoleType.DECODE);
+        status.setFinishedTaskInfo(Map.of("1", finished));
+        scheduler.onWorkerStatusUpdate(status);
+        assertNull(scheduler.getDispatchTarget(1));
     }
 
     @Test

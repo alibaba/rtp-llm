@@ -524,9 +524,12 @@ public class PriorityAdmissionScheduler {
      * WorkerStatus CANCELLED report (outside the commit wait window): counts
      * the late release confirmation. Called by the batch scheduler's
      * attribution path (Phase 5).
+     *
+     * @param victimPriority the settled victim's normalized priority (0 when
+     *                       the item carried no Auto-TPM budget)
      */
-    public void onAcceptedPreemptSettled(String endpoint) {
-        priorityReporter.reportCancelConfirm(endpoint);
+    public void onAcceptedPreemptSettled(String endpoint, int victimPriority) {
+        priorityReporter.reportCancelConfirm(endpoint, victimPriority);
         priorityReporter.reportPriorityPreempt("decode_accepted");
     }
 
@@ -714,8 +717,8 @@ public class PriorityAdmissionScheduler {
      *   <li>Issue the engine cancel (PRIORITY_PREEMPTED) per accepted victim</li>
      *   <li>Wait up to {@code autoTpmCommitWaitReleaseTimeoutMs} for each
      *       release to be confirmed — i.e. the next WorkerStatus calibration
-     *       drops the request from the confirmed layer (not-found /
-     *       already-finished cancel outcomes count as released immediately)</li>
+     *       drops the request from the confirmed layer (the cancel ack is
+     *       intent registration only and never shortcuts the wait)</li>
      *   <li>All confirmed → reserve the incoming, drive the victims terminal
      *       and place the request; any timeout / unsupported outcome → the
      *       plan fails without touching the incoming (iron rule 4: never
@@ -776,14 +779,24 @@ public class PriorityAdmissionScheduler {
                 new ArrayList<>(acceptedVictims.size());
         for (DecodeRequestSnapshot victim : acceptedVictims) {
             registrar.markCancelRequested(victim.requestId(), detail);
-            priorityReporter.reportCancelRequest(endpointKey);
-            cancels.add(cancelChannel.cancel(decodeEp, victim.requestId(),
+            priorityReporter.reportCancelRequest(endpointKey, victim.priority());
+            priorityReporter.reportCancel(victim.priority(),
+                    EngineCancelChannel.CancelReason.PRIORITY_PREEMPTED.name());
+            // AutoTPM Cancel: route to the victim's original
+            // Prefill lifecycle owner — looked up from the victim's inflight
+            // entry (a miss yields FAILED, which is NEVER treated as
+            // released). The mock control-plane path keeps using decodeEp.
+            EngineCancelChannel.CancelTarget target = EngineCancelChannel.CancelTarget.of(
+                    registrar.getDispatchTarget(victim.requestId()),
+                    decodeEp,
+                    /*batchId=*/0L);
+            cancels.add(cancelChannel.cancel(target, victim.requestId(),
                     EngineCancelChannel.CancelReason.PRIORITY_PREEMPTED));
         }
 
         String failReason = awaitCancelReleases(config, decodeEp, acceptedVictims, cancels);
         if (failReason != null) {
-            priorityReporter.reportCancelTimeout(endpointKey);
+            priorityReporter.reportCancelTimeout(endpointKey, ctx.getPriority());
             priorityReporter.reportEvictionCommit(ctx.getPriority(), proposal.evictionCase(),
                     failReason);
             Logger.warn("[auto-tpm] accepted eviction {}: request_id={} victims={} worker={}",
@@ -804,7 +817,7 @@ public class PriorityAdmissionScheduler {
             priorityReporter.reportPriorityPreempt("decode_accepted");
             priorityReporter.reportVictimKvTokens(victim.priority(), "decode_accepted",
                     victim.kvTokens());
-            priorityReporter.reportCancelConfirm(endpointKey);
+            priorityReporter.reportCancelConfirm(endpointKey, victim.priority());
             Logger.info("[auto-tpm] decode victim preempted: victim_id={} victim_priority={} "
                             + "stage=decode_accepted terminal=preempted_8429 kv_tokens={} "
                             + "incoming_id={} incoming_priority={} worker={}",
@@ -818,30 +831,37 @@ public class PriorityAdmissionScheduler {
     }
 
     /**
-     * Bounded wait for every accepted victim's release confirmation.
-     * A victim counts as released when its cancel outcome is not-found /
-     * already-finished, or when calibrate drops it from the confirmed layer
-     * ({@code isConfirmedTracked} turns false) within the window.
-     *
-     * <p>Design semantics of a non-null return (iron rule 4: a cancel timeout
-     * never assumes the resource was released): the plan fails, but some
-     * accepted victims may already carry the injected cancel intent and their
-     * CANCEL_REQUESTED mark. Those victims are NOT rolled back here — whether
-     * each one actually releases is settled later by the WorkerStatus
-     * calibration path (CANCELLED report → late confirm + 8429 attribution).
+     * Bounded wait for every accepted victim's release confirmation, driven by
+     * explicit WorkerStatus release records through {@link ReleaseTracker}.
+     * The cancel ack is intent registration only (the engine always answers
+     * ACCEPTED), so it never gates or shortcuts the wait:
+     * <ul>
+     *   <li>ACCEPTED and FAILED both wait for an explicit release record — a
+     *       transport failure does not mean the cancel missed the engine, and
+     *       the WorkerStatus report settles either way (iron rule 4);</li>
+     *   <li>UNSUPPORTED keeps its dedicated failure label — it is a
+     *       planning-gate violation, not a transport condition;</li>
+     *   <li>task disappearance never completes a waiter — only a finished
+     *       record / resource_released observation does.</li>
+     * </ul>
+     * The wait budget is unchanged ({@code autoTpmCommitWaitReleaseTimeoutMs});
+     * moving this block fully off the scheduling thread (future continuation)
+     * is the documented follow-up step of §21 Phase 5.
      *
      * @return {@code null} when all victims are confirmed released, otherwise
      *         the eviction-commit failure label
      */
-    private static String awaitCancelReleases(FlexlbConfig config,
-                                              DecodeEndpoint decodeEp,
-                                              List<DecodeRequestSnapshot> acceptedVictims,
-                                              List<CompletableFuture<EngineCancelChannel.CancelOutcome>> cancels) {
+    private String awaitCancelReleases(FlexlbConfig config,
+                                       DecodeEndpoint decodeEp,
+                                       List<DecodeRequestSnapshot> acceptedVictims,
+                                       List<CompletableFuture<EngineCancelChannel.CancelOutcome>> cancels) {
         long timeoutMs = Math.max(1, config.getAutoTpmCommitWaitReleaseTimeoutMs());
         long deadline = System.currentTimeMillis() + timeoutMs;
+        List<CompletableFuture<ReleaseTracker.ReleaseObservation>> releases =
+                new ArrayList<>(acceptedVictims.size());
         for (int i = 0; i < acceptedVictims.size(); i++) {
             long victimId = acceptedVictims.get(i).requestId();
-            EngineCancelChannel.CancelOutcome outcome;
+            EngineCancelChannel.CancelOutcome outcome = null;
             try {
                 long remaining = deadline - System.currentTimeMillis();
                 outcome = cancels.get(i).get(Math.max(1, remaining), TimeUnit.MILLISECONDS);
@@ -851,48 +871,40 @@ public class PriorityAdmissionScheduler {
                 // and are settled by the later WorkerStatus report.
                 return "cancel_timeout";
             } catch (Exception e) {
+                // Failed future ≡ FAILED outcome: the intent may still have
+                // landed — fall through to the release wait (WorkerStatus
+                // remains the sole settle source).
                 Logger.warn("[auto-tpm] cancel rpc failed for victim_id={}: {}",
                         victimId, e.getMessage());
-                // Same semantics: no release is assumed for this victim or
-                // any earlier one whose cancel intent was already injected.
-                return "cancel_timeout";
             }
-            if (outcome.unsupported()) {
-                // Planning-gate violation — must never pick accepted victims
-                // on an endpoint without the Cancel RPC. The plan fails, yet
-                // victims already sent a cancel keep their intent; settle is
-                // still owned by WorkerStatus (no release assumed).
+            if (outcome != null
+                    && outcome.ack() == EngineCancelChannel.CancelAck.UNSUPPORTED) {
+                // Planning-gate violation — the plan fails; victims already
+                // carrying the intent are settled by WorkerStatus.
                 return "cancel_unsupported";
             }
-            if (!outcome.found() || outcome.alreadyFinished()) {
-                // The engine no longer owns the request — released already.
-                continue;
-            }
-            if (!pollReleased(decodeEp, victimId, deadline)) {
-                // Confirmed layer still tracks the victim at the deadline:
-                // fail the plan without assuming the release ever happens;
-                // the victim stays CANCEL_REQUESTED until WorkerStatus
-                // settles it (design doc iron rule 4).
-                return "cancel_timeout";
-            }
+            // ACCEPTED / FAILED: wait for the explicit release record from
+            // this worker's status reports.
+            releases.add(ReleaseTracker.global().awaitReleased(
+                    decodeEp.ipPort(), victimId,
+                    Math.max(1, deadline - System.currentTimeMillis())));
+        }
+        if (releases.isEmpty()) {
+            return null;
+        }
+        try {
+            long remaining = Math.max(1, deadline - System.currentTimeMillis());
+            CompletableFuture.allOf(releases.toArray(new CompletableFuture[0]))
+                    .get(remaining, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return "cancel_timeout";
+        } catch (Exception e) {
+            // Timeout / worker epoch change / unhealthy worker: fail the plan
+            // WITHOUT assuming any release ever happened (iron rule 4).
+            return "cancel_timeout";
         }
         return null;
-    }
-
-    /** Poll the confirmed layer until the victim disappears or the deadline hits. */
-    private static boolean pollReleased(DecodeEndpoint decodeEp, long victimId, long deadline) {
-        while (decodeEp.isConfirmedTracked(victimId)) {
-            if (System.currentTimeMillis() >= deadline) {
-                return false;
-            }
-            try {
-                Thread.sleep(2);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-        return true;
     }
 
     /**

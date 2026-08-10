@@ -22,9 +22,9 @@ public class UnsupportedEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public CompletableFuture<CancelOutcome> cancel(DecodeEndpoint endpoint,
+    public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
                                                    long requestId,
                                                    CancelReason reason) {
-        return CompletableFuture.completedFuture(CancelOutcome.unsupportedEndpoint());
+        return CompletableFuture.completedFuture(CancelOutcome.unsupported());
     }
 }

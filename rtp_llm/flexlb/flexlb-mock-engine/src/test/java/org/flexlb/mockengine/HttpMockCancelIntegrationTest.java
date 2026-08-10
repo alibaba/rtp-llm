@@ -5,12 +5,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelTarget;
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelAck;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelOutcome;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelReason;
 import org.flexlb.balance.scheduler.priority.HttpMockEngineCancelChannel;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,7 +38,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -47,14 +47,16 @@ import static org.junit.jupiter.api.Assertions.fail;
  * evidence): a REAL {@link MockControlServer} on a real HTTP port +
  * {@link HttpMockEngineCancelChannel} pointed at it, asserting:
  * <ul>
- *   <li>the /cancel_request endpoint drives the three-branch cancelRequest
- *       contract (found / already_finished / not found) over HTTP,</li>
- *   <li>a cancelled QUEUED decode request (opt-in
- *       {@code decode.report_queued_as_kv_allocated}) reports phase
+ *   <li>the channel outcome is intent-only: any routable HTTP cancel (queued,
+ *       running, double cancel, unknown request id) acks ACCEPTED,</li>
+ *   <li>the raw /cancel_request JSON still exposes the mock control-plane
+ *       detail (found / already_finished / phase) for self-test evidence —
+ *       including a queued decode request (opt-in
+ *       {@code decode.report_queued_as_kv_allocated}) reporting phase
  *       KV_ALLOCATED — the accepted-layer contract Phase 5 eviction needs,</li>
  *   <li>the CANCELLED terminal surfaces in the next WorkerStatus finished
  *       list (iron rule 4 confirmation source),</li>
- *   <li>unknown engine port → unsupported branch (HTTP 404),</li>
+ *   <li>unknown engine port → UNSUPPORTED (HTTP 404),</li>
  *   <li>transport failure (dead URL) → failed future, never a synchronous
  *       throw.</li>
  * </ul>
@@ -96,10 +98,10 @@ class HttpMockCancelIntegrationTest {
         scheduler.awaitTermination(3, TimeUnit.SECONDS);
     }
 
-    // ──────────── found branch over HTTP: queued request, KV_ALLOCATED phase ────────────
+    // ──────────── accepted over HTTP: queued request cancelled, CANCELLED surfaces ────────────
 
     @Test
-    void httpCancelOfQueuedRequestReportsKvAllocatedAndSurfacesCancelled() throws Exception {
+    void httpCancelOfQueuedRequestAcceptedAndSurfacesCancelled() throws Exception {
         startGatedDecodeCluster(true);
         EngineCancelChannel channel = channel();
 
@@ -108,14 +110,10 @@ class HttpMockCancelIntegrationTest {
         assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(2L), -1, null));
 
         CancelOutcome outcome = channel
-                .cancel(endpoint(decodeService.getGrpcPort()), 2L, CancelReason.PRIORITY_PREEMPTED)
+                .cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 2L, CancelReason.PRIORITY_PREEMPTED)
                 .get(5, TimeUnit.SECONDS);
-        assertTrue(outcome.found(), "queued request must be found over HTTP");
-        assertFalse(outcome.alreadyFinished());
-        assertFalse(outcome.unsupported());
-        assertEquals(TaskPhase.KV_ALLOCATED, outcome.phase(),
-                "8429 wiring evidence: HTTP cancel of an accepted (queued) "
-                        + "request must carry the KV_ALLOCATED phase");
+        assertEquals(CancelAck.ACCEPTED, outcome.ack(),
+                "queued request cancel over HTTP must register the intent (ACCEPTED)");
 
         // Iron rule 4: release confirmation via the next WorkerStatus report.
         EngineRpcService.WorkerStatusPB status = workerStatus(decodeService, 0);
@@ -128,53 +126,56 @@ class HttpMockCancelIntegrationTest {
     }
 
     @Test
-    void httpCancelOfRunningRequestReportsRunningPhase() throws Exception {
+    void rawHttpCancelOfRunningRequestReportsRunningPhase() throws Exception {
         startGatedDecodeCluster(true);
-        EngineCancelChannel channel = channel();
 
         assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(11L), -1, null));
 
-        CancelOutcome outcome = channel
-                .cancel(endpoint(decodeService.getGrpcPort()), 11L, CancelReason.ADMIN)
-                .get(5, TimeUnit.SECONDS);
-        assertTrue(outcome.found());
-        assertEquals(TaskPhase.RUNNING, outcome.phase(),
+        // The channel outcome is intent-only (ACCEPTED, no phase) — the phase
+        // evidence lives in the raw control-plane JSON.
+        HttpResponse<String> ok = HttpClient.newHttpClient().send(HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + "/cancel_request"))
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"port\": " + decodeService.getGrpcPort() + ", \"request_id\": 11}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, ok.statusCode());
+        JsonNode json = MAPPER.readTree(ok.body());
+        assertTrue(json.get("found").asBoolean());
+        assertEquals("TASK_PHASE_RUNNING", json.get("phase").asText(),
                 "a truly running request must report the RUNNING phase");
     }
 
-    // ──────────── already_finished / notFound branches over HTTP ────────────
+    // ──────────── accepted over HTTP: double cancel / unknown request id ────────────
 
     @Test
-    void httpDoubleCancelReportsFinishedBeforeCancel() throws Exception {
+    void httpDoubleCancelIsIdempotentAndAccepted() throws Exception {
         startGatedDecodeCluster(false);
         EngineCancelChannel channel = channel();
 
         assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(21L), -1, null));
         CancelOutcome first = channel
-                .cancel(endpoint(decodeService.getGrpcPort()), 21L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
                 .get(5, TimeUnit.SECONDS);
-        assertTrue(first.found());
+        assertEquals(CancelAck.ACCEPTED, first.ack());
 
         CancelOutcome second = channel
-                .cancel(endpoint(decodeService.getGrpcPort()), 21L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
                 .get(5, TimeUnit.SECONDS);
-        assertTrue(second.alreadyFinished(), "second cancel must be idempotent");
-        assertTrue(second.found(), "finishedBeforeCancel contract is found=true");
-        assertNull(second.phase());
+        assertEquals(CancelAck.ACCEPTED, second.ack(), "second cancel must be idempotent");
     }
 
     @Test
-    void httpCancelUnknownRequestReportsNotFound() throws Exception {
+    void httpCancelUnknownRequestStillAccepted() throws Exception {
         startGatedDecodeCluster(false);
         EngineCancelChannel channel = channel();
 
         CancelOutcome outcome = channel
-                .cancel(endpoint(decodeService.getGrpcPort()), 424242L,
+                .cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 424242L,
                         CancelReason.PRIORITY_PREEMPTED)
                 .get(5, TimeUnit.SECONDS);
-        assertFalse(outcome.found());
-        assertFalse(outcome.alreadyFinished());
-        assertFalse(outcome.unsupported());
+        assertEquals(CancelAck.ACCEPTED, outcome.ack(),
+                "unknown request id is still ACCEPTED (intent registered, engine no-op)");
     }
 
     // ──────────── unsupported branch + transport failure + isSupported ────────────
@@ -188,10 +189,10 @@ class HttpMockCancelIntegrationTest {
                 "a configured control URL supports every endpoint");
 
         CancelOutcome outcome = channel
-                .cancel(endpoint(59999), 1L, CancelReason.ADMIN)
+                .cancel(CancelTarget.of(null, endpoint(59999), 0L), 1L, CancelReason.ADMIN)
                 .get(5, TimeUnit.SECONDS);
-        assertTrue(outcome.unsupported(), "unknown engine port (HTTP 404) → unsupported branch");
-        assertFalse(outcome.found());
+        assertEquals(CancelAck.UNSUPPORTED, outcome.ack(),
+                "unknown engine port (HTTP 404) → UNSUPPORTED");
     }
 
     @Test
@@ -200,7 +201,7 @@ class HttpMockCancelIntegrationTest {
         // Port 1 is never listening — connection refused.
         EngineCancelChannel channel = new HttpMockEngineCancelChannel("http://127.0.0.1:1");
 
-        var future = channel.cancel(endpoint(decodeService.getGrpcPort()), 1L, CancelReason.ADMIN);
+        var future = channel.cancel(CancelTarget.of(null, endpoint(decodeService.getGrpcPort()), 0L), 1L, CancelReason.ADMIN);
         assertNotNull(future, "cancel must never throw synchronously");
         assertThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS),
                 "transport failure must surface as a failed future");

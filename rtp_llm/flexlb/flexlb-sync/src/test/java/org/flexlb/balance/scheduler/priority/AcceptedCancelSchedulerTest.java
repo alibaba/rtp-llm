@@ -1,5 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelReason;
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelTarget;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.BatchDispatcher;
@@ -56,10 +58,11 @@ import static org.mockito.Mockito.when;
  * {@link PriorityAdmissionScheduler} and the CANCELLED completion attribution
  * of {@link FlexlbBatchScheduler}: a confirmed release lets the incoming take
  * the freed capacity, a timeout fails the plan without reserving or leaking
- * (iron rule 4), not-found / already-finished outcomes count as released
- * immediately, the accepted-evict gate keeps the legacy infeasible failure,
- * and an engine CANCELLED completion maps to PRIORITY_PREEMPTED only for
- * marked victims with Auto-TPM on (iron rule 1).
+ * (iron rule 4), ACCEPTED and FAILED outcomes both wait for an explicit
+ * release record (the ack is intent registration only), the accepted-evict
+ * gate keeps the legacy infeasible failure, and an engine CANCELLED completion
+ * maps to PRIORITY_PREEMPTED only for marked victims with Auto-TPM on (iron
+ * rule 1).
  */
 class AcceptedCancelSchedulerTest {
 
@@ -79,6 +82,9 @@ class AcceptedCancelSchedulerTest {
 
     @BeforeEach
     void setUp() {
+        // ReleaseTracker.global() is a process-wide singleton — drop releases
+        // cached by earlier tests so no stale observation confirms an eviction.
+        ReleaseTracker.global().reset();
         configService = mock(ConfigService.class);
         router = mock(Router.class);
         grpcClient = mock(EngineGrpcClient.class);
@@ -144,6 +150,7 @@ class AcceptedCancelSchedulerTest {
     @AfterEach
     void tearDown() {
         scheduler.shutdown();
+        ReleaseTracker.global().reset();
     }
 
     // ==================== success: cancel confirmed within the window ====================
@@ -153,11 +160,13 @@ class AcceptedCancelSchedulerTest {
         DecodeEndpoint decodeEp = decodeEndpoint();
         CompletableFuture<Response> victim = submitAndConfirmAccepted(1, 30);
 
-        // The engine "processes" the cancel: the next WorkerStatus report no
-        // longer lists the request — driven synchronously from the fake RPC.
+        // The engine "processes" the cancel: the next WorkerStatus report
+        // carries an explicit finished CANCELLED record — the sole release
+        // confirmation (§16.4) — fed to ReleaseTracker.global() by the
+        // decode calibrate, driven synchronously from the fake RPC.
         cancelChannel.onCancel = id -> {
-            calibrateDecode(Map.of());
-            return EngineCancelChannel.CancelOutcome.accepted(TaskPhase.KV_ALLOCATED);
+            calibrateDecode(Map.of(), Map.of(String.valueOf(id), cancelledFinished(id)));
+            return EngineCancelChannel.CancelOutcome.accepted();
         };
 
         CompletableFuture<Response> incoming = scheduler.submit(context(2, 70));
@@ -175,12 +184,13 @@ class AcceptedCancelSchedulerTest {
         assertEquals(1, cancelChannel.cancelCount.get());
 
         verify(priorityReporter).reportEvictionPlan(eq(70), eq("decode_slot_full"), eq("feasible"));
-        verify(priorityReporter).reportCancelRequest(eq(DECODE_IP_PORT));
-        verify(priorityReporter).reportCancelConfirm(eq(DECODE_IP_PORT));
+        verify(priorityReporter).reportCancelRequest(eq(DECODE_IP_PORT), eq(30));
+        verify(priorityReporter).reportCancel(eq(30), eq("PRIORITY_PREEMPTED"));
+        verify(priorityReporter).reportCancelConfirm(eq(DECODE_IP_PORT), eq(30));
         verify(priorityReporter).reportVictim(eq(30), eq(70), eq("decode_accepted"), eq("decode_slot_full"));
         verify(priorityReporter).reportVictimKvTokens(eq(30), eq("decode_accepted"), eq(128L));
         verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_slot_full"), eq("success"));
-        verify(priorityReporter, never()).reportCancelTimeout(anyString());
+        verify(priorityReporter, never()).reportCancelTimeout(anyString(), anyInt());
     }
 
     // ==================== timeout: never assume the resources are free ====================
@@ -193,7 +203,7 @@ class AcceptedCancelSchedulerTest {
 
         // Cancel accepted by the engine but no release confirmation follows.
         cancelChannel.onCancel = id ->
-                EngineCancelChannel.CancelOutcome.accepted(TaskPhase.KV_ALLOCATED);
+                EngineCancelChannel.CancelOutcome.accepted();
 
         Response incoming = scheduler.submit(context(2, 70)).get(2, TimeUnit.SECONDS);
 
@@ -211,20 +221,20 @@ class AcceptedCancelSchedulerTest {
         assertTrue(decodeEp.isConfirmedTracked(1L));
         assertTrue(DecodeEndpointSnapshot.capture(decodeEp, 1).accepted().isEmpty());
 
-        verify(priorityReporter).reportCancelRequest(eq(DECODE_IP_PORT));
-        verify(priorityReporter).reportCancelTimeout(eq(DECODE_IP_PORT));
+        verify(priorityReporter).reportCancelRequest(eq(DECODE_IP_PORT), eq(30));
+        verify(priorityReporter).reportCancelTimeout(eq(DECODE_IP_PORT), eq(70));
         verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_slot_full"), eq("cancel_timeout"));
         verify(priorityReporter, never()).reportVictim(anyInt(), anyInt(),
                 eq("decode_accepted"), anyString());
-        verify(priorityReporter, never()).reportCancelConfirm(anyString());
+        verify(priorityReporter, never()).reportCancelConfirm(anyString(), anyInt());
     }
 
-    // ==================== outcome branches: unsupported / not found / finished ====================
+    // ==================== outcome branches: unsupported / failed ====================
 
     @Test
     void unsupportedOutcome_failsPlanWithCancelUnsupported() throws Exception {
         submitAndConfirmAccepted(1, 30);
-        cancelChannel.onCancel = id -> EngineCancelChannel.CancelOutcome.unsupportedEndpoint();
+        cancelChannel.onCancel = id -> EngineCancelChannel.CancelOutcome.unsupported();
 
         Response incoming = scheduler.submit(context(2, 70)).get(2, TimeUnit.SECONDS);
 
@@ -237,33 +247,47 @@ class AcceptedCancelSchedulerTest {
     }
 
     @Test
-    void notFoundOutcome_countsAsReleasedImmediately() throws Exception {
+    void failedOutcome_waitsForReleaseRecord_failsWithoutObservation() throws Exception {
+        config.setAutoTpmCommitWaitReleaseTimeoutMs(40);
         DecodeEndpoint decodeEp = decodeEndpoint();
         CompletableFuture<Response> victim = submitAndConfirmAccepted(1, 30);
-        cancelChannel.onCancel = id -> EngineCancelChannel.CancelOutcome.notFound();
+        cancelChannel.onCancel = id -> EngineCancelChannel.CancelOutcome.failed();
 
-        scheduler.submit(context(2, 70));
+        Response incoming = scheduler.submit(context(2, 70)).get(2, TimeUnit.SECONDS);
 
-        // The engine no longer owns the request — no release poll needed.
-        Response victimResponse = victim.get(2, TimeUnit.SECONDS);
-        assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), victimResponse.getCode());
-        await(() -> decodeEp.reservedView().containsKey(2L));
-        verify(priorityReporter).reportCancelConfirm(eq(DECODE_IP_PORT));
-        verify(priorityReporter, never()).reportCancelTimeout(anyString());
+        // A FAILED ack is never release proof (nor cancel-failure proof) —
+        // without an explicit release record from WorkerStatus the eviction
+        // fails like a cancel timeout, the incoming never reserves and the
+        // victim keeps running.
+        assertFalse(incoming.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), incoming.getCode());
+        assertTrue(incoming.getErrorMessage().contains("accepted eviction cancel_timeout"));
+        assertFalse(decodeEp.reservedView().containsKey(2L));
+        assertFalse(victim.isDone());
+        assertTrue(decodeEp.isConfirmedTracked(1L));
+        verify(priorityReporter).reportCancelTimeout(eq(DECODE_IP_PORT), eq(70));
+        verify(priorityReporter, never()).reportCancelConfirm(anyString(), anyInt());
     }
 
     @Test
-    void finishedBeforeCancelOutcome_countsAsReleasedImmediately() throws Exception {
+    void failedOutcome_withExplicitReleaseRecord_evicts() throws Exception {
         DecodeEndpoint decodeEp = decodeEndpoint();
         CompletableFuture<Response> victim = submitAndConfirmAccepted(1, 30);
-        cancelChannel.onCancel = id -> EngineCancelChannel.CancelOutcome.finishedBeforeCancel();
+        // FAILED paired with an explicit finished record in the same status
+        // round (the RPC failed but the cancel still landed engine-side): the
+        // ReleaseTracker observation — not the ack — confirms.
+        cancelChannel.onCancel = id -> {
+            calibrateDecode(Map.of(), Map.of(String.valueOf(id), cancelledFinished(id)));
+            return EngineCancelChannel.CancelOutcome.failed();
+        };
 
         scheduler.submit(context(2, 70));
 
         Response victimResponse = victim.get(2, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), victimResponse.getCode());
         await(() -> decodeEp.reservedView().containsKey(2L));
-        verify(priorityReporter, never()).reportCancelTimeout(anyString());
+        verify(priorityReporter).reportCancelConfirm(eq(DECODE_IP_PORT), eq(30));
+        verify(priorityReporter, never()).reportCancelTimeout(anyString(), anyInt());
     }
 
     // ==================== gate off: accepted layer never cancelled ====================
@@ -287,7 +311,7 @@ class AcceptedCancelSchedulerTest {
         assertTrue(decodeEp.isConfirmedTracked(1L));
         verify(priorityReporter, times(3))
                 .reportEvictionPlan(eq(70), eq("decode_slot_full"), eq("infeasible"));
-        verify(priorityReporter, never()).reportCancelRequest(anyString());
+        verify(priorityReporter, never()).reportCancelRequest(anyString(), anyInt());
     }
 
     // ==================== CANCELLED completion attribution (iron rule 1) ====================
@@ -305,8 +329,9 @@ class AcceptedCancelSchedulerTest {
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
         assertTrue(response.getErrorMessage().contains("preempted by higher-priority request 88"));
-        // Late confirm counted against the victim's decode endpoint.
-        verify(priorityReporter).reportCancelConfirm(eq(DECODE_IP_PORT));
+        // Late confirm counted against the victim's decode endpoint; the
+        // dummy item carries no Auto-TPM budget, so its priority tag is 0.
+        verify(priorityReporter).reportCancelConfirm(eq(DECODE_IP_PORT), eq(0));
         verify(priorityReporter).reportPriorityPreempt(eq("decode_accepted"));
     }
 
@@ -322,7 +347,7 @@ class AcceptedCancelSchedulerTest {
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(), response.getCode());
         assertTrue(response.getErrorMessage().contains("worker error code 2"));
-        verify(priorityReporter, never()).reportCancelConfirm(anyString());
+        verify(priorityReporter, never()).reportCancelConfirm(anyString(), anyInt());
     }
 
     @Test
@@ -334,7 +359,7 @@ class AcceptedCancelSchedulerTest {
 
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(), response.getCode());
-        verify(priorityReporter, never()).reportCancelConfirm(anyString());
+        verify(priorityReporter, never()).reportCancelConfirm(anyString(), anyInt());
     }
 
     // ==================== helpers ====================
@@ -347,7 +372,7 @@ class AcceptedCancelSchedulerTest {
     private static final class FakeCancelChannel implements EngineCancelChannel {
 
         volatile LongFunction<CancelOutcome> onCancel =
-                id -> CancelOutcome.accepted(TaskPhase.KV_ALLOCATED);
+                id -> CancelOutcome.accepted();
         final AtomicInteger cancelCount = new AtomicInteger();
 
         @Override
@@ -356,7 +381,7 @@ class AcceptedCancelSchedulerTest {
         }
 
         @Override
-        public CompletableFuture<CancelOutcome> cancel(DecodeEndpoint endpoint,
+        public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
                                                        long requestId,
                                                        CancelReason reason) {
             cancelCount.incrementAndGet();
@@ -386,9 +411,23 @@ class AcceptedCancelSchedulerTest {
     }
 
     private void calibrateDecode(Map<String, TaskInfo> running) {
+        calibrateDecode(running, null);
+    }
+
+    private void calibrateDecode(Map<String, TaskInfo> running, Map<String, TaskInfo> finished) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(running);
+        response.setFinishedTaskInfo(finished);
         decodeEndpoint().onWorkerStatusUpdate(decodeWs, response);
+    }
+
+    /** Finished CANCELLED record (errorCode 2) — the explicit release proof. */
+    private static TaskInfo cancelledFinished(long requestId) {
+        TaskInfo task = new TaskInfo();
+        task.setRequestId(requestId);
+        task.setErrorCode(2);
+        task.setErrorMessage("cancelled");
+        return task;
     }
 
     private DecodeEndpoint decodeEndpoint() {

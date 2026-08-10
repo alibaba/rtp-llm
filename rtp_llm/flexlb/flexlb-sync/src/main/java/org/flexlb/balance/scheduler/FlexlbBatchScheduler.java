@@ -362,6 +362,29 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         return true;
     }
 
+    /**
+     * AutoTPM Cancel: the inflight entry itself is the owner lookup table —
+     * {@code BatchItem} carries the Prefill endpoint it was dispatched to,
+     * keyed by request id. Null when the id is not inflight (cancel then
+     * settles via WorkerStatus).
+     */
+    @Override
+    public PrefillEndpoint getDispatchTarget(long requestId) {
+        InflightEntry entry = inflight.get(requestId);
+        return entry != null ? entry.item.prefillEp() : null;
+    }
+
+    /**
+     * AutoTPM Cancel: an inflight request's normalized priority for the
+     * cancel metric priority tag. 0 when the id is not inflight or the item
+     * carries no Auto-TPM budget (legacy-path admission).
+     */
+    @Override
+    public int getInflightPriority(long requestId) {
+        InflightEntry entry = inflight.get(requestId);
+        return entry != null ? entry.item.priority() : 0;
+    }
+
     // ==================== Completion from worker status ====================
 
     public void onWorkerStatusUpdate(WorkerStatusResponse response) {
@@ -416,7 +439,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         terminal = entry.lifecycle.fail(detail);
                         completeError(entry.item.future(), StrategyErrorType.PRIORITY_PREEMPTED, detail);
                         if (priorityScheduler != null) {
-                            priorityScheduler.onAcceptedPreemptSettled(decodeEndpointKey(entry.item));
+                            priorityScheduler.onAcceptedPreemptSettled(
+                                    decodeEndpointKey(entry.item), entry.item.priority());
                         }
                     } else {
                         terminal = entry.lifecycle.fail("worker error code " + task.getErrorCode());

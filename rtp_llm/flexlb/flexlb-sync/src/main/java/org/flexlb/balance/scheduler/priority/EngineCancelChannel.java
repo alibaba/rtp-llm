@@ -1,85 +1,110 @@
 package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.enums.TaskPhase;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Abstraction over the engine-side cancel RPC (Phase 5, see
- * {@code docs/auto_tpm/engine_cancel_rpc_design.md}). A cancel is an
- * <b>intent injection</b> only: even a successful outcome does not mean the
- * resources are released — the sole confirmation source remains the next
- * WorkerStatus report (iron rule 4). Callers must therefore pair
- * {@link #cancel} with a bounded release-confirmation wait.
+ * Abstraction over the engine-side cancel RPC. A cancel is
+ * an <b>intent injection</b> only: even {@code ACCEPTED} does not mean the
+ * resources are released — the sole confirmation source remains the periodic
+ * WorkerStatus report ({@code resource_released=true}), consumed through
+ * {@link ReleaseTracker}.
  *
- * <p>The real gRPC-backed implementation lands together with the engine-side
- * Cancel RPC; until then the Spring context wires
- * {@link UnsupportedEngineCancelChannel}, which keeps every endpoint
- * unsupported so accepted-eviction planning never activates.
+ * <p>Contract highlights:
+ * <ul>
+ *   <li>the real engine cancel ALWAYS targets the victim's original
+ *       <b>Prefill lifecycle owner</b> (looked up from the request's
+ *       inflight entry via {@link InflightRegistrar#getDispatchTarget}),
+ *       never the current Decode
+ *       endpoint;</li>
+ *   <li>the engine Cancel RPC always answers {@code ACCEPTED} (intent
+ *       registration semantics) — no protocol branch carries release or
+ *       terminal-state information, so the ack is diagnostics only;</li>
+ *   <li>{@code request_id} is the idempotency key; a
+ *       transport retry returns the same ACCEPTED.</li>
+ * </ul>
  */
 public interface EngineCancelChannel {
 
     /**
-     * Whether the engine behind this endpoint supports the Cancel RPC.
-     * Planning only considers accepted-layer victims on supported endpoints —
-     * an unsupported endpoint must never receive a cancel intent.
+     * Whether victims on this endpoint may be planned for accepted-eviction.
+     * Planning only considers accepted-layer victims on supported endpoints.
      */
     boolean isSupported(DecodeEndpoint endpoint);
 
     /**
      * Asynchronously ask the engine to cancel one request. Never throws
-     * synchronously; transport-level failures surface as a failed future,
-     * protocol-level branches (not found / already finished / unsupported)
-     * surface as a completed {@link CancelOutcome}.
+     * synchronously; transport-level failures surface either as a completed
+     * {@code FAILED} outcome or as a failed future — callers treat both
+     * identically (the intent may still have landed; release stays gated on
+     * the WorkerStatus report).
      */
-    CompletableFuture<CancelOutcome> cancel(DecodeEndpoint endpoint,
+    CompletableFuture<CancelOutcome> cancel(CancelTarget target,
                                             long requestId,
                                             CancelReason reason);
 
-    /** Why the cancel was issued — mirrors the design doc's CancelReasonPB. */
+    /** Why the cancel was issued — mirrors EngineCancelReasonPB. */
     enum CancelReason {
         USER_CANCELLED,
         PRIORITY_PREEMPTED,
+        DEADLINE_EXCEEDED,
         ADMIN
     }
 
     /**
-     * Engine response to a cancel intent (three-branch contract):
-     * <ul>
-     *   <li>{@code found=false} — the engine does not know the request; the
-     *       caller may treat its resources as already released,</li>
-     *   <li>{@code alreadyFinished=true} — terminal before the cancel landed;
-     *       resources already released,</li>
-     *   <li>{@code found=true} — cancel intent accepted at {@code phase};
-     *       release must still be confirmed via WorkerStatus.</li>
-     * </ul>
-     * {@code unsupported=true} means the endpoint has no Cancel RPC at all —
-     * a planning-gate violation the scheduler must fail the plan on.
+     * Cancel routing information.
+     *
+     * @param lifecycleOwner     original Prefill owner — the REAL engine cancel
+     *                           destination; may be null when the owner
+     *                           resolver has no record (cancel then cannot be
+     *                           routed and resolves to {@code FAILED}, no
+     *                           release assumed)
+     * @param decodeEndpoint     current Decode endpoint — used only by the
+     *                           TEST-ONLY mock control plane routing
+     * @param batchId            diagnostics only, never used for fencing
      */
-    record CancelOutcome(boolean found,
-                         TaskPhase phase,
-                         boolean alreadyFinished,
-                         boolean unsupported) {
+    record CancelTarget(PrefillEndpoint lifecycleOwner,
+                        DecodeEndpoint decodeEndpoint,
+                        long batchId) {
 
-        /** Intent accepted while the request was live at {@code phase}. */
-        public static CancelOutcome accepted(TaskPhase phase) {
-            return new CancelOutcome(true, phase, false, false);
+        public static CancelTarget of(PrefillEndpoint owner,
+                                      DecodeEndpoint decodeEndpoint,
+                                      long batchId) {
+            return new CancelTarget(owner, decodeEndpoint, batchId);
+        }
+    }
+
+    /**
+     * Structured ack. The engine RPC only ever answers ACCEPTED (intent
+     * registration); the two other values are local branches.
+     */
+    enum CancelAck {
+        /** Intent registered engine-side (the only engine RPC answer). */
+        ACCEPTED,
+        /** Endpoint has no cancel path at all — planning-gate violation. */
+        UNSUPPORTED,
+        /** Transport-layer failure (RPC error/timeout, or unroutable cancel). */
+        FAILED
+    }
+
+    /**
+     * Engine response to a cancel intent. No release
+     * future is provided by design — pair with {@link ReleaseTracker}.
+     */
+    record CancelOutcome(CancelAck ack) {
+
+        public static CancelOutcome accepted() {
+            return new CancelOutcome(CancelAck.ACCEPTED);
         }
 
-        /** The engine does not know the request. */
-        public static CancelOutcome notFound() {
-            return new CancelOutcome(false, null, false, false);
+        public static CancelOutcome unsupported() {
+            return new CancelOutcome(CancelAck.UNSUPPORTED);
         }
 
-        /** The request reached a terminal state before the cancel landed. */
-        public static CancelOutcome finishedBeforeCancel() {
-            return new CancelOutcome(true, null, true, false);
-        }
-
-        /** The endpoint has no Cancel RPC. */
-        public static CancelOutcome unsupportedEndpoint() {
-            return new CancelOutcome(false, null, false, true);
+        public static CancelOutcome failed() {
+            return new CancelOutcome(CancelAck.FAILED);
         }
     }
 }

@@ -3,6 +3,8 @@ package org.flexlb.httpserver;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
+import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -23,6 +25,7 @@ import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.*;
 
 class FlexlbServiceImplTest {
@@ -54,6 +57,10 @@ class FlexlbServiceImplTest {
         ActiveRequestCounter.RequestToken token = mock(ActiveRequestCounter.RequestToken.class);
         when(activeRequestCounter.acquire()).thenReturn(token);
 
+        EngineCancelChannel cancelChannel = mock(EngineCancelChannel.class);
+        when(cancelChannel.cancel(any(), anyLong(), any())).thenReturn(
+                CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.unsupported()));
+
         service = new FlexlbServiceImpl(
                 routeService,
                 lbStatusConsistencyService,
@@ -66,7 +73,9 @@ class FlexlbServiceImplTest {
                 new PrioritySloPolicy(
                         PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
-                mock(PrioritySchedulerReporter.class)
+                mock(PrioritySchedulerReporter.class),
+                cancelChannel,
+                mock(InflightRegistrar.class)
         );
     }
 

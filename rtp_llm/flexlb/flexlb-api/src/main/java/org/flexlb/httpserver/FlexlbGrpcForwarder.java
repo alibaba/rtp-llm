@@ -81,6 +81,18 @@ public class FlexlbGrpcForwarder {
                 stub -> stub.getRequestState(request));
     }
 
+    /**
+     * Forward a Frontend-initiated cancel to the master:
+     * the request lifecycle is owned by the master, so a non-master node must
+     * delegate. Returns {@code null} when the master is unreachable — callers
+     * fall through to local handling.
+     */
+    public FlexlbScheduleProtocol.FlexlbCancelResponsePB forwardCancelToMaster(
+            FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
+        return invokeMaster("cancel", request.getRequestId(),
+                stub -> stub.cancel(request));
+    }
+
     private <T> T invokeMaster(String operation,
                                long requestId,
                                Function<FlexlbServiceGrpc.FlexlbServiceBlockingStub, T> rpc) {
