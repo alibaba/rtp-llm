@@ -467,39 +467,48 @@ def h20_oss_suites():
     native.test_suite(
         name = "smoke_h20_kimi_linear",
         tests = [
+            # Keep one legacy route as a compatibility guard while the full
+            # Kimi feature matrix below exercises the NewLoader path.
             smoke_test(
-                name="kimi_bf16_basic",
+                name="kimi_bf16_basic_legacy",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
                 envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type=["H20"],
             ),
             smoke_test(
+                name="kimi_bf16_basic",
+                task_info="data/model/kimi_linear/q_r_bf16_tp2.json",
+                smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                gpu_type=["H20"],
+            ),
+            smoke_test(
                 name="kimi_kernel_block",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2_kernel_block_size_64.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --kernel_seq_size_per_block 64 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
-                envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="kimi_cudagraph",
                 task_info="data/model/kimi_linear/q_r_cuda_graph.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --max_seq_len 128 --enable_cuda_graph 1 --warm_up 0 --concurrency_limit 8 --reserver_runtime_mem_mb 8192 --tp_size 2 --ssm_state_dtype fp32",
-                envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="kimi_long_reuse_memcache",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2_long_input_reuse_cache.json",
                 smoke_args="--tp_size 2 --act_type BF16 --max_seq_len 16384 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 2048 --write_cache_sync 1 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
-                envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type=["H20"],
             ),
             smoke_test(
                 name="kimi_tool_call",
                 task_info="data/model/kimi_linear/q_r_bf16_tp2_tool_call.json",
                 smoke_args="--act_type BF16 --seq_size_per_block 2048 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192",
-                envs=["TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                envs=["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 gpu_type=["H20"],
             ),
             smoke_test(
@@ -510,8 +519,8 @@ def h20_oss_suites():
                     "decode": "--seq_size_per_block 2048 --act_type BF16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --tp_size 2 --ssm_state_dtype fp32 --reserver_runtime_mem_mb 8192"
                 },
                 envs={
-                    "prefill": ["TRITON_AUTOTUNE_CACHE_MODE=cached"],
-                    "decode": ["TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                    "prefill": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
+                    "decode": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch", "TRITON_AUTOTUNE_CACHE_MODE=cached"],
                 },
                 gpu_type=["H20"],
             ),

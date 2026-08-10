@@ -212,3 +212,8 @@ register_lazy_model(
     "rtp_llm.models_py.new_models.deepseek_vl2",
     "DeepSeekVLV2ForCausalLM",
 )
+register_lazy_model(
+    "kimi_linear",
+    "rtp_llm.models_py.new_models.kimi_linear",
+    "KimiLinearForCausalLM",
+)
