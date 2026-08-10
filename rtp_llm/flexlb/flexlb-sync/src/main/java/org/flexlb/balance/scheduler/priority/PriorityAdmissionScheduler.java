@@ -1259,7 +1259,7 @@ public class PriorityAdmissionScheduler {
             return;
         }
         Response errorResp = Response.error(errorType);
-        errorResp.setErrorMessage(message == null ? errorType.getErrorMsg() : message);
+        errorResp.setErrorMessage(errorType.buildErrorMessage(message));
         future.complete(errorResp);
     }
 

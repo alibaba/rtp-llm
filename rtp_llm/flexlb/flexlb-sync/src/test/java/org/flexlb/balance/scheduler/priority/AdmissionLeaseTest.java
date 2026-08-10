@@ -20,10 +20,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * PR-D §2.1: unit tests for {@link AdmissionLease} — the CAS-guarded
@@ -41,6 +43,10 @@ import static org.mockito.Mockito.verify;
  *   <li>bindTo(future) on exceptional completion → close;</li>
  *   <li>null decodeEp / null prefillQueue are safe (skip the corresponding
  *       cleanup step, still execute the remaining steps).</li>
+ *   <li>onCloseCallback is decremented exactly once on every terminal path:
+ *       close(), forceCloseAfterHandover(), markDecodeAccepted();</li>
+ *   <li>onCloseCallback is called even if releaseResources() throws
+ *       (try-finally guarantee).</li>
  * </ol>
  */
 class AdmissionLeaseTest {
@@ -211,6 +217,153 @@ class AdmissionLeaseTest {
 
         verify(decodeEp, never()).release(anyLong());
         verify(registrar, times(1)).unregisterInflight(item);
+    }
+
+    // ==================== onCloseCallback counter guarantee ====================
+
+    /**
+     * onCloseCallback must decrement on the forceCloseAfterHandover path:
+     * create (increment) → handover → forceClose (decrement).
+     */
+    @Test
+    void onCloseCallback_decrements_on_forceCloseAfterHandover() {
+        AtomicInteger activeCount = new AtomicInteger(0);
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
+        PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
+        BatchItem item = batchItemWithDecode(2001L, new CompletableFuture<>(), 2001L);
+
+        when(decodeEp.isConfirmedTracked(2001L)).thenReturn(false);
+
+        activeCount.incrementAndGet();
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, activeCount::decrementAndGet);
+        lease.handoverToEngine();
+        assertEquals(1, lease.leaseState()); // HANDED_OVER
+        assertEquals(1, activeCount.get());
+
+        lease.forceCloseAfterHandover();
+
+        assertEquals(2, lease.leaseState()); // CLOSED
+        assertEquals(0, activeCount.get()); // counter decremented
+        // Resources released on force-close (decode not accepted)
+        verify(registrar, times(1)).unregisterInflight(item);
+        verify(registrar, times(1)).finishYieldedById(2001L, "post_success_soft_timeout");
+    }
+
+    /**
+     * onCloseCallback must decrement on the markDecodeAccepted path:
+     * create (increment) → handover → decodeAccept (decrement).
+     */
+    @Test
+    void onCloseCallback_decrements_on_markDecodeAccepted() {
+        AtomicInteger activeCount = new AtomicInteger(0);
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
+        PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
+        BatchItem item = batchItemWithDecode(2002L, new CompletableFuture<>(), 2002L);
+
+        activeCount.incrementAndGet();
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, activeCount::decrementAndGet);
+        lease.handoverToEngine();
+        assertEquals(1, activeCount.get());
+
+        lease.markDecodeAccepted();
+
+        assertEquals(2, lease.leaseState()); // CLOSED
+        assertEquals(0, activeCount.get()); // counter decremented
+        // Resources NOT released (engine owns them)
+        verify(registrar, never()).unregisterInflight(any());
+        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+    }
+
+    /**
+     * CAS mutex: close() (UNSET→CLOSED) then forceCloseAfterHandover()
+     * (HANDED_OVER→CLOSED) — the second CAS fails, onCloseCallback is
+     * called exactly once.
+     */
+    @Test
+    void onCloseCallback_only_decrement_once_close_then_forceClose() {
+        AtomicInteger activeCount = new AtomicInteger(0);
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
+        PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
+        BatchItem item = batchItemWithDecode(2003L, new CompletableFuture<>(), 2003L);
+
+        activeCount.incrementAndGet();
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, activeCount::decrementAndGet);
+
+        // close() succeeds: UNSET→CLOSED
+        lease.close();
+        assertEquals(0, activeCount.get()); // counter decremented
+
+        // forceCloseAfterHandover() CAS fails (state is CLOSED, not HANDED_OVER)
+        lease.forceCloseAfterHandover();
+        assertEquals(0, activeCount.get()); // NOT decremented again
+
+        // Resources released exactly once (by close())
+        verify(registrar, times(1)).unregisterInflight(item);
+        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+    }
+
+    /**
+     * try-finally guarantee: if releaseResources() throws, onCloseCallback
+     * must still be called (counter decremented). Without the try-finally fix,
+     * the exception would skip notifyCloseCallback() and leak the counter.
+     */
+    @Test
+    void onCloseCallback_called_even_if_releaseResources_throws() {
+        AtomicInteger activeCount = new AtomicInteger(0);
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
+        BatchItem item = batchItemWithDecode(2004L, new CompletableFuture<>(), 2004L);
+
+        // Make releaseResources() throw by having prefillQueue.tryRemove throw
+        doThrow(new RuntimeException("simulated queue error"))
+                .when(prefillQueue).tryRemove(2004L, "LEASE_RELEASE");
+
+        activeCount.incrementAndGet();
+        AdmissionLease lease = new AdmissionLease(item, null, prefillQueue, registrar,
+                0, activeCount::decrementAndGet);
+
+        // close() should catch the exception and still call notifyCloseCallback
+        lease.close();
+
+        assertEquals(2, lease.leaseState()); // CLOSED — CAS succeeded
+        assertEquals(0, activeCount.get()); // counter decremented despite exception
+        verify(prefillQueue, times(1)).tryRemove(2004L, "LEASE_RELEASE");
+    }
+
+    /**
+     * try-finally guarantee for forceCloseAfterHandover: if
+     * finishYieldedById throws, onCloseCallback must still be called.
+     */
+    @Test
+    void onCloseCallback_called_even_if_finishYieldedById_throws() {
+        AtomicInteger activeCount = new AtomicInteger(0);
+        InflightRegistrar registrar = mock(InflightRegistrar.class);
+        DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
+        PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
+        BatchItem item = batchItemWithDecode(2005L, new CompletableFuture<>(), 2005L);
+
+        when(decodeEp.isConfirmedTracked(2005L)).thenReturn(false);
+        // Make finishYieldedById throw
+        doThrow(new RuntimeException("simulated cancel error"))
+                .when(registrar).finishYieldedById(2005L, "post_success_soft_timeout");
+
+        activeCount.incrementAndGet();
+        AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
+                0, activeCount::decrementAndGet);
+        lease.handoverToEngine();
+
+        // forceCloseAfterHandover should catch the exception and still call notifyCloseCallback
+        lease.forceCloseAfterHandover();
+
+        assertEquals(2, lease.leaseState()); // CLOSED
+        assertEquals(0, activeCount.get()); // counter decremented despite exception
+        verify(registrar, times(1)).finishYieldedById(2005L, "post_success_soft_timeout");
     }
 
     // ==================== helpers ====================

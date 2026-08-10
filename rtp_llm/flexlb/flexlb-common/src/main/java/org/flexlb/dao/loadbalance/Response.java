@@ -42,7 +42,7 @@ public class Response {
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
-        result.setErrorMessage(strategyErrorType.getErrorMsg());
+        result.setErrorMessage(strategyErrorType.buildErrorMessage(null));
         return result;
     }
 

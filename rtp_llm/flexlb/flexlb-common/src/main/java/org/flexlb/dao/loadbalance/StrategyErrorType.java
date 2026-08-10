@@ -21,8 +21,8 @@ public enum StrategyErrorType {
     INVALID_REQUEST(8406, false),
 
     // queue error
-    QUEUE_FULL(8502, false),
-    QUEUE_TIMEOUT(8503, false),
+    QUEUE_FULL(8502, false, "TooManyRequests"),
+    QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
 
     // batch dispatch error
     BATCH_DISPATCH_FAILED(8510, true),
@@ -46,6 +46,7 @@ public enum StrategyErrorType {
     private final int errorCode;
     private final String errorMsg;
     private final boolean canRetry;
+    private final String statusName; // DashScope-compatible status_name (null = not set)
 
     // Cache for O(1) lookup by error code
     private static final Map<Integer, StrategyErrorType> ERROR_CODE_MAP = new HashMap<>();
@@ -57,9 +58,35 @@ public enum StrategyErrorType {
     }
 
     StrategyErrorType(int errorCode, boolean shouldRetry) {
+        this(errorCode, shouldRetry, null);
+    }
+
+    StrategyErrorType(int errorCode, boolean shouldRetry, String statusName) {
         this.errorCode = errorCode;
         this.errorMsg = name();
         this.canRetry = shouldRetry;
+        this.statusName = statusName;
+    }
+
+    /**
+     * Build the error_message for this error type. When {@code statusName}
+     * is non-null, constructs a JSON string containing {@code status_name}
+     * and {@code detail} so downstream consumers (including direct gRPC
+     * clients that bypass the dash_sc Python layer) can parse the
+     * DashScope-compatible status_name. When {@code statusName} is null,
+     * returns the plain detail string (backward compatible).
+     *
+     * @param detail human-readable detail message (null = use enum name)
+     * @return the error_message string
+     */
+    public String buildErrorMessage(String detail) {
+        if (statusName == null) {
+            return detail == null ? errorMsg : detail;
+        }
+        String safeDetail = detail == null ? errorMsg : detail;
+        String escaped = safeDetail.replace("\\", "\\\\").replace("\"", "\\\"");
+        return "{\"status_name\":\"" + statusName
+                + "\",\"detail\":\"" + escaped + "\"}";
     }
 
     /**

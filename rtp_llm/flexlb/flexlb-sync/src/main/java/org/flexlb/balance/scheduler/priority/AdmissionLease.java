@@ -137,9 +137,18 @@ public final class AdmissionLease implements AutoCloseable {
         if (!leaseState.compareAndSet(STATE_UNSET, STATE_CLOSED)) {
             return;
         }
-        cancelSoftTimeout();
-        releaseResources();
-        notifyCloseCallback();
+        // try-finally: ensure notifyCloseCallback() runs even if cancelSoftTimeout()
+        // or releaseResources() throws. Without this, a thrown exception would
+        // leak the activeLeaseCount backpressure counter (Fix: counter leak).
+        try {
+            cancelSoftTimeout();
+            releaseResources();
+        } catch (Exception e) {
+            Logger.error("[auto-tpm] admission lease close error: request_id={} error={}",
+                    item.requestId(), e.getMessage(), e);
+        } finally {
+            notifyCloseCallback();
+        }
         Logger.info("[auto-tpm] admission lease closed: request_id={}",
                 item.requestId());
     }
@@ -177,24 +186,37 @@ public final class AdmissionLease implements AutoCloseable {
         if (!leaseState.compareAndSet(STATE_HANDED_OVER, STATE_CLOSED)) {
             return;
         }
-        cancelSoftTimeout();
-        // TOCTOU fix: decode may have accepted between the isConfirmedTracked
-        // check in the soft-timeout lambda and this CAS. Re-check here — if
-        // decode has accepted, only decrement the counter (don't release
-        // resources or send cancel signal).
-        if (decodeEp != null && decodeEp.isConfirmedTracked(item.requestId())) {
+        // try-finally: ensure notifyCloseCallback() runs even if any intermediate
+        // step (cancelSoftTimeout, isConfirmedTracked, releaseResources,
+        // finishYieldedById) throws. Without this, a thrown exception would
+        // leak the activeLeaseCount backpressure counter (Fix: counter leak).
+        try {
+            cancelSoftTimeout();
+            // TOCTOU fix: decode may have accepted between the isConfirmedTracked
+            // check in the soft-timeout lambda and this CAS. Re-check here — if
+            // decode has accepted, only decrement the counter (don't release
+            // resources or send cancel signal).
+            if (decodeEp != null && decodeEp.isConfirmedTracked(item.requestId())) {
+                Logger.info("[auto-tpm] admission lease force-closed after handover "
+                                + "(decode accepted, TOCTOU): request_id={}",
+                        item.requestId());
+            } else {
+                releaseResources();
+                // Fix B: send cancel signal to engine so C++ releases con_ref.
+                // Only on the soft-timeout path — the normal close() failure path
+                // doesn't need this (the engine already knows the request failed).
+                registrar.finishYieldedById(item.requestId(), "post_success_soft_timeout");
+                Logger.info("[auto-tpm] admission lease force-closed after handover: "
+                                + "request_id={} reason=post_success_soft_timeout",
+                        item.requestId());
+            }
+        } catch (Exception e) {
+            Logger.error("[auto-tpm] admission lease forceCloseAfterHandover error: "
+                            + "request_id={} lease_state={} error={}",
+                    item.requestId(), leaseState.get(), e.getMessage(), e);
+        } finally {
             notifyCloseCallback();
-            return;
         }
-        releaseResources();
-        // Fix B: send cancel signal to engine so C++ releases con_ref.
-        // Only on the soft-timeout path — the normal close() failure path
-        // doesn't need this (the engine already knows the request failed).
-        registrar.finishYieldedById(item.requestId(), "post_success_soft_timeout");
-        notifyCloseCallback();
-        Logger.info("[auto-tpm] admission lease force-closed after handover: "
-                        + "request_id={} reason=post_success_soft_timeout",
-                item.requestId());
     }
 
     /**
@@ -208,10 +230,19 @@ public final class AdmissionLease implements AutoCloseable {
         if (!leaseState.compareAndSet(STATE_HANDED_OVER, STATE_CLOSED)) {
             return;
         }
-        cancelSoftTimeout();
-        notifyCloseCallback();
-        Logger.info("[auto-tpm] admission lease marked decode-accepted: request_id={}",
-                item.requestId());
+        // try-finally: ensure notifyCloseCallback() runs even if cancelSoftTimeout()
+        // throws. Without this, the counter leaks (Fix: counter leak).
+        try {
+            cancelSoftTimeout();
+            Logger.info("[auto-tpm] admission lease marked decode-accepted: request_id={}",
+                    item.requestId());
+        } catch (Exception e) {
+            Logger.error("[auto-tpm] admission lease markDecodeAccepted error: "
+                            + "request_id={} error={}",
+                    item.requestId(), e.getMessage(), e);
+        } finally {
+            notifyCloseCallback();
+        }
     }
 
     /**
@@ -272,13 +303,38 @@ public final class AdmissionLease implements AutoCloseable {
         long requestId = item.decode() != null
                 ? item.decode().getRequestId() : item.requestId();
         softTimeoutFuture = SOFT_TIMEOUT_EXECUTOR.schedule(() -> {
-            if (decodeEp != null && decodeEp.isConfirmedTracked(requestId)) {
-                // Decode accepted — mark lease closed (decrement counter only).
-                markDecodeAccepted();
-                return;
+            // try-catch: ScheduledExecutorService silently swallows exceptions
+            // from failed tasks — without this catch, a thrown exception
+            // (e.g. from isConfirmedTracked, releaseResources, or
+            // finishYieldedById) would leave the lease stuck in HANDED_OVER
+            // forever, leaking the activeLeaseCount counter. The forceClose
+            // fallback ensures the CAS transitions to CLOSED even if the
+            // first attempt threw mid-way (CAS is idempotent — a second call
+            // after a successful CAS harmlessly returns).
+            try {
+                if (decodeEp != null && decodeEp.isConfirmedTracked(requestId)) {
+                    // Decode accepted — mark lease closed (decrement counter only).
+                    markDecodeAccepted();
+                    return;
+                }
+                // Decode not accepted within the soft timeout window — force close.
+                forceCloseAfterHandover();
+            } catch (Exception e) {
+                Logger.error("[auto-tpm] soft timeout task failed: request_id={}"
+                                + " lease_state={} error={}",
+                        requestId, leaseState.get(), e.getMessage(), e);
+                // Best-effort fallback: force-close to ensure counter decrement.
+                // If the first call's CAS already succeeded (threw after CAS),
+                // this call's CAS will fail harmlessly. If it failed before CAS,
+                // this call will succeed and close the lease.
+                try {
+                    forceCloseAfterHandover();
+                } catch (Exception fallback) {
+                    Logger.error("[auto-tpm] soft timeout fallback force-close"
+                                    + " failed: request_id={} error={}",
+                            requestId, fallback.getMessage(), fallback);
+                }
             }
-            // Decode not accepted within the soft timeout window — force close.
-            forceCloseAfterHandover();
         }, softTimeoutMs, TimeUnit.MILLISECONDS);
     }
 

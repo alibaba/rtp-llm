@@ -803,7 +803,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return;
         }
         Response errorResp = Response.error(errorType);
-        errorResp.setErrorMessage(message == null ? errorType.getErrorMsg() : message);
+        errorResp.setErrorMessage(errorType.buildErrorMessage(message));
         future.complete(errorResp);
     }
 
