@@ -167,14 +167,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         auto options     = torch::TensorOptions(torch_dtype);
         if (atype == rtp_llm::AllocationType::DEVICE) {
             options = options.device(torch::kCUDA);
+        } else {
+            // Broadcast receive buffers need pinned storage. Allocate it directly to avoid
+            // copying an uninitialized pageable allocation in Tensor::pin_memory().
+            options = options.pinned_memory(true);
         }
         std::vector<int64_t> dims64(dims.begin(), dims.end());
-        auto                 tensor = torch::empty(dims64, options);
-        // NCCL broadcast requires pinned memory for CPU buffers
-        if (atype != rtp_llm::AllocationType::DEVICE) {
-            tensor = tensor.pin_memory();
-        }
-        return tensor;
+        return torch::empty(dims64, options);
     };
 
     bool is_non_root = parallelism_config.tp_rank != 0;
@@ -355,7 +354,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     torch::Tensor cpu_packed, gpu_packed;
 
     if (cpu_total_bytes > 0) {
-        cpu_packed = torch::empty({cpu_total_bytes}, torch::kUInt8).pin_memory();
+        // The memcpy loop below initializes this buffer after allocation.
+        cpu_packed = torch::empty(
+            {cpu_total_bytes}, torch::TensorOptions(torch::kUInt8).pinned_memory(true));
         if (is_root) {
             auto* base = static_cast<uint8_t*>(cpu_packed.data_ptr());
             for (auto& e : cpu_entries) {
