@@ -41,12 +41,18 @@ struct MLAKVCacheSpec: public KVCacheSpec {
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
 
-        const bool   is_fp8   = spec->dtype_ == DataType::TYPE_FP8_E4M3 || spec->dtype_ == DataType::TYPE_FP8_E8M0;
-        const size_t no_pe    = static_cast<size_t>(attn.kv_lora_rank);
-        const size_t rope     = static_cast<size_t>(attn.rope_head_dim);
-        spec->nope_per_token  = no_pe;
-        spec->rope_per_token  = rope;
-        spec->elems_per_token = is_fp8 ? no_pe + no_pe / 128 * 4 + rope * 2 : no_pe + rope;
+        const bool   is_fp8     = spec->dtype_ == DataType::TYPE_FP8_E4M3 || spec->dtype_ == DataType::TYPE_FP8_E8M0;
+        const size_t no_pe      = static_cast<size_t>(attn.kv_lora_rank);
+        const size_t rope       = static_cast<size_t>(attn.rope_head_dim);
+        spec->nope_per_token    = no_pe;
+        spec->rope_per_token    = rope;
+
+        bool use_compact_fp8_layout = false;
+#if USING_ROCM
+        use_compact_fp8_layout = is_fp8 && attn.is_sparse;
+#endif
+
+        spec->elems_per_token = is_fp8 && !use_compact_fp8_layout ? no_pe + no_pe / 128 * 4 + rope * 2 : no_pe + rope;
 
         return spec;
     }
