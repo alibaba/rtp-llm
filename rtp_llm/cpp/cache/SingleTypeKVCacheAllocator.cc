@@ -79,13 +79,13 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
     const auto& cache_keys        = kv_resource->cacheKeys(0);
     const int   seq_len           = malloc_info.complete_token_ids->seqLength();
-    const int   reuse_unit_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
-                                        static_cast<int>(cp_slot_mapper_->logicalSeqSizePerBlock(config_, 0)) :
-                                        full_kv_cache_group_->seqSizePerBlock();
+    const int reuse_unit_tokens =
+        cp_slot_mapper_ ? cp_slot_mapper_->reuseBlockTokens(config_) : full_kv_cache_group_->seqSizePerBlock();
 
     int64_t                           match_cost_time_us = 0;
     int64_t                           match_end_time_us  = 0;
-    size_t                            reuse_blocks       = 0;
+    size_t                            matched_device_blocks = 0;
+    size_t                            total_logical_blocks  = 0;
     std::shared_ptr<LoadAsyncContext> load_context;
     std::vector<MultiNodeResource>    matched_resources;
     bool                              matched_blocks_released = false;
@@ -136,10 +136,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         if (has_async_context && load_context == nullptr) {
             return rollback();
         }
-        const size_t ready_blocks = match_result.matched_device_blocks;
-        reuse_blocks = load_context && !load_context->empty() ? load_context->matchedBlocks() : ready_blocks;
+        matched_device_blocks = match_result.matched_device_blocks;
+        total_logical_blocks  = load_context ? load_context->matchedBlocks() : matched_device_blocks;
         BlockIndicesType ready_group_blocks = block_tree_cache_->matchedBlocksForGroup(0, matched_resources);
-        block_ids_0.assign(BlockIndicesType(reuse_blocks, NULL_BLOCK_IDX));
+        block_ids_0.assign(BlockIndicesType(total_logical_blocks, NULL_BLOCK_IDX));
         for (size_t i = 0; i < ready_group_blocks.size(); ++i) {
             block_ids_0.setAt(i, ready_group_blocks[i]);
         }
@@ -178,7 +178,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             full_kv_cache_group_->KVCacheGroup::reference(resident_blocks);
         }
         release_matched_blocks();
-        kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(matched_device_blocks);
     } else {
         release_matched_blocks();
     }
@@ -195,7 +195,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             const size_t path_index = load_context->loadDescs()[desc_index].path_index;
             materialize_positions.insert(path_index);
         }
-        for (size_t position = 0; position < reuse_blocks; ++position) {
+        for (size_t position = 0; position < total_logical_blocks; ++position) {
             if (isNullBlockIdx(block_ids_0.blocks()[position])
                 && materialize_positions.find(position) == materialize_positions.end()) {
                 return rollback();
@@ -243,14 +243,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
         full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id, 0), block_ids_0.blocks());
     }
-    const int    reuse_len = static_cast<int>(reuse_blocks) * reuse_unit_tokens;
+    const int    reuse_len = static_cast<int>(matched_device_blocks) * reuse_unit_tokens;
     MallocResult result{true, reuse_len, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
-    if (load_context != nullptr && reuse_blocks > 0) {
-        result.host_reuse_len = static_cast<int>(load_context->matchedBlocks(Tier::HOST)) * reuse_unit_tokens;
-        result.disk_reuse_len   = static_cast<int>(load_context->matchedBlocks(Tier::DISK)) * reuse_unit_tokens;
-    }
     return result;
 }
 

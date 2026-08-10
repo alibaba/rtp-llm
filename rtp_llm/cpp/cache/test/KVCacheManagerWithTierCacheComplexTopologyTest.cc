@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/cache/test/KVCacheManagerWithTierCacheTestBase.h"
+#include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 namespace rtp_llm::test {
 using namespace tier_cache_test_detail;
@@ -177,9 +179,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
-    EXPECT_EQ(load_result.reuse_len, 2 * seq_size_per_block);
+    EXPECT_EQ(load_result.reuse_len, 0);
     EXPECT_EQ(load_result.host_reuse_len, 0);
-    EXPECT_EQ(load_result.disk_reuse_len, 2 * seq_size_per_block);
+    EXPECT_EQ(load_result.disk_reuse_len, 0);
     ASSERT_NE(load_result.async_context, nullptr);
     const bool load_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -348,8 +350,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     touch_info.enable_cache_lookup = true;
     const auto touch_result        = manager_->malloc(touch_info);
     ASSERT_TRUE(touch_result.success);
-    EXPECT_EQ(touch_result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(touch_result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(touch_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(touch_result.host_reuse_len, 0);
     EXPECT_EQ(touch_result.disk_reuse_len, 0);
     ASSERT_NE(touch_result.async_context, nullptr);
     touch_result.async_context->waitDone();
@@ -430,6 +432,116 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     }
 
     manager_->free(FreeInfo{guard, guard_tokens});
+
+    size_t failed_host_loads = 0;
+    for (const auto& group_set : cache->groupSets()) {
+        const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+        const size_t reuse_begin = 3 - reuse_count;
+        failed_host_loads += reuse_begin <= 1 ? 1u : 0u;
+    }
+    ASSERT_GT(failed_host_loads, 0u);
+    for (size_t index = 0; index < failed_host_loads; ++index) {
+        engine->enqueueResult(/*success=*/true);
+    }
+    engine->enqueueResult(/*success=*/false);
+
+    const size_t descriptors_before_failure = engine->submitCount();
+    ASSERT_TRUE(engine->armPause());
+    ScopedTransferRelease failure_release(engine);
+
+    const int block_size = static_cast<int>(cache_config_.seq_size_per_block);
+    auto      input_ids  = torch::empty({4 * block_size}, torch::kInt32);
+    auto*     input_data = input_ids.data_ptr<int32_t>();
+    for (int index = 0; index < 4 * block_size; ++index) {
+        input_data[index] = index;
+    }
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->input_ids       = std::move(input_ids);
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->reuse_cache       = true;
+    generate_input->generate_config->enable_host_cache = true;
+
+    ResourceContext resource_context;
+    resource_context.cache_manager     = manager_;
+    resource_context.reuse_cache       = true;
+    resource_context.enable_host_cache = true;
+    resource_context.role_type         = RoleType::PREFILL;
+
+    ModelConfig model_config;
+    model_config.max_seq_len                  = 2048;
+    model_config.attn_config.tokens_per_block = block_size;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 1;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 2048;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PREFILL;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+
+    auto prefill_stream = std::make_shared<NormalGenerateStream>(
+        generate_input, model_config, runtime_config, resource_context, nullptr);
+    auto scheduler = std::make_shared<FIFOScheduler>(runtime_config,
+                                                     model_config,
+                                                     pd_sep_config,
+                                                     parallelism_config,
+                                                     model_specific_config,
+                                                     manager_);
+    ASSERT_TRUE(scheduler->enqueue(prefill_stream).ok());
+    auto first_schedule = scheduler->schedule();
+    ASSERT_TRUE(first_schedule.ok());
+    EXPECT_TRUE(first_schedule.value().empty());
+    EXPECT_EQ(prefill_stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_EQ(prefill_stream->reuseLength(), block_size);
+    EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
+
+    const bool failure_entered = engine->waitUntilEnteredFor(
+        std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
+    if (!failure_entered) {
+        engine->release();
+    }
+    ASSERT_TRUE(failure_entered);
+    engine->release();
+    ASSERT_TRUE(waitForPendingTasksDoneFor(
+        *cache, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
+
+    auto second_schedule = scheduler->schedule();
+    ASSERT_TRUE(second_schedule.ok());
+    ASSERT_EQ(second_schedule.value().size(), 1u);
+    EXPECT_EQ(second_schedule.value().front(), prefill_stream);
+    EXPECT_EQ(prefill_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(prefill_stream->hasError());
+    EXPECT_EQ(prefill_stream->reuseLength(), block_size);
+    EXPECT_EQ(prefill_stream->initialReuseLength(), block_size);
+    EXPECT_EQ(prefill_stream->deviceReuseLength(), block_size);
+    EXPECT_EQ(prefill_stream->hostReuseLength(), 0);
+    EXPECT_EQ(prefill_stream->diskReuseLength(), 0);
+    EXPECT_EQ(prefill_stream->streamCacheResource().kvCache().cacheResource(0).deviceReuseBlockNum(), 1u);
+
+    for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
+        const auto& group_set   = cache->groupSets()[group_set_id];
+        const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+        const size_t reuse_begin = 3 - reuse_count;
+        const int    group_id    = static_cast<int>(group_set->groupIds().front());
+        const auto&  blocks      = prefill_stream->streamCacheResource().kvCache().blocks(0, group_id);
+        for (size_t path = reuse_begin; path < 3; ++path) {
+            ASSERT_LT(path, blocks.size());
+            EXPECT_FALSE(isNullBlockIdx(blocks[path]));
+        }
+    }
+
+    const auto failure_descriptors = engine->descriptors();
+    ASSERT_GE(failure_descriptors.size(), descriptors_before_failure + failed_host_loads + 1);
+    for (size_t index = descriptors_before_failure; index < descriptors_before_failure + failed_host_loads; ++index) {
+        EXPECT_EQ(failure_descriptors[index].source_tier, Tier::HOST);
+        EXPECT_EQ(failure_descriptors[index].target_tier, Tier::DEVICE);
+    }
+    EXPECT_EQ(failure_descriptors[descriptors_before_failure + failed_host_loads].source_tier, Tier::DISK);
+    EXPECT_EQ(failure_descriptors[descriptors_before_failure + failed_host_loads].target_tier, Tier::DEVICE);
+
+    prefill_stream->reportError(ErrorCode::CANCELLED, "test cleanup");
+    ASSERT_TRUE(scheduler->schedule().ok());
+    EXPECT_TRUE(prefill_stream->streamCacheResource().isResourceReleased());
+
     const size_t descriptors_before_load = engine->submitCount();
     ASSERT_TRUE(engine->armPause());
     ScopedTransferRelease load_release(engine);
@@ -443,9 +555,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
-    EXPECT_EQ(load_result.reuse_len, 3 * static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(load_result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(load_result.disk_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(load_result.host_reuse_len, 0);
+    EXPECT_EQ(load_result.disk_reuse_len, 0);
     ASSERT_NE(load_result.async_context, nullptr);
     const bool entered =
         engine->waitUntilEnteredFor(std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -651,9 +763,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     info.enable_cache_lookup = true;
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.reuse_len, logical_blocks * block_size);
+    EXPECT_EQ(result.reuse_len, 0);
     EXPECT_EQ(result.host_reuse_len, 0);
-    EXPECT_EQ(result.disk_reuse_len, logical_blocks * block_size);
+    EXPECT_EQ(result.disk_reuse_len, 0);
     ASSERT_NE(result.async_context, nullptr);
 
     const bool entered =

@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -27,35 +28,15 @@ using namespace std;
 
 namespace rtp_llm {
 
-class ControlledAllocatorContext: public AsyncContext {
-public:
-    void waitDone() override {}
-
-    bool done() const override {
-        return done_;
-    }
-
-    bool success() const override {
-        return success_;
-    }
-
-    ErrorInfo errorInfo() const override {
-        return error_;
-    }
-
-    void complete(bool success) {
-        success_ = success;
-        done_    = true;
-        if (!success) {
-            error_ = ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "controlled allocator load failure");
-        }
-    }
-
-private:
-    bool      done_{false};
-    bool      success_{false};
-    ErrorInfo error_;
-};
+std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
+    auto coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+    std::vector<TransferDescriptor> descriptors{
+        TransferDescriptor{nullptr, /*group_set_id=*/0, /*path_index=*/0, Tier::HOST, BlockIndicesType{1}}};
+    auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
+    EXPECT_TRUE(coordinator->registerContext(context));
+    return context;
+}
 
 class FIFOSchedulerAsyncCacheTest: public DeviceTestBase {
 protected:
@@ -109,11 +90,13 @@ protected:
                                    bool                    reuse_cache        = false,
                                    bool                    enable_host_cache  = false,
                                    int                     max_new_tokens     = 1,
-                                   const std::vector<int>& variable_num_beams = {}) {
+                                   const std::vector<int>& variable_num_beams = {},
+                                   RoleType                role_type          = RoleType::PDFUSION) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
         resource_context.enable_host_cache   = enable_host_cache;
+        resource_context.role_type           = role_type;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
@@ -201,7 +184,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithAllocatorReadiness_EntersLoadingCache) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
-    auto context   = std::make_shared<ControlledAllocatorContext>();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
@@ -219,14 +202,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithAllocatorReadiness_Enter
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_MovesToRunning) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
-    auto context   = std::make_shared<ControlledAllocatorContext>();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
     ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
-    context->complete(true);
+    EXPECT_TRUE(context->completeOne(true));
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
@@ -243,14 +226,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_Mo
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorFailure_Evicted) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
-    auto context   = std::make_shared<ControlledAllocatorContext>();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
     ASSERT_GT(stream->curBlocksNum(), 0);
-    context->complete(false);
+    EXPECT_TRUE(context->completeOne(false));
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
@@ -267,14 +250,46 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorFailure_Ev
     EXPECT_EQ(free_calls_, 1);
 }
 
+TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_PrefillAllocatorFailure_MovesToRunning) {
+    auto scheduler = createScheduler();
+    auto stream    = createStream({1, 2, 3},
+                               /*reuse_cache=*/true,
+                               /*enable_host_cache=*/false,
+                               /*max_new_tokens=*/1,
+                               /*variable_num_beams=*/{},
+                               RoleType::PREFILL);
+    auto context = makeControlledAllocatorContext();
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_TRUE(context->completeOne(false));
+
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second.value().size(), 1);
+    EXPECT_EQ(second.value().front(), stream);
+    EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_FALSE(stream->streamCacheResource().isResourceReleased());
+    EXPECT_GT(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->streamCacheResource().allocator_load_context_, nullptr);
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(scheduler->runningStreamsSize(), 1);
+    EXPECT_EQ(free_calls_, 0);
+}
+
 TEST_F(FIFOSchedulerAsyncCacheTest, testPendingAllocatorLoads_RespectAdmissionBatchLimit) {
     auto scheduler = createScheduler(/*max_generate_batch_size=*/2);
     auto stream1   = createStream({1}, /*reuse_cache=*/true);
     auto stream2   = createStream({2}, /*reuse_cache=*/true);
     auto stream3   = createStream({3}, /*reuse_cache=*/true);
-    auto context1  = std::make_shared<ControlledAllocatorContext>();
-    auto context2  = std::make_shared<ControlledAllocatorContext>();
-    auto context3  = std::make_shared<ControlledAllocatorContext>();
+    auto context1  = makeControlledAllocatorContext();
+    auto context2  = makeControlledAllocatorContext();
+    auto context3  = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream1).ok());
     ASSERT_TRUE(scheduler->enqueue(stream2).ok());
     ASSERT_TRUE(scheduler->enqueue(stream3).ok());
@@ -298,7 +313,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPendingAllocatorLoads_RespectAdmissionBa
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_ReturningFromLoadingCache_SkipsDuplicateInitialReadiness) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
-    auto context   = std::make_shared<ControlledAllocatorContext>();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
@@ -306,7 +321,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_ReturningFromLoadingCache_Sk
     ASSERT_TRUE(first.ok());
     ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
     EXPECT_EQ(initial_malloc_calls_, 1);
-    context->complete(true);
+    EXPECT_TRUE(context->completeOne(true));
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
@@ -319,7 +334,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_ReturningFromLoadingCache_Sk
 TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_IncludedInEmptyAndOnflight) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
-    auto context   = std::make_shared<ControlledAllocatorContext>();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
@@ -338,7 +353,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_IncludedInEmptyAndOn
 TEST_F(FIFOSchedulerAsyncCacheTest, testWaitPredicate_DoesNotSpinForLoadingCacheStreams) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
-    auto context   = std::make_shared<ControlledAllocatorContext>();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
@@ -375,7 +390,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testMixedAllocatorReadinessAndDirectStreams)
     auto scheduler      = createScheduler();
     auto loading_stream = createStream({1, 2}, /*reuse_cache=*/true);
     auto direct_stream  = createStream({3, 4}, /*reuse_cache=*/false);
-    auto context        = std::make_shared<ControlledAllocatorContext>();
+    auto context        = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(loading_stream).ok());
     ASSERT_TRUE(scheduler->enqueue(direct_stream).ok());
     installReadinessAllocator([context, loading_stream](const MallocInfo& info) -> std::shared_ptr<AsyncContext> {
@@ -398,7 +413,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testMixedAllocatorReadinessAndDirectStreams)
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorPending_StaysInQueue) {
     auto scheduler = createScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
-    auto context   = std::make_shared<ControlledAllocatorContext>();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
@@ -422,7 +437,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRejoinsWaitingT
     auto scheduler        = createScheduler(/*max_generate_batch_size=*/1);
     auto completed_stream = createStream({1, 2}, /*reuse_cache=*/true);
     auto older_waiter     = createStream({3, 4}, /*reuse_cache=*/false);
-    auto context          = std::make_shared<ControlledAllocatorContext>();
+    auto context          = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(completed_stream).ok());
     ASSERT_TRUE(scheduler->enqueue(older_waiter).ok());
     installReadinessAllocator([context, completed_stream](const MallocInfo& info) {
@@ -432,7 +447,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRejoinsWaitingT
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
     ASSERT_EQ(completed_stream->getStatus(), StreamState::LOADING_CACHE);
-    context->complete(true);
+    EXPECT_TRUE(context->completeOne(true));
 
     auto second = scheduler->schedule();
     ASSERT_TRUE(second.ok());
@@ -450,7 +465,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleOrdering_LoadDoneRejoinsWaitingT
 TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionAllocatorLoadingLifecyclePromotesToDecode) {
     auto scheduler = createPDFusionRatioScheduler();
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/true);
-    auto context   = std::make_shared<ControlledAllocatorContext>();
+    auto context   = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
     installReadinessAllocator([context](const MallocInfo&) { return context; });
 
@@ -464,7 +479,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionAllocatorLoadingLifecyclePromote
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(initial_malloc_calls_, 1);
 
-    context->complete(true);
+    EXPECT_TRUE(context->completeOne(true));
     auto prefill = scheduler->schedule();
     ASSERT_TRUE(prefill.ok());
     ASSERT_EQ(prefill.value().size(), 1);
@@ -492,9 +507,9 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionPendingAllocatorLoadsCountToward
     auto stream1   = createStream({1}, /*reuse_cache=*/true);
     auto stream2   = createStream({2}, /*reuse_cache=*/true);
     auto stream3   = createStream({3}, /*reuse_cache=*/true);
-    auto context1  = std::make_shared<ControlledAllocatorContext>();
-    auto context2  = std::make_shared<ControlledAllocatorContext>();
-    auto context3  = std::make_shared<ControlledAllocatorContext>();
+    auto context1  = makeControlledAllocatorContext();
+    auto context2  = makeControlledAllocatorContext();
+    auto context3  = makeControlledAllocatorContext();
     ASSERT_TRUE(scheduler->enqueue(stream1).ok());
     ASSERT_TRUE(scheduler->enqueue(stream2).ok());
     ASSERT_TRUE(scheduler->enqueue(stream3).ok());

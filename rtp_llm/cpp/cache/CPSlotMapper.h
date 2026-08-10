@@ -61,6 +61,7 @@ public:
     int effectiveSeqLenForAlloc(const CacheConfig& config, size_t gid, int seq_len) const;
 
     size_t        logicalSeqSizePerBlock(const CacheConfig& config, size_t gid) const;
+    int           reuseBlockTokens(const CacheConfig& config) const;
     CacheKeysType canonicalCacheKeys(const CacheKeysType& full_keys) const;
     CacheKeysType localCacheKeys(const CacheConfig& config, size_t gid, const CacheKeysType& full_keys) const;
 

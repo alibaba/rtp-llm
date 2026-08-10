@@ -251,6 +251,8 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+        "//rtp_llm/cpp/engine_base/schedulers",
+        "//rtp_llm/cpp/normal_engine",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

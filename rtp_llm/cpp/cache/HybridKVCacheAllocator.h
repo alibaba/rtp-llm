@@ -41,7 +41,8 @@ public:
 
 protected:
     struct PreparedKVCache {
-        int                               reuse_blocks = 0;
+        size_t                            matched_device_blocks = 0;
+        size_t                            total_logical_blocks  = 0;
         std::shared_ptr<LoadAsyncContext> load_context;
         std::vector<RequiredPositions>    required_positions;
         std::vector<BlockIndicesType>     referenced_blocks;

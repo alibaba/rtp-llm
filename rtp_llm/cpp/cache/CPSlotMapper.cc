@@ -105,6 +105,17 @@ size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, size_t gi
     return groupSeqSize(config, gid, config.seq_size_per_block);
 }
 
+int CPSlotMapper::reuseBlockTokens(const CacheConfig& config) const {
+    if (isSharded()) {
+        for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+            if (config.typeForGroup(gid) == CacheGroupType::FULL) {
+                return static_cast<int>(logicalSeqSizePerBlock(config, gid));
+            }
+        }
+    }
+    return static_cast<int>(config.seq_size_per_block);
+}
+
 CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) const {
     if (!isSharded()) {
         return full_keys;

@@ -65,7 +65,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
     if (pending_async_context != nullptr) {
         std::shared_ptr<LoadAsyncContext> load_context =
             std::dynamic_pointer_cast<LoadAsyncContext>(pending_async_context);
-        if (load_context != nullptr && !load_context->commit()) {
+        if (load_context == nullptr || !load_context->commit()) {
             load_context.reset();
             pending_async_context.reset();
             FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};

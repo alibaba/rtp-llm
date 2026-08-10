@@ -218,8 +218,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     const size_t first_load_submits_begin = pausable_engine->submitCount();
     const auto   first_result             = manager_->malloc(first_info);
     ASSERT_TRUE(first_result.success);
-    EXPECT_EQ(first_result.reuse_len, 3 * seq_size_per_block);
-    EXPECT_EQ(first_result.host_reuse_len, 3 * seq_size_per_block);
+    EXPECT_EQ(first_result.reuse_len, 0);
+    EXPECT_EQ(first_result.host_reuse_len, 0);
     EXPECT_EQ(first_result.disk_reuse_len, 0);
     ASSERT_NE(first_result.async_context, nullptr);
     const bool first_load_entered = pausable_engine->waitUntilEnteredFor(
@@ -424,8 +424,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     info.enable_cache_lookup = true;
     auto result              = manager_->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_EQ(result.host_reuse_len, 0);
     EXPECT_EQ(result.disk_reuse_len, 0);
     ASSERT_NE(result.async_context, nullptr);
     result.async_context->waitDone();
@@ -497,8 +497,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     info.enable_cache_lookup = true;
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.reuse_len, block_size);
-    EXPECT_EQ(result.host_reuse_len, block_size);
+    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_EQ(result.host_reuse_len, 0);
     EXPECT_EQ(result.disk_reuse_len, 0);
     ASSERT_NE(result.async_context, nullptr);
 

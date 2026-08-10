@@ -5,6 +5,7 @@
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
@@ -42,22 +43,28 @@ private:
     size_t pre_run_calls_{0};
 };
 
-class CountingReadyContext: public AsyncContext {
+class CountingReadyContext: public LoadAsyncContext {
 public:
+    static std::shared_ptr<CountingReadyContext> create() {
+        auto coordinator = std::make_shared<LoadContextCoordinator>(
+            [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+        auto context = std::shared_ptr<CountingReadyContext>(new CountingReadyContext(coordinator));
+        EXPECT_TRUE(coordinator->registerContext(context));
+        return context;
+    }
+
     void waitDone() override {
         ++wait_calls_;
-    }
-    bool done() const override {
-        return true;
-    }
-    bool success() const override {
-        return true;
+        LoadAsyncContext::waitDone();
     }
     size_t waitCalls() const {
         return wait_calls_;
     }
 
 private:
+    explicit CountingReadyContext(const std::shared_ptr<LoadContextCoordinator>& coordinator):
+        LoadAsyncContext({}, {}, /*matched_blocks=*/0, /*context_id=*/1, coordinator) {}
+
     size_t wait_calls_{0};
 };
 
@@ -167,7 +174,7 @@ TEST_F(SystemPromptConstructorTest, testNormalEngineWaitsForAllocatorObserverBef
     auto engine         = createFocusedEngine<NormalEngine>(/*device_min_free_blocks=*/1);
     auto manager        = engine->resourceContext().cache_manager;
     auto real_allocator = manager->allocator_;
-    auto context        = std::make_shared<CountingReadyContext>();
+    auto context        = CountingReadyContext::create();
     auto mock_allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(manager->config_);
 
     ON_CALL(*mock_allocator, initMallocForCommonLen(testing::_))

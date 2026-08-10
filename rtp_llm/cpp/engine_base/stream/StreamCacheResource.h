@@ -101,14 +101,10 @@ public:
         return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
     }
 
-    // KVCacheResource reuse counters follow the canonical cache-key namespace.
-    // Under CP sharding one canonical block spans cp_size physical blocks.
+    // KVCacheResource reuse counters follow the topology's canonical cache-key namespace.
     int reuseBlockTokens() const {
         const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
-        if (mapper && mapper->isSharded()) {
-            return mapper->virtualBlockSize();
-        }
-        return seqSizePerBlock();
+        return mapper ? mapper->reuseBlockTokens(resource_context_.cache_manager->cacheConfig()) : seqSizePerBlock();
     }
 
     void setNeedReleaseResource(bool need_release_resource) {
@@ -145,7 +141,7 @@ public:
 private:
     void clearCacheReuseState();
     void recordCacheReuseMallocResult(const MallocResult& result);
-    void finishCacheLoadMetrics(bool success);
+    absl::Status finalizeAllocatorLoad();
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;

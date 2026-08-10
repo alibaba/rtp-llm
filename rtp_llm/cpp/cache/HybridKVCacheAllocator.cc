@@ -37,15 +37,6 @@ inline int cpEffectiveSeqLenForGroup(const std::shared_ptr<CPSlotMapper>& mapper
                seq_len;
 }
 
-inline int cpLogicalSeqSizeForGroup(const std::shared_ptr<CPSlotMapper>& mapper,
-                                    const CacheConfig&                   config,
-                                    int                                  group_id,
-                                    int                                  fallback) {
-    return (mapper && mapper->isSharded() && group_id >= 0) ?
-               static_cast<int>(mapper->logicalSeqSizePerBlock(config, static_cast<size_t>(group_id))) :
-               fallback;
-}
-
 BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) {
     BlockIndicesType valid;
     if (begin >= blocks.size()) {
@@ -98,16 +89,18 @@ void HybridKVCacheAllocator::prepareKVCache(const CacheKeysType&                
     const int            cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     BlockTreeMatchResult match_result = block_tree_cache_->match(cache_keys);
     prepared.load_context             = std::move(match_result.async_context);
-    const size_t matched_blocks =
+    prepared.matched_device_blocks = match_result.matched_device_blocks;
+    prepared.total_logical_blocks =
         prepared.load_context ? prepared.load_context->matchedBlocks() : match_result.matched_device_blocks;
-    if (matched_blocks == 0) {
+    if (prepared.total_logical_blocks == 0) {
         block_tree_cache_->releaseMatchedResources(match_result.matched_device_resources);
         return;
     }
     const auto& group_sets = block_tree_cache_->groupSets();
     for (const auto& group_set : group_sets) {
         for (const size_t group_id : group_set->groupIds()) {
-            const size_t reuse_size = loadTargetPosition(matched_blocks - 1, group_id, cp_mapper, cp_scale) + 1;
+            const size_t reuse_size =
+                loadTargetPosition(prepared.total_logical_blocks - 1, group_id, cp_mapper, cp_scale) + 1;
             kv_resource.mutableBlockIds(0, static_cast<int>(group_id))
                 .assign(BlockIndicesType(reuse_size, NULL_BLOCK_IDX));
         }
@@ -161,7 +154,6 @@ void HybridKVCacheAllocator::prepareKVCache(const CacheKeysType&                
         prepared.original_sizes.push_back(kv_resource.blocksNum(0, group_id));
     }
     block_tree_cache_->releaseMatchedResources(match_result.matched_device_resources);
-    prepared.reuse_blocks = static_cast<int>(matched_blocks);
 }
 
 MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
@@ -171,11 +163,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     const int             common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
     const auto&           cp_mapper      = cp_slot_mapper_;
     const int             cp_scale       = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    const KVCacheGroupPtr reuse_group =
-        full_group_ids_.empty() ? KVCacheGroupPtr{} : kv_cache_groups_[static_cast<size_t>(full_group_ids_.front())];
-    const int reuse_unit_tokens =
-        reuse_group ? cpLogicalSeqSizeForGroup(cp_mapper, config_, reuse_group->group_id(), seqSizePerBlock()) :
-                      seqSizePerBlock();
+    const int reuse_unit_tokens = cp_mapper ? cp_mapper->reuseBlockTokens(config_) : seqSizePerBlock();
 
     const CacheKeysType& cache_keys         = kv_resource->cacheKeys(0);
     int64_t              match_cost_time_us = 0;
@@ -195,7 +183,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         match_end_time_us  = currentTimeUs();
         match_cost_time_us = match_end_time_us - begin_us;
         load_attempted     = prepared.load_context != nullptr;
-        kv_resource->cacheResource(0).setDeviceReuseBlockNum(static_cast<size_t>(prepared.reuse_blocks));
+        kv_resource->cacheResource(0).setDeviceReuseBlockNum(prepared.matched_device_blocks);
     }
 
     const auto rollback = [&]() -> MallocResult {
@@ -254,14 +242,12 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                                                                        kv_resource->blocks(0, group_id));
         }
     }
-    MallocResult result{true, prepared.reuse_blocks * reuse_unit_tokens, match_cost_time_us, prepared.load_context};
+    MallocResult result{true,
+                        static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens,
+                        match_cost_time_us,
+                        prepared.load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
-    if (prepared.load_context != nullptr) {
-        result.host_reuse_len =
-            static_cast<int>(prepared.load_context->matchedBlocks(Tier::HOST)) * reuse_unit_tokens;
-        result.disk_reuse_len = static_cast<int>(prepared.load_context->matchedBlocks(Tier::DISK)) * reuse_unit_tokens;
-    }
     return result;
 }
 

@@ -165,8 +165,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
-    EXPECT_EQ(load_result.reuse_len, 3 * seq_size_per_block);
-    EXPECT_EQ(load_result.host_reuse_len, seq_size_per_block);
+    EXPECT_EQ(load_result.reuse_len, 2 * seq_size_per_block);
+    EXPECT_EQ(load_result.host_reuse_len, 0);
     EXPECT_EQ(load_result.disk_reuse_len, 0);
     ASSERT_NE(load_result.async_context, nullptr);
     const bool load_entered = pausable_engine->waitUntilEnteredFor(
@@ -454,9 +454,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
-    EXPECT_EQ(load_result.reuse_len, seq_size_per_block);
+    EXPECT_EQ(load_result.reuse_len, 0);
     EXPECT_EQ(load_result.host_reuse_len, 0);
-    EXPECT_EQ(load_result.disk_reuse_len, seq_size_per_block);
+    EXPECT_EQ(load_result.disk_reuse_len, 0);
     ASSERT_NE(load_result.async_context, nullptr);
     const bool disk_load_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
@@ -731,8 +731,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         host_hit_info.enable_cache_lookup = true;
         const auto host_hit_result        = manager_->malloc(host_hit_info);
         ASSERT_TRUE(host_hit_result.success);
-        EXPECT_EQ(host_hit_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-        EXPECT_EQ(host_hit_result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+        EXPECT_EQ(host_hit_result.reuse_len, 0);
+        EXPECT_EQ(host_hit_result.host_reuse_len, 0);
         EXPECT_EQ(host_hit_result.disk_reuse_len, 0);
         ASSERT_NE(host_hit_result.async_context, nullptr);
         ASSERT_TRUE(
@@ -817,9 +817,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     ASSERT_NE(load_result.async_context, nullptr);
-    EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(load_result.reuse_len, 0);
     EXPECT_EQ(load_result.host_reuse_len, 0);
-    EXPECT_EQ(load_result.disk_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(load_result.disk_reuse_len, 0);
     ASSERT_TRUE(waitForAsyncContextDoneFor(
         load_result.async_context, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
     load_result.async_context->waitDone();
@@ -941,8 +941,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
-    EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
-    EXPECT_EQ(load_result.host_reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
+    EXPECT_EQ(load_result.reuse_len, 0);
+    EXPECT_EQ(load_result.host_reuse_len, 0);
     EXPECT_EQ(load_result.disk_reuse_len, 0);
     ASSERT_NE(load_result.async_context, nullptr);
     load_result.async_context->waitDone();
