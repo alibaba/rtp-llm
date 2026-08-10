@@ -4,8 +4,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <ATen/ops/searchsorted.h>
-#include <algorithm>
-#include <limits>
 #include <numeric>
 #include <vector>
 
@@ -134,163 +132,20 @@ size_t ZigZagProcessor::handleOutputs(torch::Tensor&                            
     RTP_LLM_FAIL("Context parallel not supported on ROCm");
     return 0;
 #else
-    constexpr int64_t kMaxRestoreScratchBytes = int64_t{1} << 30;
+    int prefill_cp_size = parallelism_config_.tp_size;
 
-    RTP_LLM_CHECK_WITH_INFO(hidden_states.dim() == 2,
-                            "CP output must be 2-D, got dim=%ld",
-                            hidden_states.dim());
-    RTP_LLM_CHECK_WITH_INFO(hidden_states.is_contiguous(), "CP output must be contiguous before all-gather");
-    const int     prefill_cp_size = parallelism_config_.tp_size;
-    const int64_t local_token_num = hidden_states.size(0);
-    const int64_t hidden_size     = hidden_states.size(1);
-    RTP_LLM_CHECK_WITH_INFO(prefill_cp_size > 0, "prefill CP size must be positive, got %d", prefill_cp_size);
-    RTP_LLM_CHECK_WITH_INFO(local_token_num <= std::numeric_limits<int64_t>::max() / prefill_cp_size,
-                            "CP padded token count overflows int64: local_tokens=%ld, cp_size=%d",
-                            local_token_num,
-                            prefill_cp_size);
-    const int64_t padded_token_num = local_token_num * prefill_cp_size;
+    auto all_hidden_t =
+        torch::empty({hidden_states.size(0) * prefill_cp_size, hidden_states.size(1)}, hidden_states.options());
+    execAllGather({{all_hidden_t}, ParallelMode::TP, {hidden_states}, false});
 
-    const auto& restore_indices  = cp_params.prefill_qkv_restore_indice;
-    const auto& padding_mask     = cp_params.prefill_qkv_padding_mask;
-    auto        valid_indices    = torch::nonzero(padding_mask).squeeze(-1);
-    const auto  num_valid_tokens = valid_indices.size(0);
-
-    RTP_LLM_CHECK_WITH_INFO(restore_indices.numel() == padded_token_num,
-                            "CP restore index count mismatch: indices=%ld, local_tokens=%ld, cp_size=%d",
-                            restore_indices.numel(),
-                            local_token_num,
-                            prefill_cp_size);
-    RTP_LLM_CHECK_WITH_INFO(padding_mask.numel() == restore_indices.numel(),
-                            "CP padding mask count mismatch: mask=%ld, restore_indices=%ld",
-                            padding_mask.numel(),
-                            restore_indices.numel());
-
-    if (num_valid_tokens == 0) {
-        hidden_states = torch::empty({0, hidden_size}, hidden_states.options());
-        return 0;
-    }
-    auto gather_to_output_indices = buildGatherToOutputIndices(restore_indices, padding_mask, num_valid_tokens);
-
-    // Allocate the one required full-size result before communication, then
-    // all-gather into a bounded scratch tensor. The previous implementation
-    // kept a full rank-major gather alive while index_select allocated another
-    // full restored tensor. For DSpARK at 1M tokens both are about 24 GiB.
-    // Padding is bounded by CP alignment per request, so retaining its rows in
-    // this destination costs little. Giving every gathered row a unique output
-    // index also keeps index_copy_ deterministic; the valid compact prefix is
-    // returned below and the padding tail is discarded.
-    auto restored_padded = torch::empty({padded_token_num, hidden_size}, hidden_states.options());
-
-    const auto element_size = static_cast<int64_t>(hidden_states.element_size());
-    RTP_LLM_CHECK_WITH_INFO(
-        hidden_size == 0
-            || hidden_size <= std::numeric_limits<int64_t>::max() / element_size / prefill_cp_size,
-        "CP all-gather row byte size overflows int64: hidden=%ld, element_size=%ld, cp_size=%d",
-        hidden_size,
-        element_size,
-        prefill_cp_size);
-    const int64_t gathered_row_bytes = hidden_size * element_size * prefill_cp_size;
-    const int64_t max_chunk_rows = gathered_row_bytes == 0 ?
-                                       local_token_num :
-                                       std::max<int64_t>(1, kMaxRestoreScratchBytes / gathered_row_bytes);
-    const int64_t chunk_rows = std::min(local_token_num, max_chunk_rows);
-
-    auto gather_scratch = torch::empty({chunk_rows * prefill_cp_size, hidden_size}, hidden_states.options());
-    for (int64_t chunk_offset = 0; chunk_offset < local_token_num; chunk_offset += chunk_rows) {
-        const int64_t current_chunk_rows = std::min(chunk_rows, local_token_num - chunk_offset);
-        auto          send_chunk         = hidden_states.narrow(0, chunk_offset, current_chunk_rows);
-        auto          recv_chunk = gather_scratch.narrow(0, 0, current_chunk_rows * prefill_cp_size);
-        execAllGather({{recv_chunk}, ParallelMode::TP, {send_chunk}, false});
-        restoreGatheredChunk(restored_padded,
-                             recv_chunk,
-                             gather_to_output_indices,
-                             local_token_num,
-                             chunk_offset,
-                             prefill_cp_size);
-    }
-    hidden_states = restored_padded.narrow(0, 0, num_valid_tokens);
+    auto          prefill_qkv_restore_indice = cp_params.prefill_qkv_restore_indice;
+    auto          prefill_qkv_padding_mask   = cp_params.prefill_qkv_padding_mask;
+    torch::Tensor valid_indices              = torch::nonzero(prefill_qkv_padding_mask).squeeze(-1);
+    int64_t       num_valid_tokens           = valid_indices.size(0);
+    torch::Tensor combined_indices           = prefill_qkv_restore_indice.index_select(0, valid_indices);
+    hidden_states                            = all_hidden_t.index_select(0, combined_indices);
     return num_valid_tokens;
 #endif
-}
-
-torch::Tensor ZigZagProcessor::buildGatherToOutputIndices(const torch::Tensor& restore_indices,
-                                                          const torch::Tensor& padding_mask,
-                                                          int64_t              num_valid_tokens) {
-    RTP_LLM_CHECK_WITH_INFO(restore_indices.dim() == 1,
-                            "CP restore indices must be 1-D, got dim=%ld",
-                            restore_indices.dim());
-    RTP_LLM_CHECK_WITH_INFO(padding_mask.dim() == 1,
-                            "CP padding mask must be 1-D, got dim=%ld",
-                            padding_mask.dim());
-    RTP_LLM_CHECK_WITH_INFO(restore_indices.numel() == padding_mask.numel(),
-                            "CP restore/mask size mismatch: %ld vs %ld",
-                            restore_indices.numel(),
-                            padding_mask.numel());
-
-    auto valid_indices = torch::nonzero(padding_mask).squeeze(-1);
-    RTP_LLM_CHECK_WITH_INFO(valid_indices.size(0) == num_valid_tokens,
-                            "CP valid-token count mismatch: mask=%ld, expected=%ld",
-                            valid_indices.size(0),
-                            num_valid_tokens);
-    auto long_options     = restore_indices.options().dtype(torch::kLong);
-    auto gather_to_output = torch::empty({restore_indices.numel()}, long_options);
-
-    auto valid_source_indices = restore_indices.index_select(0, valid_indices).to(torch::kLong);
-    auto valid_output_indices = torch::arange(num_valid_tokens, long_options);
-    gather_to_output.index_copy_(0, valid_source_indices, valid_output_indices);
-
-    auto padding_indices = torch::nonzero(padding_mask.logical_not()).squeeze(-1);
-    auto padding_source_indices = restore_indices.index_select(0, padding_indices).to(torch::kLong);
-    auto padding_output_indices = torch::arange(num_valid_tokens, restore_indices.numel(), long_options);
-    RTP_LLM_CHECK_WITH_INFO(padding_source_indices.numel() == padding_output_indices.numel(),
-                            "CP padding-source count mismatch: sources=%ld, outputs=%ld",
-                            padding_source_indices.numel(),
-                            padding_output_indices.numel());
-    gather_to_output.index_copy_(0, padding_source_indices, padding_output_indices);
-    return gather_to_output;
-}
-
-void ZigZagProcessor::restoreGatheredChunk(torch::Tensor&       restored_padded,
-                                           const torch::Tensor& gathered_chunk,
-                                           const torch::Tensor& gather_to_output_indices,
-                                           int64_t              local_token_num,
-                                           int64_t              chunk_offset,
-                                           int                  cp_size) {
-    RTP_LLM_CHECK_WITH_INFO(cp_size > 0, "CP size must be positive, got %d", cp_size);
-    RTP_LLM_CHECK_WITH_INFO(gathered_chunk.dim() == 2,
-                            "CP gathered chunk must be 2-D, got dim=%ld",
-                            gathered_chunk.dim());
-    RTP_LLM_CHECK_WITH_INFO(gathered_chunk.size(0) % cp_size == 0,
-                            "CP gathered chunk rows %ld are not divisible by cp_size %d",
-                            gathered_chunk.size(0),
-                            cp_size);
-    const int64_t chunk_rows = gathered_chunk.size(0) / cp_size;
-    RTP_LLM_CHECK_WITH_INFO(chunk_offset >= 0 && chunk_offset + chunk_rows <= local_token_num,
-                            "CP gathered chunk range [%ld, %ld) exceeds local token count %ld",
-                            chunk_offset,
-                            chunk_offset + chunk_rows,
-                            local_token_num);
-    RTP_LLM_CHECK_WITH_INFO(local_token_num <= std::numeric_limits<int64_t>::max() / cp_size,
-                            "CP inverse restore size overflows int64: local_tokens=%ld, cp_size=%d",
-                            local_token_num,
-                            cp_size);
-    RTP_LLM_CHECK_WITH_INFO(gather_to_output_indices.numel() == local_token_num * cp_size,
-                            "CP inverse restore count mismatch: indices=%ld, local_tokens=%ld, cp_size=%d",
-                            gather_to_output_indices.numel(),
-                            local_token_num,
-                            cp_size);
-    RTP_LLM_CHECK_WITH_INFO(restored_padded.dim() == 2 && restored_padded.size(1) == gathered_chunk.size(1),
-                            "CP restored/gathered hidden width mismatch: restored=%ld, gathered=%ld",
-                            restored_padded.dim() == 2 ? restored_padded.size(1) : -1,
-                            gathered_chunk.size(1));
-
-    auto index_options = gather_to_output_indices.options().dtype(torch::kLong);
-    auto rank_offsets  = torch::arange(cp_size, index_options) * local_token_num;
-    auto local_offsets = torch::arange(chunk_offset, chunk_offset + chunk_rows, index_options);
-    auto source_indices = (rank_offsets.unsqueeze(1) + local_offsets.unsqueeze(0)).reshape({-1});
-    auto destination_indices = gather_to_output_indices.index_select(0, source_indices);
-
-    restored_padded.index_copy_(0, destination_indices, gathered_chunk);
 }
 
 torch::Tensor ZigZagProcessor::computeLocalLastHidden(const torch::Tensor&                      hidden_states,
