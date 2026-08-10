@@ -209,6 +209,57 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
+    void keepsDecisionActorsInFiveWorkerPvSnapshot() {
+        WorkerStatus shortestTtftWorker = createWorker("127.0.0.1", 0);
+        WorkerStatus secondWorker = createWorker("127.0.0.2", 0);
+        WorkerStatus thirdWorker = createWorker("127.0.0.3", 0);
+        WorkerStatus fourthWorker = createWorker("127.0.0.4", 0);
+        WorkerStatus fifthWorker = createWorker("127.0.0.5", 0);
+        WorkerStatus sixthWorker = createWorker("127.0.0.6", 0);
+        WorkerStatus cacheLeader = createWorker("127.0.0.7", 0);
+        List<WorkerStatus> workers = List.of(
+                shortestTtftWorker,
+                secondWorker,
+                thirdWorker,
+                fourthWorker,
+                fifthWorker,
+                sixthWorker,
+                cacheLeader);
+        CacheAffinityFirstStrategy strategy = createStrategy(workers, Map.of());
+        FlexlbConfig config = cacheAffinityConfig();
+        config.setCacheAffinityFirstMaxExtraWorkTokens(1_000);
+        BalanceContext balanceContext = new BalanceContext();
+
+        ScoredWorker selectedWorker = strategy.selectBestWorker(
+                List.of(
+                        scored(shortestTtftWorker, 100, 0),
+                        scored(secondWorker, 200, 0),
+                        scored(thirdWorker, 300, 0),
+                        scored(fourthWorker, 400, 0),
+                        scored(fifthWorker, 500, 0),
+                        scored(sixthWorker, 600, 0),
+                        scored(cacheLeader, 700, 900)),
+                balanceContext,
+                RoleType.PREFILL,
+                null,
+                1_000,
+                config);
+
+        Assertions.assertSame(cacheLeader, selectedWorker.worker());
+        var decision = balanceContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL);
+        Assertions.assertEquals(7, decision.totalWorkerCount());
+        Assertions.assertEquals(5, decision.snapshotWorkerLimit());
+        Assertions.assertTrue(decision.snapshotTruncated());
+        Assertions.assertEquals(
+                List.of(1, 2, 3, 4, 7),
+                decision.workers().stream().map(worker -> worker.estimatedTtftRank()).toList());
+        Assertions.assertTrue(decision.workers().stream()
+                .anyMatch(worker -> worker.selected() && worker.cacheLeader()));
+        Assertions.assertTrue(decision.workers().stream()
+                .anyMatch(worker -> worker.shortestTtftWorker() && worker.estimatedTtftRank() == 1));
+    }
+
+    @Test
     void usesShortestTtftWhenCacheLeaderReachesOutstandingThreshold() {
         WorkerStatus cacheLeader = createWorker("127.0.0.1", 0);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
@@ -337,6 +388,14 @@ class CacheAffinityFirstStrategyTest {
         cacheStatus.setAvailableKvCache(1000000);
         worker.setCacheStatus(cacheStatus);
         return worker;
+    }
+
+    private ScoredWorker scored(WorkerStatus worker, long ttft, long hitCacheTokens) {
+        return new ScoredWorker(
+                worker,
+                ttft,
+                hitCacheTokens,
+                worker.getLastSelectedTime().get());
     }
 
     private void putPendingTask(WorkerStatus worker,

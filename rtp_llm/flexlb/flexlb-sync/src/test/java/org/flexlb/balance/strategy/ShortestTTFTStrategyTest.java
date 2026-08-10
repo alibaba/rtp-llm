@@ -17,6 +17,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
@@ -143,18 +144,29 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals(232, selectedDecision.requestPrefillTime());
         Assertions.assertEquals(100, selectedDecision.queueTime());
         Assertions.assertEquals(332, selectedDecision.estimatedTtft());
+        Assertions.assertEquals(76.8, selectedDecision.requestHitRatePct(), 0.001);
+        Assertions.assertEquals(232, selectedDecision.requestUncachedTokens());
+        Assertions.assertEquals(768, selectedDecision.requestLocalMatchTokens());
         Assertions.assertEquals(2, selectedDecision.trackedTaskCount());
-        Assertions.assertEquals(1, selectedDecision.waitingTaskCount());
-        Assertions.assertEquals(1, selectedDecision.runningTaskCount());
-        Assertions.assertEquals(128, selectedDecision.waitingTasks().getFirst().hitCacheTokens());
-        Assertions.assertEquals(256, selectedDecision.runningTasks().getFirst().hitCacheTokens());
+        Assertions.assertEquals(1, selectedDecision.inTransitAndWaitingTaskCount());
+        Assertions.assertEquals(400, selectedDecision.inTransitAndWaitingUncachedTokens());
+        Assertions.assertEquals(1, selectedDecision.trackedRunningTaskCount());
+        Assertions.assertEquals(600, selectedDecision.trackedRunningRemainingPrefillTokens());
+        Assertions.assertEquals(1, selectedDecision.engineWaitingTaskCount());
+        Assertions.assertEquals(272, selectedDecision.engineWaitingUncachedTokens());
+        Assertions.assertEquals(1, selectedDecision.engineRunningTaskCount());
+        Assertions.assertEquals(344, selectedDecision.engineRunningRemainingPrefillTokens());
+        Assertions.assertEquals(1_000, selectedDecision.outstandingUncachedTokens());
 
         businessLogger.setLevel(Level.INFO);
         BalanceContext infoContext = new BalanceContext();
         infoContext.setConfig(new FlexlbConfig());
         infoContext.setRequest(req);
         staticCacheLoadBalancer.select(infoContext, RoleType.PREFILL, null);
-        Assertions.assertTrue(infoContext.getShortestTtftDecisionByRole().isEmpty());
+        Assertions.assertFalse(infoContext.getShortestTtftDecisionByRole().isEmpty());
+        Assertions.assertEquals(
+                2,
+                infoContext.getShortestTtftDecisionByRole().get(RoleType.PREFILL).workers().size());
         Assertions.assertEquals(
                 "SHORTEST_TTFT",
                 infoContext.getSelectionReasonByRole().get(RoleType.PREFILL));
@@ -309,6 +321,8 @@ class ShortestTTFTStrategyTest {
         task.setRequestId(requestId);
         task.setInputLength(inputLength);
         task.setPrefixLength(prefixLength);
+        task.setPredictedPrefixLength(prefixLength);
+        task.updateTaskState(TaskStateEnum.IN_TRANSIT);
         return task;
     }
 

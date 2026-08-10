@@ -3,7 +3,6 @@ package org.flexlb.dao.pv;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.pv.ShortestTtftDecision.QueueTask;
 import org.flexlb.dao.pv.ShortestTtftDecision.WorkerDecision;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.JsonUtils;
@@ -19,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PvLogDataTest {
 
     @Test
-    void omitsShortestTtftDecisionWhenDebugSnapshotIsAbsent() {
+    void omitsShortestTtftDecisionWhenSnapshotIsAbsent() {
         Request request = new Request();
         request.setRequestId("request-without-debug");
 
@@ -33,7 +32,7 @@ class PvLogDataTest {
     }
 
     @Test
-    void includesSelectionReasonWithoutDebugSnapshot() {
+    void includesSelectionReasonWithoutDecisionSnapshot() {
         BalanceContext context = new BalanceContext();
         context.recordSelectionReason(RoleType.PREFILL, "SHORTEST_TTFT_FALLBACK");
 
@@ -65,29 +64,61 @@ class PvLogDataTest {
                 "default",
                 "ShortestTTFT",
                 "SHORTEST_TTFT",
+                1600,
+                1,
+                0,
                 128,
                 90,
                 9.0,
+                1,
+                1,
+                1,
+                5,
+                false,
+                20,
                 List.of(
                         new WorkerDecision(
-                        "10.0.0.2",
-                        8080,
-                        true,
-                        true,
-                        true,
-                        256,
-                        64,
-                        83,
-                        7,
-                        90,
-                        123,
-                        1,
-                        0,
-                        1,
-                        List.of(new QueueTask("queued-1", "running", 32, 16, 20, 3)),
-                        List.of(),
-                        List.of(new QueueTask("queued-1", "running", 32, 16, 20, 3)))
-                ),
+                                1,
+                                "10.0.0.2",
+                                8080,
+                                true,
+                                true,
+                                true,
+                                false,
+                                true,
+                                true,
+                                256,
+                                64,
+                                50.0,
+                                64,
+                                64,
+                                0,
+                                64,
+                                0,
+                                64,
+                                26,
+                                90,
+                                20,
+                                84,
+                                123,
+                                1,
+                                0,
+                                0,
+                                1,
+                                16,
+                                0,
+                                0,
+                                1,
+                                16,
+                                true,
+                                true,
+                                2L,
+                                1000,
+                                500,
+                                10,
+                                100,
+                                10,
+                                200)),
                 null));
         context.finishRequestTiming();
 
@@ -121,8 +152,16 @@ class PvLogDataTest {
         assertTrue(json.contains("\"shortestTtftDecisions\":[{\"role\":\"PREFILL\""));
         assertTrue(json.contains("\"strategy\":\"ShortestTTFT\""));
         assertTrue(json.contains("\"selectionReason\":\"SHORTEST_TTFT\""));
+        assertTrue(json.contains("\"routingAttempt\":1"));
+        assertTrue(json.contains("\"snapshotOutstandingUncachedTokens\":20"));
         assertTrue(json.contains("\"estimatedTtft\":90"));
         assertTrue(json.contains("\"trackedTaskCount\":1"));
+        assertTrue(json.contains("\"outstandingGuardEligible\":true"));
+        assertTrue(json.contains("\"requestHitRatePct\":50.0"));
+        assertTrue(json.contains("\"engineRunningRemainingPrefillTokens\":16"));
+        assertFalse(json.contains("trackedTasks"));
+        assertFalse(json.contains("waitingTasks"));
+        assertFalse(json.contains("runningTasks"));
     }
 
     @Test

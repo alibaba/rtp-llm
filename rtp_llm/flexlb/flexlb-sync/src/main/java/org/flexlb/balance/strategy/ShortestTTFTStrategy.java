@@ -17,12 +17,12 @@ import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.pv.ShortestTtftDecision;
 import org.flexlb.dao.pv.ShortestTtftDecision.CacheAffinityDecision;
-import org.flexlb.dao.pv.ShortestTtftDecision.QueueTask;
 import org.flexlb.dao.pv.ShortestTtftDecision.WorkerDecision;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.ScoredWorker;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
+import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -32,6 +32,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -60,6 +61,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private static final int MIN_CANDIDATE_COUNT = 2;
     private static final double CANDIDATE_PERCENTAGE = 0.3;
     private static final double STDDEV_THRESHOLD_FACTOR = 0.5;
+    private static final int DECISION_SNAPSHOT_WORKER_LIMIT = 5;
 
     @Autowired
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
@@ -225,11 +227,21 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return workers.stream()
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
+                    HostCacheMatch hostCacheMatch = cacheMatchResult.hostMatch(workerStatus.getIpPort());
                     long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResult, p2pHitDiscount);
                     long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
                     long queueTime = workerStatus.getRunningQueueTime().get();
                     long newTTFT = prefillTime + queueTime;
                     long lastSelectedTime = workerStatus.getLastSelectedTime().get();
+                    long localMatchTokens = matchTokens(
+                            hostCacheMatch == null ? 0 : hostCacheMatch.localMatchBlocks(),
+                            cacheMatchResult.blockSize());
+                    long p2pFetchTokens = matchTokens(
+                            hostCacheMatch == null ? 0 : hostCacheMatch.p2pFetchBlocks(),
+                            cacheMatchResult.blockSize());
+                    long p2pTotalMatchTokens = matchTokens(
+                            hostCacheMatch == null ? 0 : hostCacheMatch.p2pTotalMatchBlocks(),
+                            cacheMatchResult.blockSize());
                     Logger.debug("Calculate TTFT for worker - ip: {}, port: {}, hitCacheTokens: {}, prefillTime: {}, queueTime: {}, newTTFT: {}",
                             workerStatus.getIp(),
                             workerStatus.getPort(),
@@ -237,9 +249,20 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                             prefillTime,
                             queueTime,
                             newTTFT);
-                    return new ScoredWorker(workerStatus, newTTFT, hitCacheTokens, lastSelectedTime);
+                    return new ScoredWorker(
+                            workerStatus,
+                            newTTFT,
+                            hitCacheTokens,
+                            lastSelectedTime,
+                            localMatchTokens,
+                            p2pFetchTokens,
+                            p2pTotalMatchTokens);
                 })
                 .collect(Collectors.toList());
+    }
+
+    private long matchTokens(long matchBlocks, long blockSize) {
+        return Math.max(0L, matchBlocks) * Math.max(0L, blockSize);
     }
 
     /**
@@ -389,18 +412,17 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         return selectedWorker;
     }
 
-    protected void recordDecisionSnapshot(
-            BalanceContext balanceContext,
-            ScoredWorker selectedWorker,
-            List<ScoredWorker> sortedWorkers,
-            List<ScoredWorker> topCandidates,
-            List<ScoredWorker> similarWorkers,
-            long minimumTtft,
-            double similarTtftThreshold,
-            RoleType roleType,
-            String group,
-            long seqLen,
-            String selectionReason) {
+    protected void recordDecisionSnapshot(BalanceContext balanceContext,
+                                          ScoredWorker selectedWorker,
+                                          List<ScoredWorker> sortedWorkers,
+                                          List<ScoredWorker> topCandidates,
+                                          List<ScoredWorker> similarWorkers,
+                                          long minimumTtft,
+                                          double similarTtftThreshold,
+                                          RoleType roleType,
+                                          String group,
+                                          long seqLen,
+                                          String selectionReason) {
         recordDecisionSnapshot(
                 balanceContext,
                 selectedWorker,
@@ -416,24 +438,21 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 null);
     }
 
-    protected void recordDecisionSnapshot(
-            BalanceContext balanceContext,
-            ScoredWorker selectedWorker,
-            List<ScoredWorker> sortedWorkers,
-            List<ScoredWorker> topCandidates,
-            List<ScoredWorker> similarWorkers,
-            long minimumTtft,
-            double similarTtftThreshold,
-            RoleType roleType,
-            String group,
-            long seqLen,
-            String selectionReason,
-            CacheAffinityDecision cacheAffinityDecision) {
+    protected void recordDecisionSnapshot(BalanceContext balanceContext,
+                                          ScoredWorker selectedWorker,
+                                          List<ScoredWorker> sortedWorkers,
+                                          List<ScoredWorker> topCandidates,
+                                          List<ScoredWorker> similarWorkers,
+                                          long minimumTtft,
+                                          double similarTtftThreshold,
+                                          RoleType roleType,
+                                          String group,
+                                          long seqLen,
+                                          String selectionReason,
+                                          CacheAffinityDecision cacheAffinityDecision) {
         balanceContext.recordSelectionReason(roleType, selectionReason);
-        if (!Logger.isDebugEnabled()) {
-            return;
-        }
         balanceContext.recordShortestTtftDecision(buildDecisionSnapshot(
+                balanceContext,
                 selectedWorker,
                 sortedWorkers,
                 topCandidates,
@@ -451,101 +470,208 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         engineHealthReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
     }
 
-    private ShortestTtftDecision buildDecisionSnapshot(
-            ScoredWorker selectedWorker,
-            List<ScoredWorker> sortedWorkers,
-            List<ScoredWorker> topCandidates,
-            List<ScoredWorker> similarWorkers,
-            long minimumTtft,
-            double similarTtftThreshold,
-            RoleType roleType,
-            String group,
-            long seqLen,
-            String selectionReason,
-            CacheAffinityDecision cacheAffinityDecision) {
-        List<WorkerDecision> workers = sortedWorkers.stream()
+    private ShortestTtftDecision buildDecisionSnapshot(BalanceContext balanceContext,
+                                                       ScoredWorker selectedWorker,
+                                                       List<ScoredWorker> sortedWorkers,
+                                                       List<ScoredWorker> topCandidates,
+                                                       List<ScoredWorker> similarWorkers,
+                                                       long minimumTtft,
+                                                       double similarTtftThreshold,
+                                                       RoleType roleType,
+                                                       String group,
+                                                       long seqLen,
+                                                       String selectionReason,
+                                                       CacheAffinityDecision cacheAffinityDecision) {
+        long decisionTimeMs = System.currentTimeMillis();
+        long decisionTimeUs = System.nanoTime() / 1000;
+        List<ScoredWorker> snapshotWorkers = selectSnapshotWorkers(
+                selectedWorker, sortedWorkers, cacheAffinityDecision);
+        List<WorkerDecision> workers = snapshotWorkers.stream()
                 .map(scoredWorker -> buildWorkerDecision(
                         scoredWorker,
+                        sortedWorkers.indexOf(scoredWorker) + 1,
                         selectedWorker,
                         topCandidates,
                         similarWorkers,
-                        seqLen))
+                        seqLen,
+                        decisionTimeUs,
+                        cacheAffinityDecision))
                 .toList();
         return new ShortestTtftDecision(
                 roleType,
                 group,
                 strategy.getName(),
                 selectionReason,
+                decisionTimeMs,
+                balanceContext.getRetryCount() + 1,
+                balanceContext.getConfig() == null ? 0 : balanceContext.getConfig().getP2pHitDiscount(),
                 seqLen,
                 minimumTtft,
                 similarTtftThreshold,
+                sortedWorkers.size(),
+                topCandidates.size(),
+                similarWorkers.size(),
+                DECISION_SNAPSHOT_WORKER_LIMIT,
+                workers.size() < sortedWorkers.size(),
+                workers.stream().mapToLong(WorkerDecision::outstandingUncachedTokens).sum(),
                 workers,
                 cacheAffinityDecision);
     }
 
-    private WorkerDecision buildWorkerDecision(
-            ScoredWorker scoredWorker,
-            ScoredWorker selectedWorker,
-            List<ScoredWorker> topCandidates,
-            List<ScoredWorker> similarWorkers,
-            long seqLen) {
+    private List<ScoredWorker> selectSnapshotWorkers(ScoredWorker selectedWorker,
+                                                     List<ScoredWorker> sortedWorkers,
+                                                     CacheAffinityDecision cacheAffinityDecision) {
+        LinkedHashMap<String, ScoredWorker> prioritizedWorkers = new LinkedHashMap<>();
+        prioritizedWorkers.put(selectedWorker.worker().getIpPort(), selectedWorker);
+        if (cacheAffinityDecision != null) {
+            addSnapshotWorker(
+                    prioritizedWorkers,
+                    sortedWorkers,
+                    cacheAffinityDecision.shortestTtftWorkerIpPort());
+            addSnapshotWorker(
+                    prioritizedWorkers,
+                    sortedWorkers,
+                    cacheAffinityDecision.cacheLeaderIpPort());
+        }
+        sortedWorkers.forEach(worker -> prioritizedWorkers.putIfAbsent(worker.worker().getIpPort(), worker));
+        return prioritizedWorkers.values().stream()
+                .limit(DECISION_SNAPSHOT_WORKER_LIMIT)
+                .sorted(Comparator.comparingInt(sortedWorkers::indexOf))
+                .toList();
+    }
+
+    private void addSnapshotWorker(Map<String, ScoredWorker> prioritizedWorkers,
+                                   List<ScoredWorker> sortedWorkers,
+                                   String ipPort) {
+        sortedWorkers.stream()
+                .filter(worker -> worker.worker().getIpPort().equals(ipPort))
+                .findFirst()
+                .ifPresent(worker -> prioritizedWorkers.putIfAbsent(ipPort, worker));
+    }
+
+    private WorkerDecision buildWorkerDecision(ScoredWorker scoredWorker,
+                                               int estimatedTtftRank,
+                                               ScoredWorker selectedWorker,
+                                               List<ScoredWorker> topCandidates,
+                                               List<ScoredWorker> similarWorkers,
+                                               long seqLen,
+                                               long decisionTimeUs,
+                                               CacheAffinityDecision cacheAffinityDecision) {
         WorkerStatus worker = scoredWorker.worker();
-        long requestPrefillTime = TaskInfo.estimatePrefillTimeMs(
-                seqLen, scoredWorker.hitCacheTokens());
-        List<QueueTask> trackedTasks = snapshotTrackedTasks(worker.getLocalTaskMap());
-        List<QueueTask> waitingTasks = snapshotWorkerTasks(worker.getWaitingTaskList(), "waiting");
-        List<QueueTask> runningTasks = snapshotWorkerTasks(worker.getRunningTaskList(), "running");
+        long requestPrefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, scoredWorker.hitCacheTokens());
+        long requestUncachedTokens = Math.max(0, seqLen - scoredWorker.hitCacheTokens());
+        double requestHitRatePct = seqLen > 0
+                ? scoredWorker.hitCacheTokens() * 100.0 / seqLen
+                : 0.0;
+        long outstandingUncachedTokens = worker.getOutstandingUncachedTokens();
+        Map<String, TaskInfo> trackedTasks = worker.getLocalTaskMap();
+        Map<String, TaskInfo> waitingTasks = worker.getWaitingTaskList();
+        Map<String, TaskInfo> runningTasks = worker.getRunningTaskList();
         long blockSize = worker.getCacheStatus() == null ? 0 : worker.getCacheStatus().getBlockSize();
 
         return new WorkerDecision(
+                estimatedTtftRank,
                 worker.getIp(),
                 worker.getPort(),
                 topCandidates.contains(scoredWorker),
                 similarWorkers.contains(scoredWorker),
                 selectedWorker.equals(scoredWorker),
+                isDecisionWorker(worker, cacheAffinityDecision == null
+                        ? null
+                        : cacheAffinityDecision.cacheLeaderIpPort()),
+                isDecisionWorker(worker, cacheAffinityDecision == null
+                        ? sortedWorkerIpPort(topCandidates)
+                        : cacheAffinityDecision.shortestTtftWorkerIpPort()),
+                cacheAffinityDecision == null
+                        || cacheAffinityDecision.outstandingUncachedTokensThreshold() <= 0
+                        || outstandingUncachedTokens
+                                < cacheAffinityDecision.outstandingUncachedTokensThreshold(),
                 blockSize,
                 scoredWorker.hitCacheTokens(),
+                requestHitRatePct,
+                requestUncachedTokens,
+                scoredWorker.localMatchTokens(),
+                scoredWorker.p2pFetchTokens(),
+                scoredWorker.p2pTotalMatchTokens(),
+                Math.max(0, scoredWorker.p2pTotalMatchTokens() - scoredWorker.localMatchTokens()),
                 requestPrefillTime,
                 scoredWorker.ttft() - requestPrefillTime,
                 scoredWorker.ttft(),
+                outstandingUncachedTokens,
+                outstandingUncachedTokens + requestUncachedTokens,
                 scoredWorker.lastSelectedTime(),
-                trackedTasks.size(),
-                waitingTasks.size(),
-                runningTasks.size(),
-                trackedTasks,
-                waitingTasks,
-                runningTasks);
+                countTasks(trackedTasks),
+                worker.getInTransitAndWaitingTaskCount(),
+                worker.getInTransitAndWaitingUncachedTokens(),
+                countTrackedRunningTasks(trackedTasks),
+                worker.getRunningRemainingPrefillTokens(),
+                countTasks(waitingTasks),
+                sumUncachedTokens(waitingTasks),
+                countTasks(runningTasks),
+                sumRunningRemainingPrefillTokens(runningTasks),
+                worker.isAlive(),
+                worker.getResourceAvailable().get(),
+                worker.getAvailableConcurrency(),
+                worker.getAvailableKvCacheTokens().get(),
+                worker.getUsedKvCacheTokens().get(),
+                worker.getStatusVersion().get(),
+                elapsedUs(decisionTimeUs, worker.getStatusLastUpdateTime().get()),
+                worker.getStatusUpdateIntervalUs().get(),
+                elapsedUs(decisionTimeUs, worker.getCacheLastUpdateTime().get()));
     }
 
-    private List<QueueTask> snapshotTrackedTasks(Map<String, TaskInfo> tasks) {
-        if (MapUtils.isEmpty(tasks)) {
-            return List.of();
-        }
-        return tasks.entrySet().stream()
-                .filter(entry -> entry.getValue() != null)
-                .map(entry -> toQueueTask(
-                        entry.getKey(), entry.getValue(), entry.getValue().getTaskState().getValue()))
-                .toList();
+    private String sortedWorkerIpPort(List<ScoredWorker> sortedWorkers) {
+        return sortedWorkers.isEmpty() ? null : sortedWorkers.getFirst().worker().getIpPort();
     }
 
-    private List<QueueTask> snapshotWorkerTasks(Map<String, TaskInfo> tasks, String state) {
-        if (MapUtils.isEmpty(tasks)) {
-            return List.of();
-        }
-        return tasks.entrySet().stream()
-                .filter(entry -> entry.getValue() != null)
-                .map(entry -> toQueueTask(entry.getKey(), entry.getValue(), state))
-                .toList();
+    private boolean isDecisionWorker(WorkerStatus worker, String ipPort) {
+        return ipPort != null && ipPort.equals(worker.getIpPort());
     }
 
-    private QueueTask toQueueTask(String requestId, TaskInfo task, String state) {
-        return new QueueTask(
-                requestId,
-                state,
-                task.getInputLength(),
-                task.getPrefixLength(),
-                TaskInfo.estimatePrefillTimeMs(task.getInputLength(), task.getPrefixLength()),
-                task.getWaitingTime());
+    private int countTasks(Map<String, TaskInfo> tasks) {
+        return MapUtils.isEmpty(tasks)
+                ? 0
+                : (int) tasks.values().stream().filter(task -> task != null).count();
+    }
+
+    private int countTrackedRunningTasks(Map<String, TaskInfo> tasks) {
+        return MapUtils.isEmpty(tasks)
+                ? 0
+                : (int) tasks.values().stream()
+                        .filter(task -> task != null && task.getTaskState() == TaskStateEnum.RUNNING)
+                        .count();
+    }
+
+    private long sumUncachedTokens(Map<String, TaskInfo> tasks) {
+        return MapUtils.isEmpty(tasks)
+                ? 0
+                : tasks.values().stream()
+                        .filter(task -> task != null)
+                        .mapToLong(this::uncachedTokens)
+                        .sum();
+    }
+
+    private long sumRunningRemainingPrefillTokens(Map<String, TaskInfo> tasks) {
+        return MapUtils.isEmpty(tasks)
+                ? 0
+                : tasks.values().stream()
+                        .filter(task -> task != null)
+                        .mapToLong(task -> task.getRemainingPrefillTokens() >= 0
+                                ? task.getRemainingPrefillTokens()
+                                : uncachedTokens(task))
+                        .sum();
+    }
+
+    private long uncachedTokens(TaskInfo task) {
+        long inputTokens = Math.max(0, task.getInputLength());
+        long hitTokens = task.isPrefixLengthValid()
+                ? task.getPrefixLength()
+                : task.getPredictedPrefixLength();
+        return Math.max(0, inputTokens - Math.max(0, Math.min(inputTokens, hitTokens)));
+    }
+
+    private long elapsedUs(long nowUs, long timestampUs) {
+        return timestampUs > 0 ? Math.max(0, nowUs - timestampUs) : -1;
     }
 
     /**

@@ -6,16 +6,25 @@ import org.flexlb.dao.route.RoleType;
 import java.util.List;
 
 /**
- * Debug-only snapshot of the inputs used by TTFT-based strategies.
+ * Compact PV snapshot of the inputs used by one TTFT-based routing decision.
  */
 public record ShortestTtftDecision(
         RoleType role,
         String group,
         String strategy,
         String selectionReason,
+        long decisionTimeMs,
+        int routingAttempt,
+        double p2pHitDiscount,
         long requestInputTokens,
         long minimumTtft,
         double similarTtftThreshold,
+        int totalWorkerCount,
+        int candidateWorkerCount,
+        int similarWorkerCount,
+        int snapshotWorkerLimit,
+        boolean snapshotTruncated,
+        long snapshotOutstandingUncachedTokens,
         List<WorkerDecision> workers,
         @JsonInclude(JsonInclude.Include.NON_NULL)
         CacheAffinityDecision cacheAffinityDecision) {
@@ -28,35 +37,52 @@ public record ShortestTtftDecision(
             String shortestTtftWorkerIpPort,
             long cacheLeadTokens,
             long extraTtft,
-            double toleratedExtraTtft) {
+            double toleratedExtraTtft,
+            long outstandingUncachedTokensThreshold,
+            boolean cacheLeaderOutstandingEligible) {
     }
 
     public record WorkerDecision(
+            int estimatedTtftRank,
             String ip,
             int port,
             boolean topCandidate,
             boolean similarTtftCandidate,
             boolean selected,
+            boolean cacheLeader,
+            boolean shortestTtftWorker,
+            boolean outstandingGuardEligible,
             long cacheBlockSize,
             long requestHitCacheTokens,
+            double requestHitRatePct,
+            long requestUncachedTokens,
+            long requestLocalMatchTokens,
+            long requestP2pFetchTokens,
+            long requestP2pTotalMatchTokens,
+            long requestP2pAddedMatchTokens,
             long requestPrefillTime,
             long queueTime,
             long estimatedTtft,
+            long outstandingUncachedTokens,
+            long outstandingAfterRequestUncachedTokens,
             long lastSelectedTimeUs,
             int trackedTaskCount,
-            int waitingTaskCount,
-            int runningTaskCount,
-            List<QueueTask> trackedTasks,
-            List<QueueTask> waitingTasks,
-            List<QueueTask> runningTasks) {
-    }
-
-    public record QueueTask(
-            String requestId,
-            String state,
-            long inputTokens,
-            long hitCacheTokens,
-            long estimatedPrefillTime,
-            long waitingTime) {
+            long inTransitAndWaitingTaskCount,
+            long inTransitAndWaitingUncachedTokens,
+            int trackedRunningTaskCount,
+            long trackedRunningRemainingPrefillTokens,
+            int engineWaitingTaskCount,
+            long engineWaitingUncachedTokens,
+            int engineRunningTaskCount,
+            long engineRunningRemainingPrefillTokens,
+            boolean alive,
+            boolean resourceAvailable,
+            Long availableConcurrency,
+            long availableKvCacheTokens,
+            long usedKvCacheTokens,
+            long statusVersion,
+            long statusAgeUs,
+            long statusUpdateIntervalUs,
+            long cacheAgeUs) {
     }
 }

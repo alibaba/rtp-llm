@@ -80,7 +80,7 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
 
         reportCacheAffinityDecision(roleType, selectedWorker.worker().getIp(), selectionReason);
 
-        // Preserve the decision path in the debug snapshot, including a concurrent fallback.
+        // Preserve the decision path in the request PV snapshot, including a concurrent fallback.
         recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, eligibleWorkers, List.of(),
                 shortestTtftWorker.ttft(), 0, roleType, group, seqLen, selectionReason,
                 new CacheAffinityDecision(
@@ -88,7 +88,9 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
                         shortestTtftWorker.worker().getIpPort(),
                         decision.cacheLeadTokens(),
                         decision.extraTtft(),
-                        decision.toleratedExtraTtft()));
+                        decision.toleratedExtraTtft(),
+                        configuredOutstandingUncachedTokensThreshold(config),
+                        eligibleWorkers.contains(cacheLeader)));
         return selectedWorker;
     }
 
