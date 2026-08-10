@@ -85,6 +85,18 @@ cc_test(
 )
 
 cc_test(
+    name = "mla_kv_cache_spec_test",
+    srcs = ["MLAKVCacheSpecTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:kv_cache_specs",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    env = {},
+)
+
+cc_test(
     name = "kv_cache_layout_view_test",
     srcs = ["KVCacheLayoutViewTest.cc"],
     copts = test_copts,
