@@ -305,13 +305,18 @@ class ModelLoader:
             device,
             True,
             stacked_key_config=stacked_key_config,
+            # K3's 93-layer checkpoint cannot overlap the next GPU staging
+            # batch with current weight materialization.  Keep this validated
+            # policy model-scoped so other stacked-expert models retain their
+            # existing loader concurrency.
+            serialize_staging_batches=self.model_config.model_type == "kimi_k3",
+            files_per_batch=(1 if self.model_config.model_type == "kimi_k3" else 0),
         )
 
         for key, loaded_tensor in all_tensors:
             if key not in tensor_to_weight_map:
                 continue
             weight_info = tensor_to_weight_map[key]
-
             complete = weight_info.collector.store_tensor(key, loaded_tensor)
             if complete:
                 tensors = weight_info.weight.load(

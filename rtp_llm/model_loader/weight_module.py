@@ -643,10 +643,13 @@ class AtomicWeight(WeightModule):
 
         split_func = self._get_split_func()
 
-        ts = (
-            self.__split_tensor(split_func, raw_tensor, load_config)
-            .contiguous()
-            .clone()
+        # Keep the materialized shard independent from the database-owned
+        # staging tensor, but allocate its contiguous storage only once.
+        # ``contiguous().clone()`` temporarily holds two full shard-sized
+        # allocations whenever the TP split is non-contiguous, which can
+        # exhaust device memory while loading large fastsafetensors models.
+        ts = self.__split_tensor(split_func, raw_tensor, load_config).clone(
+            memory_format=torch.contiguous_format
         )
         return {self.name: ts}
 
