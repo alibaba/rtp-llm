@@ -1,7 +1,7 @@
 from rtp_llm.server.server_args.util import str2bool
 
 
-def init_grammar_group_args(parser, grammar_config):
+def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
     grammar_group = parser.add_argument_group("Grammar Configuration")
     grammar_group.add_argument(
         "--grammar_backend",
@@ -26,4 +26,52 @@ def init_grammar_group_args(parser, grammar_config):
         type=int,
         default=8,
         help="xgrammar compiler worker count",
+    )
+    grammar_group.add_argument(
+        "--grammar_admission_queue_timeout_s",
+        env_name="DS_LLM_GRAMMAR_QUEUE_TIMEOUT_S",
+        bind_to=(grammar_admission_config, "queue_timeout_s"),
+        type=float,
+        default=30.0,
+        help="Maximum wait for an idle grammar sandbox worker.",
+    )
+    grammar_group.add_argument(
+        "--grammar_admission_compile_timeout_s",
+        env_name="DS_LLM_GRAMMAR_COMPILE_TIMEOUT_S",
+        bind_to=(grammar_admission_config, "compile_timeout_s"),
+        type=float,
+        default=30.0,
+        help="Grammar compile timeout after a sandbox worker is checked out.",
+    )
+    grammar_group.add_argument(
+        "--grammar_admission_sandbox_pool_size",
+        env_name="DS_LLM_GRAMMAR_SANDBOX_POOL_SIZE",
+        bind_to=(grammar_admission_config, "sandbox_pool_size"),
+        type=int,
+        default=0,
+        help="Grammar sandbox worker count; 0 selects an automatic size.",
+    )
+    grammar_group.add_argument(
+        "--grammar_admission_sandbox_process_memory_limit_mb",
+        env_name="DS_LLM_GRAMMAR_SANDBOX_PROCESS_MEMORY_LIMIT_MB",
+        bind_to=(grammar_admission_config, "sandbox_process_memory_limit_mb"),
+        type=int,
+        default=1024,
+        help="Per-worker address-space headroom in MiB; <=0 disables the cap.",
+    )
+    grammar_group.add_argument(
+        "--grammar_admission_compiler_cache_bytes",
+        env_name="DS_LLM_GRAMMAR_COMPILER_CACHE_BYTES",
+        bind_to=(grammar_admission_config, "compiler_cache_bytes"),
+        type=int,
+        default=1024 * 1024 * 1024,
+        help="Byte cap on each admission xgrammar compiler cache; <=0 is unlimited.",
+    )
+    grammar_group.add_argument(
+        "--grammar_admission_result_cache_max_entries",
+        env_name="DS_LLM_GRAMMAR_RESULT_CACHE_MAX_ENTRIES",
+        bind_to=(grammar_admission_config, "result_cache_max_entries"),
+        type=int,
+        default=2048,
+        help="Maximum cached deterministic grammar validation results; 0 disables it.",
     )
