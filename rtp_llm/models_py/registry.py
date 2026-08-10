@@ -159,6 +159,11 @@ register_lazy_model(
     "Qwen2MoeForCausalLM",
 )
 register_lazy_model(
+    "llama",
+    "rtp_llm.models_py.new_models.llama",
+    "LlamaForCausalLM",
+)
+register_lazy_model(
     "qwen2_vl",
     "rtp_llm.models_py.new_models.qwen2_vl.model",
     "Qwen2VLForCausalLM",
