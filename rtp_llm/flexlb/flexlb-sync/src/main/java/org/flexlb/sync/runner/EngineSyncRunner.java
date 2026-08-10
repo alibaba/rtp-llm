@@ -234,7 +234,10 @@ public class EngineSyncRunner implements Runnable {
         if (workerStatus.getRole() == null) {
             workerStatus.setRole(roleType);
         }
-        if (endpointRegistry != null && workerStatus.isAlive()) {
+        if (endpointRegistry != null) {
+            if (!workerStatus.isAlive()) {
+                workerStatus.setAlive(true);
+            }
             ensureEndpoint(workerIpPort, workerStatus);
         }
         return workerStatus;

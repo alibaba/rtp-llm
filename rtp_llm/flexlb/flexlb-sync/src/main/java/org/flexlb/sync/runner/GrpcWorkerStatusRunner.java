@@ -237,6 +237,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, roleType);
         }
+        workerStatus.refreshStatusHeartbeat(workerStatus.isAlive());
     }
 
     private void log(String msg) {

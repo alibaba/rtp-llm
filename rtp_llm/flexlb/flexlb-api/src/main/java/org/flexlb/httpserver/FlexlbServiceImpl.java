@@ -25,6 +25,8 @@ import org.flexlb.util.PriorityNormalizer;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
@@ -252,6 +254,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB buildErrorResponse(Throwable error) {
+        Throwable cause = error;
+        while (cause instanceof CompletionException && cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        if (cause instanceof TimeoutException) {
+            return buildErrorResponse(8402, "NO_AVAILABLE_WORKER: schedule timeout");
+        }
         return buildErrorResponse(500,
                 error.getMessage() != null ? error.getMessage() : "internal error");
     }
