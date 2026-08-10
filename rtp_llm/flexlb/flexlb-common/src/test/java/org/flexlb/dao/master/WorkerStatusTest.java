@@ -513,6 +513,7 @@ class WorkerStatusTest {
             localTask.setCacheMatchSource("KVCM");
             workerStatus.putLocalTask(REQUEST_ID, localTask);
             long predictedQueueTime = TaskInfo.estimatePrefillTimeMs(200, 100);
+            assertEquals(100, predictedQueueTime);
 
             TaskInfo runningTask = new TaskInfo();
             runningTask.setRequestId(REQUEST_ID);
@@ -526,8 +527,7 @@ class WorkerStatusTest {
             TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
             assertEquals(120, updated.getPrefixLength());
             assertTrue(updated.isPrefixLengthValid());
-            assertEquals(TaskInfo.estimatePrefillTimeMs(200, 120),
-                    workerStatus.getRunningQueueTime().get());
+            assertEquals(80, workerStatus.getRunningQueueTime().get());
             assertTrue(workerStatus.getRunningQueueTime().get() < predictedQueueTime);
             assertEquals(1, firstUpdateResult.cacheHitFeedbacks().size());
             assertEquals(100, firstUpdateResult.cacheHitFeedbacks().getFirst().predictedHitTokens());

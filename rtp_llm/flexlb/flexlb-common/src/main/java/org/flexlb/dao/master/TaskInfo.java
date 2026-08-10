@@ -9,8 +9,6 @@ import org.flexlb.enums.TaskStateEnum;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class TaskInfo {
-    public static final double DEFAULT_CACHE_HIT_DISCOUNT = 0.7;
-
     @JsonProperty("request_id")
     private String requestId;
     @JsonProperty("prefix_length")
@@ -63,9 +61,6 @@ public class TaskInfo {
     private long prefillNonfinalChunkTokensMax;
 
     @JsonIgnore
-    private double cacheHitDiscount = DEFAULT_CACHE_HIT_DISCOUNT;
-
-    @JsonIgnore
     private boolean kvcmMatchAvailable;
     @JsonIgnore
     private long kvcmLocalMatchTokens;
@@ -80,15 +75,11 @@ public class TaskInfo {
     private long waitingConfirmTimeUs = -1;
 
     public long estimatePrefillTime() {
-        return estimatePrefillTimeMs(inputLength, prefixLength, cacheHitDiscount);
+        return estimatePrefillTimeMs(inputLength, prefixLength);
     }
 
     public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens) {
-        return estimatePrefillTimeMs(tokens, hitCacheTokens, DEFAULT_CACHE_HIT_DISCOUNT);
-    }
-
-    public static long estimatePrefillTimeMs(long tokens, long hitCacheTokens, double cacheHitDiscount) {
-        return (long) (tokens - hitCacheTokens * cacheHitDiscount);
+        return tokens - hitCacheTokens;
     }
 
     /**

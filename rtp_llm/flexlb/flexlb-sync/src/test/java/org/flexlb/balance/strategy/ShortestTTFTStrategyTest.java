@@ -140,9 +140,9 @@ class ShortestTTFTStrategyTest {
                 .orElseThrow();
         Assertions.assertEquals("127.0.0.2", selectedDecision.ip());
         Assertions.assertEquals(768, selectedDecision.requestHitCacheTokens());
-        Assertions.assertEquals(462, selectedDecision.requestPrefillTime());
+        Assertions.assertEquals(232, selectedDecision.requestPrefillTime());
         Assertions.assertEquals(100, selectedDecision.queueTime());
-        Assertions.assertEquals(562, selectedDecision.estimatedTtft());
+        Assertions.assertEquals(332, selectedDecision.estimatedTtft());
         Assertions.assertEquals(2, selectedDecision.trackedTaskCount());
         Assertions.assertEquals(1, selectedDecision.waitingTaskCount());
         Assertions.assertEquals(1, selectedDecision.runningTaskCount());
@@ -180,7 +180,6 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals(cacheLeader.getIp(), selection.serverStatus().getServerIp());
         TaskInfo selectedTask = cacheLeader.getLocalTaskMap().get("cache-lead-two-blocks");
         Assertions.assertNotNull(selectedTask);
-        Assertions.assertEquals(1.0, selectedTask.getCacheHitDiscount());
         Assertions.assertEquals(13824, selectedTask.estimatePrefillTime());
 
         var decision = selection.balanceContext()
@@ -235,7 +234,6 @@ class ShortestTTFTStrategyTest {
 
     private FlexlbConfig cacheFocusedConfig() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setPrefillCacheHitDiscount(1.0);
         config.setShortestTtftSimilarityThresholdRatio(0.2);
         return config;
     }

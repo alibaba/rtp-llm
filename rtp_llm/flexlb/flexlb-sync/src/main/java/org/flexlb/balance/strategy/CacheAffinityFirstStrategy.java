@@ -22,7 +22,7 @@ import java.util.List;
  * <p>Cold requests have no cache lead and therefore follow the shortest TTFT. Each local
  * assignment immediately increases that worker's estimated queue, so subsequent cold requests
  * naturally spread to other workers. A cache leader may have a bounded higher TTFT when its cache
- * lead justifies that additional cost.
+ * lead exists and the additional cost stays within a fixed bound.
  */
 @Component("cacheAffinityFirstStrategy")
 public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
@@ -74,8 +74,7 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
 
         // Preserve the decision path in the debug snapshot, including a concurrent fallback.
         recordDecisionSnapshot(balanceContext, selectedWorker, workersByTtft, workersByTtft, List.of(),
-                shortestTtftWorker.ttft(), 0, roleType, group, seqLen, config.getPrefillCacheHitDiscount(),
-                selectionReason,
+                shortestTtftWorker.ttft(), 0, roleType, group, seqLen, selectionReason,
                 new CacheAffinityDecision(
                         cacheLeader.worker().getIpPort(),
                         shortestTtftWorker.worker().getIpPort(),
@@ -91,7 +90,8 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
 
     /**
      * Compare cache lead and TTFT separately. TTFT already includes the worker queue and this
-     * request's prefill time, while cache lead determines how much additional TTFT is tolerated.
+     * request's prefill time. Cache lead determines whether affinity applies, while the configured
+     * hard bound determines how much additional work is tolerated.
      */
     private CacheLeaderDecision evaluateCacheLeader(ScoredWorker cacheLeader, ScoredWorker shortestTtftWorker,
                                                     FlexlbConfig config) {
@@ -101,8 +101,8 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         // Both TTFT values already include prior queue work and this request's predicted Prefill time.
         long extraTtft = cacheLeader.ttft() - shortestTtftWorker.ttft();
 
-        // Translate cache lead into the maximum TTFT increase that cache affinity may accept.
-        double toleratedExtraTtft = calculateToleratedExtraTtft(cacheLeadTokens, config);
+        // Cache affinity may add at most the fixed configured amount of token-equivalent work.
+        long toleratedExtraTtft = configuredMaxExtraWork(config);
 
         // Prefer cache only when its final TTFT cost stays within the configured tolerance.
         if (extraTtft <= toleratedExtraTtft) {
@@ -154,7 +154,7 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
 
         // Apply the same cache-lead versus TTFT-cost rule used for the preferred worker.
         long extraTtft = worker.ttft() - shortestTtftWorker.ttft();
-        return extraTtft <= calculateToleratedExtraTtft(cacheLeadTokens, config);
+        return extraTtft <= configuredMaxExtraWork(config);
     }
 
     private ScoredWorker selectFirstWorkerWithoutConcurrentConflict(List<ScoredWorker> selectionOrder,
@@ -172,16 +172,10 @@ public class CacheAffinityFirstStrategy extends ShortestTTFTStrategy {
         return fallbackWorker;
     }
 
-    private double calculateToleratedExtraTtft(long cacheLeadTokens, FlexlbConfig config) {
-        // Keep both inputs in cache-token units before applying the shared cache-hit discount.
-        double cacheTokenTolerance = Math.max(
-                cacheLeadTokens * Math.max(0.0, config.getCacheAffinityFirstQueueToleranceFactor()),
-                config.getCacheAffinityFirstAbsoluteToleranceTokens());
-
-        // Cache tokens are converted to token-equivalent TTFT tolerance by the configured discount.
-        return cacheTokenTolerance * Math.max(0.0, config.getPrefillCacheHitDiscount());
+    private long configuredMaxExtraWork(FlexlbConfig config) {
+        return Math.max(0L, config.getCacheAffinityFirstMaxExtraWorkTokens());
     }
 
     private record CacheLeaderDecision(ScoredWorker preferredWorker, long cacheLeadTokens,
-                                       long extraTtft, double toleratedExtraTtft, String selectionReason) {}
+                                       long extraTtft, long toleratedExtraTtft, String selectionReason) {}
 }

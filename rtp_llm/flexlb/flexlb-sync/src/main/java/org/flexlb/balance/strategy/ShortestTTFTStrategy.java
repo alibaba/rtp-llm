@@ -158,7 +158,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 availableWorkers,
                 cacheMatchResult,
                 seqLen,
-                config.getPrefillCacheHitDiscount(),
                 config.getP2pHitDiscount());
 
         ScoredWorker bestWorker = selectBestWorker(
@@ -181,7 +180,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 roleType,
                 requestId,
                 seqLen,
-                config.getPrefillCacheHitDiscount(),
                 cacheMatchResult);
     }
 
@@ -223,13 +221,12 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     private List<ScoredWorker> scoreWorkers(List<WorkerStatus> workers,
                                             CacheMatchResult cacheMatchResult,
                                             long seqLen,
-                                            double cacheHitDiscount,
                                             double p2pHitDiscount) {
         return workers.stream()
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
                     long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResult, p2pHitDiscount);
-                    long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens, cacheHitDiscount);
+                    long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
                     long queueTime = workerStatus.getRunningQueueTime().get();
                     long newTTFT = prefillTime + queueTime;
                     long lastSelectedTime = workerStatus.getLastSelectedTime().get();
@@ -260,7 +257,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                                                  RoleType roleType,
                                                  String requestId,
                                                  long seqLen,
-                                                 double cacheHitDiscount,
                                                  CacheMatchResult cacheMatchResult) {
         WorkerStatus workerStatus = selectedWorker.worker();
 
@@ -271,8 +267,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 requestId,
                 balanceContext.getRequest().getSeqLen(),
                 selectedWorker.hitCacheTokens(),
-                balanceContext.getCacheMatchSource(),
-                cacheHitDiscount);
+                balanceContext.getCacheMatchSource());
         recordKvcmMatch(
                 task,
                 cacheMatchResult.source(),
@@ -331,15 +326,13 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             String requestId,
             long inputLength,
             long prefixLength,
-            String cacheMatchSource,
-            double cacheHitDiscount) {
+            String cacheMatchSource) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setInputLength(inputLength);
         task.setPrefixLength(prefixLength);
         task.setPredictedPrefixLength(prefixLength);
         task.setCacheMatchSource(cacheMatchSource);
-        task.setCacheHitDiscount(cacheHitDiscount);
         return task;
     }
 
@@ -392,7 +385,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 roleType,
                 group,
                 seqLen,
-                config.getPrefillCacheHitDiscount(),
                 "SHORTEST_TTFT");
         return selectedWorker;
     }
@@ -408,7 +400,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             RoleType roleType,
             String group,
             long seqLen,
-            double cacheHitDiscount,
             String selectionReason) {
         recordDecisionSnapshot(
                 balanceContext,
@@ -421,7 +412,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 roleType,
                 group,
                 seqLen,
-                cacheHitDiscount,
                 selectionReason,
                 null);
     }
@@ -437,7 +427,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             RoleType roleType,
             String group,
             long seqLen,
-            double cacheHitDiscount,
             String selectionReason,
             CacheAffinityDecision cacheAffinityDecision) {
         balanceContext.recordSelectionReason(roleType, selectionReason);
@@ -454,7 +443,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 roleType,
                 group,
                 seqLen,
-                cacheHitDiscount,
                 selectionReason,
                 cacheAffinityDecision));
     }
@@ -473,7 +461,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             RoleType roleType,
             String group,
             long seqLen,
-            double cacheHitDiscount,
             String selectionReason,
             CacheAffinityDecision cacheAffinityDecision) {
         List<WorkerDecision> workers = sortedWorkers.stream()
@@ -482,8 +469,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                         selectedWorker,
                         topCandidates,
                         similarWorkers,
-                        seqLen,
-                        cacheHitDiscount))
+                        seqLen))
                 .toList();
         return new ShortestTtftDecision(
                 roleType,
@@ -502,16 +488,13 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             ScoredWorker selectedWorker,
             List<ScoredWorker> topCandidates,
             List<ScoredWorker> similarWorkers,
-            long seqLen,
-            double cacheHitDiscount) {
+            long seqLen) {
         WorkerStatus worker = scoredWorker.worker();
         long requestPrefillTime = TaskInfo.estimatePrefillTimeMs(
-                seqLen, scoredWorker.hitCacheTokens(), cacheHitDiscount);
+                seqLen, scoredWorker.hitCacheTokens());
         List<QueueTask> trackedTasks = snapshotTrackedTasks(worker.getLocalTaskMap());
-        List<QueueTask> waitingTasks = snapshotWorkerTasks(
-                worker.getWaitingTaskList(), "waiting", cacheHitDiscount);
-        List<QueueTask> runningTasks = snapshotWorkerTasks(
-                worker.getRunningTaskList(), "running", cacheHitDiscount);
+        List<QueueTask> waitingTasks = snapshotWorkerTasks(worker.getWaitingTaskList(), "waiting");
+        List<QueueTask> runningTasks = snapshotWorkerTasks(worker.getRunningTaskList(), "running");
         long blockSize = worker.getCacheStatus() == null ? 0 : worker.getCacheStatus().getBlockSize();
 
         return new WorkerDecision(
@@ -545,31 +528,23 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 .toList();
     }
 
-    private List<QueueTask> snapshotWorkerTasks(
-            Map<String, TaskInfo> tasks, String state, double cacheHitDiscount) {
+    private List<QueueTask> snapshotWorkerTasks(Map<String, TaskInfo> tasks, String state) {
         if (MapUtils.isEmpty(tasks)) {
             return List.of();
         }
         return tasks.entrySet().stream()
                 .filter(entry -> entry.getValue() != null)
-                .map(entry -> toQueueTask(
-                        entry.getKey(), entry.getValue(), state, cacheHitDiscount))
+                .map(entry -> toQueueTask(entry.getKey(), entry.getValue(), state))
                 .toList();
     }
 
     private QueueTask toQueueTask(String requestId, TaskInfo task, String state) {
-        return toQueueTask(requestId, task, state, task.getCacheHitDiscount());
-    }
-
-    private QueueTask toQueueTask(
-            String requestId, TaskInfo task, String state, double cacheHitDiscount) {
         return new QueueTask(
                 requestId,
                 state,
                 task.getInputLength(),
                 task.getPrefixLength(),
-                TaskInfo.estimatePrefillTimeMs(
-                        task.getInputLength(), task.getPrefixLength(), cacheHitDiscount),
+                TaskInfo.estimatePrefillTimeMs(task.getInputLength(), task.getPrefixLength()),
                 task.getWaitingTime());
     }
 

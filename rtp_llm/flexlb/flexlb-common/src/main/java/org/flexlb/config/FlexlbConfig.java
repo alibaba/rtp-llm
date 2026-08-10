@@ -80,12 +80,6 @@ public class FlexlbConfig {
     private long prefillQueueSizeThreshold = 3;
 
     /**
-     * Reduction applied to estimated prefill work for each cache-hit token.
-     * A value of 1 means cache-hit tokens contribute no prefill work.
-     */
-    private double prefillCacheHitDiscount = 0.7;
-
-    /**
      * Credit applied to cache blocks made available through one P2P fetch.
      *
      * <p>Local cache hits retain full credit. A value of 0.2 treats a P2P-added block as one
@@ -100,17 +94,10 @@ public class FlexlbConfig {
     private double shortestTtftSimilarityThresholdRatio = 0.2;
 
     /**
-     * Multiplier for the additional TTFT tolerated by CACHE_AFFINITY_FIRST. The allowed amount is
-     * cache lead tokens multiplied by the cache-hit discount and this value.
+     * Maximum token-equivalent work that CACHE_AFFINITY_FIRST may add relative to the
+     * shortest estimated-work worker.
      */
-    private double cacheAffinityFirstQueueToleranceFactor = 2.0;
-
-    /**
-     * Absolute cache-token tolerance for additional TTFT in CACHE_AFFINITY_FIRST.
-     * It is compared with the cache lead before both values are discounted to TTFT work.
-     * Zero keeps the tolerance entirely determined by the cache lead and factor.
-     */
-    private long cacheAffinityFirstAbsoluteToleranceTokens = 0;
+    private long cacheAffinityFirstMaxExtraWorkTokens = 25_000;
 
     /**
      * KV cache available threshold for DECODE role (percentage)

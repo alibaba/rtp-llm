@@ -87,7 +87,7 @@ class CacheAffinityFirstStrategyTest {
 
     @Test
     void usesShortestTtftWorkerWhenExtraTtftExceedsTolerance() {
-        WorkerStatus overloadedCacheLeader = createWorker("127.0.0.1", 13000);
+        WorkerStatus overloadedCacheLeader = createWorker("127.0.0.1", 30000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
         CacheAffinityFirstStrategy strategy = createStrategy(
@@ -103,7 +103,7 @@ class CacheAffinityFirstStrategyTest {
     }
 
     @Test
-    void usesCacheLeaderWhenAbsoluteTokenToleranceExceedsCacheLeadTolerance() {
+    void usesCacheLeaderWhenExtraWorkIsWithinConfiguredTolerance() {
         WorkerStatus cacheLeader = createWorker("127.0.0.1", 13000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
@@ -114,16 +114,16 @@ class CacheAffinityFirstStrategyTest {
                         shortestTtftWorker.getIpPort(), 15,
                         thirdWorker.getIpPort(), 15));
         FlexlbConfig config = cacheAffinityConfig();
-        config.setCacheAffinityFirstAbsoluteToleranceTokens(250000);
+        config.setCacheAffinityFirstMaxExtraWorkTokens(12_000);
 
-        ServerStatus selected = select(strategy, config, "absolute-token-tolerance");
+        ServerStatus selected = select(strategy, config, "configured-extra-work-tolerance");
 
         Assertions.assertEquals(cacheLeader.getIp(), selected.getServerIp());
     }
 
     @Test
-    void appliesCacheHitDiscountToAbsoluteTokenTolerance() {
-        WorkerStatus cacheLeader = createWorker("127.0.0.1", 126001);
+    void usesCacheLeaderAtConfiguredExtraWorkBoundary() {
+        WorkerStatus cacheLeader = createWorker("127.0.0.1", 12000);
         WorkerStatus shortestTtftWorker = createWorker("127.0.0.2", 0);
         WorkerStatus thirdWorker = createWorker("127.0.0.3", 1000);
         CacheAffinityFirstStrategy strategy = createStrategy(
@@ -133,12 +133,11 @@ class CacheAffinityFirstStrategyTest {
                         shortestTtftWorker.getIpPort(), 15,
                         thirdWorker.getIpPort(), 15));
         FlexlbConfig config = cacheAffinityConfig();
-        config.setPrefillCacheHitDiscount(0.5);
-        config.setCacheAffinityFirstAbsoluteToleranceTokens(250000);
+        config.setCacheAffinityFirstMaxExtraWorkTokens(10_000);
 
-        ServerStatus selected = select(strategy, config, "absolute-token-discount");
+        ServerStatus selected = select(strategy, config, "extra-work-tolerance-boundary");
 
-        Assertions.assertEquals(shortestTtftWorker.getIp(), selected.getServerIp());
+        Assertions.assertEquals(cacheLeader.getIp(), selected.getServerIp());
     }
 
     @Test
@@ -248,8 +247,7 @@ class CacheAffinityFirstStrategyTest {
 
     private FlexlbConfig cacheAffinityConfig() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setPrefillCacheHitDiscount(1.0);
-        config.setCacheAffinityFirstQueueToleranceFactor(2.0);
+        config.setCacheAffinityFirstMaxExtraWorkTokens(25_000);
         return config;
     }
 
