@@ -38,6 +38,12 @@ py_test(
 )
 
 py_test(
+    name = "test_compressed_w8a8_int8_per_channel",
+    srcs = ["test_compressed_w8a8_int8_per_channel.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_model_weight_info",
     srcs = ["test_model_weight_info.py"],
     deps = py_test_deps + [
