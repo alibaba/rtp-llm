@@ -248,18 +248,17 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCheck_LoadFailureReportsErrorWith
 }
 
 // ============================================================================
-// 5. loading_cache_streams_ counted in evaluateRunningBatch (batch size limit)
+// 5. LOADING_CACHE only consumes initialized-KV quota, not runtime batch quota
 // ============================================================================
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit) {
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_DoNotConsumeRuntimeBatchQuota) {
     setupMockCoordinator();
 
-    // Set max batch size to 2
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
     RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 2;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    runtime_config.max_generate_batch_size                     = 1;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 1;
     PDSepConfig         pd_sep_config;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -280,10 +279,67 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit)
 
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());
-    // loading_cache_streams_ should count toward max_generate_batch_size
-    // With max=2, only 2 streams should be scheduled (into LOADING_CACHE)
-    // The 3rd stream should remain in waiting
-    ASSERT_LE(result.value().size(), 2);
+    EXPECT_TRUE(result->empty());
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 3u);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_DoNotConsumeCpPrefillQuota) {
+    setupMockCoordinator();
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                       = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
+    runtime_config.fifo_scheduler_config.cp_force_single_prefill = true;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    auto scheduler                              = std::make_shared<FIFOScheduler>(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+
+    auto pending_ctx = createPendingAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+
+    ASSERT_TRUE(scheduler->enqueue(createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
+    ASSERT_TRUE(scheduler->enqueue(createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 2u);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_RespectInitializedKVCacheQuota) {
+    setupMockCoordinator();
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                           = 1;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 1;
+    runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = 2;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    auto                scheduler = std::make_shared<FIFOScheduler>(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+
+    auto pending_ctx = createPendingAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+
+    ASSERT_TRUE(scheduler->enqueue(createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
+    ASSERT_TRUE(scheduler->enqueue(createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
+    ASSERT_TRUE(scheduler->enqueue(createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true)).ok());
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 2u);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
 }
 
 // ============================================================================

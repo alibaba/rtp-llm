@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -9,7 +10,6 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
-#include <unordered_set>
 
 using namespace std;
 namespace rtp_llm {
@@ -31,13 +31,18 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
+    prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
+                         static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
+                         1),
     cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
                              && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
-                     "cp_force_single_prefill is [%d], max_inited_kv_cache_streams is [%zu]",
+                     "prefill_cp_size is [%zu], cp_force_single_prefill is [%d], "
+                     "max_inited_kv_cache_streams is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
+                     prefill_cp_size_,
                      cp_force_single_prefill_,
                      max_inited_kv_cache_streams_);
 }
@@ -100,12 +105,24 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
                                                             + " is greater than kv cache max available tokens num "
                                                             + std::to_string(cache_manager_->maxAvailableTokensNum())));
         return false;  // Input length exceeds max available tokens
-    } else if ((size_t)stream->inputLength() * stream->currentBatchSize() > max_batch_tokens_size_) {
+    }
+
+    const auto input_token_cost = prefillTokenCost(input_length, static_cast<size_t>(stream->currentBatchSize()));
+    if (input_token_cost > max_batch_tokens_size_) {
         auto error_info =
-            autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%d]",
-                                            stream->inputLength(),
-                                            stream->currentBatchSize(),
-                                            max_batch_tokens_size_);
+            prefill_cp_size_ > 1 ?
+                autil::StringUtil::formatString(
+                    "padded input token cost [%zu] (input len [%d], batch size [%d], cp size [%zu]) > "
+                    "max_batch_tokens_size [%zu]",
+                    input_token_cost,
+                    stream->inputLength(),
+                    stream->currentBatchSize(),
+                    prefill_cp_size_,
+                    max_batch_tokens_size_) :
+                autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%zu]",
+                                                stream->inputLength(),
+                                                stream->currentBatchSize(),
+                                                max_batch_tokens_size_);
         stream->reportError(ErrorCode::MALLOC_FAILED, error_info);
         return false;
     }
@@ -148,14 +165,15 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     return stream_enqueued;
 }
 
-bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
-                                         const GenerateStreamPtr&       new_stream) const {
+bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runtime,
+                                         const GenerateStreamPtr& new_stream) const {
     RTP_LLM_PROFILE_FUNCTION();
+    const auto admitted_running_stream_count = schedule_runtime.admitted_running_stream_count;
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         // Decode-only scheduling can top up an existing running decode batch.
         // max_generate_batch_size_ is an inclusive cap; only requests above it
         // should be rejected.
-        if (running_streams_.size() + streams.size() + 1 <= max_generate_batch_size_) {
+        if (running_streams_.size() + admitted_running_stream_count + 1 <= max_generate_batch_size_) {
             return true;
         }
     }
@@ -165,23 +183,31 @@ bool FIFOScheduler::evaluateRunningBatch(const list<GenerateStreamPtr>& streams,
     }
     // Conservative CP prefill mode: cap at one stream per round unless runtime
     // config explicitly allows CP prefill batching.
-    if (cp_force_single_prefill_ && !streams.empty()) {
+    if (cp_force_single_prefill_ && admitted_running_stream_count > 0) {
         return false;
     }
-    if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
+    if (running_streams_.size() + admitted_running_stream_count + 1 > max_generate_batch_size_) {
         return false;
     }
 
-    int max_token_size = new_stream->contextLength();
-    if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
+    if (admitted_running_stream_count == 0
+        && new_stream->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
-    for (auto& stream : streams) {
-        max_token_size = std::max(max_token_size, stream->contextLength());
+    return schedule_runtime.admitted_prefill_token_size + prefillTokenCost(new_stream) + running_streams_.size()
+           < max_batch_tokens_size_;
+}
+
+size_t FIFOScheduler::prefillTokenCost(size_t token_count, size_t batch_size) const {
+    if (prefill_cp_size_ > 1) {
+        token_count = makeZigzagTokenLayout(token_count, prefill_cp_size_).padded_token_count;
     }
-    // 这里的判断是要求当前调度轮所有请求参与计算的 token 数之和小于 max_batch_tokens_size_，loading_cache_streams
-    // 这一轮实际不参与计算，不需要计入。
-    return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
+    return token_count * batch_size;
+}
+
+size_t FIFOScheduler::prefillTokenCost(const GenerateStreamPtr& stream) const {
+    return prefillTokenCost(static_cast<size_t>(std::max(stream->contextLength(), 0)),
+                            static_cast<size_t>(stream->currentBatchSize()));
 }
 
 size_t FIFOScheduler::countInitedKVCacheStreams() const {
@@ -227,8 +253,6 @@ void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
 
 void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
     RTP_LLM_PROFILE_FUNCTION();
-    list<GenerateStreamPtr>             admitted_streams;
-    std::unordered_set<GenerateStream*> admitted_stream_ptrs;
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
@@ -240,8 +264,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
-    const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
-    size_t       admitted_new_init_streams = 0;
+    const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
 
     // Batch group scheduling support:
     // 1. Group completeness: force_batch streams with same batch_group_id are scheduled together
@@ -270,11 +293,22 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         }
     }
 
-    int64_t force_batch_group_id = -1;
+    ScheduleRuntime schedule_runtime;
 
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        auto& stream      = *it;
+        auto  current     = it++;
+        auto& stream      = *current;
         bool  force_batch = stream->forceBatch();
+
+        if (stream->hasError()) {
+            auto state     = stream->getStatus();
+            auto new_state = stream->moveToNext();
+            if (new_state != state) {
+                addStreamToNewState(stream, new_state);
+                waiting_streams.erase(current);
+            }
+            continue;
+        }
 
         // Check if this stream can be scheduled based on batch group rules
         if (force_batch && stream->batchGroupId() != -1) {
@@ -289,31 +323,28 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
                     force_batch = false;
                 } else if (info.count < stream->batchGroupSize()) {
                     // Group incomplete, skip this stream.
-                    it++;
                     continue;
                 }
             }
         }
 
         // Batch isolation: force_batch streams and normal streams cannot mix in the same round.
-        // The first stream that passes checks determines the batch type for this round.
-        if (!admitted_streams.empty()) {
-            if (force_batch_group_id != -1) {
+        // The first stream that makes scheduling progress determines the batch type for this round.
+        if (schedule_runtime.batch_type_selected) {
+            if (schedule_runtime.force_batch_group_id != -1) {
                 // Already in force_batch mode, only accept same group
-                if (!force_batch || stream->batchGroupId() != force_batch_group_id) {
-                    it++;
+                if (!force_batch || stream->batchGroupId() != schedule_runtime.force_batch_group_id) {
                     continue;
                 }
             } else {
                 // Already in normal mode, skip force_batch streams
                 if (force_batch) {
-                    it++;
                     continue;
                 }
             }
         }
 
-        // Check for errors and memory constraints
+        // Check admission capacity and memory constraints.
         //
         // Some PD decode streams already carry CanRun before entering FIFO: DecodeRpcServer uses
         // CanRun to drive the pre-enqueue KV allocation path. CanRun is a permanent event, so it
@@ -321,50 +352,51 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         // round. Always run FIFO capacity checks and only advance streams admitted here.
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
-            && inited_kv_streams + admitted_new_init_streams >= max_inited_kv_cache_streams_) {
-            it++;
+            && inited_kv_streams + schedule_runtime.newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
             continue;
         }
 
-        if (!stream->hasError() && evaluateRunningBatch(admitted_streams, stream)) {
-            if (!stream->hasEvent(StreamEvents::CanRun)) {
-                stream->reportEvent(StreamEvents::CanRun);
-            }
-            admitted_streams.push_back(stream);
-            admitted_stream_ptrs.insert(stream.get());
-            if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv) {
-                ++admitted_new_init_streams;
-            }
-
-            // Lock batch type based on first scheduled stream.
-            if (admitted_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
-                force_batch_group_id = stream->batchGroupId();
-                partially_admitted_force_batch_group_ids_.insert(force_batch_group_id);
-            }
-        }
-        it++;
-    }
-
-    for (const auto& stream : admitted_streams) {
-        if (stream->isContextStream()) {
-            ++last_admitted_context_batch_size_;
-            last_admitted_context_token_size_ += stream->contextLength();
-        }
-    }
-
-    for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        auto& stream = *it;
-        if (!stream->hasError() && admitted_stream_ptrs.find(stream.get()) == admitted_stream_ptrs.end()) {
-            it++;
+        if (!evaluateRunningBatch(schedule_runtime, stream)) {
             continue;
         }
-        auto state     = stream->getStatus();
-        auto new_state = stream->moveToNext();
+
+        const auto state                 = stream->getStatus();
+        const bool load_initiated_before = stream->hasEvent(StreamEvents::LoadInitiated);
+        if (!stream->hasEvent(StreamEvents::CanRun)) {
+            stream->reportEvent(StreamEvents::CanRun);
+        }
+
+        const auto new_state           = stream->moveToNext();
+        const bool kv_initialized      = !already_inited_kv && stream->curBlocksNum() > 0;
+        const bool load_initiated      = !load_initiated_before && stream->hasEvent(StreamEvents::LoadInitiated);
+        const bool scheduling_progress = new_state == StreamState::RUNNING || new_state == StreamState::LOADING_CACHE
+                                         || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
+
+        if (scheduling_progress) {
+            if (!schedule_runtime.batch_type_selected) {
+                schedule_runtime.batch_type_selected = true;
+            }
+            if (schedule_runtime.force_batch_group_id == -1 && force_batch && stream->batchGroupId() != -1) {
+                schedule_runtime.force_batch_group_id = stream->batchGroupId();
+                partially_admitted_force_batch_group_ids_.insert(schedule_runtime.force_batch_group_id);
+            }
+
+            if (new_state == StreamState::RUNNING) {
+                ++schedule_runtime.admitted_running_stream_count;
+                schedule_runtime.admitted_prefill_token_size += prefillTokenCost(stream);
+            }
+            if (kv_initialized) {
+                ++schedule_runtime.newly_inited_kv_streams;
+            }
+            if (stream->isContextStream()) {
+                ++last_admitted_context_batch_size_;
+                last_admitted_context_token_size_ += stream->contextLength();
+            }
+        }
+
         if (new_state != state) {
             addStreamToNewState(stream, new_state);
-            it = waiting_streams.erase(it);
-        } else {
-            it++;
+            waiting_streams.erase(current);
         }
     }
 

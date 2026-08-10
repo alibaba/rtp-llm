@@ -51,15 +51,25 @@ public:
     int64_t                                   onflightStreams() override;
 
 private:
+    struct ScheduleRuntime {
+        bool    batch_type_selected           = false;
+        size_t  admitted_running_stream_count = 0;
+        size_t  admitted_prefill_token_size   = 0;
+        size_t  newly_inited_kv_streams       = 0;
+        int64_t force_batch_group_id          = -1;
+    };
+
     int64_t lastScheduleTime() override;
-    bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
-    size_t countInitedKVCacheStreams() const;
-    void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
-    bool   waitPredicate();
-    void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
-    void   cancelStreams(std::list<GenerateStreamPtr>& streams);
-    bool   checkInputLength(const GenerateStreamPtr& stream);
+    bool    evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
+    size_t  prefillTokenCost(size_t token_count, size_t batch_size) const;
+    size_t  prefillTokenCost(const GenerateStreamPtr& stream) const;
+    size_t  countInitedKVCacheStreams() const;
+    void    accountBatchMetrics(const GenerateStreamPtr& new_stream);
+    bool    waitPredicate();
+    void    addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
+    void    evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
+    void    cancelStreams(std::list<GenerateStreamPtr>& streams);
+    bool    checkInputLength(const GenerateStreamPtr& stream);
 
 protected:
     void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
@@ -78,6 +88,7 @@ protected:
     size_t                          max_generate_batch_size_     = 1;
     size_t                          max_inited_kv_cache_streams_ = 0;
     const bool                      need_fill_fake_stream_       = false;
+    const size_t                    prefill_cp_size_             = 1;
     // Optional guard for Context-Parallel prefill: when enabled, force prefill
     // to one stream per round. This remains the conservative default while
     // newer dsv4 CP paths can opt in to batched prefill through runtime config.
