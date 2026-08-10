@@ -308,6 +308,9 @@ class GrpcWorkerStatusCheckRunnerTest {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
                 .setRequestId(requestId)
                 .setInputLength(64_000)
+                .setCompletedPrefillTokens(16_384)
+                .setRemainingPrefillTokens(16_000)
+                .setLastCompletedPrefillStepId(1)
                 .build();
         EngineRpcService.WorkerStatusPB runningStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole(RoleType.PREFILL.getCode())
@@ -329,6 +332,12 @@ class GrpcWorkerStatusCheckRunnerTest {
 
         assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
         assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
+        assertEquals(16_000, workerStatus.getRunningRemainingPrefillTokens());
+        assertTrue(workerStatus.getLocalTaskMap().get(requestId).isPrefillProgressKnown());
+        assertEquals(16_384,
+                workerStatus.getLocalTaskMap().get(requestId).getCompletedPrefillTokens());
+        assertEquals(1,
+                workerStatus.getLocalTaskMap().get(requestId).getLastCompletedPrefillStepId());
     }
 
     @Test

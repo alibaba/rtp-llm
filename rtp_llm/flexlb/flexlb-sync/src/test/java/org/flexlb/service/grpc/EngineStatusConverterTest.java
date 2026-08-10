@@ -6,6 +6,7 @@ import org.flexlb.enums.KvCacheGroupMode;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -104,6 +105,42 @@ class EngineStatusConverterTest {
         assertEquals(3, task.getPrefillStepCount());
         assertEquals(128, task.getPrefillNonfinalChunkTokensMin());
         assertEquals(256, task.getPrefillNonfinalChunkTokensMax());
+    }
+
+    @Test
+    void preservesPostForwardPrefillProgressWithPresence() {
+        EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId("request-1")
+                .setCompletedPrefillTokens(0)
+                .setRemainingPrefillTokens(48_000)
+                .setLastCompletedPrefillStepId(0)
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
+                .addRunningTaskInfo(runningTask)
+                .build();
+
+        var task = EngineStatusConverter.convertToWorkerStatusResponse(workerStatus)
+                .getRunningTaskInfo().get("request-1");
+
+        assertTrue(task.isPrefillProgressKnown());
+        assertEquals(0, task.getCompletedPrefillTokens());
+        assertEquals(48_000, task.getRemainingPrefillTokens());
+        assertEquals(0, task.getLastCompletedPrefillStepId());
+    }
+
+    @Test
+    void treatsMissingPrefillProgressAsUnknown() {
+        EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId("legacy-request")
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
+                .addRunningTaskInfo(runningTask)
+                .build();
+
+        var task = EngineStatusConverter.convertToWorkerStatusResponse(workerStatus)
+                .getRunningTaskInfo().get("legacy-request");
+
+        assertFalse(task.isPrefillProgressKnown());
     }
 
     @Test

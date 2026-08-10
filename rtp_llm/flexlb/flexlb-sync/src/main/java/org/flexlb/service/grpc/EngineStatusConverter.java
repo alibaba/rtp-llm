@@ -122,6 +122,16 @@ public class EngineStatusConverter {
             taskInfo.setPrefillStepCount(taskInfoPB.getPrefillStepCount());
             taskInfo.setPrefillNonfinalChunkTokensMin(taskInfoPB.getPrefillNonfinalChunkTokensMin());
             taskInfo.setPrefillNonfinalChunkTokensMax(taskInfoPB.getPrefillNonfinalChunkTokensMax());
+            if (taskInfoPB.hasCompletedPrefillTokens()) {
+                taskInfo.setCompletedPrefillTokens(taskInfoPB.getCompletedPrefillTokens());
+            }
+            if (taskInfoPB.hasRemainingPrefillTokens()) {
+                taskInfo.setRemainingPrefillTokens(taskInfoPB.getRemainingPrefillTokens());
+                taskInfo.setPrefillProgressKnown(true);
+            }
+            if (taskInfoPB.hasLastCompletedPrefillStepId()) {
+                taskInfo.setLastCompletedPrefillStepId(taskInfoPB.getLastCompletedPrefillStepId());
+            }
 
             taskInfoMap.put(requestId, taskInfo);
         }

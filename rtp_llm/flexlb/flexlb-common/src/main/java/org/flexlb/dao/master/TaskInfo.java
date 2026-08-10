@@ -59,6 +59,17 @@ public class TaskInfo {
     private long prefillNonfinalChunkTokensMin;
     @JsonProperty("prefill_nonfinal_chunk_tokens_max")
     private long prefillNonfinalChunkTokensMax;
+    @JsonProperty("completed_prefill_tokens")
+    private long completedPrefillTokens;
+    @JsonProperty("remaining_prefill_tokens")
+    private long remainingPrefillTokens;
+    @JsonProperty("last_completed_prefill_step_id")
+    private long lastCompletedPrefillStepId;
+
+    // Presence is local protocol state. It keeps a legacy engine's omitted
+    // proto3 fields distinct from a valid first RUNNING snapshot (0 completed).
+    @JsonIgnore
+    private boolean prefillProgressKnown;
 
     @JsonIgnore
     private boolean kvcmMatchAvailable;

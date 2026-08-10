@@ -715,6 +715,108 @@ class WorkerStatusTest {
         }
 
         @Test
+        @DisplayName("RUNNING progress overwrites remaining work without changing pending aggregates")
+        void runningProgress_shouldOverwriteSeparateRemainingWorkAggregate() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            localTask.setInputLength(64_000);
+            localTask.setPredictedPrefixLength(0);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+            assertEquals(1, workerStatus.getInTransitAndWaitingTaskCount());
+            assertEquals(64_000, workerStatus.getInTransitAndWaitingUncachedTokens());
+
+            TaskInfo initialRunning = new TaskInfo();
+            initialRunning.setRequestId(REQUEST_ID);
+            initialRunning.setInputLength(64_000);
+            initialRunning.setPrefixLengthValid(true);
+            initialRunning.setCompletedPrefillTokens(0);
+            initialRunning.setRemainingPrefillTokens(64_000);
+            initialRunning.setLastCompletedPrefillStepId(0);
+            initialRunning.setPrefillProgressKnown(true);
+            workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, initialRunning), Map.of());
+
+            TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
+            assertNotNull(updated);
+            assertEquals(TaskStateEnum.RUNNING, updated.getTaskState());
+            assertTrue(updated.isPrefillProgressKnown());
+            assertEquals(0, updated.getCompletedPrefillTokens());
+            assertEquals(64_000, updated.getRemainingPrefillTokens());
+            assertEquals(0, updated.getLastCompletedPrefillStepId());
+            assertEquals(64_000, workerStatus.getRunningRemainingPrefillTokens());
+            assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
+            assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
+
+            TaskInfo firstStep = new TaskInfo();
+            firstStep.setRequestId(REQUEST_ID);
+            firstStep.setInputLength(64_000);
+            firstStep.setPrefixLengthValid(true);
+            firstStep.setCompletedPrefillTokens(16_384);
+            firstStep.setRemainingPrefillTokens(47_616);
+            firstStep.setLastCompletedPrefillStepId(1);
+            firstStep.setPrefillProgressKnown(true);
+            workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, firstStep), Map.of());
+
+            updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
+            assertNotNull(updated);
+            assertEquals(TaskStateEnum.RUNNING, updated.getTaskState());
+            assertTrue(updated.isPrefillProgressKnown());
+            assertEquals(16_384, updated.getCompletedPrefillTokens());
+            assertEquals(47_616, updated.getRemainingPrefillTokens());
+            assertEquals(1, updated.getLastCompletedPrefillStepId());
+            assertEquals(47_616, workerStatus.getRunningRemainingPrefillTokens());
+            assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
+            assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
+
+            TaskInfo secondStep = new TaskInfo();
+            secondStep.setRequestId(REQUEST_ID);
+            secondStep.setInputLength(64_000);
+            secondStep.setPrefixLengthValid(true);
+            secondStep.setCompletedPrefillTokens(32_768);
+            secondStep.setRemainingPrefillTokens(31_232);
+            secondStep.setLastCompletedPrefillStepId(2);
+            secondStep.setPrefillProgressKnown(true);
+            workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, secondStep), Map.of());
+
+            assertEquals(31_232, workerStatus.getRunningRemainingPrefillTokens());
+            assertEquals(0, workerStatus.getInTransitAndWaitingTaskCount());
+            assertEquals(0, workerStatus.getInTransitAndWaitingUncachedTokens());
+
+            TaskInfo preemptedWaiting = new TaskInfo();
+            preemptedWaiting.setRequestId(REQUEST_ID);
+            preemptedWaiting.setInputLength(64_000);
+            workerStatus.updateTaskStates(Map.of(REQUEST_ID, preemptedWaiting), Map.of(), Map.of());
+
+            assertEquals(TaskStateEnum.CONFIRMED,
+                    workerStatus.getLocalTaskMap().get(REQUEST_ID).getTaskState());
+            assertFalse(workerStatus.getLocalTaskMap().get(REQUEST_ID).isPrefillProgressKnown());
+            assertEquals(0, workerStatus.getRunningRemainingPrefillTokens());
+            assertEquals(1, workerStatus.getInTransitAndWaitingTaskCount());
+            assertEquals(64_000, workerStatus.getInTransitAndWaitingUncachedTokens());
+        }
+
+        @Test
+        @DisplayName("Missing RUNNING progress clears a previously reported remaining value")
+        void missingRunningProgress_shouldNotTreatLegacyDefaultAsZeroRemaining() {
+            TaskInfo localTask = new TaskInfo();
+            localTask.setRequestId(REQUEST_ID);
+            workerStatus.putLocalTask(REQUEST_ID, localTask);
+
+            TaskInfo progressTask = new TaskInfo();
+            progressTask.setRequestId(REQUEST_ID);
+            progressTask.setRemainingPrefillTokens(16_384);
+            progressTask.setPrefillProgressKnown(true);
+            workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, progressTask), Map.of());
+            assertEquals(16_384, workerStatus.getRunningRemainingPrefillTokens());
+
+            TaskInfo legacyTask = new TaskInfo();
+            legacyTask.setRequestId(REQUEST_ID);
+            workerStatus.updateTaskStates(Map.of(), Map.of(REQUEST_ID, legacyTask), Map.of());
+
+            assertFalse(workerStatus.getLocalTaskMap().get(REQUEST_ID).isPrefillProgressKnown());
+            assertEquals(0, workerStatus.getRunningRemainingPrefillTokens());
+        }
+
+        @Test
         @DisplayName("Task in waiting then in running on next call should be RUNNING and report waiting-to-running latency once")
         void taskInWaitingThenInRunning_shouldBeRunning() {
             TaskInfo localTask = new TaskInfo();

@@ -422,6 +422,12 @@ message TaskInfoPB {
     int64 prefill_step_count = 22;
     int64 prefill_nonfinal_chunk_tokens_min = 23;
     int64 prefill_nonfinal_chunk_tokens_max = 24;
+    // Progress is reported only after a prefill GPU forward has completed.
+    // Keep presence so an older engine's omitted fields are not interpreted as
+    // a completed request with zero remaining tokens.
+    optional int64 completed_prefill_tokens = 25;
+    optional int64 remaining_prefill_tokens = 26;
+    optional int64 last_completed_prefill_step_id = 27;
 }
 
 message UpdateWeightsRequestPB {

@@ -42,6 +42,9 @@ public class WorkerStatus {
     private ConcurrentHashMap<String/*requestId*/, TaskInfo> localTaskMap = new ConcurrentHashMap<>();
     private volatile long inTransitAndWaitingTaskCount;
     private volatile long inTransitAndWaitingUncachedTokens;
+    // Reported separately from IN_TRANSIT + WAITING so existing admission
+    // accounting retains its established semantics.
+    private volatile long runningRemainingPrefillTokens;
     private double stepLatencyMs;
     private long iterateCount;
     private long dpSize;
@@ -77,6 +80,7 @@ public class WorkerStatus {
 
         lastSelectedTime.set(System.nanoTime() / 1000);
         refreshInTransitAndWaitingStats();
+        refreshRunningRemainingPrefillTokens();
         Logger.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
     }
 
@@ -93,6 +97,7 @@ public class WorkerStatus {
             addKvCacheUsed(-needNewKvCacheLen);
             localTaskMap.remove(requestId);
             refreshInTransitAndWaitingStats();
+            refreshRunningRemainingPrefillTokens();
         }
     }
 
@@ -151,6 +156,7 @@ public class WorkerStatus {
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
                 updateTaskInputLength(localTask, finishedTask);
                 updateCacheHitFromEngine(localTask, finishedTask, "finished", cacheHitFeedbacks);
+                updatePrefillProgressFromEngine(localTask, finishedTask);
                 localTask.setRequestReceivedTimeMs(finishedTask.getRequestReceivedTimeMs());
                 localTask.setWaitingEnteredTimeMs(finishedTask.getWaitingEnteredTimeMs());
                 localTask.setRunningEnteredTimeMs(finishedTask.getRunningEnteredTimeMs());
@@ -197,6 +203,7 @@ public class WorkerStatus {
 
                 updateTaskInputLength(localTask, runningTask);
                 updateCacheHitFromEngine(localTask, runningTask, "running", cacheHitFeedbacks);
+                updatePrefillProgressFromEngine(localTask, runningTask);
                 localTask.setPrefillTime(runningTask.getPrefillTime());
                 localTask.setWaitingTime(runningTask.getWaitingTime());
                 localTask.setIterateCount(runningTask.getIterateCount());
@@ -236,6 +243,13 @@ public class WorkerStatus {
 
                 updateTaskInputLength(localTask, waitingTask);
                 updateCacheHitFromEngine(localTask, waitingTask, "waiting", cacheHitFeedbacks);
+                // A preempted request may return to WAITING after it had
+                // reported RUNNING progress. Its remaining work now follows
+                // the existing input/prefix accounting, not stale RUNNING data.
+                localTask.setPrefillProgressKnown(false);
+                if (localTask.getTaskState() == TaskStateEnum.RUNNING) {
+                    localTask.updateTaskState(TaskStateEnum.CONFIRMED);
+                }
                 localTask.setWaitingTime(waitingTask.getWaitingTime());
                 localTask.setDpRank(waitingTask.getDpRank());
                 localTask.setWaitingEnteredTimeMs(waitingTask.getWaitingEnteredTimeMs());
@@ -258,6 +272,7 @@ public class WorkerStatus {
             }
         }
         refreshInTransitAndWaitingStats();
+        refreshRunningRemainingPrefillTokens();
         return TaskStateUpdateResult.from(
                 cacheHitFeedbacks,
                 decisionToWaitingObservedLatenciesMs,
@@ -271,6 +286,19 @@ public class WorkerStatus {
         if (engineTask.getInputLength() > 0) {
             localTask.setInputLength(engineTask.getInputLength());
         }
+    }
+
+    private void updatePrefillProgressFromEngine(TaskInfo localTask, TaskInfo engineTask) {
+        if (!engineTask.isPrefillProgressKnown()) {
+            localTask.setPrefillProgressKnown(false);
+            return;
+        }
+
+        localTask.setCompletedPrefillTokens(Math.max(0, engineTask.getCompletedPrefillTokens()));
+        localTask.setRemainingPrefillTokens(Math.max(0, engineTask.getRemainingPrefillTokens()));
+        localTask.setLastCompletedPrefillStepId(
+                Math.max(0, engineTask.getLastCompletedPrefillStepId()));
+        localTask.setPrefillProgressKnown(true);
     }
 
     private void updateCacheHitFromEngine(TaskInfo localTask, TaskInfo engineTask, String taskState,
@@ -344,6 +372,23 @@ public class WorkerStatus {
 
         this.inTransitAndWaitingTaskCount = inTransitAndWaitingTaskCount;
         this.inTransitAndWaitingUncachedTokens = inTransitAndWaitingTokens;
+    }
+
+    /**
+     * Sum only authoritative post-forward remaining work for active RUNNING
+     * tasks. This intentionally does not alter the existing pending-task
+     * aggregates or runningQueueTime estimate.
+     */
+    public void refreshRunningRemainingPrefillTokens() {
+        long runningRemainingTokens = 0;
+        for (TaskInfo task : localTaskMap.values()) {
+            if (task == null || task.getTaskState() != TaskStateEnum.RUNNING
+                    || !task.isPrefillProgressKnown()) {
+                continue;
+            }
+            runningRemainingTokens += Math.max(0, task.getRemainingPrefillTokens());
+        }
+        this.runningRemainingPrefillTokens = runningRemainingTokens;
     }
 
     private boolean isInTransitOrWaiting(TaskInfo task) {
