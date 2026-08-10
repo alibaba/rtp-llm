@@ -1,3 +1,5 @@
+import logging
+import os
 from typing import Optional
 
 import torch
@@ -14,16 +16,37 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.allgat
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.alltoall_cp_impl import (
     PCPAll2AllAttnOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.fused_allgather_cp_impl import (
+    PCPFusedPagedAttnOp,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
+from rtp_llm.ops import (
+    AttentionConfigs,
+    CPRotateMethod,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
     LayerKVCache,
     PyAttentionInputs,
 )
 
+_all_gather_impl_name = os.environ.get("RTP_CP_IMPL", "fused").lower()
+if _all_gather_impl_name == "legacy":
+    _all_gather_impl = PCPAllGatherAttnOp
+else:
+    if _all_gather_impl_name != "fused":
+        logging.warning(
+            "Unknown RTP_CP_IMPL=%s; using fused all-gather CP",
+            _all_gather_impl_name,
+        )
+    _all_gather_impl = PCPFusedPagedAttnOp
+
+
 impl_map = {
-    CPRotateMethod.ALL_GATHER: PCPAllGatherAttnOp,
+    CPRotateMethod.ALL_GATHER: _all_gather_impl,
     CPRotateMethod.ALLTOALL: PCPAll2AllAttnOp,
     CPRotateMethod.ALL_GATHER_WITH_OVERLAP: PCPAllGatherOverlapAttnOp,
 }
@@ -136,7 +159,27 @@ class CPFlashInferImpl(FMHAImplBase):
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
 
         method = parallelism_config.prefill_cp_config.method
-        self.fmha_impl = impl_map[method](attn_configs, attn_inputs, parallelism_config)
+        impl = impl_map[method]
+        if impl is PCPFusedPagedAttnOp:
+            if attn_configs.kv_cache_dtype != KvCacheDataType.BASE:
+                logging.warning(
+                    "Falling back to legacy all-gather CP for %s KV cache",
+                    attn_configs.kv_cache_dtype,
+                )
+                impl = PCPAllGatherAttnOp
+            elif (
+                attn_configs.kernel_tokens_per_block
+                and attn_configs.kernel_tokens_per_block
+                != attn_configs.tokens_per_block
+            ):
+                logging.warning(
+                    "Falling back to legacy all-gather CP because "
+                    "kernel_tokens_per_block (%s) != tokens_per_block (%s)",
+                    attn_configs.kernel_tokens_per_block,
+                    attn_configs.tokens_per_block,
+                )
+                impl = PCPAllGatherAttnOp
+        self.fmha_impl = impl(attn_configs, attn_inputs, parallelism_config)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 
         # Store input info

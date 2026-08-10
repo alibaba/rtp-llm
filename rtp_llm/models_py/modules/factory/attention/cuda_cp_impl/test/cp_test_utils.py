@@ -319,8 +319,7 @@ def compute_rank_positions(lengths: List[int], cp_size: int) -> List[List[int]]:
 
 
 class CPAttnTestBase(unittest.TestCase):
-    """Base class with the correctness drivers.  Subclasses set ``OP_CLASS``
-    and ``AG_MODULE`` (the module path where ``all_gather`` is imported)."""
+    """Base class with correctness drivers for context-parallel attention."""
 
     OP_CLASS = None  # override in subclass
     AG_MODULE: str = ""  # override in subclass
@@ -336,6 +335,24 @@ class CPAttnTestBase(unittest.TestCase):
 
     def _extra_patches(self, stack: contextlib.ExitStack):
         """Override to add extra mock patches (e.g. user-buffers)."""
+
+    def _patch_all_gather(
+        self,
+        stack: contextlib.ExitStack,
+        all_local_k: List[torch.Tensor],
+        all_local_v: List[torch.Tensor],
+        kv_head_num: int,
+        head_dim: int,
+    ):
+        """Mock the two legacy K/V all-gathers on one GPU."""
+        call_idx = [0]
+
+        def mock_ag(tensor, group=None):
+            data = all_local_k if call_idx[0] % 2 == 0 else all_local_v
+            call_idx[0] += 1
+            return torch.cat(data, dim=0)
+
+        stack.enter_context(patch(f"{self.AG_MODULE}.all_gather", side_effect=mock_ag))
 
     def _assert_close(
         self,
@@ -445,16 +462,9 @@ class CPAttnTestBase(unittest.TestCase):
             total_blocks, kv_head_num, tokens_per_block, head_dim, device=self.device
         )
 
-        call_idx = [0]
-
-        def mock_ag(tensor, group=None):
-            data = all_local_k if call_idx[0] % 2 == 0 else all_local_v
-            call_idx[0] += 1
-            return torch.cat(data, dim=0)
-
         with contextlib.ExitStack() as stack:
-            stack.enter_context(
-                patch(f"{self.AG_MODULE}.all_gather", side_effect=mock_ag)
+            self._patch_all_gather(
+                stack, all_local_k, all_local_v, kv_head_num, head_dim
             )
             self._extra_patches(stack)
 
@@ -598,16 +608,9 @@ class CPAttnTestBase(unittest.TestCase):
             tokens_per_block,
         )
 
-        call_idx = [0]
-
-        def mock_ag(tensor, group=None):
-            data = all_local_k if call_idx[0] % 2 == 0 else all_local_v
-            call_idx[0] += 1
-            return torch.cat(data, dim=0)
-
         with contextlib.ExitStack() as stack:
-            stack.enter_context(
-                patch(f"{self.AG_MODULE}.all_gather", side_effect=mock_ag)
+            self._patch_all_gather(
+                stack, all_local_k, all_local_v, kv_head_num, head_dim
             )
             self._extra_patches(stack)
 
