@@ -300,6 +300,7 @@ class GenerateConfigTest(TestCase):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = 102
+        generate_env_config.max_thinking_tokens = 64
         special_tokens = SpecialTokens()
         tokenizer = QWenTokenizer(
             f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
@@ -316,6 +317,20 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.max_thinking_tokens, 109)
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [102])
+
+    def test_add_thinking_params_uses_env_default(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_end_token_id = 102
+        generate_env_config.max_thinking_tokens = 64
+        generate_config = Pipeline.create_generate_config(
+            generate_config=self._create_generate_config(),
+            vocab_size=100,
+            special_tokens=SpecialTokens(),
+            tokenizer=None,
+            generate_env_config=generate_env_config,
+        )
+
+        self.assertEqual(generate_config.max_thinking_tokens, 64)
 
     def test_add_thinking_params_with_think_token(self):
         generate_env_config = GenerateEnvConfig()
@@ -622,6 +637,35 @@ class OpenaiGenerateConfigTest(TestCase):
         self.assertEqual(config.max_new_tokens, 100)
         self.assertEqual(config.max_thinking_tokens, 10)
         self.assertTrue(config.in_think_mode)
+
+    def test_openai_env_thinking_budget_is_default_only(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_end_token_id = 102
+        generate_env_config.max_thinking_tokens = 64
+
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(messages=[], enable_thinking=True),
+            generate_env_config,
+        )
+        self.assertEqual(config.max_thinking_tokens, 64)
+
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(
+                messages=[], enable_thinking=True, thinking_budget=10
+            ),
+            generate_env_config,
+        )
+        self.assertEqual(config.max_thinking_tokens, 10)
+
+        config = self._extract_openai_generation_config(
+            ChatCompletionRequest(
+                messages=[],
+                enable_thinking=True,
+                extra_configs=GenerateConfig(max_thinking_tokens=12),
+            ),
+            generate_env_config,
+        )
+        self.assertEqual(config.max_thinking_tokens, 12)
 
     def test_openai_max_completion_tokens_respects_max_tokens_total_cap(self):
         generate_env_config = GenerateEnvConfig()

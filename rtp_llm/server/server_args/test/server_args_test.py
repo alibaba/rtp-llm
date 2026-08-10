@@ -39,6 +39,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_IMAGE_MIN_DIMENSION"] = "12"
         os.environ["MM_IMAGE_MAX_ASPECT_RATIO"] = "150.5"
         os.environ["SP_DETERMINISTIC_DRAFT_EXACT_MATCH"] = "1"
+        os.environ["MAX_THINKING_TOKENS"] = "123"
 
         sys.argv = ["prog"]
 
@@ -85,6 +86,7 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(py_env_configs.vit_config.mm_image_min_dimension, 12)
         self.assertEqual(py_env_configs.vit_config.mm_image_max_aspect_ratio, 150.5)
+        self.assertEqual(py_env_configs.generate_env_config.max_thinking_tokens, 123)
         self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
         restored_sp_config = pickle.loads(pickle.dumps(py_env_configs.sp_config))
         self.assertTrue(restored_sp_config.deterministic_draft_exact_match)

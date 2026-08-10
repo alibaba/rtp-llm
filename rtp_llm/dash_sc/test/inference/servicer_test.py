@@ -122,6 +122,7 @@ class _GenerateEnvCfg:
     think_end_token_id = -1
     think_start_tag = "<think>\n"
     think_end_tag = "</think>\n\n"
+    max_thinking_tokens = None
 
 
 def _dsv4_tokenizer() -> _FakeTokenizer:
@@ -1928,6 +1929,30 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.thinking_mode, ThinkingMode.ADAPTIVE)
         self.assertEqual(generate_config.max_thinking_tokens, 3)
+
+    async def test_dash_generation_env_thinking_budget_is_default_only(self) -> None:
+        for request_budget, expected_budget in ((None, 64), (10, 10)):
+            with self.subTest(request_budget=request_budget):
+                visitor = _FakeVisitor(_FakeAsyncStream([]))
+                tok = _dsv4_tokenizer()
+                env_cfg = _GenerateEnvCfg()
+                env_cfg.max_thinking_tokens = 64
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor,
+                    tokenizer=tok,
+                    generate_env_config=env_cfg,
+                    think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+                )
+                req = self._valid_infer_request()
+                req.parameters["max_new_tokens"].int64_param = 3
+                if request_budget is not None:
+                    req.parameters["thinking_budget"].int64_param = request_budget
+
+                await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+                self.assertEqual(visitor.enqueue_called, 1)
+                generate_config = visitor.last_generate_input.generate_config
+                self.assertEqual(generate_config.max_thinking_tokens, expected_budget)
 
     async def test_dash_generation_enable_thinking_true_without_budget_keeps_thinking(
         self,

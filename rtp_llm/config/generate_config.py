@@ -15,6 +15,7 @@ _GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
     {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
 )
 _JSON_OBJECT_SCHEMA: Dict[str, str] = {"type": "object"}
+_INT32_MAX = 2_147_483_647
 
 
 def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
@@ -290,6 +291,18 @@ class GenerateConfig(BaseModel):
             tokenizer: Tokenizer instance.
             generate_env_config: GenerateEnvConfig object.
         """
+
+        env_max_thinking_tokens = getattr(
+            generate_env_config, "max_thinking_tokens", None
+        )
+        if (
+            env_max_thinking_tokens is not None
+            and "max_thinking_tokens" not in self.model_fields_set
+        ):
+            env_max_thinking_tokens = int(env_max_thinking_tokens)
+            self.max_thinking_tokens = (
+                _INT32_MAX if env_max_thinking_tokens < 0 else env_max_thinking_tokens
+            )
 
         if tokenizer and not self.begin_think_token_ids:
             think_start_tag: str = generate_env_config.think_start_tag.encode(

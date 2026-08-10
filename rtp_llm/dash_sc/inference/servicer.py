@@ -694,6 +694,16 @@ async def iter_real_model_stream_infer(
         generate_config = sampling.to_generate_config(other=other)
         generate_config.trace_id = trace_str
         if generate_env_config is not None:
+            env_max_thinking_tokens = getattr(
+                generate_env_config, "max_thinking_tokens", None
+            )
+            if env_max_thinking_tokens is not None:
+                env_max_thinking_tokens = int(env_max_thinking_tokens)
+                generate_config.max_thinking_tokens = (
+                    _INT32_MAX
+                    if env_max_thinking_tokens < 0
+                    else env_max_thinking_tokens
+                )
             try:
                 hf_tok = _hf_tokenizer(tokenizer)
                 if (
