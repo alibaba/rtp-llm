@@ -51,6 +51,7 @@ _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
+_BIND_BARRIER_TIMEOUT_S = 600.0
 _PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
 _PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
 _DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
@@ -85,6 +86,38 @@ def _is_proxy_mode_enabled() -> bool:
     return os.environ.get(_PROXY_MODE_ENV_KEY, "").strip() == "1" or bool(
         os.environ.get(_FORWARD_ENV_KEY, "").strip()
     )
+
+
+def _wait_for_bind_barrier(bind_barrier, rank_id: int, server_id: int) -> None:
+    if bind_barrier is None:
+        return
+    logging.info(
+        "[DashScApp] waiting at gRPC bind barrier rank_id=%s server_id=%s",
+        rank_id,
+        server_id,
+    )
+    try:
+        arrival_index = bind_barrier.wait(timeout=_BIND_BARRIER_TIMEOUT_S)
+    except threading.BrokenBarrierError as e:
+        raise RuntimeError(
+            f"DashSc gRPC bind barrier failed for rank {rank_id} server {server_id}"
+        ) from e
+    logging.info(
+        "[DashScApp] gRPC bind barrier released rank_id=%s server_id=%s "
+        "arrival_index=%s",
+        rank_id,
+        server_id,
+        arrival_index,
+    )
+
+
+def _abort_bind_barrier(bind_barrier) -> None:
+    if bind_barrier is None:
+        return
+    try:
+        bind_barrier.abort()
+    except Exception as e:
+        logging.warning("[DashScApp] failed to abort gRPC bind barrier: %s", e)
 
 
 class DashScShutdownManager:
@@ -369,9 +402,11 @@ class DashScApp:
          hosts the aio gRPC server AND backend ``enqueue`` coroutines, so the
          request path never leaves this loop.
       4. Construct the proxy servicer on that loop when in proxy mode.
-      5. Call ``self._grpc_server.start_on_loop`` (schedules start on the
+      5. Wait for every DashSc worker to finish initialization at the shared
+         bind barrier.
+      6. Call ``self._grpc_server.start_on_loop`` (schedules start on the
          loop and blocks the main thread until bind succeeds or raises).
-      6. Notify the parent via the pipe, then block the main thread waiting on
+      7. Notify the parent via the pipe, then block the main thread waiting on
          SIGTERM/SIGINT.
     """
 
@@ -516,7 +551,7 @@ class DashScApp:
         except Exception as e:
             logging.warning("[DashScApp] servicer cleanup failed: %s", e, exc_info=True)
 
-    def start(self, ready_pipe_writer=None) -> None:
+    def start(self, ready_pipe_writer=None, bind_barrier=None) -> None:
         servicer: DashScAppServicer | None = None
         try:
             port = self.server_config.dash_sc_grpc_server_port
@@ -607,6 +642,11 @@ class DashScApp:
             # (split via the ``protocol`` tag ``grpc_metrics`` injects).
             kmonitor.init()
 
+            _wait_for_bind_barrier(
+                bind_barrier,
+                self.server_config.rank_id,
+                self.server_config.frontend_server_id,
+            )
             logging.info(
                 "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",
                 self.server_config.rank_id,
@@ -626,6 +666,7 @@ class DashScApp:
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:
+            _abort_bind_barrier(bind_barrier)
             error_trace = traceback.format_exc()
             logging.error("[DashScApp] start failed: %s\n%s", e, error_trace)
             if ready_pipe_writer is not None:

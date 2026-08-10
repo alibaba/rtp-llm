@@ -123,6 +123,7 @@ cc_library(
         ":types_hdr",
         ":common_defines",
         "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -206,6 +207,7 @@ cc_library(
         ":types_hdr",
         ":common_defines",
         "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:signal_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -270,6 +272,7 @@ cc_library(
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+        "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
         "@havenask//aios/autil:scope",
@@ -305,6 +308,7 @@ cc_library(
         ":op_data",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+        "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",
     ] + torch_deps() + select({
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",

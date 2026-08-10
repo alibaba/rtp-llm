@@ -394,9 +394,11 @@ class EplbMode:
     def value(self) -> int:
         ...
 class FIFOSchedulerConfig:
+    cp_force_single_prefill: bool
     decode_prefill_ratio: str
     max_batch_tokens_size: int
     max_context_batch_size: int
+    max_inited_kv_cache_streams: int
     pdfusion_scheduler_mode: str
     def __getstate__(self) -> tuple:
         ...
@@ -406,6 +408,28 @@ class FIFOSchedulerConfig:
         ...
     def to_string(self) -> str:
         ...
+
+
+class GrammarConfig:
+    constrained_json_disable_any_whitespace: bool
+    grammar_backend: str
+    num_workers: int
+    override_stop_tokens: list[int]
+    tokenizer_info_json: str
+
+    def __getstate__(self) -> tuple:
+        ...
+
+    def __init__(self) -> None:
+        ...
+
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
+
+    def to_string(self) -> str:
+        ...
+
+
 class FMHAConfig:
     absorb_opt_len: int
     disable_flashinfer_native: bool
@@ -1023,6 +1047,11 @@ class ModelConfig:
     moe_normalize_expert_scale: bool
     moe_style: int
     moe_topk_group: int
+    hc_mult: int
+    hc_sinkhorn_iters: int
+    hc_eps: float
+    swiglu_limit: float
+    num_hash_layers: int
     num_layers: int
     partial_rotary_factor: float
     position_ids_style: int

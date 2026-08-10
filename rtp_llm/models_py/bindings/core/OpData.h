@@ -34,12 +34,15 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
-    torch::Tensor         input_lengths;      // [batch_size]
-    torch::Tensor         sequence_lengths;   // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;  // [sum(lm_output_lengths)]
-    torch::Tensor         lm_output_lengths;  // [total_batch_size]
-    torch::Tensor         prefix_lengths;     // [context_batch_size]
+    mutable torch::Tensor combo_tokens;             // [cumulated_seq_len]
+    torch::Tensor         input_lengths;            // [batch_size]
+    torch::Tensor         sequence_lengths;         // [decoder_batch_size]
+    torch::Tensor         lm_output_indexes;        // selected output rows
+    // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
+    // scheduling redesign no longer populates it (stays undefined).
+    torch::Tensor         lm_output_lengths;        // [total_batch_size]
+    torch::Tensor         prefix_lengths;           // [context_batch_size]
+    torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -78,11 +81,12 @@ struct GptModelInputs {
     bool   decode_entrance           = false;
     bool   use_opaque_kv_cache_store = false;
 
-    bool need_all_logits = false;
-    bool need_moe_gating = false;
-    bool warmup          = false;
-    bool skip_run        = false;
-    bool is_fake_stream  = false;
+    bool need_all_logits        = false;
+    bool need_all_hidden_states = false;
+    bool need_moe_gating        = false;
+    bool warmup                 = false;
+    bool skip_run               = false;
+    bool is_fake_stream         = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.
@@ -335,28 +339,13 @@ struct AllGatherParams {
 };
 
 struct SpeculativeSamplingParams {
-    torch::Tensor& draft_probs_d;
-    torch::Tensor& draft_token_ids_d;
-    torch::Tensor& uniform_samples_d;
-    torch::Tensor& target_probs_d;
-    torch::Tensor& output_token_ids_d;
-    torch::Tensor& output_accepted_token_num_d;
-    torch::Tensor& output_emitted_token_num_d;
-
-    SpeculativeSamplingParams(torch::Tensor& draft_probs_d,
-                              torch::Tensor& draft_token_ids_d,
-                              torch::Tensor& uniform_samples_d,
-                              torch::Tensor& target_probs_d,
-                              torch::Tensor& output_token_ids_d,
-                              torch::Tensor& output_accepted_token_num_d,
-                              torch::Tensor& output_emitted_token_num_d):
-        draft_probs_d(draft_probs_d),
-        draft_token_ids_d(draft_token_ids_d),
-        uniform_samples_d(uniform_samples_d),
-        target_probs_d(target_probs_d),
-        output_token_ids_d(output_token_ids_d),
-        output_accepted_token_num_d(output_accepted_token_num_d),
-        output_emitted_token_num_d(output_emitted_token_num_d) {}
+    torch::Tensor draft_probs_d;
+    torch::Tensor draft_token_ids_d;
+    torch::Tensor uniform_samples_d;
+    torch::Tensor target_probs_d;
+    torch::Tensor output_token_ids_d;
+    torch::Tensor output_accepted_token_num_d;
+    torch::Tensor output_emitted_token_num_d;
 };
 
 struct RejectionSamplingParams {
@@ -368,6 +357,14 @@ struct RejectionSamplingParams {
     torch::Tensor output_token_ids_d;
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
+};
+
+struct MappingDraft2TargetParams {
+    torch::Tensor tokens;
+    torch::Tensor d2t_map;
+    int           batch_size;
+    int           token_offset;
+    int           token_stride;
 };
 
 }  // namespace rtp_llm

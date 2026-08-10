@@ -13,8 +13,13 @@ that computes zigzag positions from first principles.
 """
 
 import unittest
+from types import SimpleNamespace
 from typing import List, Set, Tuple
+from unittest.mock import patch
 
+import torch
+
+from rtp_llm.models_py.modules.factory.attention import common as attention_common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_full_causal_kv_indices,
     generate_half_kv_indices,
@@ -22,6 +27,41 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_nonlocal_causal_kv_indices,
     generate_q_indices,
 )
+
+
+class CacheStoreInputLengthTest(unittest.TestCase):
+    # Cache-store planning moved into the C++ CacheStoreWriter (main #1250);
+    # python only forwards the writer + inputs pair. The CP full-length
+    # override now happens in PyWrappedModel::forward before the writer runs.
+    def test_writer_receives_writer_and_inputs_pair(self):
+        cache_store_inputs = object()
+        writer = object()
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=cache_store_inputs,
+            cache_store_writer=writer,
+        )
+
+        op = object()
+        with patch.object(
+            attention_common, "WriteCacheStoreOp", return_value=op
+        ) as constructor:
+            self.assertIs(
+                attention_common.create_write_cache_store_impl(attn_inputs), op
+            )
+
+        args = constructor.call_args.args
+        self.assertIs(args[0], writer)
+        self.assertIs(args[1], cache_store_inputs)
+
+    def test_no_writer_returns_none(self):
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=object(),
+            cache_store_writer=None,
+        )
+        self.assertIsNone(attention_common.create_write_cache_store_impl(attn_inputs))
+
 
 # ---------------------------------------------------------------------------
 # Reference helpers (independent of the code under test)

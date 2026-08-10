@@ -37,6 +37,7 @@ def start_dash_sc_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    bind_barrier=None,
 ):
     _install_hot_hook_runtime(f"dash_sc_rank_{rank_id}_server_{server_id}")
     logging.info(
@@ -66,7 +67,10 @@ def start_dash_sc_server(
     try:
         set_global_controller(global_controller)
         app = DashScApp(py_env_configs)
-        app.start(ready_pipe_writer=pipe_writer)
+        app.start(
+            ready_pipe_writer=pipe_writer,
+            bind_barrier=bind_barrier,
+        )
     except BaseException as e:
         logging.error(
             f"start dash_sc server error: {e}, trace: {traceback.format_exc()}"

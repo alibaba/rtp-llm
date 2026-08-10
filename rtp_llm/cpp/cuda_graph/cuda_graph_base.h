@@ -32,6 +32,7 @@ struct GraphParams {
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
+    int64_t          hc_mult = 1;
     // Golden cache-group identity for CUDA graph capture/replay. A one-group
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
@@ -47,12 +48,20 @@ class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
-    virtual void           initCapture()                                               = 0;
-    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) = 0;
-    virtual void           setPositionEncoding(torch::Tensor position_encoding)        = 0;
-    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)   = 0;
-    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)       = 0;
-    virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)  = 0;
-    py::object             py_instance_;
+    virtual void           initCapture()                                                = 0;
+    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)  = 0;
+    virtual void           setPositionEncoding(torch::Tensor position_encoding)         = 0;
+    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)    = 0;
+    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)        = 0;
+    virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
+    virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
+                                                  CudaGraphState&      state,
+                                                  bool                 skip_forward_event_sync = false) = 0;
+
+    // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
+    // buffers after page-table changes. Other captured fields stay untouched.
+    virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
+
+    py::object py_instance_;
 };
 }  // namespace rtp_llm

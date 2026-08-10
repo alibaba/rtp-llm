@@ -43,10 +43,12 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         inp = PyAttentionInputs()
         inp.is_cuda_graph = with_copy_params
         inp.is_prefill = True
-        inp.input_lengths = torch.tensor(input_lengths, dtype=torch.int32).pin_memory()
+        inp.input_lengths = torch.tensor(
+            input_lengths, dtype=torch.int32, device="cuda"
+        )
         inp.prefix_lengths = torch.tensor(
-            prefix_lengths, dtype=torch.int32
-        ).pin_memory()
+            prefix_lengths, dtype=torch.int32, device="cuda"
+        )
         seq_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
         inp.sequence_lengths = torch.tensor(seq_lengths, dtype=torch.int32).pin_memory()
 

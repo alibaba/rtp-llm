@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import concurrent.futures
 import json
@@ -7,10 +9,7 @@ import threading
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
-from typing import Optional
-
-import requests
-import torch
+from typing import Any, Optional
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
@@ -20,13 +19,18 @@ from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.grpc_util import trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
-from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
 download_executor = concurrent.futures.ThreadPoolExecutor()
 
 logger = logging.getLogger(__name__)
 
 REQUEST_GET = None
+
+
+def _default_request_get(url, headers):
+    import requests
+
+    return requests.get(url, stream=True, headers=headers, timeout=10)
 
 
 def request_get(url, headers):
@@ -37,9 +41,7 @@ def request_get(url, headers):
 
             REQUEST_GET = safe_request_get
         except ImportError:
-            REQUEST_GET = lambda url, headers: requests.get(
-                url, stream=True, headers=headers, timeout=10
-            )
+            REQUEST_GET = _default_request_get
     return REQUEST_GET(url, headers)
 
 
@@ -63,6 +65,7 @@ def get_base64_prefix(s):
     if not match:
         return 0
     return match.end()
+
 
 
 class IgraphItemKeyCountMismatchError(Exception):
@@ -111,6 +114,8 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     headers = _get_http_heads(download_headers)
     try:
         if url.startswith("http") or url.startswith("https"):
+            import requests
+
             response = requests.get(url, stream=True, headers=headers, timeout=10)
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
@@ -150,6 +155,8 @@ def get_bytes_io_from_url(url: str, download_headers: str = ""):
                         f"download failed, error code: {response.status_code}"
                     )
             elif url.startswith("oss"):
+                from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
+
                 res = get_bytes_io_from_oss_path(url)
             elif get_base64_prefix(url) > 0:
                 res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
@@ -198,6 +205,7 @@ class MMDataCache(object):
                 self.mm_data_cache = LruDict(cache_size)
             else:
                 self.mm_data_cache.set_size(cache_size)
+
 
 
 # Global cache instance for VIT embeddings

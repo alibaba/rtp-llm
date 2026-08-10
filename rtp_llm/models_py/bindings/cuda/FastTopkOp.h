@@ -9,6 +9,12 @@ void fast_topk_v2(at::Tensor&                         score,
                   at::Tensor&                         lengths,
                   const std::optional<torch::Tensor>& row_starts = std::nullopt);
 
+void fast_topk_v2_variable(at::Tensor&                         score,
+                           at::Tensor&                         indices,
+                           at::Tensor&                         lengths,
+                           const std::optional<torch::Tensor>& row_starts,
+                           int64_t                             top_k);
+
 void fast_topk_transform_fused(at::Tensor&                         score,
                                at::Tensor&                         lengths,
                                at::Tensor&                         dst_page_table,

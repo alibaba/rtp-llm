@@ -72,6 +72,8 @@ cc_library(
         "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
+        "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",

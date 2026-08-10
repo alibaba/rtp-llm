@@ -7,6 +7,7 @@
 
 #include <c10/util/Exception.h>
 
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -120,6 +121,11 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
     if (!has1DCapacity(spec_cap_cpu_, B)) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
+#if USING_CUDA
+    if (!has1DCapacity(spec_cap_gpu_, B)) {
+        spec_cap_gpu_ = torch::empty({B}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    }
+#endif
 }
 
 void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task) {
@@ -140,6 +146,12 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
                             static_cast<long long>(P),
                             static_cast<long long>(P + 1),
                             static_cast<long long>(draft_cols));
+#if USING_CUDA
+    if (task.draft_tokens_ready_event && draft_tokens.is_cuda()) {
+        // Async MTP records this on the producer stream; order our D2H after it.
+        task.draft_tokens_ready_event->block(cuda_graph::graphGetCurrentStream());
+    }
+#endif
     auto draft     = draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
     auto dst       = draft_tokens_cpu_.narrow(0, 0, B).narrow(1, 0, P);
     auto draft_i32 = draft.scalar_type() == torch::kInt32 ? draft.contiguous() : draft.to(torch::kInt32).contiguous();
@@ -209,10 +221,19 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const Ve
     auto packed_mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows))
                                .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
     auto row_indices_gpu = logits_row_indices_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
-    packed_mask_gpu.copy_(packed_mask_cpu);
-    row_indices_gpu.copy_(row_indices_cpu);
+    // Pinned sources + ready_event ordering make non-blocking uploads safe for
+    // both the sync path (same-stream order) and the async worker path.
+    packed_mask_gpu.copy_(packed_mask_cpu, /*non_blocking=*/true);
+    row_indices_gpu.copy_(row_indices_cpu, /*non_blocking=*/true);
+    auto spec_cap_gpu = spec_cap_gpu_.narrow(0, 0, static_cast<int64_t>(shape.batch_size));
+    spec_cap_gpu.copy_(spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(shape.batch_size)), /*non_blocking=*/true);
     result.packed_allow_mask_gpu  = std::move(packed_mask_gpu);
     result.logits_row_indices_gpu = std::move(row_indices_gpu);
+    result.spec_cap_gpu           = std::move(spec_cap_gpu);
+    result.ready_event            = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    result.ready_event->record(cuda_graph::graphGetCurrentStream());
+    result.consumed_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    last_consumed_event_  = result.consumed_event;
 #endif
     result.has_active_processor            = true;
     result.packed_allow_mask_cpu_lifetime  = std::move(packed_mask_cpu);
@@ -227,6 +248,15 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
     if (task.active.empty()) {
         return LaunchResult{};
     }
+#if USING_CUDA
+    if (last_consumed_event_) {
+        // Pinned scratch is reused across rounds; wait for the previous
+        // consumer's recorded GPU work before overwriting it. An event the
+        // consumer never recorded completes immediately.
+        last_consumed_event_->synchronize();
+        last_consumed_event_.reset();
+    }
+#endif
     try {
         const size_t B = task.total_streams;
         const int    P = task.propose_step;

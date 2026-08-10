@@ -12,6 +12,7 @@ GenerateContext::~GenerateContext() {
 
 void GenerateContext::reset() {
     error_status = grpc::Status::OK;
+    error_info   = ErrorInfo();
 }
 
 bool GenerateContext::ok() const {
@@ -40,6 +41,15 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     collector.qps                = true;
     collector.error_qps          = hasError();
     collector.cancel_qps         = cancelled();
+    if (error_info.hasError()) {
+        collector.error_code = error_info.code();
+    } else if (stream_ && stream_->hasError()) {
+        collector.error_code = stream_->statusInfo().code();
+    } else if (cancelled()) {
+        collector.error_code = ErrorCode::CANCELLED;
+    } else if (hasError()) {
+        collector.error_code = ErrorCode::UNKNOWN_ERROR;
+    }
     collector.onflight_request   = onflight_requests;
     collector.total_rt_us        = executeTimeMs() * 1000;
     collector.retry_times        = retry_times;

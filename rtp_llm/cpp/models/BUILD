@@ -52,12 +52,12 @@ cc_library(
         "logits_processor/SpecLogitsProcessor.h",
         "logits_processor/MultiSeqLogitsProcessor.h",
         "logits_processor/LogitsProcessorStates.h",
+        "logits_processor/SpecLogitsVerifyRunner.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
         "logits_processor/RecommendationLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
         "logits_processor/GrammarLogitsProcessor.h",
-        "logits_processor/SpecLogitsVerifyRunner.h",
         "logits_processor/BitmaskUtils.h",
     ],
     srcs = [
@@ -65,19 +65,21 @@ cc_library(
         "logits_processor/BitmaskUtils.cc",
         "logits_processor/MultiSeqLogitsProcessor.cc",
         "logits_processor/LogitsProcessorStates.cc",
+        "logits_processor/SpecLogitsVerifyRunner.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
         "logits_processor/RecommendationLogitsProcessor.cc",
         "logits_processor/LogitsProcessorFactory.cc",
         "logits_processor/GrammarLogitsProcessor.cc",
-        "logits_processor/SpecLogitsVerifyRunner.cc",
     ],
     deps = [
         ":sample_infos",
         ":dfa_utils",
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/pybind:py_utils",
@@ -85,6 +87,7 @@ cc_library(
         "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "@havenask//aios/autil:json",
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
@@ -167,7 +170,13 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-    ],
+    ] + select({
+        "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
+            "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op"
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

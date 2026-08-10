@@ -31,6 +31,7 @@ public:
         seq_size_per_block_(graph_params.tokens_per_block),
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
+        hc_mult_(static_cast<int>(graph_params.hc_mult)),
         sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
@@ -75,6 +76,11 @@ public:
     void           captureDecodeOneBatchSize(int bs);
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void           prepareAttentionInputs(const PyModelInputs& inputs,
+                                          CudaGraphState&      state,
+                                          bool                 skip_forward_event_sync = false) override;
+    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
     void           replayDecode(int bs);
@@ -98,6 +104,9 @@ private:
     }
     bool isMtpDraftPrefillCudaGraph() const {
         return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+    }
+    bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
+        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
@@ -138,6 +147,7 @@ private:
     int                     seq_size_per_block_{0};
     int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
+    int                     hc_mult_{1};
     int                     sp_steps_{0};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
@@ -161,6 +171,8 @@ private:
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+
+    std::atomic<bool> prepared_attention_inputs_ = false;
 };
 
 }  // namespace rtp_llm

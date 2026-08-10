@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 #include <memory>
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
 #include <unordered_set>
+#include <c10/core/DeviceGuard.h>
 #include <c10/core/InferenceMode.h>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -151,6 +153,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%s] start to allocate resource", decode_context.request_key.c_str());
     auto input                        = QueryConverter::transQuery(&decode_context.allocate_request.input());
+    decode_context.request_info       = input->request_info;
     auto generate_stream              = engine_->makeStream(input);
     decode_context.request_timeout_ms = generate_stream->getTimeoutMs();
 
@@ -165,7 +168,12 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         this_thread::sleep_for(chrono::milliseconds(1));
     }
     if (generate_stream->hasError()) {
-        string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
+        auto   stream_error = generate_stream->statusInfo();
+        string error_msg    = stream_error.ToString();
+        if (error_msg.empty()) {
+            error_msg = "malloc kv cache block failed at decode node";
+        }
+        error_msg = "request: [" + decode_context.request_key + "] " + error_msg;
         RTP_LLM_LOG_ERROR(error_msg);
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
@@ -201,6 +209,9 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
     load_response.mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     GRPC_RET_IF_ERROR(
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
+    if (!error_info.ok()) {
+        decode_context.error_info = error_info;
+    }
     GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
     RTP_LLM_LOG_DEBUG("request [%s] load cache from prefill done", decode_context.request_key.c_str());
 }
@@ -244,27 +255,80 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                         .clone();
         generate_stream->setContextPositionIds(context_position_ids);
     }
+    if (!propose_maga_init_params_) {
+        generate_stream->markGrpcNormalDeviceStatePending();
+    }
     if (propose_maga_init_params_) {
+        // gRPC handler threads default to CUDA device 0; pin allocations below
+        // to this worker's device so local_rank>0 workers don't place the MTP
+        // device-state tensors on the wrong GPU.
+        c10::DeviceGuard device_guard(torch::Device(
+            torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
+        const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
+        RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
+        if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
+            RTP_LLM_CHECK_WITH_INFO(propose_step == static_cast<size_t>(maga_init_params_.sp_config.gen_num_per_cycle),
+                                    "decode rpc propose_step mismatch, propose_params=%zu, sp_config=%ld",
+                                    propose_step,
+                                    maga_init_params_.sp_config.gen_num_per_cycle);
+        }
+
         generate_stream->setReuseLength(generate_stream->seqLength() - 1);
         generate_stream->setSpEditRun(false);
         generate_stream->setMtpTokenIndex(generate_stream->seqLength() - 1);
         generate_stream->setContainProposeToken(true);
         std::vector<int> propose_tokens;
         propose_tokens.assign(generate_request.propose_token_ids().begin(), generate_request.propose_token_ids().end());
+        RTP_LLM_CHECK_WITH_INFO(propose_tokens.size() >= 2,
+                                "decode rpc propose_tokens should contain target and draft token, count=%zu",
+                                propose_tokens.size());
         generate_stream->setProposeToken(propose_tokens);
 
-        auto sp_output_buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
-        sp_output_buffer->tokens = torch::zeros({1, (int64_t)propose_tokens.size()}, torch::kInt32);
+        auto sp_output_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_output_buffer->propose_step = propose_step;
+        sp_output_buffer->tokens       = torch::zeros({1, (int64_t)propose_tokens.size()},
+                                                torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
         memcpy(sp_output_buffer->tokens.data_ptr<int>(), propose_tokens.data(), propose_tokens.size() * sizeof(int));
 
         auto propose_probs_t  = QueryConverter::transTensor(generate_request.propose_probs());
         auto propose_hidden_t = QueryConverter::transTensor(generate_request.propose_hidden());
 
-        auto& tensors_holder = sp_output_buffer->tensors_holder;
-        tensors_holder.emplace_back(std::move(propose_probs_t));
-        tensors_holder.emplace_back(std::move(propose_hidden_t));
+        const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
+        sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+
+        auto propose_tokens_gpu = torch::empty({1}, cuda_i32);
+        auto accept_len         = torch::ones({1}, cuda_i32);
+        auto accept_tokens      = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+        accept_tokens[0][0]     = sp_output_buffer->tokens[0][0];
+        propose_tokens_gpu[0]   = sp_output_buffer->tokens[0][1];
+
+        auto next_seq_len = torch::ones({1}, cuda_i32);
+        next_seq_len[0]   = generate_stream->seqLength();
 
         generate_stream->setSPOutputBuffer(sp_output_buffer);
+        // The per-step refresher (MtpExecutor's device-state publish) is gated
+        // on RTP_LLM_STREAM_ASYNC / RTP_LLM_MTP_ASYNC_DEVICE_STATE. Publishing
+        // this static snapshot without those pipelines active would leave a
+        // stale next_real_seq_len that overrides incrKVBlock forever (same
+        // failure mode as the normal-decode grpc device state).
+        auto env_on = [](const char* name) {
+            const char* value = std::getenv(name);
+            return value != nullptr && std::string(value) == "1";
+        };
+        if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
+            generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
+                .epoch                  = 0,
+                .accept_len_gpu         = std::move(accept_len),
+                .accept_tokens_gpu      = std::move(accept_tokens),
+                .next_seq_len_gpu       = std::move(next_seq_len),
+                .propose_tokens_gpu     = std::move(propose_tokens_gpu),
+                .last_hidden_states_gpu = sp_output_buffer->hidden_states,
+                .draft_all_probs_gpu    = sp_output_buffer->all_probs,
+                .last_real_seq_len      = generate_stream->seqLength(),
+                .next_real_seq_len      = generate_stream->seqLength(),
+            });
+        }
     }
 
     generate_stream->resetBeginTime(currentTimeUs());
@@ -409,10 +473,17 @@ ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_con
     auto load_cache_timeout_ms = maga_init_params_.pd_sep_config.load_cache_timeout_ms;
     load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;
     auto max_rpc_timeout_ms    = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
-    auto rpc_timeout           = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
-    auto min_timeout_ms        = std::min(load_cache_timeout_ms, rpc_timeout);
     auto request_timeout_ms    = decode_context.request_timeout_ms;
-    min_timeout_ms             = request_timeout_ms > 0 ? std::min(request_timeout_ms, min_timeout_ms) : min_timeout_ms;
+    // load_cache_timeout_ms is the KV-cache loading deadline and always applies;
+    // max_rpc_timeout_ms / request_timeout_ms only participate in min when > 0
+    // (<= 0 means unlimited for that knob).
+    int64_t min_timeout_ms = load_cache_timeout_ms;
+    if (max_rpc_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, max_rpc_timeout_ms);
+    }
+    if (request_timeout_ms > 0) {
+        min_timeout_ms = std::min(min_timeout_ms, request_timeout_ms);
+    }
 
     LoadKVCacheContext load_context{decode_context.request_id,
                                     decode_context.request_key,
