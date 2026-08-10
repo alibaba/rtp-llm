@@ -120,7 +120,7 @@ public:
     }
 
     bool reuseCache() const;
-    bool enableMemoryCache() const;
+    bool enableHostCache() const;
     bool enableRemoteCache() const;
     bool enableDeviceCache() const;
     bool enableDiskCache() const;

@@ -336,16 +336,15 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.reuse_cache                           = true;
     config.reserve_block_ratio                   = 0;
     config.enable_device_cache                   = true;
-    config.enable_memory_cache                   = true;
-    config.enable_tiered_memory_cache            = true;
-    config.memory_cache_size_mb                  = lower_cache_size_mb;
-    config.memory_cache_sync_timeout_ms          = 5000;
+    config.enable_host_cache                     = true;
+    config.host_cache_size_mb                    = lower_cache_size_mb;
+    config.host_cache_sync_timeout_ms            = 5000;
     config.enable_disk_cache                     = layout == TierLayout::HOST_DISK;
-    config.memory_cache_disk_paths               = layout == TierLayout::HOST_DISK ? disk_path : "";
-    config.memory_cache_disk_size_mb             = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;
-    config.memory_cache_disk_buffered_io         = true;
-    config.memory_cache_disk_sync_timeout_ms     = 5000;
-    config.memory_cache_disk_staging_block_count = 2;
+    config.disk_cache_paths                      = layout == TierLayout::HOST_DISK ? disk_path : "";
+    config.disk_cache_size_mb                    = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;
+    config.disk_cache_buffered_io                = true;
+    config.disk_cache_sync_timeout_ms            = 5000;
+    config.disk_cache_staging_block_count        = 2;
     config.linear_step                           = 1;
     return config;
 }
@@ -1276,7 +1275,7 @@ protected:
         ASSERT_TRUE(manager_->init());
         ASSERT_NE(manager_->blockTreeCache(), nullptr);
         auto cache = manager_->blockTreeCache();
-        ASSERT_TRUE(cache->isMemoryCacheEnabled());
+        ASSERT_TRUE(cache->isHostCacheEnabled());
         ASSERT_EQ(cache->isDiskCacheEnabled(), GetParam() == TierLayout::HOST_DISK);
         ASSERT_NO_FATAL_FAILURE(expectDsv4TierTopology(manager_, cache_config_, GetParam()));
 

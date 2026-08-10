@@ -397,14 +397,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("multi_task_prompt_tokens", &KVCacheConfig::multi_task_prompt_tokens)
         .def_readwrite("reserve_block_ratio", &KVCacheConfig::reserve_block_ratio)
         .def_readwrite("max_block_size_per_item", &KVCacheConfig::max_block_size_per_item)
-        .def_readwrite("memory_cache_size_mb", &KVCacheConfig::memory_cache_size_mb)
-        .def_readwrite("memory_cache_sync_timeout_ms", &KVCacheConfig::memory_cache_sync_timeout_ms)
-        .def_readwrite("enable_memory_cache_disk", &KVCacheConfig::enable_memory_cache_disk)
-        .def_readwrite("memory_cache_disk_paths", &KVCacheConfig::memory_cache_disk_paths)
-        .def_readwrite("memory_cache_disk_size_mb", &KVCacheConfig::memory_cache_disk_size_mb)
-        .def_readwrite("memory_cache_disk_buffered_io", &KVCacheConfig::memory_cache_disk_buffered_io)
-        .def_readwrite("memory_cache_disk_sync_timeout_ms", &KVCacheConfig::memory_cache_disk_sync_timeout_ms)
-        .def_readwrite("memory_cache_disk_staging_block_count", &KVCacheConfig::memory_cache_disk_staging_block_count)
+        .def_readwrite("host_cache_size_mb", &KVCacheConfig::host_cache_size_mb)
+        .def_readwrite("host_cache_sync_timeout_ms", &KVCacheConfig::host_cache_sync_timeout_ms)
+        .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
+        .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
+        .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
+        .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
+        .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
@@ -413,27 +412,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
-        .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
+        .def_readwrite("enable_host_cache", &KVCacheConfig::enable_host_cache)
+        .def_readwrite("enable_host_cache_pinned", &KVCacheConfig::enable_host_cache_pinned)
         .def_readwrite("enable_disk_cache", &KVCacheConfig::enable_disk_cache)
-        .def_readwrite("enable_memory_cache_sm_copy", &KVCacheConfig::enable_memory_cache_sm_copy)
-        .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
-        .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
-        .def_readwrite("enable_gpu_prefix_tree", &KVCacheConfig::enable_gpu_prefix_tree)
-        .def_readwrite("enable_prefix_tree_memory_cache", &KVCacheConfig::enable_prefix_tree_memory_cache)
-        .def_readwrite("enable_legacy_memory_connector_fallback",
-                       &KVCacheConfig::enable_legacy_memory_connector_fallback)
-        .def_readwrite("prefix_tree_memory_state_swa_pool_ratio",
-                       &KVCacheConfig::prefix_tree_memory_state_swa_pool_ratio)
-        .def_readwrite("enable_independent_group_eviction", &KVCacheConfig::enable_independent_group_eviction)
         .def_readwrite("device_eviction_policy", &KVCacheConfig::device_eviction_policy)
         .def_readwrite("host_eviction_policy", &KVCacheConfig::host_eviction_policy)
         .def_readwrite("disk_eviction_policy", &KVCacheConfig::disk_eviction_policy)
-        .def_readwrite("device_watermark_ratio", &KVCacheConfig::device_watermark_ratio)
-        .def_readwrite("host_watermark_ratio", &KVCacheConfig::host_watermark_ratio)
-        .def_readwrite("disk_watermark_ratio", &KVCacheConfig::disk_watermark_ratio)
         .def_readwrite("device_cache_min_free_blocks", &KVCacheConfig::device_cache_min_free_blocks)
-        .def_readwrite("load_cache_retry_times", &KVCacheConfig::load_cache_retry_times)
-        // Remote connector configuration fields
         .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
         .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
         .def_readwrite("reco_server_address", &KVCacheConfig::reco_server_address)
@@ -464,22 +449,29 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.multi_task_prompt_tokens,
                                       self.reserve_block_ratio,
                                       self.max_block_size_per_item,
-                                      self.memory_cache_size_mb,
-                                      self.memory_cache_sync_timeout_ms,
+                                      self.host_cache_size_mb,
+                                      self.host_cache_sync_timeout_ms,
                                       self.linear_step,
                                       self.fp8_kv_cache,
+                                      self.ssm_state_dtype,
                                       self.kv_cache_mem_mb,
                                       self.seq_size_per_block,
                                       self.kernel_seq_size_per_block,
                                       self.test_block_num,
                                       self.use_block_cache,
                                       self.enable_device_cache,
-                                      self.enable_memory_cache,
-                                      self.enable_memory_cache_sm_copy,
+                                      self.enable_host_cache,
+                                      self.enable_host_cache_pinned,
+                                      self.enable_disk_cache,
                                       self.enable_remote_cache,
-                                      self.write_cache_sync,
-                                      self.enable_tiered_memory_cache,
-                                      self.device_cache_min_free_blocks,
+                                      self.disk_cache_paths,
+                                      self.disk_cache_size_mb,
+                                      self.disk_cache_buffered_io,
+                                      self.disk_cache_sync_timeout_ms,
+                                      self.disk_cache_staging_block_count,
+                                      self.device_eviction_policy,
+                                      self.host_eviction_policy,
+                                      self.disk_eviction_policy,
                                       self.reco_enable_vipserver,
                                       self.reco_vipserver_domain,
                                       self.reco_server_address,
@@ -500,97 +492,63 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reco_get_broadcast_timeout,
                                       self.reco_put_broadcast_timeout,
                                       self.reco_client_config,
-                                      self.ssm_state_dtype,
-                                      self.enable_memory_cache_disk,
-                                      self.memory_cache_disk_paths,
-                                      self.memory_cache_disk_size_mb,
-                                      self.memory_cache_disk_buffered_io,
-                                      self.memory_cache_disk_sync_timeout_ms,
-                                      self.enable_gpu_prefix_tree,
-                                      self.enable_prefix_tree_memory_cache,
-                                      self.enable_legacy_memory_connector_fallback,
-                                      self.prefix_tree_memory_state_swa_pool_ratio,
-                                      self.enable_independent_group_eviction,
-                                      self.load_cache_retry_times,
-                                      self.memory_cache_disk_staging_block_count,
-                                      self.enable_disk_cache,
-                                      self.device_eviction_policy,
-                                      self.host_eviction_policy,
-                                      self.disk_eviction_policy,
-                                      self.device_watermark_ratio,
-                                      self.host_watermark_ratio,
-                                      self.disk_watermark_ratio);
+                                      self.device_cache_min_free_blocks);
             },
             [](py::tuple t) {
-                if (t.size() != 62)
-                    throw std::runtime_error("Invalid state!");
-                KVCacheConfig c;
-                try {
-                    c.reuse_cache                          = t[0].cast<bool>();
-                    c.multi_task_prompt                    = t[1].cast<std::string>();
-                    c.multi_task_prompt_str                = t[2].cast<std::string>();
-                    c.multi_task_prompt_tokens             = t[3].cast<std::map<std::string, std::vector<int>>>();
-                    c.reserve_block_ratio                  = t[4].cast<int64_t>();
-                    c.max_block_size_per_item              = t[5].cast<int>();
-                    c.memory_cache_size_mb                 = t[6].cast<int64_t>();
-                    c.memory_cache_sync_timeout_ms         = t[7].cast<int64_t>();
-                    c.linear_step                          = t[8].cast<int>();
-                    c.fp8_kv_cache                         = t[9].cast<int>();
-                    c.kv_cache_mem_mb                      = t[10].cast<int64_t>();
-                    c.seq_size_per_block                   = t[11].cast<int>();
-                    c.kernel_seq_size_per_block            = t[12].cast<int>();
-                    c.test_block_num                       = t[13].cast<int>();
-                    c.use_block_cache                      = t[14].cast<int>();
-                    c.enable_device_cache                  = t[15].cast<bool>();
-                    c.enable_memory_cache                  = t[16].cast<bool>();
-                    c.enable_memory_cache_sm_copy          = t[17].cast<bool>();
-                    c.enable_remote_cache                  = t[18].cast<bool>();
-                    c.write_cache_sync                     = t[19].cast<bool>();
-                    c.enable_tiered_memory_cache           = t[20].cast<bool>();
-                    c.device_cache_min_free_blocks         = t[21].cast<int64_t>();
-                    c.reco_enable_vipserver                = t[22].cast<bool>();
-                    c.reco_vipserver_domain                = t[23].cast<std::string>();
-                    c.reco_server_address                  = t[24].cast<std::string>();
-                    c.reco_instance_group                  = t[25].cast<std::string>();
-                    c.reco_meta_channel_retry_time         = t[26].cast<uint32_t>();
-                    c.reco_meta_channel_connection_timeout = t[27].cast<uint32_t>();
-                    c.reco_meta_channel_call_timeout       = t[28].cast<uint32_t>();
-                    c.reco_storage_thread_num              = t[29].cast<uint32_t>();
-                    c.reco_storage_queue_size              = t[30].cast<uint32_t>();
-                    c.reco_put_timeout_ms                  = t[31].cast<int>();
-                    c.reco_get_timeout_ms                  = t[32].cast<int>();
-                    c.reco_model_sdk_config                = t[33].cast<std::string>();
-                    c.reco_model_user_data                 = t[34].cast<std::string>();
-                    c.reco_model_extra_info                = t[35].cast<std::string>();
-                    c.reco_instance_id_salt                = t[36].cast<std::string>();
-                    c.reco_asyncwrapper_thread_num         = t[37].cast<size_t>();
-                    c.reco_asyncwrapper_queue_size         = t[38].cast<size_t>();
-                    c.reco_get_broadcast_timeout           = t[39].cast<int>();
-                    c.reco_put_broadcast_timeout           = t[40].cast<int>();
-                    c.reco_client_config                   = t[41].cast<std::string>();
-                    c.ssm_state_dtype                      = t[42].cast<std::string>();
-                    c.enable_memory_cache_disk                = t[43].cast<bool>();
-                    c.memory_cache_disk_paths                 = t[44].cast<std::string>();
-                    c.memory_cache_disk_size_mb               = t[45].cast<int64_t>();
-                    c.memory_cache_disk_buffered_io           = t[46].cast<bool>();
-                    c.memory_cache_disk_sync_timeout_ms       = t[47].cast<int64_t>();
-                    c.enable_gpu_prefix_tree                  = t[48].cast<bool>();
-                    c.enable_prefix_tree_memory_cache         = t[49].cast<bool>();
-                    c.enable_legacy_memory_connector_fallback = t[50].cast<bool>();
-                    c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
-                    c.enable_independent_group_eviction       = t[52].cast<bool>();
-                    c.load_cache_retry_times                  = t[53].cast<int>();
-                    c.memory_cache_disk_staging_block_count   = t[54].cast<int64_t>();
-                    c.enable_disk_cache                       = t[55].cast<bool>();
-                    c.device_eviction_policy                  = t[56].cast<std::string>();
-                    c.host_eviction_policy                    = t[57].cast<std::string>();
-                    c.disk_eviction_policy                    = t[58].cast<std::string>();
-                    c.device_watermark_ratio                  = t[59].cast<double>();
-                    c.host_watermark_ratio                    = t[60].cast<double>();
-                    c.disk_watermark_ratio                    = t[61].cast<double>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());
+                if (t.size() != 50) {
+                    throw std::runtime_error("Invalid KVCacheConfig state");
                 }
+                KVCacheConfig c;
+                c.reuse_cache                          = t[0].cast<bool>();
+                c.multi_task_prompt                    = t[1].cast<std::string>();
+                c.multi_task_prompt_str                = t[2].cast<std::string>();
+                c.multi_task_prompt_tokens             = t[3].cast<std::map<std::string, std::vector<int>>>();
+                c.reserve_block_ratio                  = t[4].cast<int64_t>();
+                c.max_block_size_per_item              = t[5].cast<int>();
+                c.host_cache_size_mb                   = t[6].cast<int64_t>();
+                c.host_cache_sync_timeout_ms           = t[7].cast<int64_t>();
+                c.linear_step                          = t[8].cast<int>();
+                c.fp8_kv_cache                         = t[9].cast<int>();
+                c.ssm_state_dtype                      = t[10].cast<std::string>();
+                c.kv_cache_mem_mb                      = t[11].cast<int64_t>();
+                c.seq_size_per_block                   = t[12].cast<int>();
+                c.kernel_seq_size_per_block            = t[13].cast<int>();
+                c.test_block_num                       = t[14].cast<int>();
+                c.use_block_cache                      = t[15].cast<int>();
+                c.enable_device_cache                  = t[16].cast<bool>();
+                c.enable_host_cache                    = t[17].cast<bool>();
+                c.enable_host_cache_pinned             = t[18].cast<bool>();
+                c.enable_disk_cache                    = t[19].cast<bool>();
+                c.enable_remote_cache                  = t[20].cast<bool>();
+                c.disk_cache_paths                     = t[21].cast<std::string>();
+                c.disk_cache_size_mb                   = t[22].cast<int64_t>();
+                c.disk_cache_buffered_io               = t[23].cast<bool>();
+                c.disk_cache_sync_timeout_ms           = t[24].cast<int64_t>();
+                c.disk_cache_staging_block_count       = t[25].cast<int64_t>();
+                c.device_eviction_policy               = t[26].cast<std::string>();
+                c.host_eviction_policy                 = t[27].cast<std::string>();
+                c.disk_eviction_policy                 = t[28].cast<std::string>();
+                c.reco_enable_vipserver                = t[29].cast<bool>();
+                c.reco_vipserver_domain                = t[30].cast<std::string>();
+                c.reco_server_address                  = t[31].cast<std::string>();
+                c.reco_instance_group                  = t[32].cast<std::string>();
+                c.reco_meta_channel_retry_time         = t[33].cast<uint32_t>();
+                c.reco_meta_channel_connection_timeout = t[34].cast<uint32_t>();
+                c.reco_meta_channel_call_timeout       = t[35].cast<uint32_t>();
+                c.reco_storage_thread_num              = t[36].cast<uint32_t>();
+                c.reco_storage_queue_size              = t[37].cast<uint32_t>();
+                c.reco_put_timeout_ms                  = t[38].cast<int>();
+                c.reco_get_timeout_ms                  = t[39].cast<int>();
+                c.reco_model_sdk_config                = t[40].cast<std::string>();
+                c.reco_model_user_data                 = t[41].cast<std::string>();
+                c.reco_model_extra_info                = t[42].cast<std::string>();
+                c.reco_instance_id_salt                = t[43].cast<std::string>();
+                c.reco_asyncwrapper_thread_num         = t[44].cast<size_t>();
+                c.reco_asyncwrapper_queue_size         = t[45].cast<size_t>();
+                c.reco_get_broadcast_timeout           = t[46].cast<int>();
+                c.reco_put_broadcast_timeout           = t[47].cast<int>();
+                c.reco_client_config                   = t[48].cast<std::string>();
+                c.device_cache_min_free_blocks         = t[49].cast<int64_t>();
                 return c;
             }));
 

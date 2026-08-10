@@ -45,7 +45,7 @@ struct DeviceBlockDebugInfo {
 struct BlockTreeCacheConfig {
     // ---- Tier enable flags ----
     bool enable_device_cache{true};
-    bool enable_memory_cache{false};
+    bool enable_host_cache{false};
     bool enable_disk_cache{false};
     bool enable_remote_cache{false};
 
@@ -66,22 +66,11 @@ struct BlockTreeCacheConfig {
     int task_pool_size{4};
 
     // ---- Cross-rank transfer timeout ----
-    int memory_cache_sync_timeout_ms{10000};
-    int memory_cache_disk_sync_timeout_ms{30000};
-
-    // ---- L2 Host pool sizing ----
-    int64_t memory_cache_size_mb{0};  // 0 = disabled
-
-    // ---- L3 Disk pool sizing ----
-    int64_t     memory_cache_disk_size_mb{0};  // 0 = disabled
-    std::string memory_cache_disk_path;
-    bool        memory_cache_disk_buffered_io{true};
+    int host_cache_sync_timeout_ms{10000};
+    int disk_cache_sync_timeout_ms{30000};
 
     // Usable transient Device<->Disk staging blocks per rank.
     size_t device_disk_staging_block_count{4};
-
-    // Block size (from CacheConfig), used to compute pool block count
-    size_t block_size_bytes{0};
 
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {
@@ -89,7 +78,7 @@ struct BlockTreeCacheConfig {
             case Tier::DEVICE:
                 return enable_device_cache;
             case Tier::HOST:
-                return enable_memory_cache;
+                return enable_host_cache;
             case Tier::DISK:
                 return enable_disk_cache;
             case Tier::REMOTE:
@@ -174,8 +163,8 @@ public:
     bool isDeviceCacheEnabled() const {
         return config_.enable_device_cache;
     }
-    bool isMemoryCacheEnabled() const {
-        return config_.enable_memory_cache;
+    bool isHostCacheEnabled() const {
+        return config_.enable_host_cache;
     }
     bool isDiskCacheEnabled() const {
         return config_.enable_disk_cache;

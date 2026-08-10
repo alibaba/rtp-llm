@@ -20,7 +20,6 @@ namespace rtp_llm {
 bool KVCacheAllocator::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");
 
-    // NOTE: the reservable block count depends on initialized block pools and must be queried after `doInit()`.
     const int64_t reserve_ratio = reserve_block_ratio_;
     if (reserve_ratio > 0) {
         const size_t reservable_blocks = reservableFreeBlocksNum();

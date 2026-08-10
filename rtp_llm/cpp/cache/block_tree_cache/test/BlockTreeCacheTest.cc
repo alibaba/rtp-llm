@@ -1160,7 +1160,7 @@ TEST_F(BlockTreeCacheTest, SequentialReclaimDrainsChainWithoutHostBlocks) {
     BlockTreeCacheConfig seq_cfg;
     seq_cfg.task_pool_size      = 2;
     seq_cfg.enable_device_cache = true;
-    seq_cfg.enable_memory_cache = false;
+    seq_cfg.enable_host_cache   = false;
 
     std::unique_ptr<BlockTreeCache> ce_cache = makeBlockTreeCacheForTest(std::move(groups), std::move(seq_cfg));
 
@@ -1215,14 +1215,14 @@ TEST_F(BlockTreeCacheTest, TierEnableQueries) {
 
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = true;
-    cfg.enable_memory_cache = true;
+    cfg.enable_host_cache   = true;
     cfg.enable_disk_cache   = true;
     cfg.enable_remote_cache = true;
 
     std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(std::move(groups), std::move(cfg));
 
     EXPECT_TRUE(cache->isDeviceCacheEnabled());
-    EXPECT_TRUE(cache->isMemoryCacheEnabled());
+    EXPECT_TRUE(cache->isHostCacheEnabled());
     EXPECT_TRUE(cache->isDiskCacheEnabled());
     EXPECT_TRUE(cache->isRemoteCacheEnabled());
 }
@@ -1594,7 +1594,7 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceB
     std::vector<GroupSetPtr> groups = {full};
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache            = true;
+    config.enable_host_cache              = true;
     std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     RTP_LLM_CHECK(cache != nullptr);
 
@@ -1671,7 +1671,7 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     initializeSingleMemberGroupSets({first_group, second_group}, {first_device_pool, second_device_pool});
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache                 = true;
+    config.enable_host_cache                   = true;
     std::vector<GroupSetPtr>        group_sets = {first_group, second_group};
     std::unique_ptr<BlockTreeCache> cache      = makeBlockTreeCacheForTest(std::move(group_sets), std::move(config));
     ASSERT_NE(cache, nullptr);
@@ -1783,7 +1783,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     std::vector<GroupSetPtr> groups = {full};
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache            = true;
+    config.enable_host_cache              = true;
     std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
 
@@ -1862,7 +1862,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     initializeSingleMemberGroupSets({resident_group, loading_group}, {resident_device_pool, target_device_pool});
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache             = true;
+    config.enable_host_cache               = true;
     std::vector<GroupSetPtr>        groups = {resident_group, loading_group};
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
@@ -2006,7 +2006,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsRootAndLiveTreeHoldsAcrossAllPhysicalTi
 
     BlockTreeCacheConfig config;
     config.enable_device_cache      = true;
-    config.enable_memory_cache      = true;
+    config.enable_host_cache        = true;
     config.enable_disk_cache        = true;
     std::vector<GroupSetPtr> groups = {full};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
@@ -2123,7 +2123,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
     initializeTestGroupSet(full, {device_pool}, kBlockBytes);
     BlockTreeCacheConfig config;
     config.enable_device_cache      = true;
-    config.enable_memory_cache      = true;
+    config.enable_host_cache        = true;
     config.enable_disk_cache        = true;
     std::vector<GroupSetPtr> groups = {full};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
@@ -2181,7 +2181,7 @@ TEST_F(BlockTreeCacheTest, LoadContextOutlivesHostAndDiskCacheShutdown) {
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, host_pool, disk_pool);
 
         BlockTreeCacheConfig config;
-        config.enable_memory_cache      = true;
+        config.enable_host_cache        = true;
         config.enable_disk_cache        = true;
         std::vector<GroupSetPtr> groups = {full};
         auto                     cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));

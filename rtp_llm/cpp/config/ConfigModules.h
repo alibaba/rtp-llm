@@ -154,14 +154,13 @@ struct KVCacheConfig {
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio                   = 5;
     int                                     max_block_size_per_item               = 16;
-    int64_t                                 memory_cache_size_mb                  = 0;
-    int64_t                                 memory_cache_sync_timeout_ms          = 10000;
-    bool                                    enable_memory_cache_disk              = false;
-    std::string                             memory_cache_disk_paths               = "";
-    int64_t                                 memory_cache_disk_size_mb             = 0;
-    bool                                    memory_cache_disk_buffered_io         = true;
-    int64_t                                 memory_cache_disk_sync_timeout_ms     = 30000;
-    int64_t                                 memory_cache_disk_staging_block_count = 4;
+    int64_t                                 host_cache_size_mb                    = 0;
+    int64_t                                 host_cache_sync_timeout_ms            = 10000;
+    std::string                             disk_cache_paths                      = "";
+    int64_t                                 disk_cache_size_mb                    = 0;
+    bool                                    disk_cache_buffered_io                = true;
+    int64_t                                 disk_cache_sync_timeout_ms            = 30000;
+    int64_t                                 disk_cache_staging_block_count        = 4;
     int                                     linear_step = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         fp8_kv_cache              = 0;
@@ -170,29 +169,16 @@ struct KVCacheConfig {
     int         seq_size_per_block        = 64;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
-    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache       = true;
-    bool        enable_memory_cache       = false;
-    bool        enable_disk_cache         = false;
-    // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy             = false;
-    bool    enable_remote_cache                     = false;
-    bool    write_cache_sync                        = false;
-    bool    enable_tiered_memory_cache              = false;  // Deprecated; use independent tier switches.
-    bool    enable_gpu_prefix_tree                  = false;
-    bool    enable_prefix_tree_memory_cache         = false;
-    bool    enable_legacy_memory_connector_fallback = true;
-    int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
-    // Deprecated/no-op retained for configuration compatibility.
-    bool        enable_independent_group_eviction = false;
-    std::string device_eviction_policy            = "lru";
-    std::string host_eviction_policy              = "lru";
-    std::string disk_eviction_policy              = "fifo";
-    double      device_watermark_ratio            = kDefaultDeviceWatermarkRatio;
-    double      host_watermark_ratio              = kDefaultHostWatermarkRatio;
-    double      disk_watermark_ratio              = kDefaultDiskWatermarkRatio;
-    int64_t     device_cache_min_free_blocks       = 0;
-    int         load_cache_retry_times             = 1;  // Maximum retry attempts for load cache transfer failures
+    int         use_block_cache              = -1;  // -1 means not set, use Optional<int> equivalent
+    bool        enable_device_cache          = true;
+    bool        enable_host_cache            = false;
+    bool        enable_host_cache_pinned     = true;
+    bool        enable_disk_cache            = false;
+    bool        enable_remote_cache          = false;
+    std::string device_eviction_policy       = "lru";
+    std::string host_eviction_policy         = "lru";
+    std::string disk_eviction_policy         = "fifo";
+    int64_t     device_cache_min_free_blocks = 0;
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;

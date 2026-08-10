@@ -21,15 +21,11 @@ struct ResourceContext {
 
     bool    reuse_cache{false};
     bool    enable_device_cache{true};
-    bool    enable_memory_cache{false};
+    bool    enable_host_cache{false};
     bool    enable_disk_cache{false};
     bool    enable_remote_cache{false};
-    bool    write_cache_sync{false};
-    int64_t device_cache_min_free_blocks{0};
 
-    void initCacheConfig(const KVCacheConfig&       kv_cache_config,
-                         const FIFOSchedulerConfig& scheduler_config,
-                         int64_t                    max_seq_len);
+    void initCacheConfig(const KVCacheConfig& kv_cache_config);
 };
 
 }  // namespace rtp_llm

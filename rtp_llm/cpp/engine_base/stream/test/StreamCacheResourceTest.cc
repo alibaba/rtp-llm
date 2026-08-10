@@ -323,7 +323,7 @@ TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
 
     request.reuse_cache         = true;
     request.enable_device_cache = false;
-    request.enable_memory_cache = false;
+    request.enable_host_cache   = false;
     request.enable_disk_cache   = false;
 
     for (const bool device_on : {false, true}) {
@@ -332,7 +332,7 @@ TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
                 SCOPED_TRACE("L1=" + std::to_string(device_on) + " L2=" + std::to_string(host_on)
                              + " L3=" + std::to_string(disk_on));
                 deployment.enable_device_cache = device_on;
-                deployment.enable_memory_cache = host_on;
+                deployment.enable_host_cache   = host_on;
                 deployment.enable_disk_cache   = disk_on;
                 EXPECT_EQ(resource.enableCacheLookup(), device_on || host_on || disk_on);
             }
@@ -352,24 +352,24 @@ TEST_F(StreamCacheResourceTest, testStoreTargetPicksHighestMutuallyPermittedTier
 
     request.reuse_cache            = true;
     request.enable_device_cache    = true;
-    request.enable_memory_cache    = true;
+    request.enable_host_cache      = true;
     request.enable_disk_cache      = true;
     deployment.enable_device_cache = true;
-    deployment.enable_memory_cache = true;
+    deployment.enable_host_cache   = true;
     deployment.enable_disk_cache   = true;
     EXPECT_EQ(resource.storeTarget(), Tier::DEVICE);
 
     request.enable_device_cache = false;
     EXPECT_EQ(resource.storeTarget(), Tier::HOST);
 
-    deployment.enable_memory_cache = false;
+    deployment.enable_host_cache = false;
     EXPECT_EQ(resource.storeTarget(), Tier::DISK);
 
     request.enable_disk_cache = false;
     EXPECT_EQ(resource.storeTarget(), Tier::NONE);
 
     request.enable_disk_cache      = true;
-    deployment.enable_memory_cache = false;
+    deployment.enable_host_cache   = false;
     EXPECT_EQ(resource.storeTarget(), Tier::DISK);
 
     request.reuse_cache = false;

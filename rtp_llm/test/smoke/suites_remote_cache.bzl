@@ -11,7 +11,7 @@ def remote_cache_suites():
                 data = ["@remote_kv_cache_manager_server//:bin/kv_cache_manager_bin"],
                 gpu_type = ["L20"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
-                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --write_cache_sync 1 --enable_remote_cache true --enable_device_cache 0",
+                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 0",
                 task_info = "data/model/qwen25/q_r_l20_remote_cache.json",
             ),
             smoke_test(

@@ -64,7 +64,7 @@ TEST_F(FIFOSchedulerTest, testSimple) {
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
 
-    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_memory_cache)
+    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_host_cache)
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
@@ -294,7 +294,7 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream1).ok());
 
-    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_memory_cache)
+    // Single schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_host_cache)
     // Since no cache loading is needed, stream transitions directly to RUNNING in one schedule call
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());

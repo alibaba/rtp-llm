@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 
-#include <cstdlib>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -45,10 +44,6 @@ std::optional<EvictionPolicy> parseEvictionPolicy(const std::string& value) {
         return EvictionPolicy::FIFO;
     }
     return std::nullopt;
-}
-
-bool validWatermarkRatio(double ratio) {
-    return ratio >= 0.0 && ratio <= 1.0;
 }
 
 size_t alignUp(size_t value, size_t alignment) {
@@ -168,7 +163,8 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
     return aligned;
 }
 
-std::shared_ptr<HostBlockPool> createHostPool(const std::string& name, size_t payload_bytes, size_t usable_blocks) {
+std::shared_ptr<HostBlockPool>
+createHostPool(const std::string& name, size_t payload_bytes, size_t usable_blocks, bool enable_pinned) {
     if (payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
@@ -178,7 +174,7 @@ std::shared_ptr<HostBlockPool> createHostPool(const std::string& name, size_t pa
     config->physical_block_count = usable_blocks + 1;
     config->payload_bytes        = payload_bytes;
     config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
-    config->enable_pinned        = shouldPinHostBlockPool();
+    config->enable_pinned        = enable_pinned;
     config->alignment            = kPoolAlignment;
     auto pool                    = std::make_shared<HostBlockPool>(config);
     return pool->init() ? pool : nullptr;
@@ -186,12 +182,12 @@ std::shared_ptr<HostBlockPool> createHostPool(const std::string& name, size_t pa
 
 std::shared_ptr<BlockTreeDiskMountGuard>
 createDiskMountGuard(const KVCacheConfig& config, int64_t local_world_size, int64_t local_rank) {
-    if (config.memory_cache_disk_paths.empty()) {
+    if (config.disk_cache_paths.empty()) {
         RTP_LLM_LOG_ERROR("disk cache paths are empty");
         return nullptr;
     }
     auto       guard = std::make_shared<BlockTreeDiskMountGuard>();
-    const auto path  = resolveDiskMountPath(config.memory_cache_disk_paths, local_world_size, local_rank);
+    const auto path  = resolveDiskMountPath(config.disk_cache_paths, local_world_size, local_rank);
     return guard->init(path) ? guard : nullptr;
 }
 
@@ -215,7 +211,7 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
     config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
     config->physical_block_count = usable_blocks + 1;
     config->disk_size_bytes      = config->physical_block_count * config->stride_bytes;
-    config->buffered_io          = kv_config.memory_cache_disk_buffered_io;
+    config->buffered_io          = kv_config.disk_cache_buffered_io;
     config->mount_guard          = guard;
     auto pool                    = std::make_shared<BlockTreeDiskBlockPool>(config);
     return pool->init() ? pool : nullptr;
@@ -277,15 +273,6 @@ size_t computeGroupSetPayloadBytes(const CacheConfig& cache_config, const std::v
 
 }  // namespace
 
-bool shouldPinHostBlockPool() {
-    const char* value = std::getenv("RTP_LLM_PIN_HOST_BLOCK_POOL");
-    if (value == nullptr) {
-        return true;
-    }
-    const std::string flag(value);
-    return flag != "0" && flag != "false" && flag != "FALSE" && flag != "off" && flag != "OFF";
-}
-
 size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t combined_stride_bytes) {
     if (combined_stride_bytes == 0) {
         return 0;
@@ -324,16 +311,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                           kv_cache_config.disk_eviction_policy.c_str());
         return nullptr;
     }
-    if (!validWatermarkRatio(kv_cache_config.device_watermark_ratio)
-        || !validWatermarkRatio(kv_cache_config.host_watermark_ratio)
-        || !validWatermarkRatio(kv_cache_config.disk_watermark_ratio)) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: watermark ratio must be in [0, 1], device=%f host=%f disk=%f",
-                          kv_cache_config.device_watermark_ratio,
-                          kv_cache_config.host_watermark_ratio,
-                          kv_cache_config.disk_watermark_ratio);
-        return nullptr;
-    }
-
     const int group_count = cache_config.groupNums();
     if (group_count <= 0) {
         RTP_LLM_LOG_ERROR("topology must contain at least one group");
@@ -360,13 +337,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
     }
 
-    const bool host_enabled = kv_cache_config.enable_memory_cache;
+    const bool host_enabled = kv_cache_config.enable_host_cache;
     const bool disk_enabled = kv_cache_config.enable_disk_cache;
-    if (host_enabled && kv_cache_config.memory_cache_size_mb <= 0) {
+    if (host_enabled && kv_cache_config.host_cache_size_mb <= 0) {
         RTP_LLM_LOG_ERROR("host cache size must be positive");
         return nullptr;
     }
-    if (disk_enabled && kv_cache_config.memory_cache_disk_size_mb <= 0) {
+    if (disk_enabled && kv_cache_config.disk_cache_size_mb <= 0) {
         RTP_LLM_LOG_ERROR("disk cache size must be positive");
         return nullptr;
     }
@@ -403,15 +380,17 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
 
     std::vector<std::shared_ptr<HostBlockPool>> host_pools(plan.members.size());
     if (host_enabled && !plan.members.empty()) {
-        const size_t bytes  = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
+        const size_t bytes  = static_cast<size_t>(kv_cache_config.host_cache_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
             RTP_LLM_LOG_ERROR("host budget is too small for one complete tree coordinate");
             return nullptr;
         }
         for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
-            host_pools[group_set_id] = createHostPool(
-                "block_tree_host_g" + std::to_string(group_set_id), group_set_payload_bytes[group_set_id], usable);
+            host_pools[group_set_id] = createHostPool("block_tree_host_g" + std::to_string(group_set_id),
+                                                      group_set_payload_bytes[group_set_id],
+                                                      usable,
+                                                      kv_cache_config.enable_host_cache_pinned);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }
@@ -420,7 +399,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
 
     std::vector<BlockTreeDiskBlockPoolPtr> disk_pools(plan.members.size());
     if (disk_enabled && !plan.members.empty()) {
-        const size_t bytes  = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
+        const size_t bytes  = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
             RTP_LLM_LOG_ERROR("disk budget is too small for one complete tree coordinate");
@@ -470,36 +449,32 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
 
     BlockTreeCacheConfig config;
     config.enable_device_cache    = kv_cache_config.enable_device_cache;
-    config.enable_memory_cache    = host_enabled;
+    config.enable_host_cache      = host_enabled;
     config.enable_disk_cache      = disk_enabled;
     config.enable_remote_cache    = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
     config.device_eviction_policy = *device_eviction_policy;
     config.host_eviction_policy   = *host_eviction_policy;
     config.disk_eviction_policy   = *disk_eviction_policy;
     if (config.enable_device_cache) {
-        config.watermark_device.ratio = kv_cache_config.device_watermark_ratio;
+        config.watermark_device.ratio = kDefaultDeviceWatermarkRatio;
     }
     if (host_enabled) {
-        config.watermark_host.ratio = kv_cache_config.host_watermark_ratio;
+        config.watermark_host.ratio = kDefaultHostWatermarkRatio;
     }
     if (disk_enabled) {
-        config.watermark_disk.ratio = kv_cache_config.disk_watermark_ratio;
+        config.watermark_disk.ratio = kDefaultDiskWatermarkRatio;
     }
-    config.memory_cache_size_mb          = kv_cache_config.memory_cache_size_mb;
-    config.memory_cache_disk_size_mb     = kv_cache_config.memory_cache_disk_size_mb;
-    config.memory_cache_disk_buffered_io = kv_cache_config.memory_cache_disk_buffered_io;
-    config.memory_cache_sync_timeout_ms =
-        checkedTimeout(kv_cache_config.memory_cache_sync_timeout_ms, "memory_cache_sync_timeout_ms");
-    config.memory_cache_disk_sync_timeout_ms =
-        disk_enabled ?
-            checkedTimeout(kv_cache_config.memory_cache_disk_sync_timeout_ms, "memory_cache_disk_sync_timeout_ms") :
-            config.memory_cache_sync_timeout_ms;
+    config.host_cache_sync_timeout_ms =
+        checkedTimeout(kv_cache_config.host_cache_sync_timeout_ms, "host_cache_sync_timeout_ms");
+    config.disk_cache_sync_timeout_ms =
+        disk_enabled ? checkedTimeout(kv_cache_config.disk_cache_sync_timeout_ms, "disk_cache_sync_timeout_ms") :
+                       config.host_cache_sync_timeout_ms;
 
     if (disk_enabled) {
-        const int64_t staging_block_count = kv_cache_config.memory_cache_disk_staging_block_count;
+        const int64_t staging_block_count = kv_cache_config.disk_cache_staging_block_count;
         if (staging_block_count <= 0
             || static_cast<uint64_t>(staging_block_count) > std::numeric_limits<size_t>::max()) {
-            RTP_LLM_LOG_ERROR("memory_cache_disk_staging_block_count must be > 0, got %ld", staging_block_count);
+            RTP_LLM_LOG_ERROR("disk_cache_staging_block_count must be > 0, got %ld", staging_block_count);
             return nullptr;
         }
         config.device_disk_staging_block_count = static_cast<size_t>(staging_block_count);

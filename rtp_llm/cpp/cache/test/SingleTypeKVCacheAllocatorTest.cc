@@ -97,11 +97,11 @@ private:
 
 KVCacheConfig makeSingleTypeTieredConfig(Tier source_tier, const std::string& disk_path) {
     KVCacheConfig config;
-    config.enable_memory_cache       = true;
-    config.memory_cache_size_mb      = 1;
+    config.enable_host_cache         = true;
+    config.host_cache_size_mb        = 1;
     config.enable_disk_cache         = source_tier == Tier::DISK;
-    config.memory_cache_disk_size_mb = source_tier == Tier::DISK ? 1 : 0;
-    config.memory_cache_disk_paths   = disk_path;
+    config.disk_cache_size_mb        = source_tier == Tier::DISK ? 1 : 0;
+    config.disk_cache_paths          = disk_path;
     return config;
 }
 

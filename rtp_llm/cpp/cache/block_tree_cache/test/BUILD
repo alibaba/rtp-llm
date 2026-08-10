@@ -179,7 +179,5 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,
-    env = {
-        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
-    },
+    env = {},
 )

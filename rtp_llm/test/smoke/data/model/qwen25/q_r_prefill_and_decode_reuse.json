@@ -43,7 +43,7 @@
           "top_k": 1,
           "top_p": 0,
           "enable_device_cache": true,
-          "enable_memory_cache": false
+          "enable_host_cache": false
         }
       },
       "result": {
@@ -77,7 +77,7 @@
           "top_k": 1,
           "top_p": 0,
           "enable_device_cache": false,
-          "enable_memory_cache": true
+          "enable_host_cache": true
         }
       },
       "result": {

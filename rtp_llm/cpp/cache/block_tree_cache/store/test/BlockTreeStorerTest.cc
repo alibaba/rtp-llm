@@ -65,7 +65,7 @@ StoreEnvironment makeStoreEnvironment(const std::string&         name,
 
     BlockTreeCacheConfig config;
     config.enable_device_cache      = device_cache_on;
-    config.enable_memory_cache      = host_cache_on;
+    config.enable_host_cache        = host_cache_on;
     config.enable_disk_cache        = disk_cache_on;
     config.task_pool_size           = task_pool_size;
     std::vector<GroupSetPtr> groups = env.groups;

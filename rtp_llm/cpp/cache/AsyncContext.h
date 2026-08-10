@@ -10,7 +10,6 @@
 
 namespace rtp_llm {
 
-class Meta;
 class KVCacheResource;
 
 class AsyncContext {
@@ -72,8 +71,7 @@ private:
 class FusedAsyncReadContext: public AsyncContext {
 public:
     FusedAsyncReadContext(const std::shared_ptr<FusedAsyncContext>& fused_match_context,
-                          const std::shared_ptr<KVCacheResource>&   resource,
-                          const std::shared_ptr<Meta>&              meta);
+                          const std::shared_ptr<KVCacheResource>&   resource);
     ~FusedAsyncReadContext() override = default;
 
 public:
@@ -87,13 +85,11 @@ public:
     const std::shared_ptr<FusedAsyncContext>  fusedReadContext() const;
     const std::shared_ptr<FusedAsyncContext>& fusedMatchContext() const;
     const std::shared_ptr<KVCacheResource>&   resource() const;
-    const std::shared_ptr<Meta>&              meta() const;
 
 private:
     std::shared_ptr<FusedAsyncContext> fused_match_context_;
     std::shared_ptr<FusedAsyncContext> fused_read_context_;
     std::shared_ptr<KVCacheResource>   resource_;
-    std::shared_ptr<Meta>              meta_;
 
     std::atomic<bool>  read_ctx_set_{false};
     mutable std::mutex read_ctx_mutex_;

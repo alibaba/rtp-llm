@@ -2,7 +2,6 @@
 
 #include <utility>
 
-#include "rtp_llm/cpp/cache/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -73,9 +72,8 @@ ErrorInfo FusedAsyncContext::errorInfo() const {
 // --------------------------------- FusedAsyncReadContext ---------------------------------
 
 FusedAsyncReadContext::FusedAsyncReadContext(const std::shared_ptr<FusedAsyncContext>& fused_match_context,
-                                             const std::shared_ptr<KVCacheResource>&   resource,
-                                             const std::shared_ptr<Meta>&              meta):
-    fused_match_context_(fused_match_context), resource_(resource), meta_(meta) {}
+                                             const std::shared_ptr<KVCacheResource>&   resource):
+    fused_match_context_(fused_match_context), resource_(resource) {}
 
 void FusedAsyncReadContext::waitDone() {
     RTP_LLM_PROFILE_FUNCTION();
@@ -141,10 +139,6 @@ const std::shared_ptr<FusedAsyncContext>& FusedAsyncReadContext::fusedMatchConte
 
 const std::shared_ptr<KVCacheResource>& FusedAsyncReadContext::resource() const {
     return resource_;
-}
-
-const std::shared_ptr<Meta>& FusedAsyncReadContext::meta() const {
-    return meta_;
 }
 
 }  // namespace rtp_llm

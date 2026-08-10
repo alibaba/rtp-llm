@@ -422,8 +422,8 @@ TEST_F(KVCacheManagerTest, FactoryFailureDoesNotPublishOrInjectBlockTreeCache) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 0;
+    kv_cache_config.enable_host_cache    = true;
+    kv_cache_config.host_cache_size_mb   = 0;
     auto cache_manager                   = std::make_shared<KVCacheManager>(cache_config,
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
@@ -946,52 +946,52 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     manager->free(FreeInfo{second_resource, second_tokens});
 }
 
-TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenMemoryCacheDisabled) {
+TEST_F(KVCacheManagerTest, Init_ReturnTrue_WhenHostCacheDisabled) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache = false;
+    kv_cache_config.enable_host_cache = false;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_TRUE(kv_cache_manager->init());
     ASSERT_NE(kv_cache_manager->blockTreeCache(), nullptr);
-    EXPECT_FALSE(kv_cache_manager->blockTreeCache()->isMemoryCacheEnabled());
+    EXPECT_FALSE(kv_cache_manager->blockTreeCache()->isHostCacheEnabled());
 }
 
-TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSizeMissing) {
+TEST_F(KVCacheManagerTest, Init_Throws_WhenHostCacheEnabledButSizeMissing) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.enable_host_cache            = true;
     kv_cache_config.reuse_cache                  = true;
-    kv_cache_config.memory_cache_size_mb         = 0;
-    kv_cache_config.memory_cache_sync_timeout_ms = 1;
+    kv_cache_config.host_cache_size_mb           = 0;
+    kv_cache_config.host_cache_sync_timeout_ms   = 1;
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_FALSE(kv_cache_manager->init());
 }
 
-TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInvalid) {
+TEST_F(KVCacheManagerTest, Init_Throws_WhenHostCacheEnabledButSyncTimeoutInvalid) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.enable_host_cache            = true;
     kv_cache_config.reuse_cache                  = true;
-    kv_cache_config.memory_cache_size_mb         = 10;
-    kv_cache_config.memory_cache_sync_timeout_ms = 0;  // mock coordinator init failed
+    kv_cache_config.host_cache_size_mb           = 10;
+    kv_cache_config.host_cache_sync_timeout_ms   = 0;  // mock coordinator init failed
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     EXPECT_THROW(kv_cache_manager->init(), std::runtime_error);
 }
 
-TEST_F(KVCacheManagerTest, TieredMemoryCacheIsOwnedOnlyByBlockTreeCache) {
+TEST_F(KVCacheManagerTest, TieredHostCacheIsOwnedOnlyByBlockTreeCache) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.enable_host_cache    = true;
     kv_cache_config.reuse_cache          = true;
-    kv_cache_config.memory_cache_size_mb = 1;
+    kv_cache_config.host_cache_size_mb   = 1;
 
     auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(manager->init());
     ASSERT_NE(manager->blockTreeCache(), nullptr);
-    EXPECT_TRUE(manager->blockTreeCache()->isMemoryCacheEnabled());
+    EXPECT_TRUE(manager->blockTreeCache()->isHostCacheEnabled());
     ASSERT_EQ(manager->blockTreeCache()->groupSets().size(), 1u);
     EXPECT_NE(manager->blockTreeCache()->groupSets().front()->hostPool(), nullptr);
 }
@@ -1030,8 +1030,8 @@ static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& ma
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTieredBlockTree) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
+    kv_cache_config.enable_host_cache  = true;
+    kv_cache_config.host_cache_size_mb = 1;
     auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(manager->init());
 
@@ -1046,8 +1046,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTiere
 TEST_F(KVCacheManagerTest, ExecuteFunctionReportsFailedCodeForMixedPartialAndOutOfRangeGroupedItems) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig tiered_config;
-    tiered_config.enable_memory_cache  = true;
-    tiered_config.memory_cache_size_mb = 1;
+    tiered_config.enable_host_cache    = true;
+    tiered_config.host_cache_size_mb   = 1;
     auto tiered_manager                = std::make_shared<KVCacheManager>(cache_config, false, nullptr, tiered_config);
     ASSERT_TRUE(tiered_manager->init());
 
@@ -1099,8 +1099,8 @@ TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
     KVCacheConfig     kv_cache_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
+    kv_cache_config.enable_host_cache    = true;
+    kv_cache_config.host_cache_size_mb   = 1;
     parallelism_config.tp_size           = 2;
     parallelism_config.tp_rank           = 0;
     parallelism_config.world_size        = 2;
@@ -1126,8 +1126,8 @@ TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {
     KVCacheConfig     kv_cache_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
+    kv_cache_config.enable_host_cache    = true;
+    kv_cache_config.host_cache_size_mb   = 1;
     parallelism_config.tp_size           = 2;
     parallelism_config.tp_rank           = 1;
     parallelism_config.world_size        = 2;
@@ -1322,21 +1322,21 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailabl
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
 
-    kv_cache_config.enable_memory_cache          = true;
+    kv_cache_config.enable_host_cache            = true;
     kv_cache_config.reuse_cache                  = true;
-    kv_cache_config.memory_cache_size_mb         = 1;
-    kv_cache_config.memory_cache_sync_timeout_ms = 1;
+    kv_cache_config.host_cache_size_mb           = 1;
+    kv_cache_config.host_cache_sync_timeout_ms   = 1;
     runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
 
     auto kv_cache_manager = std::make_shared<KVCacheManager>(
         cache_config, false, nullptr, kv_cache_config, ParallelismConfig{}, runtime_config);
     ASSERT_TRUE(kv_cache_manager->init());
 
-    // With memory cache enabled, getKVCacheInfo() should include memory block pool stats.
+    // With host cache enabled, getKVCacheInfo() should include host block pool stats.
     auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
 
     // The "device-only" kv cache would be totalBlocksNum() * seq_size_per_block.
-    // With memory cache enabled, total_kv_cache/available_kv_cache should be >= device-only.
+    // With host cache enabled, total_kv_cache/available_kv_cache should be >= device-only.
     const size_t device_only_total =
         kv_cache_manager->allocator_->totalBlocksNum() * kv_cache_manager->cacheConfig().seq_size_per_block;
     const size_t device_only_available =

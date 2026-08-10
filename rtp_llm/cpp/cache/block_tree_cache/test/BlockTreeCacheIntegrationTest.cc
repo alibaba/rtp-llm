@@ -356,7 +356,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = false;
-    cfg.enable_memory_cache = true;
+    cfg.enable_host_cache   = true;
     cfg.enable_disk_cache   = true;
 
     auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(cfg));
@@ -577,7 +577,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         std::vector<GroupSetPtr> groups = {full};
         BlockTreeCacheConfig     config;
         config.enable_device_cache = true;
-        config.enable_memory_cache = true;
+        config.enable_host_cache   = true;
         config.enable_disk_cache   = true;
         auto cache                 = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
         ASSERT_NE(cache, nullptr);
@@ -682,7 +682,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
         std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache   = true;
     config.enable_disk_cache   = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
     ASSERT_NE(cache, nullptr);
@@ -732,7 +732,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
         std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
     ASSERT_NE(cache, nullptr);
 
@@ -780,7 +780,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
         std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
     ASSERT_NE(cache, nullptr);
 
@@ -1312,7 +1312,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
 
     BlockTreeCacheConfig config;
     config.enable_device_cache      = false;
-    config.enable_memory_cache      = false;
+    config.enable_host_cache        = false;
     config.enable_disk_cache        = true;
     std::vector<GroupSetPtr> groups = {group};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));

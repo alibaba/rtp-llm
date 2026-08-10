@@ -37,8 +37,10 @@ Reused KV cache can live in three local tiers, each controlled by its own indepe
 | Tier | Location | Switch | Required companion settings |
 |------|----------|--------|-----------------------------|
 | L1 | GPU device memory | `ENABLE_DEVICE_CACHE` (default on) | — |
-| L2 | Pinned host memory | `ENABLE_MEMORY_CACHE` (default off) | `MEMORY_CACHE_SIZE_MB` |
-| L3 | Local disk | `ENABLE_DISK_CACHE` (default off) | `MEMORY_CACHE_DISK_SIZE_MB`, `MEMORY_CACHE_DISK_PATHS` |
+| L2 | Pinned host memory | `ENABLE_HOST_CACHE` (default off) | `HOST_CACHE_SIZE_MB` |
+| L3 | Local disk | `ENABLE_DISK_CACHE` (default off) | `DISK_CACHE_SIZE_MB`, `DISK_CACHE_PATHS` |
+
+`DEVICE_CACHE_MIN_FREE_BLOCKS` sets the global L1 free-block headroom. With independent device pools, the value is distributed in proportion to each participating pool’s block capacity; zero keeps automatic sizing.
 
 All eight combinations are valid, including L2-only and L3-only deployments. Enabling a tier
 without its capacity or path settings is a startup error rather than a silent downgrade, so a
@@ -58,7 +60,7 @@ Lookup and store are decided separately:
 - **Store target** is the highest tier that both the deployment and the request permit
   (L1, then L2, then L3). If no tier is permitted, nothing is stored.
 
-The per-request switches `enable_device_cache`, `enable_memory_cache` and `enable_disk_cache`
+The per-request switches `enable_device_cache`, `enable_host_cache` and `enable_disk_cache`
 in `generate_config` only restrict where a request's own KV is written. All three default to `true`.
 A request that forbids L1 still benefits from an L1 hit and stores into L2
 or L3 instead. Writes into L2/L3 happen asynchronously after the request completes, so they do

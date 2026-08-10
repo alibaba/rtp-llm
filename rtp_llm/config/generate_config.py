@@ -212,7 +212,7 @@ class GenerateConfig(BaseModel):
 
     enable_device_cache: bool = True
 
-    enable_memory_cache: bool = True
+    enable_host_cache: bool = True
 
     enable_disk_cache: bool = True
 

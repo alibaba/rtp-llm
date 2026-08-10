@@ -132,11 +132,10 @@ public:
         return cp_slot_mapper_;
     }
 
-    // Reserve some blocks for already-running streams' future allocations.
-    // Only applied to "init malloc" requests where batch_kv_cache_resource has no blocks yet.
     void setReserveBlocksNum(size_t reserve_block_num) {
         reserve_block_num_ = reserve_block_num;
     }
+
     size_t reserveBlocksNum() const {
         return reserve_block_num_;
     }

@@ -7,7 +7,6 @@ cc_library(
     hdrs = [
         "AsyncContext.h",
         "CacheBlockKind.h",
-        "Meta.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

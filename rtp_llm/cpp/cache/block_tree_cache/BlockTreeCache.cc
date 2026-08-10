@@ -32,8 +32,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
         task_pool_.get(),
         metrics_reporter_,
         mutex_,
-        config_.memory_cache_sync_timeout_ms,
-        config_.memory_cache_disk_sync_timeout_ms,
+        config_.host_cache_sync_timeout_ms,
+        config_.disk_cache_sync_timeout_ms,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
         [this](bool tree_data_mutated, bool check_watermark) {
             onWorkflowSettledLocked(tree_data_mutated, check_watermark);
@@ -49,8 +49,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
             task_pool_.get(),
             metrics_reporter_,
             mutex_,
-            config_.memory_cache_disk_sync_timeout_ms,
-            config_.memory_cache_sync_timeout_ms,
+            config_.disk_cache_sync_timeout_ms,
+            config_.host_cache_sync_timeout_ms,
             config_.enable_device_cache,
             [this](bool tree_data_mutated, bool check_watermark) {
                 onWorkflowSettledLocked(tree_data_mutated, check_watermark);
@@ -61,8 +61,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
             task_pool_.get(),
             metrics_reporter_,
             mutex_,
-            config_.memory_cache_sync_timeout_ms,
-            config_.memory_cache_disk_sync_timeout_ms,
+            config_.host_cache_sync_timeout_ms,
+            config_.disk_cache_sync_timeout_ms,
             [this](bool tree_data_mutated, bool check_watermark) {
                 onWorkflowSettledLocked(tree_data_mutated, check_watermark);
             }) {}
@@ -85,7 +85,7 @@ bool BlockTreeCache::init() {
                      config_.task_pool_size,
                      storage_backend_ ? "enabled" : "null",
                      config_.enable_device_cache ? "on" : "off",
-                     config_.enable_memory_cache ? "on" : "off",
+                     config_.enable_host_cache ? "on" : "off",
                      config_.enable_disk_cache ? "on" : "off",
                      config_.enable_remote_cache ? "on" : "off");
     for (const GroupSetPtr& group_set : tree_->groupSets()) {

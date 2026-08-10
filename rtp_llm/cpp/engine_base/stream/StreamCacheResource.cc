@@ -428,8 +428,8 @@ bool StreamCacheResource::enableRemoteCache() const {
     return resource_context_.enable_remote_cache && stream_->enableRemoteCache();
 }
 
-bool StreamCacheResource::enableMemoryCache() const {
-    return resource_context_.enable_memory_cache && stream_->enableMemoryCache();
+bool StreamCacheResource::enableHostCache() const {
+    return resource_context_.enable_host_cache && stream_->enableHostCache();
 }
 
 bool StreamCacheResource::enableDeviceCache() const {
@@ -441,7 +441,7 @@ bool StreamCacheResource::enableDiskCache() const {
 }
 
 bool StreamCacheResource::enableCacheLookup() const {
-    const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_memory_cache
+    const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_host_cache
                                  || resource_context_.enable_disk_cache;
     return reuseCache() && any_global_tier;
 }
@@ -453,7 +453,7 @@ Tier StreamCacheResource::storeTarget() const {
     if (enableDeviceCache()) {
         return Tier::DEVICE;
     }
-    if (enableMemoryCache()) {
+    if (enableHostCache()) {
         return Tier::HOST;
     }
     if (enableDiskCache()) {

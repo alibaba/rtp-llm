@@ -145,8 +145,7 @@ TEST_F(SystemPromptConstructorTest, testSecondTaskFailureReleasesEarlierRequestO
     // remains; the partial tail and all request refs are released.
     EXPECT_EQ(manager->freeBlocksNum(), free_before - 1);
     ASSERT_EQ(manager->blockTreeCache()->groupSets().size(), 1u);
-    EXPECT_EQ(manager->blockTreeCache()->groupSets().front()->devicePools().front()->activeTreeCachedBlocksNum(),
-              0u);
+    EXPECT_EQ(manager->blockTreeCache()->groupSets().front()->devicePools().front()->activeTreeCachedBlocksNum(), 0u);
     EXPECT_EQ(manager->blockTreeCache()->getStats().device_heap_total_size, 1u);
 
     EXPECT_EQ(block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(
@@ -159,11 +158,8 @@ TEST_F(SystemPromptConstructorTest, testNormalEngineResolvesAbsoluteDeviceReserv
     auto engine = createFocusedEngine<NormalEngine>(
         /*device_min_free_blocks=*/0, /*max_context_batch_size=*/3, /*max_batch_tokens=*/17);
 
-    // max_prefill=min(3*20,17)=17 tokens and block width is 2, so the
-    // resolved absolute headroom is ceil(17/2)=9 blocks.
     EXPECT_EQ(engine->kv_cache_config.device_cache_min_free_blocks, 9);
     ASSERT_NE(engine->resourceContext().cache_manager, nullptr);
-    ASSERT_NE(engine->resourceContext().cache_manager->blockTreeCache(), nullptr);
     EXPECT_EQ(engine->resourceContext().cache_manager->reserveBlocksNum(), 9u);
 }
 

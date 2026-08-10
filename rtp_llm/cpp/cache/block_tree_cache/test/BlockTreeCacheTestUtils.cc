@@ -728,7 +728,7 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     environment->groups = {full, swa};
     BlockTreeCacheConfig config;
     config.enable_device_cache = true;
-    config.enable_memory_cache = true;
+    config.enable_host_cache   = true;
     config.enable_disk_cache   = options.enable_disk;
 
     environment->scripted_per_rank_transfer_engine =

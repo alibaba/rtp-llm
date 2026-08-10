@@ -636,8 +636,8 @@ class CaseRunner(object):
         for env_str in env_list:
             k, v = env_str.split("=", 1)
             v = self._expand_env_value(v)
-            if k == "MEMORY_CACHE_DISK_PATHS":
-                self._prepare_memory_cache_disk_paths(v)
+            if k == "DISK_CACHE_PATHS":
+                self._prepare_disk_cache_paths(v)
             env_dict.update({k: v})
             logging.info(f"env dict update {k}:{v}")
         return env_dict
@@ -654,7 +654,7 @@ class CaseRunner(object):
             "__TEST_TMPDIR__", tmp_dir
         )
 
-    def _prepare_memory_cache_disk_paths(self, paths: str) -> None:
+    def _prepare_disk_cache_paths(self, paths: str) -> None:
         safe_roots = [
             os.environ.get("TEST_TMPDIR"),
             os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR"),
@@ -668,12 +668,12 @@ class CaseRunner(object):
             if os.path.exists(abs_path):
                 if not any(os.path.commonpath([abs_path, root]) == root for root in safe_roots):
                     raise RuntimeError(
-                        f"refuse to clean MEMORY_CACHE_DISK_PATHS outside test dirs: {abs_path}"
+                        f"refuse to clean DISK_CACHE_PATHS outside test dirs: {abs_path}"
                     )
                 shutil.rmtree(abs_path)
-                logging.info("cleaned memory cache disk path: %s", abs_path)
+                logging.info("cleaned disk cache path: %s", abs_path)
             os.makedirs(abs_path, exist_ok=True)
-            logging.info("prepared memory cache disk path: %s", abs_path)
+            logging.info("prepared disk cache path: %s", abs_path)
 
     def start_servers_parallel(
         self, server_configs: List[Dict[str, Any]]

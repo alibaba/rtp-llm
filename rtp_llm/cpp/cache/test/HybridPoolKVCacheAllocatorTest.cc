@@ -592,18 +592,13 @@ TEST_F(HybridPoolKVCacheAllocatorTest, RegUserMrWithoutCacheStoreIsNoOpAndZeroCo
 }
 
 // ---------------------------------------------------------------------------
-// hasAvailableBlocksForReserve via reserve_block_num
+// hasAvailableBlocksForReserve via reserve_block_ratio
 // ---------------------------------------------------------------------------
 
-TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksAreDistributedAcrossGroupsForInitMalloc) {
-    // Group 0 (linear) gets 6 blocks (5 free), group 1 (full) gets 4 blocks (3 free).
-    // total_available = 8. Set reserve = 4.
-    // Expected per-group reserve: floor(4 * 5/8) = 2 for group_id=0, floor(4 * 3/8) = 1 for group_id=1.
+TEST_F(HybridPoolKVCacheAllocatorTest, ReserveRatioIsAppliedToEachGroupPoolForInitMalloc) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/4);
-    auto allocator = makeAllocator(config);
+    auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/50);
     ASSERT_TRUE(allocator->init());
-
-    allocator->setReserveBlocksNum(4);
 
     // seq_len=4 -> 1 block per group.
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
@@ -619,11 +614,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksAreDistributedAcrossGroupsFo
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksRejectsWhenGroupCannotMeetItsShare) {
     // Force a group whose free_blocks < need + group_reserve_blocks.
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/4);
-    auto allocator = makeAllocator(config);
+    auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/100);
     ASSERT_TRUE(allocator->init());
-
-    // A reserve large enough to hide most blocks should reject init malloc.
-    allocator->setReserveBlocksNum(allocator->freeBlocksNum());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100});
@@ -637,12 +629,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksRejectsWhenGroupCannotMeetIt
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportReserveBlocks) {
-    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
-    auto allocator = makeAllocator(config);
+    auto              config        = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    constexpr int64_t reserve_ratio = 50;
+    auto              allocator     = makeAllocator(config, RoleType::PDFUSION, reserve_ratio);
     ASSERT_TRUE(allocator->init());
-
-    constexpr size_t reserve_blocks = 6;
-    allocator->setReserveBlocksNum(reserve_blocks);
 
     const auto snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
@@ -651,10 +641,23 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PoolMetricsSnapshotsReportReserveBlocks) 
     EXPECT_EQ(snapshots[0].used_blocks, snapshots[0].total_blocks - snapshots[0].free_blocks);
     EXPECT_EQ(snapshots[1].used_blocks, snapshots[1].total_blocks - snapshots[1].free_blocks);
 
-    const size_t total_reservable_free_blocks = snapshots[0].free_blocks + snapshots[1].free_blocks;
-    ASSERT_GT(total_reservable_free_blocks, 0u);
-    EXPECT_EQ(reserve_blocks * snapshots[0].free_blocks / total_reservable_free_blocks, snapshots[0].reserve_blocks);
-    EXPECT_EQ(reserve_blocks * snapshots[1].free_blocks / total_reservable_free_blocks, snapshots[1].reserve_blocks);
+    const size_t total_blocks = snapshots[0].total_blocks + snapshots[1].total_blocks;
+    EXPECT_EQ(allocator->reserveBlocksNum() * snapshots[0].total_blocks / total_blocks, snapshots[0].reserve_blocks);
+    EXPECT_EQ(allocator->reserveBlocksNum() * snapshots[1].total_blocks / total_blocks, snapshots[1].reserve_blocks);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DeviceCacheMinFreeBlocksAreDistributedByPoolCapacity) {
+    CacheConfig config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    std::shared_ptr<TestHybridPoolKVCacheAllocator> allocator =
+        makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/0);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(6);
+
+    const std::vector<KVCachePoolMetricsSnapshot> snapshots = allocator->poolMetricsSnapshots();
+    ASSERT_EQ(snapshots.size(), 2u);
+    const size_t total_blocks = snapshots[0].total_blocks + snapshots[1].total_blocks;
+    EXPECT_EQ(6u * snapshots[0].total_blocks / total_blocks, snapshots[0].reserve_blocks);
+    EXPECT_EQ(6u * snapshots[1].total_blocks / total_blocks, snapshots[1].reserve_blocks);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveRatioAndSnapshotsExcludeNonReservablePool) {
@@ -690,9 +693,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, NonReservableOnlyPoolsHaveDivisionSafeZer
     ASSERT_TRUE(allocator->init());
     EXPECT_EQ(allocator->reserveBlocksNum(), 0u);
 
-    // Exercise snapshot distribution with a non-zero configured reserve and a
-    // zero-participant denominator. Every pool must receive a safe zero share.
-    allocator->setReserveBlocksNum(7);
+    // Non-reservable pools must report zero reserve.
     const auto snapshots = allocator->poolMetricsSnapshots();
     ASSERT_EQ(snapshots.size(), 2u);
     EXPECT_EQ(snapshots[0].reserve_blocks, 0u);
@@ -701,10 +702,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, NonReservableOnlyPoolsHaveDivisionSafeZer
 
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/20, /*full_block_num=*/6);
-    auto allocator = makeAllocator(config);
+    auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/1);
     ASSERT_TRUE(allocator->init());
-
-    allocator->setReserveBlocksNum(1);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 104, 105, 106, 107});
@@ -765,9 +764,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
     auto allocator = makeAllocator(config);
 
     KVCacheConfig tiered_config;
-    tiered_config.enable_memory_cache        = true;
-    tiered_config.enable_tiered_memory_cache = true;
-    tiered_config.memory_cache_size_mb       = 1;
+    tiered_config.enable_host_cache  = true;
+    tiered_config.host_cache_size_mb = 1;
     allocator->setBlockTreeCacheConfigForTest(std::move(tiered_config));
     ASSERT_TRUE(allocator->init());
 
@@ -816,7 +814,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfi
 
 TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseReferencesOnReserveReject) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/4);
-    auto allocator = makeAllocator(config);
+    auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/100);
     ASSERT_TRUE(allocator->init());
 
     const auto seeded = seedCompleteBlockTreePath(allocator, CacheKeysType{100});
@@ -830,9 +828,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
     ASSERT_EQ(pools[0]->refCount(linear_cached), 1u);
     ASSERT_EQ(pools[1]->refCount(full_cached), 1u);
 
-    const size_t available_before = allocator->freeBlocksNum();
-    const auto   counters_before  = snapshotPoolCounters(allocator);
-    allocator->setReserveBlocksNum(std::max<size_t>(1, available_before * 8));
+    const auto counters_before = snapshotPoolCounters(allocator);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});

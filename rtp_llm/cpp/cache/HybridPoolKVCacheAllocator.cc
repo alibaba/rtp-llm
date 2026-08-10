@@ -424,7 +424,7 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
 }
 
 size_t HybridPoolKVCacheAllocator::reserveBlocksForPoolMetrics(size_t pool_index) const {
-    return reserveBlocksForPool(pool_index, reserveBlocksNum(), totalReservableFreeBlocks());
+    return reserveBlocksForPool(pool_index);
 }
 
 void HybridPoolKVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
@@ -457,15 +457,20 @@ size_t HybridPoolKVCacheAllocator::reservableFreeBlocksNum() const {
     return totalReservableFreeBlocks();
 }
 
-size_t HybridPoolKVCacheAllocator::reserveBlocksForPool(size_t group_id,
-                                                        size_t reserve_blocks,
-                                                        size_t total_reservable_free_blocks) const {
-    if (group_id >= group_block_pools_.size() || !group_block_pools_[group_id] || group_id >= kv_cache_groups_.size()
-        || !kv_cache_groups_[group_id] || !kv_cache_groups_[group_id]->isReservable()
-        || config_.usesExplicitIndependentBlocks(group_id) || total_reservable_free_blocks == 0) {
+size_t HybridPoolKVCacheAllocator::reserveBlocksForPool(size_t group_id) const {
+    if (!kv_cache_groups_[group_id]->isReservable() || config_.usesExplicitIndependentBlocks(group_id)) {
         return 0;
     }
-    return reserve_blocks * group_block_pools_[group_id]->freeBlocksNum() / total_reservable_free_blocks;
+
+    size_t total_reservable_blocks = 0;
+    for (size_t current_group_id = 0; current_group_id < group_block_pools_.size(); ++current_group_id) {
+        if (!kv_cache_groups_[current_group_id]->isReservable()
+            || config_.usesExplicitIndependentBlocks(current_group_id)) {
+            continue;
+        }
+        total_reservable_blocks += group_block_pools_[current_group_id]->totalBlocksNum();
+    }
+    return reserveBlocksNum() * group_block_pools_[group_id]->totalBlocksNum() / total_reservable_blocks;
 }
 
 bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info,
@@ -496,11 +501,9 @@ bool HybridPoolKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& 
         }
         const auto& pool = group_block_pools_[static_cast<size_t>(group_id)];
         while (true) {
-            const size_t total_reservable_free_blocks = totalReservableFreeBlocks();
-            const size_t group_reserve_blocks =
-                reserveBlocksForPool(static_cast<size_t>(group_id), reserve_blocks, total_reservable_free_blocks);
-            const size_t required_blocks = static_cast<size_t>(need_blocks) + group_reserve_blocks;
-            const size_t free_blocks     = pool->freeBlocksNum();
+            const size_t group_reserve_blocks = reserveBlocksForPool(static_cast<size_t>(group_id));
+            const size_t required_blocks      = static_cast<size_t>(need_blocks) + group_reserve_blocks;
+            const size_t free_blocks          = pool->freeBlocksNum();
             if (free_blocks >= required_blocks) {
                 break;
             }

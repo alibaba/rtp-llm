@@ -14,9 +14,7 @@ namespace rtp_llm {
 class BroadcastManager;
 class StorageBackend;
 
-bool shouldPinHostBlockPool();
-
-size_t computeHostUsableBlockCount(size_t memory_cache_size_bytes, size_t stride_bytes);
+size_t computeHostUsableBlockCount(size_t capacity_bytes, size_t stride_bytes);
 
 std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank);
 

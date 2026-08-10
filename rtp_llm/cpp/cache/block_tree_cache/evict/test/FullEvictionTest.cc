@@ -73,7 +73,7 @@ TieredFullCache makeTieredFullCache(bool enable_lower_tiers = true) {
         std::vector<DeviceBlockPoolPtr>{result.device_pool}, result.host_pool, result.disk_pool);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = enable_lower_tiers;
+    config.enable_host_cache   = enable_lower_tiers;
     config.enable_disk_cache   = enable_lower_tiers;
     std::vector<GroupSetPtr> group_sets{result.full};
     result.cache = makeBlockTreeCacheForTest(std::move(group_sets), config);
@@ -487,7 +487,7 @@ TEST(FullPruneTest, PrunesCascadedDescendantGroupResourcesAndTopology) {
         128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, nullptr, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     std::vector<GroupSetPtr> group_sets{full, swa};
     auto cache = makeBlockTreeCacheForTest(std::move(group_sets), config);
     ASSERT_NE(cache, nullptr);
@@ -526,7 +526,7 @@ TEST(FullPruneTest, RefreshesSurvivingFullResourceAfterDescendantPrune) {
         std::vector<DeviceBlockPoolPtr>{full1_device_pool}, nullptr, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full0, full1}, config);
     ASSERT_NE(cache, nullptr);
 
@@ -558,7 +558,7 @@ TEST(FullPruneTest, DetachesBusyDescendantGroupResource) {
         128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, swa_host_pool, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa}, config);
     ASSERT_NE(cache, nullptr);
 
@@ -605,7 +605,7 @@ TEST(FullPruneTest, DetachesBusyClosureRootGroupResource) {
         128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, swa_host_pool, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa}, config);
     ASSERT_NE(cache, nullptr);
 
@@ -647,7 +647,7 @@ TEST(FullPruneTest, ReverseDirectDropPrunesCascadedFullSubtree) {
         128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, nullptr, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full, swa}, config);
     ASSERT_NE(cache, nullptr);
 
@@ -682,7 +682,7 @@ TEST(FullPruneTest, ReverseDirectDropAttachesOneClosureForMultipleFullGroups) {
         128, 64, std::vector<DeviceBlockPoolPtr>{swa_device_pool}, nullptr, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     auto cache = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full0, full1, swa}, config);
     ASSERT_NE(cache, nullptr);
 
@@ -736,7 +736,7 @@ TEST(FullPruneTest, HostPruneRemovesDeviceDescendant) {
         std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
+    config.enable_host_cache = true;
     std::vector<GroupSetPtr> group_sets{full};
     auto cache = makeBlockTreeCacheForTest(std::move(group_sets), config);
     ASSERT_NE(cache, nullptr);

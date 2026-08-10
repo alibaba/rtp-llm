@@ -53,7 +53,7 @@
                     "top_k": 1,
                     "top_p": 0,
                     "enable_device_cache": true,
-                    "enable_memory_cache": false
+                    "enable_host_cache": false
                 },
                 "_prompt_source": "$prompt:x6[:14744] (8989 tokens, qwen3)"
             },
@@ -98,7 +98,7 @@
                     "top_k": 1,
                     "top_p": 0,
                     "enable_device_cache": false,
-                    "enable_memory_cache": true
+                    "enable_host_cache": true
                 },
                 "_prompt_source": "$prompt:x6[:14744] (8989 tokens, qwen3)"
             },
@@ -143,7 +143,7 @@
                     "top_k": 1,
                     "top_p": 0,
                     "enable_device_cache": true,
-                    "enable_memory_cache": false
+                    "enable_host_cache": false
                 },
                 "_prompt_source": "$prompt:x6[:7190] (4497 tokens, qwen3)"
             },
@@ -188,7 +188,7 @@
                     "top_k": 1,
                     "top_p": 0,
                     "enable_device_cache": false,
-                    "enable_memory_cache": true
+                    "enable_host_cache": true
                 },
                 "_prompt_source": "$prompt:x6[:7190] (4497 tokens, qwen3)"
             },
@@ -233,7 +233,7 @@
                     "top_k": 1,
                     "top_p": 0,
                     "enable_device_cache": true,
-                    "enable_memory_cache": false
+                    "enable_host_cache": false
                 },
                 "_prompt_source": "$prompt:x6[:10836] (6622 tokens, qwen3)"
             },
@@ -278,7 +278,7 @@
                     "top_k": 1,
                     "top_p": 0,
                     "enable_device_cache": false,
-                    "enable_memory_cache": true
+                    "enable_host_cache": true
                 },
                 "_prompt_source": "$prompt:x6[:10836] (6622 tokens, qwen3)"
             },

@@ -385,7 +385,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
-    resource_context_.initCacheConfig(kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
+    resource_context_.initCacheConfig(kv_cache_config);
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
         CHECK_AND_RETURN_REF(

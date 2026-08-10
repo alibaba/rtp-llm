@@ -59,7 +59,7 @@ private:
     int    defaultGroupIdForLayer(int layer_id) const;
     size_t minTokenCapacity(bool use_free_blocks, bool full_groups_only) const;
     size_t totalReservableFreeBlocks() const;
-    size_t reserveBlocksForPool(size_t group_id, size_t reserve_blocks, size_t total_reservable_free_blocks) const;
+    size_t reserveBlocksForPool(size_t group_id) const;
 
     std::vector<DeviceBlockPoolPtr> group_block_pools_;
     RoleType                        role_type_{RoleType::PDFUSION};

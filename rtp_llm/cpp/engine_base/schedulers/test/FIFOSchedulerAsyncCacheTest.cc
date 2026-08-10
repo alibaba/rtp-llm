@@ -105,15 +105,15 @@ protected:
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
     }
 
-    GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
-                                   bool                    reuse_cache         = false,
-                                   bool                    enable_memory_cache = false,
-                                   int                     max_new_tokens      = 1,
-                                   const std::vector<int>& variable_num_beams  = {}) {
+    GenerateStreamPtr createStream(const std::vector<int>& input_tokens       = {1, 2, 3},
+                                   bool                    reuse_cache        = false,
+                                   bool                    enable_host_cache  = false,
+                                   int                     max_new_tokens     = 1,
+                                   const std::vector<int>& variable_num_beams = {}) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
-        resource_context.enable_memory_cache = enable_memory_cache;
+        resource_context.enable_host_cache   = enable_host_cache;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
@@ -123,7 +123,7 @@ protected:
         auto generate_config                 = std::make_shared<GenerateConfig>();
         query->request_id                    = next_request_id_++;
         generate_config->reuse_cache         = reuse_cache;
-        generate_config->enable_memory_cache = enable_memory_cache;
+        generate_config->enable_host_cache   = enable_host_cache;
         generate_config->max_new_tokens      = max_new_tokens;
         generate_config->variable_num_beams  = variable_num_beams;
         query->input_ids                     = torch::tensor(input_tokens, torch::kInt32);

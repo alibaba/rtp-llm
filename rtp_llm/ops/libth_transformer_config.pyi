@@ -647,21 +647,25 @@ class HybridAttentionType:
         ...
 class KVCacheConfig:
     enable_device_cache: bool
-    enable_memory_cache: bool
+    enable_host_cache: bool
+    enable_host_cache_pinned: bool
     enable_disk_cache: bool
-    enable_memory_cache_sm_copy: bool
     enable_remote_cache: bool
+    device_eviction_policy: str
+    host_eviction_policy: str
+    disk_eviction_policy: str
+    device_cache_min_free_blocks: int
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
     max_block_size_per_item: int
-    memory_cache_size_mb: int
-    memory_cache_sync_timeout_ms: int
-    enable_memory_cache_disk: bool
-    memory_cache_disk_paths: str
-    memory_cache_disk_size_mb: int
-    memory_cache_disk_buffered_io: bool
-    memory_cache_disk_sync_timeout_ms: int
+    host_cache_size_mb: int
+    host_cache_sync_timeout_ms: int
+    disk_cache_paths: str
+    disk_cache_size_mb: int
+    disk_cache_buffered_io: bool
+    disk_cache_sync_timeout_ms: int
+    disk_cache_staging_block_count: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
@@ -689,18 +693,9 @@ class KVCacheConfig:
     reuse_cache: bool
     seq_size_per_block: int
     kernel_seq_size_per_block: int
-    enable_tiered_memory_cache: bool
-    enable_gpu_prefix_tree: bool
-    enable_prefix_tree_memory_cache: bool
-    enable_legacy_memory_connector_fallback: bool
-    prefix_tree_memory_state_swa_pool_ratio: int
-    enable_independent_group_eviction: bool
-    device_cache_min_free_blocks: int
-    load_cache_retry_times: int
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
-    write_cache_sync: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

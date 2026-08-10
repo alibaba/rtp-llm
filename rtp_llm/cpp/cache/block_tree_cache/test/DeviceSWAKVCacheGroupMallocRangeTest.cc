@@ -1,9 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <cstdlib>
 #include <memory>
-#include <string>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/SWAKVCacheGroup.h"
@@ -13,31 +11,6 @@ namespace test {
 namespace {
 
 using DeviceSWAKVCacheGroup = SWAKVCacheGroup;
-
-class ScopedEnvVar {
-public:
-    ScopedEnvVar(const char* name, const char* value): name_(name) {
-        const char* old_value = std::getenv(name_);
-        if (old_value != nullptr) {
-            old_value_ = old_value;
-            had_value_ = true;
-        }
-        setenv(name_, value, 1);
-    }
-
-    ~ScopedEnvVar() {
-        if (had_value_) {
-            setenv(name_, old_value_.c_str(), 1);
-        } else {
-            unsetenv(name_);
-        }
-    }
-
-private:
-    const char* name_;
-    std::string old_value_;
-    bool        had_value_ = false;
-};
 
 DeviceBlockPoolConfig makeDeviceBlockPoolConfig() {
     constexpr uint32_t kLayerNum        = 1;
@@ -92,7 +65,6 @@ TEST(DeviceSWAKVCacheGroupMallocRangeTest, EmptyBlockIdsKeepTailBlocksForSeqLenU
     constexpr int kSeqSizePerBlock = 256;
     constexpr int kMaxSeqLen       = 1000000;
 
-    ScopedEnvVar          disable_pin_host_pool("RTP_LLM_PIN_HOST_BLOCK_POOL", "0");
     auto                  block_pool = createDeviceBlockPool();
     DeviceSWAKVCacheGroup group({}, makeMHASpec(kSeqSizePerBlock), block_pool, 0);
 

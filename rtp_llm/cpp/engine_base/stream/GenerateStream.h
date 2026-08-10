@@ -508,8 +508,8 @@ public:
         return generate_input_->generate_config->enable_device_cache;
     }
 
-    bool enableMemoryCache() const {
-        return generate_input_->generate_config->enable_memory_cache;
+    bool enableHostCache() const {
+        return generate_input_->generate_config->enable_host_cache;
     }
 
     bool enableDiskCache() const {
