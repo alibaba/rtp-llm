@@ -97,6 +97,19 @@ DASH_ERROR_CAPACITY = DashErrorSpec(
     status_code=429,
     status_name="TooManyRequests",
 )
+# Auto-TPM victim preemption (Master 8429 PRIORITY_PREEMPTED): the request was
+# already dispatched and then cancelled as a victim of a strictly
+# higher-priority request.  Distinct from generic capacity backpressure
+# (DASH_ERROR_CAPACITY): error_no carries ABORT(10) for downstream
+# metric/labelling, status_name is Throttling.Aborted, and finish_reason is
+# USE_PARAMETER_STATUS so the api-server passes the explicit 429 through
+# verbatim (same wire convention as the specs above).
+DASH_ERROR_AUTO_TPM_PREEMPTED = DashErrorSpec(
+    error_no=LLMFinishReason.ABORT,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.Aborted",
+)
 DASH_ERROR_TIMEOUT = DashErrorSpec(
     error_no=LLMFinishReason.STOP_TIMEOUT,
     finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,

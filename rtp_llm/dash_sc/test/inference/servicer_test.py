@@ -426,6 +426,53 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
+    async def test_auto_tpm_preempted_maps_to_throttling_aborted(self) -> None:
+        """Master 8429 PRIORITY_PREEMPTED (Auto-TPM victim) must surface as
+        ABORT(10) / 429 / Throttling.Aborted with the AUTO_TPM_PREEMPTED
+        marker in status_message — not the generic CAPACITY mapping."""
+        req = self._minimal_request()
+
+        class _PreemptedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.PRIORITY_PREEMPTED,
+                    "preempted by higher-priority request 77",
+                )
+
+        access_agg = GrpcAccessRecord(
+            method="ModelStreamInfer",
+            stream_type="bidi_stream",
+            peer="",
+            start_ts=0.0,
+            raw_mode=False,
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _PreemptedVisitor(),
+                rtp_llm_request_id=1,
+                access_agg=access_agg,
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, LLMFinishReason.ABORT)
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "Throttling.Aborted")
+        self.assertIn("AUTO_TPM_PREEMPTED", payload["status_message"])
+        self.assertIn(
+            "preempted by higher-priority request 77", payload["status_message"]
+        )
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+        self.assertEqual(access_agg.backend_error_code, "8429_PRIORITY_PREEMPTED")
+
     async def test_engine_task_list_full_ft_exception_mapped_to_429(self) -> None:
         """Engine abort with TASK_LIST_FULL arrives as FtRuntimeException(UNKNOWN_ERROR)
         which would normally map to 500 (INTERNAL). The error message carries the

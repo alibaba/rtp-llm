@@ -31,6 +31,7 @@ from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
+    DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
@@ -99,6 +100,11 @@ def _set_access_backend_error_code(access_agg: Any, e: BaseException) -> None:
 
 
 def _dash_error_spec_for_ft_exception(exc: FtRuntimeException) -> DashErrorSpec:
+    # Auto-TPM victim preemption (Master 8429): dedicated spec —
+    # ABORT(10) / 429 / Throttling.Aborted — instead of the generic
+    # category-based CAPACITY mapping (TooManyRequests).
+    if exc.exception_type == ExceptionType.PRIORITY_PREEMPTED:
+        return DASH_ERROR_AUTO_TPM_PREEMPTED
     return _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exc.exception_type.category]
 
 
@@ -1006,6 +1012,11 @@ async def iter_real_model_stream_infer(
         if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
             error_spec = DASH_ERROR_CAPACITY
         status_message = str(e)
+        # Auto-TPM preemption: status_message must carry the explicit
+        # AUTO_TPM_PREEMPTED marker so callers can attribute the 429 to
+        # priority preemption rather than generic throttling.
+        if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
+            status_message = f"AUTO_TPM_PREEMPTED: {status_message}"
         if error_spec.status_code == 500:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
         elif error_spec.status_code == 499:
@@ -1036,11 +1047,14 @@ async def iter_real_model_stream_infer(
         # the error message still carries the TASK_LIST_FULL marker.
         if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
             error_spec = DASH_ERROR_CAPACITY
+        fallback_status_message = f"{type(e).__name__}: {e}"
+        if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
+            fallback_status_message = f"AUTO_TPM_PREEMPTED: {fallback_status_message}"
         response = build_dash_error_response(
             str(request.id),
             request.model_name,
             error_spec=error_spec,
-            status_message=f"{type(e).__name__}: {e}",
+            status_message=fallback_status_message,
         )
         stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
         yield (response, stats) if yield_access_stats else response
