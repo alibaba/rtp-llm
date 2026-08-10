@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, AsyncIterator, Callable, Iterable, Optional, Protocol
 
@@ -39,7 +40,12 @@ from rtp_llm.config.response_format_compiler import (
     restore_final_constraint,
 )
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
-from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
+from rtp_llm.dash_sc.access_record import (
+    GrpcAccessRecord,
+    extract_body_trace_headers,
+    extract_span_external_request_id,
+    to_optional_int,
+)
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_ADMISSION_OVERLOADED,
@@ -59,9 +65,11 @@ from rtp_llm.dash_sc.codec import (
     LLMFinishReason,
     SamplingParams,
     StreamResponseBuilder,
+    _lookup_ds_request_control,
     _token_ids_list_from_generate_output,
     build_dash_error_response,
     parse_dash_sc_grpc_request,
+    parse_ds_header_attributes,
     parse_multimodal_parts_from_request,
     prepend_to_generated_ids_tensor,
 )
@@ -85,7 +93,10 @@ from rtp_llm.server.request_headers import (
     extract_trace_id,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE, start_server_span
-from rtp_llm.telemetry.tracing import metadata_to_headers
+from rtp_llm.telemetry.tracing import (
+    metadata_to_headers,
+    select_valid_server_trace_carrier,
+)
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
@@ -149,6 +160,15 @@ def _build_mm_inputs_from_request(
         )
         for part in parts
     ]
+
+
+def _request_parameter_string(request, name: str) -> str:
+    if name not in request.parameters:
+        return ""
+    parameter = request.parameters[name]
+    if not parameter.HasField("string_param"):
+        return ""
+    return str(parameter.string_param or "")
 
 
 def _exception_metric_code(error_code: int | ExceptionType) -> str:
@@ -1570,18 +1590,20 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
 
     async def ModelStreamInfer(self, request_iterator, context):
+        request_start_time = time.time_ns()
+        request_start_ns = time.monotonic_ns()
         try:
             invocation_metadata = context.invocation_metadata()
         except Exception:
             invocation_metadata = ()
+        metadata_headers = metadata_to_headers(invocation_metadata)
         # Self-managed access-log lifecycle (the shared interceptor is gone).
         # Create/arrival/query go first — before any inbound frame — so a
         # frame-less RPC (peer closed before sending) still reports arrival and
         # produces an access line via the ``finally`` below.
-        # The record is built before the SERVER span and the two reporting calls
-        # sit inside the ``try``: nothing that can raise runs between span start
-        # and ``try``, so the span can never escape without ``finally`` ending it
-        # and clearing CURRENT_TRACE_STATE.
+        # The SERVER span is delayed until the first frame reveals body-carried
+        # trace context. The finally block idempotently creates a metadata/root
+        # span for frame-less and pre-parse failure paths, then always ends it.
         record = GrpcAccessRecord.create(
             context,
             "ModelStreamInfer",
@@ -1589,11 +1611,39 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             raw_mode=False,
             repetition_monitor_config=self._rep_cfg,
         )
-        trace_state = start_server_span(
-            _DASH_SERVER_SPAN_NAME,
-            metadata_to_headers(invocation_metadata),
-            _DASH_SERVER_ATTRIBUTES,
-        )
+        trace_state = None
+        current_rtp_llm_request_id: Optional[int] = None
+        current_external_request_id = ""
+
+        def _ensure_span(body_headers: Optional[dict[str, str]] = None):
+            nonlocal trace_state
+            if trace_state is not None:
+                return trace_state
+            headers, source = select_valid_server_trace_carrier(
+                body_headers or {}, metadata_headers
+            )
+            trace_state = start_server_span(
+                _DASH_SERVER_SPAN_NAME,
+                headers,
+                _DASH_SERVER_ATTRIBUTES,
+                start_time=request_start_time,
+                request_start_ns=request_start_ns,
+            )
+            if trace_state is not None:
+                trace_state.set_attribute("rtp_llm.trace_context_source", source)
+                if current_rtp_llm_request_id is not None:
+                    trace_state.set_attribute(
+                        "request_id", str(current_rtp_llm_request_id)
+                    )
+                    trace_state.set_attribute(
+                        "rtp_llm.request_id", current_rtp_llm_request_id
+                    )
+                if current_external_request_id:
+                    trace_state.set_attribute(
+                        "rtp_llm.external_request_id", current_external_request_id
+                    )
+            return trace_state
+
         exc: Optional[BaseException] = None
         try:
             emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
@@ -1602,19 +1652,33 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             async for request in request_iterator:
                 record.req_count += 1
                 rtp_llm_request_id = self._next_rtp_llm_request_id()
-                if trace_state is not None:
-                    trace_state.set_attribute("request_id", str(rtp_llm_request_id))
-                    trace_state.set_attribute("rtp_llm.request_id", rtp_llm_request_id)
+                current_rtp_llm_request_id = rtp_llm_request_id
+                current_external_request_id = extract_span_external_request_id(
+                    invocation_metadata, request
+                )
                 logging.debug(
                     "[DashScGrpc] ModelInferRequest: id=%s model_name=%s",
                     request.id,
                     request.model_name,
                 )
+                body_headers = extract_body_trace_headers(request)
+                _ensure_span(body_headers)
                 try:
                     parsed_input_ids, sampling, request_controls = (
                         parse_dash_sc_grpc_request(request)
                     )
                     mm_inputs = _build_mm_inputs_from_request(request)
+                    traceparent_new = _lookup_ds_request_control(
+                        parse_ds_header_attributes(request), "traceparent_new"
+                    )
+                    if (
+                        traceparent_new
+                        and body_headers.get("traceparent")
+                        and str(traceparent_new) != body_headers["traceparent"]
+                    ):
+                        logging.warning(
+                            "[DashScGrpc] body traceparent differs from traceparent_new"
+                        )
                 except (DashScParameterError, DashScInputIdsError) as e:
                     if first_request:
                         record.record_request_frame(request)
@@ -1790,6 +1854,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             record.record_aux_info(getattr(e, "aux_info", None), overwrite=False)
             raise
         finally:
+            _ensure_span()
             end_ts = record.resolve_status(context, exc)
             try:
                 # Log first, metrics second — a kmonitor hiccup must never delay or
