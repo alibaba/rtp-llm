@@ -83,6 +83,10 @@ public:
         return false;
     }
 
+    virtual bool isDSpark() {
+        return false;
+    }
+
     virtual bool updateEplbConfig(const EPLBConfig& config) {
         return false;
     }

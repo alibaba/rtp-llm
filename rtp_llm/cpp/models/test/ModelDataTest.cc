@@ -84,34 +84,14 @@ TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
     EXPECT_EQ(holder.clear_tensors.front().front().data_ptr(), t1.data_ptr());
 }
 
-TEST_F(ModelDataTest, testDSparkDraftBypassesPrefillContextParallel) {
-    // The target keeps ordinary prefill CP enabled, while the DSpARK draft
-    // keeps the complete B*gamma non-causal query block on every rank.
-    EXPECT_TRUE(
-        PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/true, /*bypass=*/false));
-    EXPECT_FALSE(
-        PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/true, /*bypass=*/true));
-    EXPECT_FALSE(
-        PyWrappedModel::shouldEnablePrefillContextParallel(/*configured=*/false, /*bypass=*/false));
-}
+TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
+    ParallelismConfig prefill_config;
+    prefill_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    EXPECT_TRUE(buildExecProperties(prefill_config, DeviceResourceConfig{}).enable_prefill_cp);
 
-TEST_F(ModelDataTest, testDSparkCacheStoreLengthsParticipateInTpSyncMetadata) {
-    GptModelInputs inputs;
-    inputs.cache_store_input_lengths  = torch::zeros({2}, torch::kInt32);
-    inputs.cache_store_prefix_lengths = torch::zeros({3}, torch::kInt32);
-
-    auto cpu_metadata = getCacheStoreTensorSyncMetadata(inputs);
-    EXPECT_EQ(cpu_metadata.input_lengths_count, 2);
-    EXPECT_EQ(cpu_metadata.prefix_lengths_count, 3);
-    EXPECT_EQ(cpu_metadata.device_bits, 0);
-
-    inputs.cache_store_input_lengths  = inputs.cache_store_input_lengths.cuda();
-    inputs.cache_store_prefix_lengths = inputs.cache_store_prefix_lengths.cuda();
-    auto cuda_metadata                = getCacheStoreTensorSyncMetadata(inputs);
-    EXPECT_EQ(cuda_metadata.input_lengths_count, 2);
-    EXPECT_EQ(cuda_metadata.prefix_lengths_count, 3);
-    EXPECT_NE(cuda_metadata.device_bits & kDeviceBitCacheStoreInputLengths, 0);
-    EXPECT_NE(cuda_metadata.device_bits & kDeviceBitCacheStorePrefixLengths, 0);
+    ParallelismConfig decode_config;
+    decode_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    EXPECT_FALSE(buildExecProperties(decode_config, DeviceResourceConfig{}).enable_prefill_cp);
 }
 
 TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {

@@ -317,6 +317,37 @@ class CudaAsyncCPGatherImpl:
         return full
 
 
+def build_cp_context_for_forward(
+    cp_info,
+    cp_size: int,
+    cp_rank: int,
+    num_tokens: int,
+    device: torch.device,
+    prefix_lengths: Optional[torch.Tensor] = None,
+    kv_cache_sharded: bool = False,
+) -> CPContext:
+    """`build_cp_context` plus the shared prefix->position-offset convention.
+
+    Every per-forward caller (the transformer layer loop, the DSpark commit
+    row map) must derive `position_offset` from `prefix_lengths` identically:
+    absent/empty prefix means offset 0, otherwise the per-request prefix
+    lengths as int64 on `device`. Getting this wrong shifts every derived
+    global position, so the rule lives in exactly one place.
+    """
+    position_offset: Union[int, torch.Tensor] = 0
+    if prefix_lengths is not None and int(prefix_lengths.numel()) > 0:
+        position_offset = prefix_lengths.to(device=device, dtype=torch.long)
+    return build_cp_context(
+        cp_info,
+        cp_size,
+        cp_rank,
+        num_tokens,
+        device,
+        position_offset=position_offset,
+        kv_cache_sharded=kv_cache_sharded,
+    )
+
+
 def build_cp_context(
     cp_info,
     cp_size: int,
@@ -929,9 +960,7 @@ def build_cp_full_prefill_positions(
         req = torch.empty((0,), dtype=torch.long, device=device)
 
     zero = torch.zeros(1, dtype=torch.long, device=device)
-    cu_seq = torch.cat(
-        [zero, torch.cumsum(lengths.to(torch.long), dim=0)]
-    ).contiguous()
+    cu_seq = torch.cat([zero, torch.cumsum(lengths.to(torch.long), dim=0)]).contiguous()
     return (
         pos,
         req,

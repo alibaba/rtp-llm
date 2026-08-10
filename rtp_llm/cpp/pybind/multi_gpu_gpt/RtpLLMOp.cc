@@ -59,16 +59,15 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     size_t     model_num             = py_layers_weights_vec.size();
     size_t     gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
 
-    if (sp_type == SP_TYPE_DSPARK) {
-        // DSpARK is one multi-layer draft model. gamma controls its output
-        // width, not the number of one-layer MTP model instances.
-        auto       gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
+    // Get py_eplb if available (from model)
         py::object py_eplb    = py::none();
         if (py::hasattr(sp_model, "py_eplb")) {
             py_eplb = sp_model.attr("py_eplb");
         }
-        mtp_params->push_back(std::make_unique<EngineInitParams>(model_id,
-                                                                 model_config,
+
+    auto make_engine_params = [&](size_t id, const ModelConfig& cfg, auto gpt_weight) {
+        return std::make_unique<EngineInitParams>(id,
+                                                  cfg,
                                                                  base_params.parallelism_config,
                                                                  base_params.runtime_config,
                                                                  base_params.pd_sep_config,
@@ -89,9 +88,15 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                  base_params.vit_config,
                                                                  std::move(*gpt_weight),
                                                                  py::none(),
-                                                                 py_eplb));
-        return std::make_unique<ProposeModelEngineInitParams>(
-            sp_type, gen_num_per_cycle, std::move(mtp_params));
+                                                  py_eplb);
+    };
+
+    if (sp_type == SP_TYPE_DSPARK) {
+        // DSpARK is one multi-layer draft model. gamma controls its output
+        // width, not the number of one-layer MTP model instances.
+        mtp_params->push_back(
+            make_engine_params(model_id, model_config, convert.createGptWeights(py_layers_weights, py_global_weights)));
+        return std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params));
     }
     if (gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
@@ -111,12 +116,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         model_num = 1;
     }
 
-    // Get py_eplb if available (from model)
-    py::object py_eplb = py::none();
-    if (py::hasattr(sp_model, "py_eplb")) {
-        py_eplb = sp_model.attr("py_eplb");
-    }
-
     // Create a temporary ModelConfig with num_layers = 1 for MTP
     ModelConfig temp_model_config = model_config;
     temp_model_config.num_layers  = 1;
@@ -125,30 +124,8 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         auto     layer_weigths = py_layers_weights_vec[i];
         py::list tmp;
         tmp.append(layer_weigths);
-        auto gpt_weight = convert.createGptWeights(tmp, py_global_weights);
-        mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                           temp_model_config,
-                                                                           base_params.parallelism_config,
-                                                                           base_params.runtime_config,
-                                                                           base_params.pd_sep_config,
-                                                                           base_params.concurrency_config,
-                                                                           base_params.fmha_config,
-                                                                           base_params.kv_cache_config,
-                                                                           base_params.profiling_debug_logging_config,
-                                                                           base_params.hw_kernel_config,
-                                                                           base_params.device_resource_config,
-                                                                           base_params.moe_config,
-                                                                           base_params.model_specific_config,
-                                                                           base_params.sp_config,
-                                                                           base_params.cache_store_config,
-                                                                           base_params.misc_config,
-                                                                           base_params.arpc_config,
-                                                                           base_params.grpc_config,
-                                                                           base_params.ffn_disaggregate_config,
-                                                                           base_params.vit_config,
-                                                                           std::move(*gpt_weight),
-                                                                           py::none(),
-                                                                           py_eplb)));
+        mtp_params->push_back(
+            make_engine_params(model_id, temp_model_config, convert.createGptWeights(tmp, py_global_weights)));
         model_id++;
     }
 
@@ -375,11 +352,6 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     grpc::ServerBuilder builder;
     const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
     auto                server_config = grpc_config.get_server_config();
-    if (server_config.find(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH) == server_config.end()) {
-        // The fixed-gamma DSpARK side channel carries [1, gamma, vocab]
-        // probabilities and can exceed gRPC's default receive limit.
-        server_config[GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH] = -1;
-    }
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);

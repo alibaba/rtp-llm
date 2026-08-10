@@ -52,10 +52,6 @@ struct StreamSpecUpdateInfo {
     // shape: [propose_step] (the per-stream slice). When defined, PDFUSION
     // path will skip D2H and consume this GPU tensor directly.
     torch::Tensor draft_token_gpu;
-    // CPU mirror of a complete fixed-width block proposal. DSpARK fills this
-    // only for PD-separated streams so the decode node receives every draft
-    // token; MTP keeps using the single legacy draft_token above.
-    torch::Tensor draft_tokens_cpu;
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
@@ -416,12 +412,17 @@ public:
         contain_propose_token_ = contain_propose_token;
     }
 
-    bool getContainProposeToken() {
-        return contain_propose_token_;
-    }
-
     void setMtpTokenIndex(int mtp_token_index) {
         mtp_token_index_ = mtp_token_index;
+    }
+
+    // Prompt-tail positions of a PD handoff: the target cache loaded from
+    // prefill covers seqLength() - 1 tokens for every speculative mode.
+    // DSpARK handoffs carry no proposal; MTP/Eagle set theirs afterwards.
+    void initSpeculativeHandoffPositions() {
+        setReuseLength(seqLength() - 1);
+        setSpEditRun(false);
+        setMtpTokenIndex(seqLength() - 1);
     }
 
     size_t getMtpTokenIndex() {
@@ -480,13 +481,6 @@ public:
 
     at::Generator getGenerator() {
         return generator_;
-    }
-
-    torch::Tensor getProposeTokens() const {
-        if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens.defined()) {
-            return propose_stream_->sp_output_buffer_->tokens;
-        }
-        return torch::Tensor();
     }
 
     void setSPOutputBuffer(SpeculativeExecutorStreamOutputPtr sp_output_buffer) {

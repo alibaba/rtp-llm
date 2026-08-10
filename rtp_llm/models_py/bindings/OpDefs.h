@@ -5,9 +5,11 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <cstdint>
+#include <utility>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
+#include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 // Forward declare for opaque pointers in PyCacheStoreInputs
@@ -175,8 +177,8 @@ struct KVCache {
         layer_cache.group_id      = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
         layer_cache.region_name   = region_name;
         const bool is_full_region = !rtp_llm::isDsv4FixedRegion(region_name);
-        layer_cache.seq_size_per_block =
-            is_full_region && kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block :
+        layer_cache.seq_size_per_block = is_full_region && kernel_seq_size_per_block > 0 ?
+                                             kernel_seq_size_per_block :
                                                               groupSeqSizePerBlock(layer_cache.group_id);
         layer_cache.kv_cache_base = base;
         if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
@@ -264,10 +266,6 @@ struct PyCacheStoreInputs {
     // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
     int cp_size = 1;
     int cp_rank = 0;
-
-    // Undefined keeps the attention input/prefix lengths.
-    torch::Tensor store_input_lengths;
-    torch::Tensor store_prefix_lengths;
 };
 
 struct PyPrefillCudaGaphCopyParams {
@@ -350,17 +348,26 @@ struct PyModelInputs {
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
-    torch::Tensor       dspark_ctx_lengths;
-    torch::Tensor       dspark_ctx_starts;
+    rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
+
+    PyModelInputs() = default;
+    PyModelInputs(torch::Tensor            input_ids,
+                  torch::Tensor            input_hiddens,
+                  PyAttentionInputs        attention_inputs,
+                  BertEmbeddingInputs      bert_embedding_inputs,
+                  rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE):
+        input_ids(std::move(input_ids)),
+        input_hiddens(std::move(input_hiddens)),
+        attention_inputs(std::move(attention_inputs)),
+        bert_embedding_inputs(std::move(bert_embedding_inputs)),
+        dspark_call_phase(dspark_call_phase) {}
 };
 
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
-    torch::Tensor          aux_hidden_states;
     torch::Tensor          draft_tokens;
-    torch::Tensor          draft_probs;
 
     PyModelOutputs() = default;
 

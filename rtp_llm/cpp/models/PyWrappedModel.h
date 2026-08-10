@@ -55,23 +55,16 @@ public:
                    bool                               use_spec_decoding          = false,
                    const std::vector<int>&            kv_cache_layer_to_group    = {},
                    std::shared_ptr<ModelInputsLogger> model_inputs_logger        = nullptr,
-                   bool                               is_dspark_draft             = false);
+                   bool                               is_dspark_draft            = false,
+                   DSparkCallPhase                    dspark_graph_phase         = DSparkCallPhase::NONE);
     ~PyWrappedModel();
-
-    // Context parallelism is a model-input policy, not merely a process-group
-    // property. DSpARK's draft model must keep the complete fixed-width query
-    // block on every CP/EP rank because its attention is deliberately
-    // non-causal across all gamma positions. The target model still uses the
-    // ordinary CP split/gather path.
-    static constexpr bool shouldEnablePrefillContextParallel(bool configured, bool bypass) {
-        return configured && !bypass;
-    }
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool            hasMtpTargetHiddenBuffer() const override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
@@ -116,6 +109,7 @@ private:
     const rtp_llm::ExecProperties device_props_;
     const bool                    enable_prefill_cp_;
     const bool                    is_dspark_draft_;
+    const DSparkCallPhase                    dspark_graph_phase_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
@@ -131,6 +125,7 @@ private:
     bool                               enable_cuda_graph_{false};
     bool                               is_prefill_cuda_graph_mode_{false};
     bool                               use_spec_decoding_{false};
+    bool                               has_mtp_hidden_buffer_{false};
     bool                               enable_device_perf_{false};
     bool                               check_nan_{false};
     std::shared_ptr<ModelInputsLogger> model_inputs_logger_;
@@ -157,15 +152,26 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                       bool                               use_spec_decoding,
                                       const std::vector<int>&            kv_cache_layer_to_group,
                                       std::shared_ptr<ModelInputsLogger> model_inputs_logger,
-                                      bool                               is_dspark_draft):
+                                      bool                               is_dspark_draft,
+                                      DSparkCallPhase                    dspark_graph_phase):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
-    enable_prefill_cp_(shouldEnablePrefillContextParallel(device_props_.enable_prefill_cp, is_dspark_draft)),
+    // Every prefill-shaped forward of a CP-enabled model goes through the
+    // standard split/gather path — including the DSpARK draft commit, whose
+    // incremental-prefill geometry CP-splits like any prompt while its
+    // already-rank-local hidden rows pass through untouched. The fixed-width
+    // non-causal propose block never reaches a CP-enabled model: proposals
+    // run only on decode roles, where prefill CP is off (colocated CP is
+    // rejected at executor construction).
+    enable_prefill_cp_(device_props_.enable_prefill_cp),
     is_dspark_draft_(is_dspark_draft),
+    dspark_graph_phase_(dspark_graph_phase),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph),
+    // The ordinary DSpARK wrapper stays eager. Dedicated prefill-graph
+    // wrappers carry an explicit proposal/commit phase and fixed width.
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && (!is_dspark_draft || is_prefill_cuda_graph_mode)),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
@@ -301,28 +307,22 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
+        graph_params.dspark_call_phase            = dspark_graph_phase_;
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.tokens_per_block             = params.tokens_per_block;
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
-        graph_params.hc_mult                      = params.hc_mult;
+        graph_params.input_hidden_size = static_cast<size_t>(params.hidden_size) * static_cast<size_t>(params.hc_mult);
+        if (is_dspark_draft_) {
+            auto width = py_instance.attr("cuda_graph_input_hidden_size")().cast<int64_t>();
+            RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
+            graph_params.input_hidden_size = static_cast<size_t>(width);
+        }
         graph_params.model_data_type              = dtype;
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
         graph_params.kv_cache_group_num           = params.kv_cache_group_num;
-
-        const bool is_dspark_draft = params.sp_config.type == SP_TYPE_DSPARK && params.model_id != 0;
-        graph_params.is_dspark_draft = is_dspark_draft;
-        if (is_dspark_draft) {
-            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_instance, "_dspark_aux_dim"),
-                                    "DeepSeekV4DSparkModel must expose _dspark_aux_dim for CUDA graph capture");
-            graph_params.input_hidden_size = py_instance.attr("_dspark_aux_dim").cast<size_t>();
-            // The target verifies [anchor + gamma] and exports one auxiliary
-            // row for each of those positions; the proposer query itself has
-            // gamma rows. Accepted rows are selected by device-side lengths.
-            graph_params.input_hidden_rows_per_bs = params.sp_config.gen_num_per_cycle + 1;
-        }
 
         if (kv_cache_layer_to_group.size() > 0) {
             graph_params.kv_cache_layer_to_group = kv_cache_layer_to_group;
@@ -336,18 +336,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         // | Model Type                | is_prefill_cuda_graph    | sp_config.type | model_id | num_tokens_per_bs       |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // | Embedding Model (prefill) | true                     | SP_TYPE_NONE   | -        | max_seq_len             |
-        // | Draft Model (prefill)     | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
+        // | DSpARK proposal (prefill) | true                     | DSpARK         | 1        | gen_num_per_cycle       |
+        // | Draft commit (prefill)    | true                     | != SP_TYPE_NONE| 1        | gen_num_per_cycle + 1   |
         // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
         // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | gen_num_per_cycle + 1   |
         // | Draft Model (decode)      | false                    | != SP_TYPE_NONE| 1        | 1 (default)             |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
         // clang-format on
 
-        if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
+        if (is_dspark_draft_ && dspark_graph_phase_ == DSparkCallPhase::PROPOSE) {
+            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
+        } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
-        } else if (is_dspark_draft) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
                    && (!params.model_id || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill
@@ -411,12 +412,29 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
 
     cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
 
+    if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
+        has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();
+    }
+
+    // Speculative prefill CP needs every target rank to retain the complete
+    // rank-local hidden sequence for the following draft prefill. The normal
+    // CP output contains only the selected last-token rows, so reject the
+    // configuration while initializing the target model if that hand-off is
+    // unavailable.
+    if (enable_prefill_cp_ && use_spec_decoding_ && !hasMtpTargetHiddenBuffer()) {
+        throw std::runtime_error(
+            "speculative prefill CP requires the target model to provide a rank-local MTP hidden buffer");
+    }
+
     if (enable_prefill_cp_) {
-        context_parallel_processor_ =
-            ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
-        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");
-    } else if (device_props_.enable_prefill_cp && is_dspark_draft) {
-        RTP_LLM_LOG_INFO("Context parallel input splitting bypassed for fixed-block draft model.");
+        // MTP hidden buffer is a DeepSeek-specific hand-off. It is written after
+        // CP token splitting and already contains rank-local rows, so it must not
+        // be split by the context-parallel processor again.
+        const bool split_hidden_states = !has_mtp_hidden_buffer_;
+        context_parallel_processor_    = ContextParallelProcessorFactory::create(
+            ProcessorType::ZIG_ZAG, params.parallelism_config, split_hidden_states);
+        RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, split_hidden_states=%d.",
+                         static_cast<int>(split_hidden_states));
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");

@@ -43,11 +43,8 @@ const MaskedByteLut& maskedByteLut() {
 
 SpecLogitsVerifyRunner::SpecLogitsVerifyRunner(): copy_stream_(cuda_graph::graphGetStreamFromPool(true)) {}
 
-void SpecLogitsVerifyRunner::ensureBuffersFit(size_t total_streams,
-                                              size_t active_streams,
-                                              int    propose_step,
-                                              size_t vocab_size,
-                                              size_t bitmask_words) {
+void SpecLogitsVerifyRunner::ensureBuffersFit(
+    size_t total_streams, size_t active_streams, int propose_step, size_t vocab_size, size_t bitmask_words) {
     const int64_t B    = static_cast<int64_t>(total_streams);
     const int64_t A    = static_cast<int64_t>(active_streams);
     const int64_t P    = static_cast<int64_t>(propose_step);
@@ -83,8 +80,9 @@ void SpecLogitsVerifyRunner::materializeDraftTokensToCpu(const LaunchTask& task)
     RTP_LLM_CHECK_WITH_INFO(task.draft_tokens.numel() >= B * P && task.draft_tokens.numel() % B == 0,
                             "spec logits runner draft token shape mismatch");
     const int64_t draft_cols = task.draft_tokens.numel() / B;
-    const int64_t draft_offset = draft_cols > P ? 1 : 0;
-    RTP_LLM_CHECK_WITH_INFO(draft_cols >= draft_offset + P, "spec logits runner draft token columns mismatch");
+    RTP_LLM_CHECK_WITH_INFO(draft_cols == P || draft_cols == P + 1,
+                            "spec logits runner requires P proposal columns with an optional leading anchor");
+    const int64_t draft_offset = draft_cols == P + 1 ? 1 : 0;
     auto draft = task.draft_tokens.reshape({B, draft_cols}).narrow(1, draft_offset, P);
     auto dst   = draft_tokens_cpu_.flatten().narrow(0, 0, B * P).view({B, P});
     if (!draft.is_cuda()) {
@@ -225,8 +223,8 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     if (!cpu_slot->cap.defined() || cpu_slot->cap.numel() < cap_elements) {
         cpu_slot->cap = torch::empty({cap_elements}, pinned_i32);
     }
-    auto mask_cpu = cpu_slot->mask.narrow(0, 0, mask_elements)
-                        .view({static_cast<int64_t>(active_rows), static_cast<int64_t>(V)});
+    auto mask_cpu =
+        cpu_slot->mask.narrow(0, 0, mask_elements).view({static_cast<int64_t>(active_rows), static_cast<int64_t>(V)});
     auto cap_cpu = cpu_slot->cap.narrow(0, 0, cap_elements);
 
     unpackMergedBitmaskToVocabMask(mask_cpu, active_rows, V, W);
@@ -235,9 +233,9 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(copy_stream_));
     auto cuda_bool = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
     auto cuda_i32  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    auto mask_gpu  = active_rows == rows
-                         ? torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool)
-                         : torch::zeros({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool);
+    auto                         mask_gpu  = active_rows == rows ?
+                                                 torch::empty({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool) :
+                                                 torch::zeros({static_cast<int64_t>(rows), static_cast<int64_t>(V)}, cuda_bool);
     auto cap_gpu = torch::empty({static_cast<int64_t>(B)}, cuda_i32);
     if (active_rows == rows) {
         mask_gpu.copy_(mask_cpu, /*non_blocking=*/true);

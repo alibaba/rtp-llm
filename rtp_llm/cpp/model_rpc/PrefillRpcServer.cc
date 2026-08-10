@@ -421,7 +421,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
             {context_position_ids.data_ptr<int32_t>(),
              context_position_ids.data_ptr<int32_t>() + context_position_ids.numel()});
     }
-    if (engine_->isMTPEagle()) {
+    if (engine_->isMTPEagle() && !engine_->isDSpark()) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
                                 "mtp remote generate propose token should not be empty");
     }
@@ -430,7 +430,7 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
-    if (sp_output_buffer) {
+    if (sp_output_buffer && !engine_->isDSpark()) {
         auto all_probs_cpu =
             sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
         torch::Tensor hidden_states_cpu;

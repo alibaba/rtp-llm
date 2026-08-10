@@ -200,8 +200,7 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
 
     constexpr bool       deterministic    = true;
     constexpr int        max_sampling_rounds = 32;
-    auto [seed_t, offset_t] =
-        makeSamplingSeedOffsetTensors(
+    auto [seed_t, offset_t]            = makeSamplingSeedOffsetTensors(
             params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
 
     torch::Tensor success_t = success;
@@ -371,26 +370,31 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 }
 
 void rejectionSampling(const RejectionSamplingParams& params) {
-    RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
     RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
     RTP_LLM_CHECK(params.target_probs_d.is_cuda());
 
-    int  batch_size             = params.draft_probs_d.size(0);
-    int  num_speculative_tokens = params.draft_probs_d.size(1);
+    int  batch_size             = params.draft_token_ids_d.size(0);
+    int  num_speculative_tokens = params.draft_token_ids_d.size(1);
     int  target_vocab_size      = params.target_probs_d.size(2);
     int  target_token_stride    = params.target_token_ids_d.size(1);
     auto stream                 = at::cuda::getCurrentCUDAStream().stream();
 
-    RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
     RTP_LLM_CHECK(params.draft_token_ids_d.dim() == 2);
     RTP_LLM_CHECK(params.target_probs_d.dim() == 3);
     RTP_LLM_CHECK(params.draft_token_ids_d.size(0) == batch_size);
     RTP_LLM_CHECK(params.draft_token_ids_d.size(1) == num_speculative_tokens);
     RTP_LLM_CHECK(params.target_probs_d.size(0) == batch_size);
     RTP_LLM_CHECK(params.target_probs_d.size(1) == num_speculative_tokens + 1);
+    if (!params.draft_probs_point_mass) {
+        RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
+        RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
+        RTP_LLM_CHECK(params.draft_probs_d.size(0) == batch_size);
+        RTP_LLM_CHECK(params.draft_probs_d.size(1) == num_speculative_tokens);
     RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+    }
 
-    check_cuda_value(invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
+    check_cuda_value(
+        invokeRejectionSampling(params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>(),
                                              params.draft_token_ids_d.data_ptr<int32_t>(),
                                              params.uniform_samples_d.data_ptr<float>(),
                                              params.target_probs_d.data_ptr<float>(),
@@ -402,7 +406,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                              batch_size,
                                              num_speculative_tokens,
                                              target_vocab_size,
-                                             stream));
+                                stream,
+                                params.draft_probs_point_mass));
 }
 
 void mappingDraft2Target(const MappingDraft2TargetParams& params) {
@@ -510,7 +515,8 @@ hipError_t invokeRejectionSampling(DType*      draft_probs,
                                    int         batch_size,
                                    int         num_speculative_tokens,
                                    int         target_vocab_size,
-                                   hipStream_t stream);
+                                   hipStream_t stream,
+                                   bool        draft_probs_point_mass);
 
 #include <ATen/hip/HIPContext.h>
 #include "rtp_llm/models_py/bindings/rocm/kernels/sampling/sampling.h"
@@ -729,26 +735,31 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 }
 
 void rejectionSampling(const RejectionSamplingParams& params) {
-    RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
     RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
     RTP_LLM_CHECK(params.target_probs_d.is_cuda());
 
-    int  batch_size             = params.draft_probs_d.size(0);
-    int  num_speculative_tokens = params.draft_probs_d.size(1);
+    int  batch_size             = params.draft_token_ids_d.size(0);
+    int  num_speculative_tokens = params.draft_token_ids_d.size(1);
     int  target_vocab_size      = params.target_probs_d.size(2);
     int  target_token_stride    = params.target_token_ids_d.size(1);
     auto stream                 = at::hip::getCurrentHIPStream().stream();
 
-    RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
     RTP_LLM_CHECK(params.draft_token_ids_d.dim() == 2);
     RTP_LLM_CHECK(params.target_probs_d.dim() == 3);
     RTP_LLM_CHECK(params.draft_token_ids_d.size(0) == batch_size);
     RTP_LLM_CHECK(params.draft_token_ids_d.size(1) == num_speculative_tokens);
     RTP_LLM_CHECK(params.target_probs_d.size(0) == batch_size);
     RTP_LLM_CHECK(params.target_probs_d.size(1) == num_speculative_tokens + 1);
+    if (!params.draft_probs_point_mass) {
+        RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
+        RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
+        RTP_LLM_CHECK(params.draft_probs_d.size(0) == batch_size);
+        RTP_LLM_CHECK(params.draft_probs_d.size(1) == num_speculative_tokens);
     RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+    }
 
-    hipError_t err = ::invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
+    hipError_t err =
+        ::invokeRejectionSampling(params.draft_probs_point_mass ? nullptr : params.draft_probs_d.data_ptr<float>(),
                                                params.draft_token_ids_d.data_ptr<int32_t>(),
                                                params.uniform_samples_d.data_ptr<float>(),
                                                params.target_probs_d.data_ptr<float>(),
@@ -760,7 +771,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                                batch_size,
                                                num_speculative_tokens,
                                                target_vocab_size,
-                                               stream);
+                                  stream,
+                                  params.draft_probs_point_mass);
     RTP_LLM_CHECK_WITH_INFO(err == hipSuccess, "invokeRejectionSampling failed: %s", hipGetErrorString(err));
 }
 

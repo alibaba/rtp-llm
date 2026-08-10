@@ -31,6 +31,7 @@ public:
         params.num_tokens_per_bs            = static_cast<int>(max_seq_len);
         params.max_context_batch_size       = static_cast<size_t>(max_context_batch_size);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
+        params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
         params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
@@ -54,6 +55,7 @@ public:
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
         params.num_tokens_per_bs            = 1;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
+        params.input_hidden_size            = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::Half;
         params.max_context_batch_size       = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);

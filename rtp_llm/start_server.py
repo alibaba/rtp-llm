@@ -7,6 +7,7 @@ import time
 import traceback
 
 from rtp_llm.utils.time_util import timer_wrapper
+from rtp_llm.utils.util import str_to_bool
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -643,12 +644,12 @@ def _get_startup_real_warmup_speculative_reserve_step(
     sp_type = getattr(sp_config, "type", SpeculativeType.NONE)
     if sp_type in (None, "", SpeculativeType.NONE):
         return 0
-    reserve_step = int(getattr(sp_config, "gen_num_per_cycle", 0) or 0) + 1
-    # Match NormalEngine's DSpARK reserve: one gamma+1 verify window plus
-    # another gamma+1 window used to seed the next fixed-width draft block.
-    if sp_type == SpeculativeType.DSPARK:
-        reserve_step *= 2
-    return reserve_step
+    gamma = int(getattr(sp_config, "gen_num_per_cycle", 0) or 0)
+    # Match GenerateStream::useStreamAsyncReserveTokens(): one verify window
+    # in synchronous mode, or two in-flight proposal windows when async
+    # bookkeeping is on.
+    stream_async = str_to_bool(os.environ.get("RTP_LLM_STREAM_ASYNC", "0") or "0")
+    return 2 * gamma + 1 if stream_async else gamma + 1
 
 
 def _get_startup_real_warmup_request_token_len(

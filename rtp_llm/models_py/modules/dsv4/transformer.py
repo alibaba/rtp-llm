@@ -247,7 +247,6 @@ class V4Transformer(nn.Module):
         # with 0-based layer ids (V4-Flash uses 40/41/42); the empty tuple is
         # the no-auxiliary-tensor default for ordinary inference and MTP.
         self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
-        self._aux_hidden_states: Optional[torch.Tensor] = None
 
     def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
         """Configure target residual-stream layers exported to DSpARK.
@@ -274,64 +273,56 @@ class V4Transformer(nn.Module):
             )
         self.capture_aux_hidden_layer_ids = capture_ids
 
-    def begin_aux_hidden_capture(self) -> Optional[Dict[int, torch.Tensor]]:
-        """Clear the prior output and create per-forward capture storage."""
-        self._aux_hidden_states = None
-        if not self.capture_aux_hidden_layer_ids:
-            return None
-        return {}
+    def capture_aux_hidden(self, layer_id: int, hidden: torch.Tensor) -> None:
+        """Write one selected layer's mean-pooled hidden into the shared
+        runtime buffer.
 
-    def capture_aux_hidden(
-        self,
-        captured: Optional[Dict[int, torch.Tensor]],
-        layer_id: int,
-        hidden: torch.Tensor,
-    ) -> None:
-        if captured is not None and layer_id in self.capture_aux_hidden_layer_ids:
-            # hidden is [T, hc, H] in prefill and [B, S, hc, H] in decode.
-            # Keep the token layout untouched; in CP prefill it intentionally
-            # remains rank-local zigzag order here. PyWrappedModel restores
-            # this output to global token order before the executor feeds it
-            # to the draft; the draft's CP input processor then applies the
-            # same zigzag split as it does for combo_tokens.
-            captured[layer_id] = hidden.mean(dim=-2)
-
-    def finish_aux_hidden_capture(
-        self, captured: Optional[Dict[int, torch.Tensor]]
-    ) -> Optional[torch.Tensor]:
-        """Publish ``[..., selected_layers, hidden]`` for PyModelOutputs."""
-        if captured is None:
-            self._aux_hidden_states = None
-            return None
-        missing_ids = [
-            layer_id
-            for layer_id in self.capture_aux_hidden_layer_ids
-            if layer_id not in captured
-        ]
-        if missing_ids:
-            raise RuntimeError(
-                "DSpARK auxiliary hidden capture missed configured layers: "
-                f"missing={missing_ids}, configured={self.capture_aux_hidden_layer_ids}"
-            )
-        self._aux_hidden_states = torch.stack(
-            [captured[layer_id] for layer_id in self.capture_aux_hidden_layer_ids],
-            dim=-2,
-        )
-        return self._aux_hidden_states
-
-    def take_aux_hidden_states(self) -> Optional[torch.Tensor]:
-        """Transfer the most recent DSpARK capture to the model output.
-
-        The prefill CP restore can temporarily need an output-sized buffer in
-        addition to the rank-local capture.  Keeping this module attribute
-        alive after publishing the output pins the rank-local storage for the
-        rest of the C++ post-processing path, which is several GiB at long
-        context lengths.  Clear the persistent owner while returning the same
-        tensor to the caller.
+        In DSpARK mode the buffer rows are ``[T, len(capture_ids)*dim]``;
+        the segment index is the layer's position in
+        ``capture_aux_hidden_layer_ids`` (capture order follows the
+        configured ids, not model traversal order). ``hidden`` is
+        ``[T, hc, H]`` in prefill and ``[B, S, hc, H]`` in decode/verify; the
+        mHC lane is mean-reduced and token rows are flattened. The ``copy_``
+        into the fixed-address registered buffer keeps the write inside a
+        captured CUDA graph, mirroring ``_write_mtp_hidden_buffer``. In CP
+        prefill the rows intentionally stay rank-local zigzag order — the
+        same semantics as the MTP pre-hc rows in this buffer.
         """
-        aux_hidden_states = self._aux_hidden_states
-        self._aux_hidden_states = None
-        return aux_hidden_states
+        try:
+            segment = self.capture_aux_hidden_layer_ids.index(layer_id)
+        except ValueError:
+            return
+        buf = self._mtp_hidden_buffer
+        assert buf is not None, (
+            "DSpARK aux capture requires the shared MTP hidden buffer; "
+            "the target model must request it before binding runtime buffers"
+        )
+        pooled = hidden.mean(dim=-2)
+        flat = pooled.reshape(-1, pooled.size(-1))
+        rows, dim = flat.shape
+        assert (segment + 1) * dim <= buf.size(1), (
+            f"aux segment overflow: segment={segment} dim={dim} "
+            f"row_width={buf.size(1)}"
+        )
+        assert rows <= buf.size(
+            0
+        ), f"_mtp_hidden_buffer overflow: T={rows} > cap={buf.size(0)}"
+        buf[:rows, segment * dim : (segment + 1) * dim].copy_(flat)
+
+    def _note_aux_hidden_rows(self, rows: int, is_cuda_graph: bool) -> None:
+        """Row accounting for the per-layer aux writes of one forward.
+
+        Same contract as ``_write_mtp_hidden_buffer``: the Python-side valid
+        count is only advanced outside CUDA graph capture/replay; graphed
+        readers pass an explicit row count instead.
+        """
+        assert self._mtp_hidden_buffer is not None
+        assert rows <= self._mtp_hidden_buffer.size(0), (
+            f"_mtp_hidden_buffer overflow: T={rows} > "
+            f"cap={self._mtp_hidden_buffer.size(0)}"
+        )
+        if not is_cuda_graph:
+            self._mtp_hidden_valid_tokens = int(rows)
 
     def _bind_runtime_buffers(
         self,

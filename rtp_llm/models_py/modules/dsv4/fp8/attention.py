@@ -13,9 +13,10 @@ slow but correct. M6 will swap in FlashMLA sparse impl.
 """
 
 import json
+import logging
 import os
 import threading
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 # P3 (audit §3.5 / §7.4 P0): wo_a batched output projection.
@@ -316,6 +317,35 @@ def _build_suffix_cp_sliced_slot_mapping(
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
 
 _DSV4_FP8_KV_ENTRY_BYTES = 584
+
+# Call sites whose first byte-sliced (CP-RR) SWA cache write has been logged.
+_SWA_CP_RR_LOGGED_SITES: set = set()
+
+# Sentinel for bind_attn_cache: leave the corresponding attribute untouched.
+BIND_KEEP = object()
+
+
+@contextmanager
+def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_KEEP):
+    """Temporarily bind a kv-cache / block-table (and optionally a CP context)
+    view onto ``attn``, restoring the previous binding on exit.  ``None`` for
+    the cache/table arguments keeps the current binding; pass ``cp_ctx`` only
+    when it should be replaced."""
+    prev_kv = attn._kv_cache
+    prev_bt = attn._block_tables_by_type
+    prev_cp = attn._cp_ctx
+    if kv_cache is not None:
+        attn._kv_cache = kv_cache
+    if block_tables_by_type is not None:
+        attn._block_tables_by_type = block_tables_by_type
+    if cp_ctx is not BIND_KEEP:
+        attn._cp_ctx = cp_ctx
+    try:
+        yield attn
+    finally:
+        attn._kv_cache = prev_kv
+        attn._block_tables_by_type = prev_bt
+        attn._cp_ctx = prev_cp
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
@@ -1315,6 +1345,19 @@ class AttentionFP8(nn.Module):
             return None
         raw = self._pool_raw_u8(SWA_KV)
         assert raw is not None, "byte-sliced FP8 SWA pool unavailable"
+        # One INFO per call site so smoke logs positively confirm which paths
+        # engaged the CP-RR (byte-sliced) SWA cache layout.
+        if validation_site not in _SWA_CP_RR_LOGGED_SITES:
+            _SWA_CP_RR_LOGGED_SITES.add(validation_site)
+            cp_ctx = getattr(self, "_cp_ctx", None)
+            logging.info(
+                "[dsv4-cp-rr] byte-sliced SWA cache path engaged at %s "
+                "(cp_size=%s, cp_rank=%s, entries_per_block=%d)",
+                validation_site,
+                getattr(cp_ctx, "cp_size", None),
+                getattr(cp_ctx, "cp_rank", None),
+                int(full_entries_per_block),
+            )
         return build_cp_byte_sliced_slot_compaction(
             slot_mapping,
             full_entries_per_block=full_entries_per_block,
@@ -2029,21 +2072,12 @@ class AttentionFP8(nn.Module):
         come from ``attn_metadata.pool_block_tables`` — stashed onto
         ``self._block_tables_by_type`` here so Compressor / Indexer pool
         context resolution shares one code path with prefill."""
-        prev_kv = self._kv_cache
-        prev_bt = self._block_tables_by_type
-        if kv_cache is not None:
-            self._kv_cache = kv_cache
-        if attn_metadata.pool_block_tables is not None:
-            self._block_tables_by_type = attn_metadata.pool_block_tables
-        try:
+        with bind_attn_cache(self, kv_cache, attn_metadata.pool_block_tables):
             self._set_compressor_pool_context()
             try:
                 return self._forward_decode_body(x, attn_metadata)
             finally:
                 self._clear_compressor_pool_context()
-        finally:
-            self._kv_cache = prev_kv
-            self._block_tables_by_type = prev_bt
 
     def _forward_decode_body(
         self,

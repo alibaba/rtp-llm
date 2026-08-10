@@ -119,6 +119,10 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
     return result.cast<torch::Tensor>();
 }
 
+bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
+    return has_mtp_hidden_buffer_;
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -469,12 +473,6 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_store_async_writer_.get(),
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
-        if (inputs.cache_store_input_lengths.defined()) {
-            cache_store_inputs.store_input_lengths = async_to_pinned_host(inputs.cache_store_input_lengths);
-        }
-        if (inputs.cache_store_prefix_lengths.defined()) {
-            cache_store_inputs.store_prefix_lengths = async_to_pinned_host(inputs.cache_store_prefix_lengths);
-        }
         params = cache_store_inputs;
     }
     return params;
@@ -523,10 +521,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        PyModelInputs py_model_inputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs};
-        py_model_inputs.dspark_ctx_lengths = micro_inputs.dspark_ctx_lengths;
-        py_model_inputs.dspark_ctx_starts  = micro_inputs.dspark_ctx_starts;
-        input_list.emplace_back(std::move(py_model_inputs));
+        input_list.emplace_back(PyModelInputs{token_ids, input_hiddens, py_attn_inputs, bert_embedding_inputs});
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -585,28 +580,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    auto merge_optional_output = [&py_model_outputs](torch::Tensor PyModelOutputs::*field,
-                                                     const char*                    field_name) -> torch::Tensor {
-        if (!(py_model_outputs[0].*field).defined()) {
-            return torch::Tensor();
-        }
-        if (py_model_outputs.size() == 1) {
-            return (py_model_outputs[0].*field);
-        }
-        std::vector<torch::Tensor> parts;
-        parts.reserve(py_model_outputs.size());
-        for (auto& output : py_model_outputs) {
-            RTP_LLM_CHECK_WITH_INFO((output.*field).defined(), "%s must be set on every micro batch", field_name);
-            parts.emplace_back(output.*field);
-        }
-        return torch::cat(parts, 0);
-    };
-
-    auto outputs              = callForwardPostLayers(hidden_states, inputs, false);
-    outputs.aux_hidden_states = merge_optional_output(&PyModelOutputs::aux_hidden_states, "aux_hidden_states");
-    outputs.draft_tokens      = merge_optional_output(&PyModelOutputs::draft_tokens, "draft_tokens");
-    outputs.draft_probs       = merge_optional_output(&PyModelOutputs::draft_probs, "draft_probs");
-    return outputs;
+    return callForwardPostLayers(hidden_states, inputs, false);
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
@@ -660,7 +634,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
 
     graph_state_         = CudaGraphState();
     auto empty_tensor    = torch::Tensor();
-    auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+    auto py_model_inputs =
+        PyModelInputs(empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{}, inputs.dspark_call_phase);
 
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
@@ -696,7 +671,8 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     // via the focused graph_runner hook (no replay of unrelated D2D copies).
     if (enable_cuda_graph_) {
         auto empty_tensor    = torch::Tensor();
-        auto py_model_inputs = PyModelInputs({empty_tensor, empty_tensor, attention_inputs_, empty_tensor});
+        auto py_model_inputs = PyModelInputs(
+            empty_tensor, empty_tensor, attention_inputs_, BertEmbeddingInputs{}, inputs.dspark_call_phase);
         if (graph_runner_->canRun(py_model_inputs, graph_state_)) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
@@ -761,9 +737,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // and combo_tokens above used direct .to(non_blocking=true). Both are async on
         // the current stream and will be ordered correctly with the kernels below.
 
-        auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
-        py_model_inputs.dspark_ctx_lengths = inputs.dspark_ctx_lengths;
-        py_model_inputs.dspark_ctx_starts  = inputs.dspark_ctx_starts;
+        auto py_model_inputs =
+            PyModelInputs(token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs, inputs.dspark_call_phase);
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -793,11 +768,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
-        // The cloned tensor is the only hidden-state owner needed below. Drop
-        // the Python output's rank-local tensor before CP post-processing so a
-        // long-context gather/restore can reuse that storage.
-        py_model_outputs.hidden_states = torch::Tensor();
-
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
         }
@@ -812,10 +782,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        auto       attach_dspark_outputs = [&py_model_outputs](GptModelOutputs outputs) {
-            outputs.aux_hidden_states = py_model_outputs.aux_hidden_states;
+        auto       attach_draft_outputs = [&py_model_outputs](GptModelOutputs outputs) {
             outputs.draft_tokens      = py_model_outputs.draft_tokens;
-            outputs.draft_probs       = py_model_outputs.draft_probs;
             return outputs;
         };
         if (is_dspark_draft_) {
@@ -826,50 +794,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return attach_dspark_outputs(std::move(outputs));
+            return attach_draft_outputs(std::move(outputs));
         }
         if (enable_prefill_cp_ && has_context_request) {
-            // When no consumer needs the full sequence hidden, gather only the
-            // last-token rows lm_head needs instead of all-gathering+restoring the
-            // full [seq, hidden] (the 14 GiB block at the 1M-prefill OOM). The
-            // gather is a small [num_lm, hidden] all-reduce-sum; see
-            // ZigZagProcessor::handleOutputsLastHidden.
-            const bool need_full_hidden = inputs.need_all_logits || inputs.need_all_hidden_states;
-            size_t     num_valid_tokens = 0;
-            if (!need_full_hidden) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-            } else {
-                num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            }
-            if (py_model_outputs.aux_hidden_states.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(py_model_outputs.aux_hidden_states.dim() == 3,
-                                        "DSpARK aux_hidden_states must be [token, layers, hidden], got dim=%d",
-                                        static_cast<int>(py_model_outputs.aux_hidden_states.dim()));
-                const auto capture_layers = py_model_outputs.aux_hidden_states.size(1);
-                const auto hidden_size    = py_model_outputs.aux_hidden_states.size(2);
-                auto       aux_flat       = py_model_outputs.aux_hidden_states.reshape(
-                    {py_model_outputs.aux_hidden_states.size(0), capture_layers * hidden_size});
-                // The Python model transferred its persistent capture owner to
-                // this output. Drop that final field owner before handleOutputs
-                // takes and replaces aux_flat, allowing the rank-local capture
-                // storage to be reclaimed during the CP restore.
-                py_model_outputs.aux_hidden_states = torch::Tensor();
-                const auto aux_valid_tokens = context_parallel_processor_->handleOutputs(aux_flat, inputs, cp_params);
-                if (need_full_hidden) {
-                    RTP_LLM_CHECK_WITH_INFO(aux_valid_tokens == num_valid_tokens,
-                                            "DSpARK aux CP token count mismatch: %zu vs %zu",
-                                            aux_valid_tokens,
-                                            num_valid_tokens);
-                }
-                py_model_outputs.aux_hidden_states =
-                    aux_flat.reshape({(int64_t)aux_valid_tokens, capture_layers, hidden_size});
-            }
-            if (!need_full_hidden) {
-                return attach_dspark_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
-            }
-            return attach_dspark_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
+            return attach_draft_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
         }
-        return attach_dspark_outputs(callForwardPostLayers(hidden_states, inputs, true));
+        return attach_draft_outputs(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -1246,14 +1177,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
-                micro_model_inputs.dspark_ctx_lengths =
-                    inputs.dspark_ctx_lengths.defined() ?
-                        inputs.dspark_ctx_lengths.narrow(0, sliced_batch_idx, total_batch_size) :
-                        torch::Tensor();
-                micro_model_inputs.dspark_ctx_starts =
-                    inputs.dspark_ctx_starts.defined() ?
-                        inputs.dspark_ctx_starts.narrow(0, sliced_batch_idx, total_batch_size) :
-                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -1290,14 +1213,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
-                micro_model_inputs.dspark_ctx_lengths =
-                    inputs.dspark_ctx_lengths.defined() ?
-                        inputs.dspark_ctx_lengths.narrow(0, sliced_batch_idx, d_micro_batch_size) :
-                        torch::Tensor();
-                micro_model_inputs.dspark_ctx_starts =
-                    inputs.dspark_ctx_starts.defined() ?
-                        inputs.dspark_ctx_starts.narrow(0, sliced_batch_idx, d_micro_batch_size) :
-                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
 
@@ -1343,14 +1258,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
-                micro_model_inputs.dspark_ctx_lengths =
-                    inputs.dspark_ctx_lengths.defined() ?
-                        inputs.dspark_ctx_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size) :
-                        torch::Tensor();
-                micro_model_inputs.dspark_ctx_starts =
-                    inputs.dspark_ctx_starts.defined() ?
-                        inputs.dspark_ctx_starts.narrow(0, sliced_batch_idx, p_micro_batch_size) :
-                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -1380,8 +1287,6 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.combo_tokens_type_ids);
 
     buffer_holder_.hold_host(inputs.last_hidden_states);
-    buffer_holder_.hold_host(inputs.dspark_ctx_lengths);
-    buffer_holder_.hold_host(inputs.dspark_ctx_starts);
 
     buffer_holder_.hold_host(inputs.attention_mask);
     buffer_holder_.hold_host(inputs.kv_cache_block_id);

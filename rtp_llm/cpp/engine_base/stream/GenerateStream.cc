@@ -760,13 +760,12 @@ size_t GenerateStream::curBlocksNum() const {
 }
 
 size_t GenerateStream::maxTokenNum() const {
-    auto reserve_tokens = reserveStep();
+    size_t reserve_tokens = 0;
     if (sp_output_buffer_) {
-        auto sp_reserve_tokens = static_cast<size_t>(sp_output_buffer_->propose_step);
+        reserve_tokens = static_cast<size_t>(sp_output_buffer_->propose_step);
         if (useStreamAsyncReserveTokens()) {
-            sp_reserve_tokens = sp_reserve_tokens * 2 + 1;
+            reserve_tokens = reserve_tokens * 2 + 1;
         }
-        reserve_tokens = std::max(reserve_tokens, sp_reserve_tokens);
     }
 
     const auto max_token_num_by_seq_len  = max_seq_len_ > reserve_tokens ? max_seq_len_ - reserve_tokens : 0;
@@ -904,27 +903,17 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
-    if (update_info.draft_tokens_cpu.defined()) {
-        const auto& proposal = update_info.draft_tokens_cpu;
-        RTP_LLM_CHECK_WITH_INFO(proposal.device().is_cpu() && proposal.scalar_type() == torch::kInt32,
-                                "full speculative proposal must be CPU int32");
-        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= proposal.numel() + 1,
-                                "speculative token buffer has %ld slots but full proposal needs %ld",
-                                sp_output_buffer_->tokens.numel(),
-                                proposal.numel() + 1);
-        std::copy(proposal.data_ptr<int32_t>(),
-                  proposal.data_ptr<int32_t>() + proposal.numel(),
-                  spec_tokens + 1);
-        propose_token_.resize(1 + proposal.numel());
-        propose_token_[0] = target_last_token;
-        std::copy(proposal.data_ptr<int32_t>(),
-                  proposal.data_ptr<int32_t>() + proposal.numel(),
-                  propose_token_.begin() + 1);
-    } else {
+    if (update_info.draft_token >= 0) {
         RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
                                 "speculative token buffer must contain target and draft slots");
         spec_tokens[1]  = update_info.draft_token;
         propose_token_ = {target_last_token, update_info.draft_token};
+    } else {
+        // Commit-only speculative steps (DSpARK prefill/decode tail) publish
+        // only accepted target tokens. Their next proposal is produced at the
+        // following decode round head and must not become persistent stream
+        // or PD side-channel state.
+        propose_token_.clear();
     }
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
@@ -1215,7 +1204,8 @@ void GenerateStream::reportStreamMetrics() {
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
             collector.reuse_length           = initial_reuse_length_;
             collector.input_token_length     = inputLength();
-            collector.effective_context_length = std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
+            collector.effective_context_length =
+                std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();

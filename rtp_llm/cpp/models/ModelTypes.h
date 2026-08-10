@@ -56,7 +56,8 @@ struct GptModelInitParams {
     // DSv4 head-channel residual multiplier. Default 1 (no expansion).
     // When >1, the model's pre-output residual ([T, hc_mult*hidden_size])
     // is the contract between target and draft for MTP — see
-    // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
+    // makeFakeSPOutputBuffer (MtpExecutor.cc) and CudaGraphRunner
+    // input_hiddens.
     int64_t hc_mult = 1;
 };
 
@@ -89,10 +90,6 @@ enum GptModelInputIndex : size_t {
     // last_hidden_states can have a different row count from combo_tokens for
     // DSpARK prefill seeding, so transmit its leading dimension explicitly.
     mtpHiddenStatesRows,
-    dsparkCtxLengths,
-    dsparkCtxStarts,
-    cacheStoreInputLengths,
-    cacheStorePrefixLengths,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
@@ -109,19 +106,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitSequenceLengths  = 1u << 2,
     kDeviceBitPrefixLengths    = 1u << 3,
     kDeviceBitLmOutputIndexes  = 1u << 4,
-    kDeviceBitDsparkCtxLengths = 1u << 5,
-    kDeviceBitDsparkCtxStarts  = 1u << 6,
-    kDeviceBitCacheStoreInputLengths  = 1u << 7,
-    kDeviceBitCacheStorePrefixLengths = 1u << 8,
 };
 
-struct CacheStoreTensorSyncMetadata {
-    int64_t  input_lengths_count  = 0;
-    int64_t  prefix_lengths_count = 0;
-    uint32_t device_bits          = 0;
-};
-
-CacheStoreTensorSyncMetadata getCacheStoreTensorSyncMetadata(const GptModelInputs& inputs);
 GptModelInputShapeHints       getModelInputShapeHints(const GptModelInputs& inputs);
 torch::Tensor                 makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
 std::array<int64_t, 2>        decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
@@ -157,14 +143,26 @@ public:
 
     // Optional spec-decode hand-off: target model exposes the pre-output-projection
     // residual buffer (DSv4: pre-``hc_head`` ``[T, hc*D]``) so MtpExecutor can
-    // swap it into ``last_hidden_states`` before each draft forward instead of
-    // the post-reduce ``[T, D]``. Default returns an empty Tensor (model has no
-    // such buffer); ``PyWrappedModel`` overrides to call the Python accessor.
+    // normalize it into ``GptModelOutputs::all_hidden_states`` instead of the
+    // post-reduce ``[T, D]``. Default returns an empty Tensor (model has no such
+    // buffer); ``PyWrappedModel`` overrides to call the Python accessor.
     //
     // The producer writes the buffer in verify (req-major) layout
     // ``[r0_v0, r0_v1, …, r0_v_ps, r1_v0, …]``: each request occupies
+    // ``propose_step + 1`` consecutive rows. ``num_tokens >= 0`` returns that
+    // many leading rows; ``num_tokens < 0`` asks the producer for its last
+    // written row count (CP prefill keeps rank-local rows in the buffer, so
+    // the count cannot be derived from the global token count).
     virtual torch::Tensor getMtpTargetHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
+    }
+
+    // Capability query used while initializing a speculative target model.
+    // Prefill CP cannot recover the full target hidden sequence from its
+    // last-hidden output, so initialization must know whether this rank-local
+    // hand-off exists before admitting CPRR execution.
+    virtual bool hasMtpTargetHiddenBuffer() const {
+        return false;
     }
 
     // Optional CP-prefill companion: expose one final pre-hc row per request

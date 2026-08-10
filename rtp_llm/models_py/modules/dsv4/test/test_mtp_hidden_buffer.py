@@ -99,6 +99,15 @@ class MtpHiddenBufferTest(unittest.TestCase):
         sliced = DeepSeekV4Model.get_mtp_last_hidden_states(model, 1)
         self.assertTrue(torch.equal(flat[:1], sliced))
 
+    def test_target_hidden_buffer_capability_follows_bound_storage(self) -> None:
+        v4 = types.SimpleNamespace(_mtp_hidden_buffer=None)
+        model = types.SimpleNamespace(v4=v4)
+
+        self.assertFalse(DeepSeekV4Model.has_mtp_hidden_buffer(model))
+
+        v4._mtp_hidden_buffer = torch.empty(1, 3, dtype=torch.bfloat16)
+        self.assertTrue(DeepSeekV4Model.has_mtp_hidden_buffer(model))
+
     def test_shared_store_bind_without_mtp_returns_none(self) -> None:
         store = self._make_store()
         module = _RuntimeModule()

@@ -48,7 +48,6 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_0,
     identity,
-    sp_id,
     stack_,
     stack_moe_w1,
     yarn_get_mscale,
@@ -688,6 +687,58 @@ class DeepSeekV4(DeepSeekV2):
         return DeepSeekV4Weight
 
 
+def _v4_draft_shared_weights(hidden_size: int, head_stage: int) -> List[WeightModule]:
+    """Weight entries every V4 draft (MTP, DSpARK) declares identically:
+    the target-vocab embedding/lm_head pair plus the ``mtp.{head_stage}``
+    final-norm / hyper-connection head stack."""
+    return [
+        AtomicWeight(
+            W.embedding,
+            [CkptWeightInfo("embed.weight", identity)],
+            identity,
+        ),
+        # Drafts load alongside the main model in the same process; keep the
+        # lm_head copy in bf16 to halve the per-process footprint (the FP32
+        # cast happens lazily on the rare standalone test path). Production
+        # routes or aliases the framework lm_head onto the target's tensor —
+        # for alias-declared names the loader skips materializing this copy.
+        AtomicWeight(
+            W.lm_head,
+            [CkptWeightInfo("head.weight", identity)],
+            identity,
+            data_type=torch.bfloat16,
+        ),
+        AtomicWeight(
+            W.final_ln_gamma,
+            [CkptWeightInfo(f"mtp.{head_stage}.norm.weight", identity)],
+            identity,
+        ),
+        AtomicWeight(
+            W.final_ln_beta,
+            [],
+            functools.partial(zeros, shape=[hidden_size]),
+        ),
+        AtomicWeight(
+            W.v4_hc_head_base,
+            [CkptWeightInfo(f"mtp.{head_stage}.hc_head_base", identity)],
+            identity,
+            data_type=torch.float32,
+        ),
+        AtomicWeight(
+            W.v4_hc_head_fn,
+            [CkptWeightInfo(f"mtp.{head_stage}.hc_head_fn", identity)],
+            identity,
+            data_type=torch.float32,
+        ),
+        AtomicWeight(
+            W.v4_hc_head_scale,
+            [CkptWeightInfo(f"mtp.{head_stage}.hc_head_scale", identity)],
+            identity,
+            data_type=torch.float32,
+        ),
+    ]
+
+
 class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
     """MTP draft weight loader for the V4 `mtp.{i}.*` checkpoint layout."""
 
@@ -714,51 +765,7 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
             self._get_hf_layer_weight_info(layer_id)
             for layer_id in range(self._num_layers)
         ]
-        weights: List[WeightModule] = [
-            AtomicWeight(
-                W.embedding,
-                [CkptWeightInfo("embed.weight", identity)],
-                identity,
-            ),
-            AtomicWeight(
-                W.final_ln_gamma,
-                [CkptWeightInfo("mtp.0.norm.weight", identity)],
-                identity,
-            ),
-            AtomicWeight(
-                W.final_ln_beta,
-                [],
-                functools.partial(zeros, shape=[self._hidden_size]),
-            ),
-            AtomicWeight(
-                W.lm_head,
-                [CkptWeightInfo("head.weight", identity)],
-                identity,
-                # MTP loads alongside the main model in the same process;
-                # keep its lm_head copy in bf16 to halve the per-process
-                # memory footprint (the FP32 cast happens lazily on the
-                # rare standalone test path).  Production routes the
-                # framework lm_head through the main model's tensor.
-                data_type=torch.bfloat16,
-            ),
-            AtomicWeight(
-                W.v4_hc_head_base,
-                [CkptWeightInfo("mtp.0.hc_head_base", identity)],
-                identity,
-                data_type=torch.float32,
-            ),
-            AtomicWeight(
-                W.v4_hc_head_fn,
-                [CkptWeightInfo("mtp.0.hc_head_fn", identity)],
-                identity,
-                data_type=torch.float32,
-            ),
-            AtomicWeight(
-                W.v4_hc_head_scale,
-                [CkptWeightInfo("mtp.0.hc_head_scale", identity)],
-                identity,
-                data_type=torch.float32,
-            ),
+        weights: List[WeightModule] = _v4_draft_shared_weights(self._hidden_size, 0) + [
             AtomicWeight(
                 W.v4_mtp_enorm,
                 [CkptWeightInfo("mtp.0.enorm.weight", identity)],
@@ -826,13 +833,6 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         return DeepSeekV4MtpWeight
 
 
-class DSparkReplicatedLmHeadWeight(AtomicWeight):
-    """Keep DSpARK's in-model sampling head complete on every CP rank."""
-
-    def _get_split_func(self):
-        return sp_id
-
-
 class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
     """Three-stage DSpARK draft weights stored under ``mtp.{i}``."""
 
@@ -850,46 +850,9 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
             for layer_id in range(self._num_layers)
         ]
         last_stage = self._num_layers - 1
-        weights: List[WeightModule] = [
-            AtomicWeight(
-                W.embedding,
-                [CkptWeightInfo("embed.weight", identity)],
-                identity,
-            ),
-            DSparkReplicatedLmHeadWeight(
-                W.lm_head,
-                [CkptWeightInfo("head.weight", identity)],
-                identity,
-                data_type=torch.bfloat16,
-            ),
-            AtomicWeight(
-                W.final_ln_gamma,
-                [CkptWeightInfo(f"mtp.{last_stage}.norm.weight", identity)],
-                identity,
-            ),
-            AtomicWeight(
-                W.final_ln_beta,
-                [],
-                functools.partial(zeros, shape=[self._hidden_size]),
-            ),
-            AtomicWeight(
-                W.v4_hc_head_base,
-                [CkptWeightInfo(f"mtp.{last_stage}.hc_head_base", identity)],
-                identity,
-                data_type=torch.float32,
-            ),
-            AtomicWeight(
-                W.v4_hc_head_fn,
-                [CkptWeightInfo(f"mtp.{last_stage}.hc_head_fn", identity)],
-                identity,
-                data_type=torch.float32,
-            ),
-            AtomicWeight(
-                W.v4_hc_head_scale,
-                [CkptWeightInfo(f"mtp.{last_stage}.hc_head_scale", identity)],
-                identity,
-                data_type=torch.float32,
-            ),
+        weights: List[WeightModule] = _v4_draft_shared_weights(
+            self._hidden_size, last_stage
+        ) + [
             AtomicWeight(
                 W.v4_dspark_main_norm,
                 [CkptWeightInfo("mtp.0.main_norm.weight", identity)],
@@ -926,6 +889,37 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
 
 class DeepSeekV4DSpark(DeepSeekV4):
     """Runtime-fixed-width DeepSeek-V4 DSpARK proposal model."""
+
+    @classmethod
+    def speculative_weight_alias_names(cls, target_model, draft_model_config):
+        """Borrow the two full-vocabulary matrices from the target owner."""
+        if not isinstance(target_model, DeepSeekV4) or isinstance(
+            target_model, DeepSeekV4DSpark
+        ):
+            raise TypeError("DeepSeek-V4 DSpark requires a DeepSeek-V4 target owner")
+        target_config = target_model.model_config
+        compatible_fields = (
+            "vocab_size",
+            "hidden_size",
+            "data_type",
+            "enable_fp32_lm_head",
+        )
+        mismatches = [
+            name
+            for name in compatible_fields
+            if getattr(target_config, name) != getattr(draft_model_config, name)
+        ]
+        if mismatches:
+            details = ", ".join(
+                f"{name}={getattr(target_config, name)!r}/"
+                f"{getattr(draft_model_config, name)!r}"
+                for name in mismatches
+            )
+            raise ValueError(
+                "DeepSeek-V4 DSpark cannot alias semantically incompatible "
+                f"target weights: {details}"
+            )
+        return (W.embedding, W.lm_head)
 
     @classmethod
     def _create_config(cls, ckpt_path: str):

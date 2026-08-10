@@ -7,7 +7,6 @@
 #include <torch/version.h>
 
 #include <string>
-#include <utility>
 
 namespace rtp_llm {
 
@@ -23,11 +22,9 @@ public:
         decoder_layer_hidden_states_ = hidden_states;
     };
 
-    void setOptionalOutputs(at::Tensor aux_hidden_states, at::Tensor draft_tokens, at::Tensor draft_probs) {
-        aux_hidden_states_ = std::move(aux_hidden_states);
-        draft_tokens_      = std::move(draft_tokens);
-        draft_probs_       = std::move(draft_probs);
-    }
+    void setDraftTokens(at::Tensor draft_tokens) {
+        draft_tokens_ = draft_tokens;
+    };
 
     CaptureMemoryHold() {}
 
@@ -46,11 +43,10 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
         py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                = inputs.input_ids;
+        py_model_inputs_.dspark_call_phase                        = inputs.dspark_call_phase;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
-        py_model_inputs_.dspark_ctx_lengths                       = inputs.dspark_ctx_lengths;
-        py_model_inputs_.dspark_ctx_starts                        = inputs.dspark_ctx_starts;
         py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;
         py_model_inputs_.attention_inputs.cu_seqlens_host         = inputs.attention_inputs.cu_seqlens_host;
         py_model_inputs_.attention_inputs.cu_kv_seqlens           = inputs.attention_inputs.cu_kv_seqlens;
@@ -71,9 +67,7 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
-    at::Tensor               aux_hidden_states_;
     at::Tensor               draft_tokens_;
-    at::Tensor               draft_probs_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

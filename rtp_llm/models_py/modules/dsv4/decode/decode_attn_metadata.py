@@ -542,7 +542,7 @@ def update_decode_metadata_in_place(
             INDEXER_KV,
             SWA_KV,
         )
-        from rtp_llm.models_py.modules.dsv4.decode.pool_slot_mapping import (
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
             compute_kv_pool_slot_mapping,
         )
 
@@ -573,7 +573,9 @@ def update_decode_metadata_in_place(
             mapped = compute_kv_pool_slot_mapping(
                 meta.pool_block_tables[SWA_KV][:bs],
                 abs_pos_swa,
-                E,
+                pool_entries_per_block=E,
+                pool_tokens_per_block=E,
+                ring_entries=E,
             )
             slot[: bs * q_len].copy_(mapped)
 
@@ -611,7 +613,9 @@ def update_decode_metadata_in_place(
                 mapped = compute_kv_pool_slot_mapping(
                     meta.pool_block_tables[at][:bs],
                     cmp_idx_with_skip,
-                    E,
+                    pool_entries_per_block=E,
+                    pool_tokens_per_block=E,
+                    ring_entries=E,
                 )
                 meta.pool_write_slot_mappings[at][: bs * q_len].copy_(mapped)
 
@@ -787,7 +791,7 @@ def build_decode_metadata(
             INDEXER_KV,
             SWA_KV,
         )
-        from rtp_llm.models_py.modules.dsv4.decode.pool_slot_mapping import (
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.pool_slot_mapping import (
             compute_kv_pool_slot_mapping,
         )
 
@@ -805,7 +809,9 @@ def build_decode_metadata(
             pool_write_slot_mappings[SWA_KV] = compute_kv_pool_slot_mapping(
                 pool_block_tables[SWA_KV],
                 abs_pos_swa,
-                E,
+                pool_entries_per_block=E,
+                pool_tokens_per_block=E,
+                ring_entries=E,
             )
 
         for ratio_key, attn_type_writers in (
@@ -833,7 +839,9 @@ def build_decode_metadata(
                 pool_write_slot_mappings[at] = compute_kv_pool_slot_mapping(
                     pool_block_tables[at],
                     cmp_idx_with_skip,
-                    E,
+                    pool_entries_per_block=E,
+                    pool_tokens_per_block=E,
+                    ring_entries=E,
                 )
 
     # Phase 2B-2a: SWA absolute-position window (paged read).

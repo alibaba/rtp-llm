@@ -153,6 +153,7 @@ std::string formatModelInputs(const GptModelInputs& inputs) {
     appendBool("decode_entrance", inputs.decode_entrance);
     appendBool("use_opaque_kv_cache_store", inputs.use_opaque_kv_cache_store);
     appendBool("need_all_logits", inputs.need_all_logits);
+    append("dspark_call_phase", dsparkCallPhaseName(inputs.dspark_call_phase));
     appendBool("need_all_hidden_states", inputs.need_all_hidden_states);
     appendBool("need_moe_gating", inputs.need_moe_gating);
     appendBool("warmup", inputs.warmup);

@@ -285,10 +285,16 @@ class Block(nn.Module):
         attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
+        attn_fn=None,
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
         ``forward`` is byte-identical for PD-disagg cleanliness.
+
+        ``attn_fn`` overrides the attention call (normed input -> attention
+        output) while keeping this block's hyper-connection choreography as
+        the single authority; the DSpARK draft substitutes its non-causal
+        fixed-block attention this way instead of copying the block body.
         """
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
@@ -305,7 +311,10 @@ class Block(nn.Module):
         x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
-        attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
+        if attn_fn is not None:
+            attn_out = attn_fn(x_pre)
+        else:
+            attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
         x = self.attn_hc.post(attn_out, residual, post, comb)

@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include "rtp_llm/models_py/bindings/core/DSparkCallPhase.h"
 #include <cstddef>
 #include <optional>
 #include <memory>
@@ -52,14 +53,6 @@ struct GptModelInputs {
     // for mtp model
     torch::Tensor last_hidden_states;
 
-    // DSpARK feature-injection window. Each int32 [batch] entry selects the
-    // rows of last_hidden_states used by one request. Undefined means the
-    // whole available prefix (initial seeding).
-    torch::Tensor dspark_ctx_lengths;
-    // Optional int32 [batch] absolute start for each feature window. When it
-    // is undefined, the window ends at the request prefix length.
-    torch::Tensor dspark_ctx_starts;
-
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
     // - single-type cache: [batch_size, block_nums]
@@ -81,10 +74,6 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
-    // Optional PD cache-store range overrides. DSpARK attends from the full
-    // prompt while transfer remains bounded to committed prefix/suffix KV.
-    torch::Tensor cache_store_input_lengths;
-    torch::Tensor cache_store_prefix_lengths;
     size_t        kv_block_stride_bytes;
     size_t        kv_scale_stride_bytes;
     size_t        seq_size_per_block;
@@ -109,6 +98,9 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
+    // Only interpreted by a DSpARK draft model. All other models leave NONE.
+    DSparkCallPhase dspark_call_phase = DSparkCallPhase::NONE;
+
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
 
@@ -123,12 +115,10 @@ struct GptModelOutputs {
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
 
-    // Optional [token, capture_layers, hidden] target features for DSpARK.
-    torch::Tensor aux_hidden_states;
-    // Optional in-model DSpARK proposal: [batch, gamma] tokens and
-    // [batch, gamma, vocab] probabilities.
+    // Optional in-model DSpARK proposal: [batch, gamma] tokens. Rejection
+    // sampling consumes these as an implicit point mass, so no per-vocab
+    // draft probabilities cross this boundary.
     torch::Tensor draft_tokens;
-    torch::Tensor draft_probs;
 
     std::vector<torch::Tensor> moe_gating;
 };
@@ -421,6 +411,7 @@ struct RejectionSamplingParams {
     torch::Tensor output_token_ids_d;
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
+    bool          draft_probs_point_mass = false;
 };
 
 struct MappingDraft2TargetParams {
