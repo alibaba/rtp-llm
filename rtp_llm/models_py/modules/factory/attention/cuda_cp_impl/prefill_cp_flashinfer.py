@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Optional
 
 import torch
@@ -22,9 +21,9 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.fused_
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import (
     AttentionConfigs,
+    CPAllGatherImpl,
     CPRotateMethod,
     FMHAType,
-    KvCacheDataType,
     ParallelismConfig,
 )
 from rtp_llm.ops.compute_ops import (
@@ -33,23 +32,34 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
 )
 
-_all_gather_impl_name = os.environ.get("RTP_CP_IMPL", "fused").lower()
-if _all_gather_impl_name == "legacy":
-    _all_gather_impl = PCPAllGatherAttnOp
-else:
-    if _all_gather_impl_name != "fused":
-        logging.warning(
-            "Unknown RTP_CP_IMPL=%s; using fused all-gather CP",
-            _all_gather_impl_name,
-        )
-    _all_gather_impl = PCPFusedPagedAttnOp
-
-
 impl_map = {
-    CPRotateMethod.ALL_GATHER: _all_gather_impl,
+    CPRotateMethod.ALL_GATHER: PCPAllGatherAttnOp,
     CPRotateMethod.ALLTOALL: PCPAll2AllAttnOp,
     CPRotateMethod.ALL_GATHER_WITH_OVERLAP: PCPAllGatherOverlapAttnOp,
 }
+
+
+def select_prefill_cp_impl(
+    attn_configs: AttentionConfigs,
+    attn_inputs: PyAttentionInputs,
+    parallelism_config: ParallelismConfig,
+):
+    """Select a CP implementation, falling back when fused cannot run safely."""
+    method = parallelism_config.prefill_cp_config.method
+    impl = impl_map[method]
+    if (
+        method == CPRotateMethod.ALL_GATHER
+        and parallelism_config.prefill_cp_config.all_gather_impl
+        == CPAllGatherImpl.FUSED
+    ):
+        supported, reason = PCPFusedPagedAttnOp.can_run(
+            attn_configs, attn_inputs, parallelism_config
+        )
+        if supported:
+            impl = PCPFusedPagedAttnOp
+        else:
+            logging.warning("Falling back to legacy all-gather CP: %s", reason)
+    return impl
 
 
 class CPFlashInferImpl(FMHAImplBase):
@@ -158,27 +168,8 @@ class CPFlashInferImpl(FMHAImplBase):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
 
-        method = parallelism_config.prefill_cp_config.method
-        impl = impl_map[method]
-        if impl is PCPFusedPagedAttnOp:
-            if attn_configs.kv_cache_dtype != KvCacheDataType.BASE:
-                logging.warning(
-                    "Falling back to legacy all-gather CP for %s KV cache",
-                    attn_configs.kv_cache_dtype,
-                )
-                impl = PCPAllGatherAttnOp
-            elif (
-                attn_configs.kernel_tokens_per_block
-                and attn_configs.kernel_tokens_per_block
-                != attn_configs.tokens_per_block
-            ):
-                logging.warning(
-                    "Falling back to legacy all-gather CP because "
-                    "kernel_tokens_per_block (%s) != tokens_per_block (%s)",
-                    attn_configs.kernel_tokens_per_block,
-                    attn_configs.tokens_per_block,
-                )
-                impl = PCPAllGatherAttnOp
+        impl = select_prefill_cp_impl(attn_configs, attn_inputs, parallelism_config)
+        logging.info("Selected prefill CP implementation: %s", impl.__name__)
         self.fmha_impl = impl(attn_configs, attn_inputs, parallelism_config)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 

@@ -8,7 +8,7 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import NcclCommConfig, RoleType
+from rtp_llm.ops import CPAllGatherImpl, NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -135,6 +135,7 @@ class GenerateConfigTest(TestCase):
 
     def test_set_parallelism_config_propagates_prefill_cp_cache_fields(self):
         py_env_configs = PyEnvConfigs()
+        py_env_configs.prefill_cp_config.all_gather_impl = CPAllGatherImpl.FUSED
         py_env_configs.prefill_cp_config.kv_cache_sharded = True
         py_env_configs.prefill_cp_config.prefill_cp_size = 4
 
@@ -145,6 +146,10 @@ class GenerateConfigTest(TestCase):
 
         self.assertTrue(
             py_env_configs.parallelism_config.prefill_cp_config.kv_cache_sharded
+        )
+        self.assertEqual(
+            py_env_configs.parallelism_config.prefill_cp_config.all_gather_impl,
+            CPAllGatherImpl.FUSED,
         )
         self.assertEqual(
             py_env_configs.parallelism_config.prefill_cp_config.prefill_cp_size, 4

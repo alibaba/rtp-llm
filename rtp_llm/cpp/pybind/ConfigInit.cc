@@ -169,6 +169,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("UNKNOWN", CPRotateMethod::UNKNOWN)
         .export_values();
 
+    py::enum_<CPAllGatherImpl>(m, "CPAllGatherImpl")
+        .value("LEGACY", CPAllGatherImpl::LEGACY)
+        .value("FUSED", CPAllGatherImpl::FUSED)
+        .export_values();
+
     py::enum_<FMHAType>(m, "FMHAType")
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
         .value("NONE", FMHAType::NONE)
@@ -2070,6 +2075,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<PrefillCPConfig>(m, "PrefillCPConfig")
         .def(py::init<>())
         .def_readwrite("method", &PrefillCPConfig::method)
+        .def_readwrite("all_gather_impl", &PrefillCPConfig::all_gather_impl)
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
         .def_readwrite("kv_cache_sharded", &PrefillCPConfig::kv_cache_sharded)
         .def_readwrite("prefill_cp_size", &PrefillCPConfig::prefill_cp_size)
@@ -2078,10 +2084,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
         .def(py::pickle(
             [](const PrefillCPConfig& self) {
-                return py::make_tuple(self.method, self.comm_buffer_size, self.kv_cache_sharded, self.prefill_cp_size);
+                return py::make_tuple(self.method,
+                                      self.comm_buffer_size,
+                                      self.kv_cache_sharded,
+                                      self.prefill_cp_size,
+                                      self.all_gather_impl);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 5)
                     throw std::runtime_error("Invalid state!");
                 PrefillCPConfig c;
                 try {
@@ -2090,6 +2100,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 4) {
                         c.kv_cache_sharded = t[2].cast<bool>();
                         c.prefill_cp_size  = t[3].cast<int64_t>();
+                    }
+                    if (t.size() >= 5) {
+                        c.all_gather_impl = t[4].cast<CPAllGatherImpl>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());

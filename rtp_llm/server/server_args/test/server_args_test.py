@@ -1,8 +1,12 @@
+import argparse
 import importlib
 import json
 import os
 import sys
 from unittest import TestCase, main
+
+from rtp_llm.ops import CPAllGatherImpl
+from rtp_llm.server.server_args.util import str2_cp_all_gather_impl
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
@@ -19,6 +23,10 @@ class ServerArgsSetTest(TestCase):
         os.environ.clear()
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
+
+    def test_invalid_cp_all_gather_impl_is_rejected(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            str2_cp_all_gather_impl("fuse")
 
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
@@ -38,6 +46,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
         os.environ["LOADER_RECYCLE_HANDLES"] = "false"
         os.environ["MOE_PURE_TP_PRESHARD"] = "false"
+        os.environ["RTP_CP_IMPL"] = "FUSED"
 
         sys.argv = ["prog"]
 
@@ -56,6 +65,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
         self.assertEqual(py_env_configs.parallelism_config.dp_size, 2)
         self.assertEqual(py_env_configs.parallelism_config.world_size, 8)
+        self.assertEqual(
+            py_env_configs.prefill_cp_config.all_gather_impl,
+            CPAllGatherImpl.FUSED,
+        )
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
@@ -126,6 +139,8 @@ class ServerArgsSetTest(TestCase):
             "false",
             "--disable_flashinfer_native",
             "true",
+            "--cp_all_gather_impl",
+            "legacy",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -147,6 +162,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)
         self.assertEqual(py_env_configs.parallelism_config.dp_size, 4)
         self.assertEqual(py_env_configs.parallelism_config.world_size, 32)
+        self.assertEqual(
+            py_env_configs.prefill_cp_config.all_gather_impl,
+            CPAllGatherImpl.LEGACY,
+        )
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)
