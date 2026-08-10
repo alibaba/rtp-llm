@@ -162,6 +162,7 @@ try:
         check_rope_cache,
         get_rope_cache,
         get_rope_cache_once,
+        CPAllGatherImpl,
         CPRotateMethod,
         PrefillCPConfig,
     )

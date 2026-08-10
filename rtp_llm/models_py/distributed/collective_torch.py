@@ -721,23 +721,17 @@ def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     return tensor
 
 
-def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
-    """Gather tensors from all ranks in the group.
-
-    Args:
-        tensor: Tensor to gather from this rank
-        group: Process group to use
-
-    Returns:
-        Concatenated tensor containing all gathered tensors
-        (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
-    """
+def _all_gather_impl(
+    tensor: torch.Tensor,
+    group: Group,
+    output: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Gather through the configured fast path or a caller-provided output."""
     rocm_rccl = _get_rocm_rccl()
     if rocm_rccl is not None:
         rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
         if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-            process_group = _get_group(group)
-            return rocm_rccl.capture_all_gather(tensor, process_group)
+            return rocm_rccl.capture_all_gather(tensor, _get_group(group))
 
     if group == Group.TP:
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
@@ -753,14 +747,41 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
 
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
+    expected_shape = [world_size * tensor.shape[0]] + list(tensor.shape)[1:]
+    if output is None:
+        output = torch.empty(expected_shape, device=tensor.device, dtype=tensor.dtype)
+    elif list(output.shape) != expected_shape:
+        raise ValueError(
+            f"all_gather_into output shape {list(output.shape)} does not match "
+            f"expected shape {expected_shape}"
+        )
+    torch.distributed.all_gather_into_tensor(output, tensor, group=process_group)
+    return output
 
-    tensor_list = torch.zeros(
-        [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
-        device=tensor.device,
-        dtype=tensor.dtype,
-    )
-    torch.distributed.all_gather_into_tensor(tensor_list, tensor, group=process_group)
-    return tensor_list
+
+def all_gather_into(
+    output: torch.Tensor, tensor: torch.Tensor, group: Group
+) -> torch.Tensor:
+    """Gather into ``output`` on the standard path while preserving TP fast paths.
+
+    RCCL capture and symmetric-memory implementations own their result storage and
+    may return a different tensor. Callers must use the returned tensor.
+    """
+    return _all_gather_impl(tensor, group, output)
+
+
+def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Gather tensors from all ranks in the group.
+
+    Args:
+        tensor: Tensor to gather from this rank
+        group: Process group to use
+
+    Returns:
+        Concatenated tensor containing all gathered tensors
+        (shape: [world_size * tensor.shape[0]] + list(tensor.shape)[1:])
+    """
+    return _all_gather_impl(tensor, group)
 
     # reference old implementation
     # tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
@@ -796,7 +817,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 

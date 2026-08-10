@@ -338,6 +338,9 @@ def set_parallelism_config(
 
     if py_prefill_cp_config:
         parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
+        parallelism_config.prefill_cp_config.all_gather_impl = (
+            py_prefill_cp_config.all_gather_impl
+        )
         parallelism_config.prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
         )

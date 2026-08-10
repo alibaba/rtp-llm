@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 import torch
@@ -14,8 +15,17 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.allgat
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.alltoall_cp_impl import (
     PCPAll2AllAttnOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.fused_allgather_cp_impl import (
+    PCPFusedPagedAttnOp,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
+from rtp_llm.ops import (
+    AttentionConfigs,
+    CPAllGatherImpl,
+    CPRotateMethod,
+    FMHAType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
     LayerKVCache,
@@ -27,6 +37,29 @@ impl_map = {
     CPRotateMethod.ALLTOALL: PCPAll2AllAttnOp,
     CPRotateMethod.ALL_GATHER_WITH_OVERLAP: PCPAllGatherOverlapAttnOp,
 }
+
+
+def select_prefill_cp_impl(
+    attn_configs: AttentionConfigs,
+    attn_inputs: PyAttentionInputs,
+    parallelism_config: ParallelismConfig,
+):
+    """Select a CP implementation, falling back when fused cannot run safely."""
+    method = parallelism_config.prefill_cp_config.method
+    impl = impl_map[method]
+    if (
+        method == CPRotateMethod.ALL_GATHER
+        and parallelism_config.prefill_cp_config.all_gather_impl
+        == CPAllGatherImpl.FUSED
+    ):
+        supported, reason = PCPFusedPagedAttnOp.can_run(
+            attn_configs, attn_inputs, parallelism_config
+        )
+        if supported:
+            impl = PCPFusedPagedAttnOp
+        else:
+            logging.warning("Falling back to legacy all-gather CP: %s", reason)
+    return impl
 
 
 class CPFlashInferImpl(FMHAImplBase):
@@ -135,8 +168,9 @@ class CPFlashInferImpl(FMHAImplBase):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
 
-        method = parallelism_config.prefill_cp_config.method
-        self.fmha_impl = impl_map[method](attn_configs, attn_inputs, parallelism_config)
+        impl = select_prefill_cp_impl(attn_configs, attn_inputs, parallelism_config)
+        logging.info("Selected prefill CP implementation: %s", impl.__name__)
+        self.fmha_impl = impl(attn_configs, attn_inputs, parallelism_config)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 
         # Store input info

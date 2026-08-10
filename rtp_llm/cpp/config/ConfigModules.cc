@@ -43,7 +43,8 @@ std::string PrefillCPConfig::to_string() const {
             oss << "UNKNOWN";
             break;
     }
-    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n"
+    oss << "\n all_gather_impl: " << (all_gather_impl == CPAllGatherImpl::FUSED ? "FUSED" : "LEGACY") << "\n"
+        << " comm_buffer_size: " << comm_buffer_size << "\n"
         << " kv_cache_sharded: " << kv_cache_sharded << "\n"
         << " prefill_cp_size: " << prefill_cp_size << "\n";
     return oss.str();

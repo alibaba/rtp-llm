@@ -170,10 +170,12 @@ TEST(KVCacheResourceTest, InitializationDoesNotRetainTopology) {
 
 TEST(PrefillCPConfigTest, ToStringIncludesShardingFields) {
     PrefillCPConfig config;
+    config.all_gather_impl  = CPAllGatherImpl::FUSED;
     config.kv_cache_sharded = true;
     config.prefill_cp_size  = 2;
 
     const auto text = config.to_string();
+    EXPECT_NE(text.find("all_gather_impl: FUSED"), std::string::npos);
     EXPECT_NE(text.find("kv_cache_sharded: 1"), std::string::npos);
     EXPECT_NE(text.find("prefill_cp_size: 2"), std::string::npos);
 }
