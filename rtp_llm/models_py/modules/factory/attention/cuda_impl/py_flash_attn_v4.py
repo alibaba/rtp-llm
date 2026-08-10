@@ -4,7 +4,7 @@ import os
 import sys
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
-from typing import NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional
 
 import torch
 from packaging.specifiers import SpecifierSet
@@ -119,40 +119,57 @@ def _get_fa4_log_level() -> int:
     return level
 
 
-def _configure_fa4_logging(fa_logging) -> None:
+def _bind_fa4_log_imports(fa_logging, fa_log: Callable[[int, str], None]) -> None:
+    previous_fa_log = getattr(fa_logging, "fa_log", None)
+    package_names = set()
+    package_name = getattr(fa_logging, "__package__", None)
+    if package_name:
+        package_names.add(package_name)
+    module_name = getattr(fa_logging, "__name__", "")
+    if "." in module_name:
+        package_names.add(module_name.rsplit(".", 1)[0])
+    for loaded_name, module in tuple(sys.modules.items()):
+        if module is fa_logging and loaded_name.endswith(".fa_logging"):
+            package_names.add(loaded_name.rsplit(".", 1)[0])
+
+    fa_logging.fa_log = fa_log
+    interface_names = {f"{name}.interface" for name in package_names}
+    package_prefixes = tuple(f"{name}." for name in package_names)
+    for loaded_name, module in tuple(sys.modules.items()):
+        if module is None:
+            continue
+        is_interface = loaded_name in interface_names
+        holds_previous_import = (
+            previous_fa_log is not None
+            and loaded_name.startswith(package_prefixes)
+            and getattr(module, "fa_log", None) is previous_fa_log
+        )
+        if is_interface or holds_previous_import:
+            module.fa_log = fa_log
+
+
+def _configure_fa4_logging(fa_logging) -> Callable[[int, str], None]:
     """Route vendored host logs through RTP-LLM's logging configuration."""
     configured_level = _get_fa4_log_level()
+    vendor_logger = logging.getLogger("flash_attn")
+    fa_logging.set_fa_log_level(0)
+    retained_handler_ids = {id(handler) for handler in vendor_logger.handlers}
     fa_logging.set_fa_log_level(configured_level)
-    default_handler = getattr(fa_logging, "_default_handler", None)
-    vendor_logger = getattr(fa_logging, "_logger", None)
-    if default_handler is not None and vendor_logger is not None:
-        vendor_logger.removeHandler(default_handler)
-        fa_logging._default_handler = None
-    if vendor_logger is not None:
-        vendor_logger.propagate = True
+    for handler in tuple(vendor_logger.handlers):
+        if id(handler) not in retained_handler_ids:
+            vendor_logger.removeHandler(handler)
+    vendor_logger.setLevel(logging.NOTSET)
+    vendor_logger.propagate = True
 
-        get_log_level = getattr(
-            fa_logging,
-            "get_fa_log_level",
-            lambda: configured_level,
-        )
+    def rtp_fa_log(level: int, message: str) -> None:
+        if fa_logging.get_fa_log_level() >= level:
+            log_method = vendor_logger.info if level <= 1 else vendor_logger.debug
+            log_method(message)
 
-        def rtp_fa_log(level: int, message: str) -> None:
-            if get_log_level() >= level:
-                log_method = vendor_logger.info if level <= 1 else vendor_logger.debug
-                log_method(message)
-
-        # Interface modules import fa_log during initialization, so install the
-        # host-integrated implementation before importing the FA4 interface.
-        fa_logging.fa_log = rtp_fa_log
-        module_name = getattr(fa_logging, "__name__", "")
-        if "." in module_name:
-            package_prefix = module_name.rsplit(".", 1)[0] + "."
-            for loaded_name, module in tuple(sys.modules.items()):
-                if loaded_name.startswith(package_prefix) and hasattr(
-                    module, "fa_log"
-                ):
-                    module.fa_log = rtp_fa_log
+    # Interface modules import fa_log during initialization, so install the
+    # host-integrated implementation before importing the FA4 interface.
+    _bind_fa4_log_imports(fa_logging, rtp_fa_log)
+    return rtp_fa_log
 
 
 @lru_cache(maxsize=1)
@@ -161,10 +178,13 @@ def _load_fa4_forward():
     try:
         from rtp_llm.third_party.vllm_flash_attention.cute import fa_logging
 
-        _configure_fa4_logging(fa_logging)
-        from rtp_llm.third_party.vllm_flash_attention.cute.interface import (
-            _flash_attn_fwd,
+        rtp_fa_log = _configure_fa4_logging(fa_logging)
+        from rtp_llm.third_party.vllm_flash_attention.cute import (
+            interface as fa4_interface,
         )
+
+        _bind_fa4_log_imports(fa_logging, rtp_fa_log)
+        _flash_attn_fwd = fa4_interface._flash_attn_fwd
     except Exception as error:
         raise RuntimeError(
             f"failed to load vendored FA4 CuTe backend: {error}"
@@ -261,6 +281,10 @@ class FlashAttn4TargetVerifyOp:
                 "FA4 target verify requires uniform positive query lengths"
             )
 
+        # max_kv_len and num_splits are Python scalars compiled into the CUDA
+        # Graph launch. CudaGraphRunner initializes capture prefix lengths from
+        # the global KV limit and reuses the device metadata buffers on replay,
+        # so this capture must represent an upper bound for every replay.
         cu_kv_seqlens = attn_inputs.cu_kv_seqlens_device
         kv_lengths = torch.empty_like(cu_kv_seqlens[:-1])
         torch.sub(cu_kv_seqlens[1:], cu_kv_seqlens[:-1], out=kv_lengths)
@@ -290,8 +314,103 @@ class FlashAttn4TargetVerifyOp:
             page_table=attn_inputs.kv_cache_kernel_block_id_device,
         )
 
-    @staticmethod
-    def prepare_cuda_graph(params: FlashAttn4TargetVerifyParams) -> None:
+    def prepare_cuda_graph(
+        self,
+        params: FlashAttn4TargetVerifyParams,
+        attn_inputs: PyAttentionInputs,
+    ) -> None:
+        replay_batch_size = attn_inputs.input_lengths.numel()
+        metadata_batch_sizes = {
+            "query_lengths": attn_inputs.input_lengths_device.numel(),
+            "prefix_lengths": attn_inputs.prefix_lengths.numel(),
+            "kv_lengths": params.kv_lengths.numel(),
+            "cu_kv_seqlens": attn_inputs.cu_kv_seqlens_device.numel() - 1,
+            "page_table": attn_inputs.kv_cache_kernel_block_id_device.size(0),
+        }
+        if replay_batch_size != params.batch_size or any(
+            size != params.batch_size for size in metadata_batch_sizes.values()
+        ):
+            raise RuntimeError(
+                "FA4 CUDA graph replay batch size does not match the capture "
+                f"contract: capture batch_size={params.batch_size}, "
+                f"replay batch_size={replay_batch_size}, "
+                f"metadata batch sizes={metadata_batch_sizes}"
+            )
+
+        # CudaGraphRunner refreshes each host/device metadata pair before this
+        # callback, so host lengths can enforce scalar graph bounds without a
+        # device-to-host synchronization.
+        query_lengths = attn_inputs.input_lengths
+        valid_query_lengths = (query_lengths == params.query_len) | (query_lengths == 0)
+        replay_max_query_len = int(query_lengths.max().item())
+        if replay_max_query_len != params.query_len or not bool(
+            valid_query_lengths.all().item()
+        ):
+            raise RuntimeError(
+                "FA4 CUDA graph replay query length differs from capture: "
+                f"capture query_len={params.query_len}, "
+                f"replay query_lengths={query_lengths.tolist()}"
+            )
+
+        replay_kv_lengths = attn_inputs.prefix_lengths + query_lengths
+        replay_min_kv_len = int(replay_kv_lengths.min().item())
+        replay_max_kv_len = int(replay_kv_lengths.max().item())
+        if replay_min_kv_len < 0:
+            raise RuntimeError(
+                "FA4 CUDA graph replay requires non-negative KV lengths, "
+                f"got replay min_kv_len={replay_min_kv_len}"
+            )
+        if replay_max_kv_len > params.max_kv_len:
+            raise RuntimeError(
+                "FA4 CUDA graph replay KV length exceeds capture max_kv_len: "
+                f"capture max_kv_len={params.max_kv_len}, "
+                f"replay max_kv_len={replay_max_kv_len}"
+            )
+
+        page_table = attn_inputs.kv_cache_kernel_block_id_device
+        if page_table.dim() != 2:
+            raise RuntimeError(
+                "FA4 CUDA graph replay requires a 2D page table, "
+                f"got replay shape={tuple(page_table.shape)}"
+            )
+        page_table_kv_capacity = page_table.size(1) * self.page_size
+        if replay_max_kv_len > page_table_kv_capacity:
+            raise RuntimeError(
+                "FA4 CUDA graph replay KV length exceeds page-table capacity: "
+                f"capture max_kv_len={params.max_kv_len}, "
+                f"replay max_kv_len={replay_max_kv_len}, "
+                f"page_table_kv_capacity={page_table_kv_capacity}"
+            )
+
+        max_capture_splits = min(
+            _ceil_div(params.max_kv_len, _FA4_TILE_N), _FA4_MAX_SPLITS
+        )
+        if not 1 <= params.num_splits <= max_capture_splits:
+            raise RuntimeError(
+                "FA4 CUDA graph capture num_splits exceeds its max_kv_len bound: "
+                f"capture num_splits={params.num_splits}, "
+                f"capture max_kv_len={params.max_kv_len}, "
+                f"max num_splits={max_capture_splits}, "
+                f"replay max_kv_len={replay_max_kv_len}"
+            )
+
+        fixed_buffers = (
+            ("query_lengths", params.query_lengths, attn_inputs.input_lengths_device),
+            (
+                "cu_kv_seqlens",
+                params.cu_kv_seqlens,
+                attn_inputs.cu_kv_seqlens_device,
+            ),
+            ("page_table", params.page_table, page_table),
+        )
+        for name, capture_buffer, replay_buffer in fixed_buffers:
+            if capture_buffer.data_ptr() != replay_buffer.data_ptr():
+                raise RuntimeError(
+                    "FA4 CUDA graph replay replaced a captured metadata buffer: "
+                    f"buffer={name}, capture data_ptr={capture_buffer.data_ptr()}, "
+                    f"replay data_ptr={replay_buffer.data_ptr()}"
+                )
+
         torch.sub(
             params.cu_kv_seqlens[1:],
             params.cu_kv_seqlens[:-1],
@@ -427,7 +546,7 @@ class FlashAttn4TargetVerifyImpl(FMHAImplBase):
         return self.fmha_impl.forward(query, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
-        self.fmha_impl.prepare_cuda_graph(self.fmha_params)
+        self.fmha_impl.prepare_cuda_graph(self.fmha_params, attn_inputs)
         new_kv_cache_offset = self.rope_kvcache_impl.prepare(
             attn_inputs
         ).kv_cache_offset

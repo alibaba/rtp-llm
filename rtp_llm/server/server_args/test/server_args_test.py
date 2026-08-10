@@ -74,9 +74,7 @@ class ServerArgsSetTest(TestCase):
         )
 
         # Verify target-verify backend defaults.
-        self.assertTrue(
-            py_env_configs.fmha_config.enable_flashinfer_fa2_target_verify
-        )
+        self.assertTrue(py_env_configs.fmha_config.enable_flashinfer_fa2_target_verify)
         self.assertTrue(py_env_configs.fmha_config.enable_fa4_target_verify)
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
@@ -175,11 +173,34 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trtllm_gen)
         self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trt_fmha_v2)
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
-        self.assertFalse(
-            py_env_configs.fmha_config.enable_flashinfer_fa2_target_verify
-        )
+        self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_fa2_target_verify)
         self.assertFalse(py_env_configs.fmha_config.enable_fa4_target_verify)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
+
+    def test_target_verify_env_vars_bind_true_and_false(self):
+        cases = (
+            ("true", "false", True, False),
+            ("false", "true", False, True),
+        )
+        for fa2_value, fa4_value, expected_fa2, expected_fa4 in cases:
+            with self.subTest(fa2=fa2_value, fa4=fa4_value):
+                os.environ["ENABLE_FLASHINFER_FA2_TARGET_VERIFY"] = fa2_value
+                os.environ["ENABLE_FA4_TARGET_VERIFY"] = fa4_value
+                sys.argv = ["prog"]
+
+                import rtp_llm.server.server_args.server_args
+
+                importlib.reload(rtp_llm.server.server_args.server_args)
+                py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+                self.assertEqual(
+                    py_env_configs.fmha_config.enable_flashinfer_fa2_target_verify,
+                    expected_fa2,
+                )
+                self.assertEqual(
+                    py_env_configs.fmha_config.enable_fa4_target_verify,
+                    expected_fa4,
+                )
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""

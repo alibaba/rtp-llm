@@ -33,8 +33,19 @@ class TaggedBlockTableModel:
 class TaggedSequenceLengthModel:
     """Expose the cumulative lengths used by a tagged captured graph."""
 
+    def __init__(self) -> None:
+        self.last_replay_batch_size = None
+
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
-        return None
+        return self
+
+    def prepare_cuda_graph(self, attention_inputs) -> None:
+        copy_params = attention_inputs["full"].prefill_cuda_graph_copy_params
+        if copy_params is None:
+            raise AssertionError("target-verify graph copy params were not propagated")
+        self.last_replay_batch_size = int(
+            copy_params.cuda_graph_prefill_batch_size.item()
+        )
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
         full_inputs = inputs.attention_inputs["full"]
@@ -108,9 +119,7 @@ def _build_decode_inputs(
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
     attention_inputs.is_target_verify = False
-    attention_inputs.prefix_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.input_lengths = torch.ones(
         batch_size, dtype=torch.int32
     ).pin_memory()
@@ -186,16 +195,12 @@ def _build_target_verify_inputs(
     attention_inputs.prefix_lengths = torch.full(
         (batch_size,), prefix_len, dtype=torch.int32
     ).pin_memory()
-    attention_inputs.sequence_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.sequence_lengths_plus_1_device = (
         attention_inputs.prefix_lengths.cuda() + 1
     )
 
-    cu_q = torch.arange(
-        0, token_count + 1, query_len, dtype=torch.int32
-    ).pin_memory()
+    cu_q = torch.arange(0, token_count + 1, query_len, dtype=torch.int32).pin_memory()
     attention_inputs.cu_seqlens = cu_q
     attention_inputs.cu_seqlens_device = cu_q.cuda()
     attention_inputs.cu_kv_seqlens_device = torch.arange(
@@ -212,13 +217,9 @@ def _build_target_verify_inputs(
         attention_inputs.decode_cu_seqlens.cuda()
     )
 
-    attention_inputs.context_total_kv_length = batch_size * (
-        query_len + prefix_len
-    )
+    attention_inputs.context_total_kv_length = batch_size * (query_len + prefix_len)
 
-    block_count = (
-        prefix_len + query_len + TOKENS_PER_BLOCK - 1
-    ) // TOKENS_PER_BLOCK
+    block_count = (prefix_len + query_len + TOKENS_PER_BLOCK - 1) // TOKENS_PER_BLOCK
     return _build_common_inputs(
         attention_inputs,
         tags,
@@ -365,9 +366,10 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
     def test_target_verify_clears_rounded_batch_sequence_lengths(self) -> None:
         query_len = 5
         prefix_len = 11
+        model = TaggedSequenceLengthModel()
         runner = CudaGraphRunner()
         runner.init_decode(
-            TaggedSequenceLengthModel(),
+            model,
             HIDDEN_SIZE,
             64,
             TOKENS_PER_BLOCK,
@@ -392,6 +394,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
 
                 output = runner.forward(inputs)
                 torch.cuda.synchronize()
+                self.assertEqual(model.last_replay_batch_size, batch_size)
                 total_query_length = batch_size * query_len
                 total_kv_length = batch_size * (query_len + prefix_len)
                 expected_signature = torch.tensor(

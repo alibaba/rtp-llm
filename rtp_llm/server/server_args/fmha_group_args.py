@@ -44,7 +44,9 @@ def init_fmha_group_args(parser, fmha_config):
         bind_to=(fmha_config, "enable_flashinfer_fa2_target_verify"),
         type=str2bool,
         default=True,
-        help="控制是否启用SM90 target verify的FlashInfer FA2后端。",
+        help="控制是否启用SM90 target verify的FlashInfer FA2后端（标准RoPE和MRoPE共用此开关）。"
+        "同时要求DISABLE_FLASHINFER_NATIVE=False；关闭后回退到后续支持当前形状的FlashInfer/TRT候选。"
+        "可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
         "--enable_fa4_target_verify",
@@ -52,7 +54,9 @@ def init_fmha_group_args(parser, fmha_config):
         bind_to=(fmha_config, "enable_fa4_target_verify"),
         type=str2bool,
         default=True,
-        help="控制是否启用SM90 target verify的FA4后端。",
+        help="控制是否启用SM90 target verify的FA4后端。"
+        "同时要求ENABLE_PAGED_OPEN_SOURCE_FMHA=True、CUDA Graph、BF16 BASE KV、head_dim=256和page_size=64；"
+        "关闭后优先回退到FlashInfer FA2。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
         "--enable_open_source_fmha",

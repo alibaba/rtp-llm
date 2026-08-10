@@ -2,7 +2,10 @@ package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load(":pip.bzl", "PIP_EXTRA_ARGS")
-exports_files(["requirements_base.txt"])
+exports_files([
+    "requirements_base.txt",
+    "requirements_torch_gpu_cuda12_9.txt",
+])
 
 py_package(
     name = "extension_package",
@@ -57,9 +60,10 @@ compile_pip_requirements(
     name = "requirements_torch_gpu_cuda12_9",
     src = "requirements_torch_gpu_cuda12_9.txt",
     extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["@rtp_deps//:requirements_base.txt"],
+    extra_data = ["//:requirements_base.txt"],
     requirements_txt = "requirements_lock_torch_gpu_cuda12_9.txt",
     tags = ["manual"],
+    timeout = "eternal",
 )
 
 compile_pip_requirements(

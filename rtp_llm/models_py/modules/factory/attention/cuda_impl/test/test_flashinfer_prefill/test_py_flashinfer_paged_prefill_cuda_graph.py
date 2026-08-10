@@ -45,6 +45,8 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         with_copy_params=False,
         max_seq_len=0,
         is_target_verify=False,
+        graph_max_batch_size=None,
+        copy_batch_size=None,
     ):
         """Create PyAttentionInputs for prefill (single or multi batch)."""
         if isinstance(input_lengths, int):
@@ -69,16 +71,10 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
 
         if with_copy_params:
             # The production graph replay path copies these changing values H2D.
-            inp.cu_seqlens_device = torch.tensor(
-                cu, dtype=torch.int32
-            ).pin_memory()
-            inp.cu_kv_seqlens_device = torch.tensor(
-                cu, dtype=torch.int32
-            ).pin_memory()
+            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
+            inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
         else:
-            inp.cu_seqlens_device = torch.tensor(
-                cu, dtype=torch.int32, device="cuda"
-            )
+            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
             inp.cu_kv_seqlens_device = torch.tensor(
                 cu, dtype=torch.int32, device="cuda"
             )
@@ -96,10 +92,10 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             ms = max_seq_len if max_seq_len > 0 else max(input_lengths)
             cp = PyPrefillCudaGaphCopyParams()
             cp.cuda_graph_prefill_batch_size = torch.tensor(
-                [batch_size], dtype=torch.int32
+                [copy_batch_size or batch_size], dtype=torch.int32
             ).pin_memory()
             cp.max_seq_len = ms
-            cp.max_batch_size = batch_size
+            cp.max_batch_size = graph_max_batch_size or batch_size
             inp.prefill_cuda_graph_copy_params = cp
 
         return inp
@@ -134,6 +130,29 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         kv.kv_cache_base = cache
         return kv
 
+    def test_metadata_buffer_mismatch_fails_during_replay(self):
+        buffer = torch.empty(4, dtype=torch.int32, device=self.device)
+        cases = (
+            ("missing", None, 4, torch.int32, buffer.device),
+            ("capacity", buffer, 5, torch.int32, buffer.device),
+            ("dtype", buffer, 4, torch.int64, buffer.device),
+            ("device", buffer, 4, torch.int32, torch.device("cpu")),
+        )
+
+        for case, candidate, required_numel, dtype, device in cases:
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(
+                    RuntimeError, "CUDA graph replay cannot reallocate metadata"
+                ):
+                    PyFlashinferPrefillPagedAttnOp._ensure_cuda_graph_metadata_buffer(
+                        candidate,
+                        "metadata",
+                        required_numel,
+                        dtype,
+                        device,
+                        forbid_realloc=True,
+                    )
+
     def _test_forward_match(
         self,
         input_lengths,
@@ -145,12 +164,19 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         capture_input_lengths=None,
         capture_prefix_lengths=None,
         is_target_verify=False,
+        graph_max_batch_size=None,
+        runtime_batch_size=None,
     ):
         if isinstance(input_lengths, int):
             input_lengths = [input_lengths]
             prefix_lengths = [prefix_lengths]
         if max_seq_len == 0:
             max_seq_len = max(input_lengths)
+        runtime_batch_size = runtime_batch_size or len(input_lengths)
+        self.assertGreater(runtime_batch_size, 0)
+        self.assertLessEqual(runtime_batch_size, len(input_lengths))
+        reference_input_lengths = input_lengths[:runtime_batch_size]
+        reference_prefix_lengths = prefix_lengths[:runtime_batch_size]
 
         config = self._create_config(
             head_num=head_num,
@@ -158,8 +184,10 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             size_per_head=size_per_head,
             seq_size_per_block=PAGE_SIZE,
         )
-        seq_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
-        total_q = sum(input_lengths)
+        seq_lengths = [
+            p + i for p, i in zip(reference_prefix_lengths, reference_input_lengths)
+        ]
+        total_q = sum(reference_input_lengths)
         total_kv = sum(seq_lengths)
 
         q = torch.randn(
@@ -185,8 +213,8 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
 
         # Normal path
         normal_inp = self._make_inputs(
-            input_lengths,
-            prefix_lengths,
+            reference_input_lengths,
+            reference_prefix_lengths,
             is_target_verify=is_target_verify,
         )
         backend = "fa2" if is_target_verify else "auto"
@@ -203,12 +231,15 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         # CUDA graph path: capture then replay
         capture_input_lengths = capture_input_lengths or input_lengths
         capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
+        capture_total_q = sum(capture_input_lengths)
+        self.assertGreaterEqual(capture_total_q, total_q)
         cg_init = self._make_inputs(
             capture_input_lengths,
             capture_prefix_lengths,
             True,
             max_seq_len,
             is_target_verify,
+            graph_max_batch_size,
         )
         self.assertFalse(cg_init.cu_seqlens_device.is_cuda)
         self.assertTrue(cg_init.cu_seqlens_device.is_pinned())
@@ -226,14 +257,21 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             True,
             max_seq_len,
             is_target_verify,
+            graph_max_batch_size,
+            runtime_batch_size,
         )
         self.assertFalse(cg_replay.cu_seqlens_device.is_cuda)
         self.assertTrue(cg_replay.cu_seqlens_device.is_pinned())
-        cg_op.prepare(cg_replay, forbid_realloc=True)
 
         # Warm up allocations/JIT on a side stream before capture. Capture uses
         # different query values so the comparison below requires graph replay.
-        static_q = torch.zeros_like(q)
+        static_q = torch.zeros(
+            capture_total_q,
+            head_num,
+            size_per_head,
+            dtype=q.dtype,
+            device=q.device,
+        )
         warmup_stream = torch.cuda.Stream()
         warmup_stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(warmup_stream):
@@ -244,14 +282,43 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         with torch.cuda.graph(graph):
             cg_out = cg_op.forward(static_q, kv_cache)
 
-        static_q.copy_(q)
+        if graph_max_batch_size is not None:
+            self.assertEqual(
+                cg_op._aligned_q_buf.size(0), graph_max_batch_size * max_seq_len
+            )
+
+        metadata_identity = (
+            id(cg_op.input_lengths),
+            cg_op.input_lengths.data_ptr(),
+            id(cg_op.cu_seq_lens),
+            cg_op.cu_seq_lens.data_ptr(),
+            id(cg_op.qo_indptr),
+            cg_op.qo_indptr.data_ptr(),
+        )
+        static_q.zero_()
+        static_q[:total_q].copy_(q)
         cg_op.prepare(cg_replay, forbid_realloc=True)
+        _allocator_pressure = [
+            torch.full_like(cg_op.cu_seq_lens, -1) for _ in range(32)
+        ]
+        self.assertEqual(
+            metadata_identity,
+            (
+                id(cg_op.input_lengths),
+                cg_op.input_lengths.data_ptr(),
+                id(cg_op.cu_seq_lens),
+                cg_op.cu_seq_lens.data_ptr(),
+                id(cg_op.qo_indptr),
+                cg_op.qo_indptr.data_ptr(),
+            ),
+        )
         graph.replay()
         torch.cuda.synchronize()
+        del _allocator_pressure
 
         compare_tensors(
             normal_out,
-            cg_out,
+            cg_out[:total_q],
             rtol=1e-3,
             atol=1e-3,
             name=f"input={input_lengths}, prefix={prefix_lengths}",
@@ -386,13 +453,78 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
     def test_multi_batch_varied_input_and_prefix(self):
         self._test_forward_match([1, 3, 5, 2], [200, 50, 100, 300])
 
-    def test_replay_smaller_batch_with_varied_input(self):
+    def test_replay_updates_per_sequence_metadata_with_stable_buffers(self):
         self._test_forward_match(
             [2, 4, 3],
             [100, 50, 200],
             max_seq_len=5,
-            capture_input_lengths=[5, 5, 5, 5],
-            capture_prefix_lengths=[200, 200, 200, 200],
+            capture_input_lengths=[5, 1, 3],
+            capture_prefix_lengths=[200, 50, 100],
+        )
+
+    def test_target_verify_replay_updates_multi_batch_metadata(self):
+        self._test_forward_match(
+            [2, 4, 3],
+            [100, 50, 200],
+            max_seq_len=5,
+            capture_input_lengths=[5, 1, 3],
+            capture_prefix_lengths=[200, 50, 100],
+            is_target_verify=True,
+        )
+
+    def test_target_verify_graph_buckets_use_per_instance_metadata(self):
+        cases = (
+            ([5], [100], [5], [100]),
+            ([2, 4], [100, 50], [4, 2], [50, 100]),
+        )
+        for input_lengths, prefix_lengths, capture_inputs, capture_prefixes in cases:
+            with self.subTest(batch_size=len(input_lengths)):
+                self._test_forward_match(
+                    input_lengths,
+                    prefix_lengths,
+                    max_seq_len=5,
+                    capture_input_lengths=capture_inputs,
+                    capture_prefix_lengths=capture_prefixes,
+                    is_target_verify=True,
+                    graph_max_batch_size=4,
+                )
+
+    def test_target_verify_replay_pads_actual_batch_to_graph_bucket(self):
+        input_lengths = [2, 4, 3, 0]
+        prefix_lengths = [100, 50, 200, 0]
+        capture_input_lengths = [5, 5, 5, 5]
+        capture_prefix_lengths = [200, 50, 65, 27]
+        replay_pages = sum(
+            math.ceil((q + kv) / PAGE_SIZE)
+            for q, kv in zip(input_lengths, prefix_lengths)
+        )
+        capture_pages = sum(
+            math.ceil((q + kv) / PAGE_SIZE)
+            for q, kv in zip(capture_input_lengths, capture_prefix_lengths)
+        )
+        replay_reuse_pages = sum(math.ceil(kv / PAGE_SIZE) for kv in prefix_lengths)
+        capture_reuse_pages = sum(
+            math.ceil(kv / PAGE_SIZE) for kv in capture_prefix_lengths
+        )
+        # Capture-only values reserve the 24-page/max-KV upper bound. Replay's
+        # fourth row is the selected graph bucket's zero-length padding slot.
+        self.assertEqual(capture_pages, 24)
+        self.assertEqual(capture_pages, replay_pages)
+        self.assertEqual(capture_reuse_pages, 24)
+        self.assertEqual(capture_reuse_pages, replay_reuse_pages)
+        self.assertGreaterEqual(
+            max(q + kv for q, kv in zip(capture_input_lengths, capture_prefix_lengths)),
+            max(q + kv for q, kv in zip(input_lengths, prefix_lengths)),
+        )
+        self._test_forward_match(
+            input_lengths,
+            prefix_lengths,
+            max_seq_len=5,
+            capture_input_lengths=capture_input_lengths,
+            capture_prefix_lengths=capture_prefix_lengths,
+            is_target_verify=True,
+            graph_max_batch_size=8,
+            runtime_batch_size=3,
         )
 
     def test_multi_batch_single_tokens(self):

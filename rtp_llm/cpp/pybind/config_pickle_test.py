@@ -1,11 +1,15 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig
+from rtp_llm.ops import FMHAConfig, GrammarConfig
 
 
 def _new_grammar_config():
     return GrammarConfig.__new__(GrammarConfig)
+
+
+def _new_fmha_config():
+    return FMHAConfig.__new__(FMHAConfig)
 
 
 class _LegacyGrammarConfig:
@@ -24,6 +28,25 @@ class _PreviousSixTupleGrammarConfig:
     def __reduce__(self):
         previous_state = (True, 6, "six-tokenizer-info", [13, 17], 4096, True)
         return _new_grammar_config, (), previous_state
+
+
+class _LegacyFMHAConfig:
+    def __reduce__(self):
+        legacy_state = (
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            False,
+            True,
+            2049,
+            False,
+        )
+        return _new_fmha_config, (), legacy_state
 
 
 class GrammarConfigPickleTest(unittest.TestCase):
@@ -82,6 +105,60 @@ class GrammarConfigPickleTest(unittest.TestCase):
             ):
                 config = _new_grammar_config()
                 config.__setstate__(state)
+
+
+class FMHAConfigPickleTest(unittest.TestCase):
+    def test_current_fourteen_tuple_round_trip(self):
+        config = FMHAConfig()
+        config.enable_fmha = False
+        config.enable_flashinfer_trt_fmha_v2 = True
+        config.enable_paged_flashinfer_trt_fmha_v2 = False
+        config.enable_open_source_fmha = True
+        config.enable_paged_open_source_fmha = False
+        config.disable_flashinfer_native = True
+        config.enable_xqa = False
+        config.use_aiter_pa = True
+        config.use_asm_pa = False
+        config.use_triton_pa = True
+        config.absorb_opt_len = 4097
+        config.enable_flashinfer_trtllm_gen = False
+        config.enable_flashinfer_fa2_target_verify = False
+        config.enable_fa4_target_verify = True
+
+        state = config.__getstate__()
+        self.assertEqual(len(state), 14)
+        self.assertEqual(state[10:], (4097, False, False, True))
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertFalse(restored.enable_fmha)
+        self.assertTrue(restored.enable_flashinfer_trt_fmha_v2)
+        self.assertFalse(restored.enable_paged_flashinfer_trt_fmha_v2)
+        self.assertTrue(restored.enable_open_source_fmha)
+        self.assertFalse(restored.enable_paged_open_source_fmha)
+        self.assertTrue(restored.disable_flashinfer_native)
+        self.assertFalse(restored.enable_xqa)
+        self.assertTrue(restored.use_aiter_pa)
+        self.assertFalse(restored.use_asm_pa)
+        self.assertTrue(restored.use_triton_pa)
+        self.assertEqual(restored.absorb_opt_len, 4097)
+        self.assertFalse(restored.enable_flashinfer_trtllm_gen)
+        self.assertFalse(restored.enable_flashinfer_fa2_target_verify)
+        self.assertTrue(restored.enable_fa4_target_verify)
+
+    def test_legacy_twelve_tuple_uses_defaults_for_new_gates(self):
+        restored = pickle.loads(pickle.dumps(_LegacyFMHAConfig()))
+
+        self.assertFalse(restored.enable_fmha)
+        self.assertEqual(restored.absorb_opt_len, 2049)
+        self.assertFalse(restored.enable_flashinfer_trtllm_gen)
+        self.assertTrue(restored.enable_flashinfer_fa2_target_verify)
+        self.assertTrue(restored.enable_fa4_target_verify)
+
+    def test_thirteen_tuple_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "Invalid state"):
+            config = _new_fmha_config()
+            config.__setstate__((False,) * 13)
 
 
 if __name__ == "__main__":

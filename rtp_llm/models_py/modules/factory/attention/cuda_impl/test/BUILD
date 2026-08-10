@@ -41,6 +41,8 @@ py_test (
 py_test(
     name = "test_py_flash_attn_v4",
     srcs = ["test_py_flash_attn_v4.py"],
+    data = ["@rtp_deps//:requirements_torch_gpu_cuda12_9.txt"],
+    env = {"PYTHONNOUSERSITE": "1"},
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": fa4_deps,
         "//conditions:default": [],
@@ -277,6 +279,25 @@ py_test(
     exec_properties = {
         'gpu': 'H20',
     },
+)
+
+# Workspace allocation/retry helpers only need a CUDA-configured Python
+# environment; they do not reserve or initialize a GPU.
+py_test(
+    name = "test_py_flashinfer_workspace_helpers_cpu",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_workspace_helpers_cpu.py",
+    ],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "@//:cuda_pre_12_9": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 # Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA

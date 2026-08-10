@@ -86,7 +86,8 @@ else:
                 FlashInferTRTLLMPrefillImpl,
                 FlashInferTRTLLMFMHAv2PrefillImpl,
                 # Target-verify specializations precede generic FlashInfer/TRT
-                # paths; each has an independent rollback gate in FMHAConfig.
+                # paths. FA4 has its own gate; FA2 RoPE and MRoPE deliberately
+                # share one operational rollback gate in FMHAConfig.
                 FlashAttn4TargetVerifyImpl,
                 PyFlashinferFa2TargetVerifyImpl,
                 PyFlashinferMropeTargetVerifyImpl,

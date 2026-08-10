@@ -30,10 +30,22 @@ This page lists server arguments used to configure the behavior and performance 
 | `--enable_flashinfer_trtllm_gen` | Enables FlashInfer TRT-LLM Gen attention on SM100. | True |
 | `--enable_flashinfer_trt_fmha_v2` | Enables FlashInfer TRT-LLM FMHA v2 contiguous prefill. | True |
 | `--enable_paged_flashinfer_trt_fmha_v2` | Enables FlashInfer TRT-LLM FMHA v2 paged prefill. | True |
+| `--enable_flashinfer_fa2_target_verify` | Enables the SM90 FlashInfer FA2 target-verify backends for both standard RoPE and MRoPE (`ENABLE_FLASHINFER_FA2_TARGET_VERIFY`). Also requires `--disable_flashinfer_native=false`. | True |
+| `--enable_fa4_target_verify` | Enables the SM90 FA4 CuTe target-verify candidate (`ENABLE_FA4_TARGET_VERIFY`). Also requires `--enable_paged_open_source_fmha=true`. | True |
 | `--enable_open_source_fmha` | Enables open-source FMHA implementation. | True |
 | `--enable_paged_open_source_fmha` | Enables Paged open-source FMHA implementation. | True |
 | `--disable_flashinfer_native` | Disables FlashInfer native attention backends. | False |
 | `--enable_xqa` | Enables XQA feature (requires SM90+ GPU). | True |
+
+### Target-verify backend rollout and rollback
+
+For supported SM90 target-verify shapes, specialized candidates are considered before the generic FlashInfer/TRT paths. FA4 is considered before FlashInfer FA2; the standard-RoPE and MRoPE FA2 implementations share the same FA2 gate. If a gate is disabled or a shape is unsupported, selection continues through the remaining candidates that support the request.
+
+FA4 additionally requires a CUDA 12.9 build, CUDA Graph prefill, BF16 query and base KV-cache data, head dimension 256, page size 64, and the packaged CuTe dependencies: `nvidia-cutlass-dsl>=4.5.3,<4.6`, `apache-tvm-ffi>=0.1.12,<0.2`, `quack-kernels>=0.5.0,<0.6`, and `torch-c-dlpack-ext>=0.1.5,<0.2`. Its effective gate is `ENABLE_FA4_TARGET_VERIFY && ENABLE_PAGED_OPEN_SOURCE_FMHA`. Set `ENABLE_FA4_TARGET_VERIFY=false` to retain paged open-source FMHA while rolling target verify back to FA2; set `ENABLE_PAGED_OPEN_SOURCE_FMHA=false` for the broader master rollback. The first FA4 use may incur CuTe JIT compilation latency, so deployments should warm the selected capture buckets before serving traffic. The FA4 Bazel test reads the CUDA 12.9 requirements file and requires these declared ranges to match the runtime loader gate; dependency changes must update both contracts together.
+
+FlashInfer FA2 supports causal SM90 target verify with FP16/BF16 queries, base or FP8 KV cache, head dimensions 64/128/256, and a positive power-of-two page size. Its effective gate is `ENABLE_FLASHINFER_FA2_TARGET_VERIFY && !DISABLE_FLASHINFER_NATIVE`; the one feature gate controls both standard RoPE and MRoPE. Set `ENABLE_FLASHINFER_FA2_TARGET_VERIFY=false` to roll both specializations back while retaining other FlashInfer-native paths, or set `DISABLE_FLASHINFER_NATIVE=true` for the master rollback.
+
+Both feature gates default to enabled. Roll out on a canary first, compare token outputs against the fallback path, and account for FA4 cold-start compilation before expanding traffic. The FA4 feature flags do not roll back the shared CUDA 12.9 Python dependency lock; reverting those package versions requires rolling back the complete image and lock together.
 
 ### Removed FMHA options
 

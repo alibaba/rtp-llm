@@ -418,6 +418,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.prefill_cuda_graph_copy_params = None
+        self.input_lengths: Optional[torch.Tensor] = None
+        self.cu_seq_lens: Optional[torch.Tensor] = None
+        self.qo_indptr: Optional[torch.Tensor] = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
         self._aligned_q_buf = None
         self._compact_out_buf = None
@@ -439,6 +442,40 @@ class PyFlashinferPrefillPagedAttnOp(object):
     def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
         """Set the params object to be used by this op."""
         self.fmha_params = params
+
+    @staticmethod
+    def _ensure_cuda_graph_metadata_buffer(
+        buffer: Optional[torch.Tensor],
+        name: str,
+        required_numel: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        forbid_realloc: bool,
+    ) -> torch.Tensor:
+        if (
+            buffer is not None
+            and buffer.numel() == required_numel
+            and buffer.dtype == dtype
+            and buffer.device == device
+        ):
+            return buffer
+
+        if forbid_realloc:
+            actual = (
+                "missing"
+                if buffer is None
+                else (
+                    f"capacity={buffer.numel()}, dtype={buffer.dtype}, "
+                    f"device={buffer.device}"
+                )
+            )
+            raise RuntimeError(
+                f"CUDA graph replay cannot reallocate {name}: expected "
+                f"capacity={required_numel}, dtype={dtype}, device={device}; "
+                f"got {actual}"
+            )
+
+        return torch.empty(required_numel, dtype=dtype, device=device)
 
     def _workspace_size_bytes(self) -> int:
         return self.g_workspace_buffer.numel() * self.g_workspace_buffer.element_size()
@@ -600,9 +637,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         batch_size = input_lengths.size(0)
         max_q_len = int(input_lengths.max().item()) if batch_size else 0
         if attn_inputs.prefix_lengths.numel() == batch_size:
-            max_kv_len = int(
-                (attn_inputs.prefix_lengths + input_lengths).max().item()
-            )
+            max_kv_len = int((attn_inputs.prefix_lengths + input_lengths).max().item())
         elif attn_inputs.sequence_lengths.numel() > 0:
             max_kv_len = int(attn_inputs.sequence_lengths.max().item())
         else:
@@ -616,32 +651,48 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.page_size,
             forbid_realloc,
         )
-        # Store CUDA graph copy parameters
-        # Define qo_indptr early for CUDA graph initialization
-        if attn_inputs.prefill_cuda_graph_copy_params is not None:
-            # FlashInfer and the compact/aligned copy kernels require stable
-            # device pointers. Replay metadata may arrive in pinned host memory,
-            # so copy it into fixed CUDA buffers allocated before graph capture.
-            self.input_lengths = attn_inputs.input_lengths
-            self.cu_seq_lens = torch.empty(
-                attn_inputs.cu_seqlens_device.shape,
-                dtype=attn_inputs.cu_seqlens_device.dtype,
-                device=self.g_workspace_buffer.device,
+        copy_params = attn_inputs.prefill_cuda_graph_copy_params
+        qo_indptr_reallocated = False
+        if copy_params is not None:
+            # These pointers are captured by FlashInfer and the compact/aligned
+            # copy kernels. Each graph instance owns one fixed batch bucket;
+            # copy_params.max_batch_size is only the aligned Q/output capacity.
+            metadata_device = self.g_workspace_buffer.device
+            old_qo_indptr = self.qo_indptr
+            self.input_lengths = self._ensure_cuda_graph_metadata_buffer(
+                self.input_lengths,
+                "input_lengths",
+                batch_size,
+                attn_inputs.input_lengths.dtype,
+                metadata_device,
+                forbid_realloc,
             )
-            self.cu_seq_lens.copy_(
-                attn_inputs.cu_seqlens_device,
-                non_blocking=attn_inputs.cu_seqlens_device.is_pinned(),
+            self.cu_seq_lens = self._ensure_cuda_graph_metadata_buffer(
+                self.cu_seq_lens,
+                "cu_seq_lens",
+                batch_size + 1,
+                attn_inputs.cu_seqlens_device.dtype,
+                metadata_device,
+                forbid_realloc,
             )
-            qo_indptr = torch.empty_like(self.cu_seq_lens)
+            self.qo_indptr = self._ensure_cuda_graph_metadata_buffer(
+                self.qo_indptr,
+                "qo_indptr",
+                batch_size + 1,
+                attn_inputs.cu_seqlens_device.dtype,
+                metadata_device,
+                forbid_realloc,
+            )
+            qo_indptr_reallocated = self.qo_indptr is not old_qo_indptr
+            qo_indptr = self.qo_indptr
         else:
             qo_indptr = attn_inputs.cu_seqlens_device[
                 : attn_inputs.input_lengths.size(0) + 1
             ]
 
-        if (
-            self.enable_cuda_graph
-            and _get_flashinfer_private_attr(self.prefill_wrapper, "_qo_indptr_buf")
-            is None
+        if self.enable_cuda_graph and (
+            _get_flashinfer_private_attr(self.prefill_wrapper, "_qo_indptr_buf") is None
+            or qo_indptr_reallocated
         ):
             _set_prefill_wrapper_cuda_graph_buffers(
                 self.prefill_wrapper,
@@ -651,35 +702,31 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 self.fmha_params.paged_kv_last_page_len_d,
                 len(attn_inputs.cu_seqlens_device) - 1,
             )
-            if attn_inputs.prefill_cuda_graph_copy_params is not None:
-                self.prefill_cuda_graph_copy_params = (
-                    attn_inputs.prefill_cuda_graph_copy_params
-                )
-                # input_lengths and cu_seq_lens were already set above
-                self.qo_indptr = qo_indptr
+            if copy_params is not None:
+                self.prefill_cuda_graph_copy_params = copy_params
                 # Fill with cumulative sequence: [0, max_seq_len, 2*max_seq_len, ...]
-                self.qo_indptr.copy_(
-                    torch.arange(
-                        self.qo_indptr.size(0),
-                        device=self.qo_indptr.device,
-                        dtype=self.qo_indptr.dtype,
-                    )
-                    * self.prefill_cuda_graph_copy_params.max_seq_len
+                torch.arange(
+                    self.qo_indptr.size(0),
+                    out=self.qo_indptr,
                 )
+                self.qo_indptr.mul_(self.prefill_cuda_graph_copy_params.max_seq_len)
 
         # Update buffers for subsequent calls if in CUDA graph mode
         if self.prefill_cuda_graph_copy_params is not None:
-            assert attn_inputs.prefill_cuda_graph_copy_params is not None
+            assert copy_params is not None
             assert self.input_lengths is not None
             assert self.cu_seq_lens is not None
-            self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size[0] = (
-                attn_inputs.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size
+            self.prefill_cuda_graph_copy_params.cuda_graph_prefill_batch_size.copy_(
+                copy_params.cuda_graph_prefill_batch_size,
+                non_blocking=copy_params.cuda_graph_prefill_batch_size.is_pinned(),
             )
-            self.input_lengths[: attn_inputs.input_lengths.size(0)] = (
-                attn_inputs.input_lengths
+            self.input_lengths[: attn_inputs.input_lengths.numel()].copy_(
+                attn_inputs.input_lengths,
+                non_blocking=attn_inputs.input_lengths.is_pinned(),
             )
-            self.cu_seq_lens[: attn_inputs.cu_seqlens_device.size(0)] = (
-                attn_inputs.cu_seqlens_device
+            self.cu_seq_lens[: attn_inputs.cu_seqlens_device.numel()].copy_(
+                attn_inputs.cu_seqlens_device,
+                non_blocking=attn_inputs.cu_seqlens_device.is_pinned(),
             )
             qo_indptr = self.qo_indptr
 
@@ -747,16 +794,16 @@ class PyFlashinferPrefillPagedAttnOp(object):
             hidden_size = head_num * head_size
 
             # Pre-allocate buffers on first use (avoid per-forward GPU allocation)
-            total_len = (
+            aligned_capacity = (
                 self.prefill_cuda_graph_copy_params.max_seq_len
                 * self.prefill_cuda_graph_copy_params.max_batch_size
             )
             if self._aligned_q_buf is None or self._aligned_q_buf.shape != (
-                total_len,
+                aligned_capacity,
                 hidden_size,
             ):
                 self._aligned_q_buf = torch.zeros(
-                    (total_len, hidden_size), dtype=q.dtype, device=q.device
+                    (aligned_capacity, hidden_size), dtype=q.dtype, device=q.device
                 )
             if self._compact_out_buf is None or self._compact_out_buf.shape != (
                 token_num,
@@ -781,13 +828,28 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 self.cu_seq_lens,
             )
 
-            # Reshape back to 3D for FlashInfer
-            q_aligned = self._aligned_q_buf.view(total_len, head_num, head_size)
+            # FlashInfer derives its fixed batch size from qo_indptr and requires
+            # q.shape[0] to match its final offset. The backing buffer retains the
+            # global graph capacity, while each graph instance exposes only its
+            # fixed selected-bucket prefix. A replay may use a smaller actual
+            # batch, but the metadata tensor length remains the captured bucket.
+            bucket_aligned_len = (
+                self.input_lengths.numel()
+                * self.prefill_cuda_graph_copy_params.max_seq_len
+            )
+            if bucket_aligned_len > aligned_capacity:
+                raise RuntimeError(
+                    "CUDA graph batch bucket exceeds aligned query capacity: "
+                    f"required={bucket_aligned_len}, capacity={aligned_capacity}"
+                )
+            q_aligned = self._aligned_q_buf[:bucket_aligned_len].view(
+                bucket_aligned_len, head_num, head_size
+            )
 
             result = self.prefill_wrapper.run(q_aligned, paged_kv_cache)
 
             # Reshape result to 2D for copy back (ensure contiguous)
-            result_2d = result.view(total_len, hidden_size).contiguous()
+            result_2d = result.view(bucket_aligned_len, hidden_size).contiguous()
             self._compact_out_buf.zero_()
 
             # Copy large to small (aligned -> compact)
@@ -1087,8 +1149,7 @@ def _supports_py_flashinfer_fa2_target_verify(
         and attn_inputs.is_target_verify
         and attn_configs.need_rope_kv_cache
         and attn_configs.dtype in {torch.float16, torch.bfloat16}
-        and attn_configs.kv_cache_dtype
-        in {KvCacheDataType.BASE, KvCacheDataType.FP8}
+        and attn_configs.kv_cache_dtype in {KvCacheDataType.BASE, KvCacheDataType.FP8}
         and attn_configs.size_per_head in {64, 128, 256}
         and page_size > 0
         and page_size.bit_count() == 1
@@ -1148,10 +1209,13 @@ class PyFlashinferMropeTargetVerifyImpl(FMHAImplBase):
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
     ) -> bool:
-        return _supports_py_flashinfer_fa2_target_verify(
-            attn_configs,
-            attn_inputs,
-        ) and attn_configs.rope_config.style == RopeStyle.Mrope
+        return (
+            _supports_py_flashinfer_fa2_target_verify(
+                attn_configs,
+                attn_inputs,
+            )
+            and attn_configs.rope_config.style == RopeStyle.Mrope
+        )
 
     def support_cuda_graph(self) -> bool:
         return True

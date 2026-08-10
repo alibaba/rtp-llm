@@ -446,6 +446,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_triton_pa                       = t[9].cast<bool>();
                     c.absorb_opt_len                      = t[10].cast<int64_t>();
                     c.enable_flashinfer_trtllm_gen        = t[11].cast<bool>();
+                    // Legacy 12-field state keeps both target-verify gates at
+                    // the FMHAConfig defaults. New fields are append-only.
                     if (t.size() == 14) {
                         c.enable_flashinfer_fa2_target_verify = t[12].cast<bool>();
                         c.enable_fa4_target_verify            = t[13].cast<bool>();

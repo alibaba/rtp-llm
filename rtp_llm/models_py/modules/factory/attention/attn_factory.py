@@ -116,6 +116,7 @@ def _is_fmha_impl_disabled(
     elif impl_class_name == "FlashInferTRTLLMFMHAv2PagedPrefillImpl":
         return not fmha_config.enable_paged_flashinfer_trt_fmha_v2
     elif impl_class_name == "FlashAttn4TargetVerifyImpl":
+        # FA4 has a feature-specific gate plus the paged open-source master gate.
         return (
             not fmha_config.enable_fa4_target_verify
             or not fmha_config.enable_paged_open_source_fmha
@@ -124,6 +125,8 @@ def _is_fmha_impl_disabled(
         "PyFlashinferFa2TargetVerifyImpl",
         "PyFlashinferMropeTargetVerifyImpl",
     }:
+        # Standard RoPE and MRoPE intentionally share one FA2 rollback gate;
+        # DISABLE_FLASHINFER_NATIVE remains their common master rollback.
         return (
             not fmha_config.enable_flashinfer_fa2_target_verify
             or fmha_config.disable_flashinfer_native

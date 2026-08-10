@@ -303,12 +303,12 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
                                py_model_inputs_.attention_inputs.padding_offset,
                                state.current_seq_len * sizeof(int));
         }
+    }
 
-        if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
-            auto* batch_size_ptr = py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params
-                                       ->cuda_graph_prefill_batch_size.data_ptr<int>();
-            *batch_size_ptr = state.current_batch_size;
-        }
+    if (py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params) {
+        auto* batch_size_ptr = py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params
+                                   ->cuda_graph_prefill_batch_size.data_ptr<int>();
+        *batch_size_ptr = state.current_batch_size;
     }
 
     // Multi-group cache: H2H strided copies for group-local block tables.
@@ -924,7 +924,9 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
 
     // Common direct assignments (no slice needed)
-    inputs.attention_inputs.dtype       = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
+    inputs.attention_inputs.dtype = capture_mem_hold_.py_model_inputs_.attention_inputs.dtype;
+    inputs.attention_inputs.prefill_cuda_graph_copy_params =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
     inputs.bert_embedding_inputs        = capture_mem_hold_.py_model_inputs_.bert_embedding_inputs;
     inputs.attention_inputs.is_s_padded = true;
     refreshTaggedAttentionInputs(inputs);
