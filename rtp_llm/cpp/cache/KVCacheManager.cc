@@ -194,14 +194,18 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
 
     // Cache-key computation is identical for CP and non-CP — we always have
     // the full sequence's token ids; rolling hash is at block_size granularity.
-    const int  seq_size_per_block = config_.seq_size_per_block;
-    const bool is_first_malloc    = !effective->batch_kv_cache_resource->curBlocksNum();
+    const int  seq_size_per_block         = config_.seq_size_per_block;
+    const bool is_first_malloc            = !effective->batch_kv_cache_resource->curBlocksNum();
+    bool       cache_keys_initialized_now = false;
     if (is_first_malloc) {
-        initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
+        if (!effective->batch_kv_cache_resource->cacheKeysInitialized()) {
+            initCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
+            cache_keys_initialized_now = true;
+        }
     } else {
         updateCacheKeys(effective->batch_kv_cache_resource, effective->complete_token_ids, seq_size_per_block);
     }
-    reportPrefillCacheHitMetrics(*effective, is_first_malloc);
+    reportPrefillCacheHitMetrics(*effective, cache_keys_initialized_now);
 
     auto result = allocator_->malloc(*effective);
 
@@ -229,8 +233,8 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     return result;
 }
 
-void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc) {
-    if (!is_first_malloc || !prefill_cache_hit_metrics_reporter_ || !malloc_info.batch_kv_cache_resource
+void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool cache_keys_initialized_now) {
+    if (!cache_keys_initialized_now || !prefill_cache_hit_metrics_reporter_ || !malloc_info.batch_kv_cache_resource
         || !malloc_info.complete_token_ids) {
         return;
     }
@@ -657,7 +661,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
         auto                      shared_cache = allocator_->sharedBlockCache();
         if (shared_cache) {
             device_cache_keys = shared_cache->allCacheKeys();
-            info.version = shared_cache->version();
+            info.version      = shared_cache->version();
         }
         // memory cache keys
         const auto mem_cache_keys = coordinator_->memoryCacheKeysForStatus();
