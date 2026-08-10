@@ -22,4 +22,8 @@ makeCacheKey(size_t model_id, const std::string& token_id_str, size_t layer_id, 
     return makeCacheKey(model_id, token_id_str, layer_id) + "_region_" + std::to_string(static_cast<int>(region_name));
 }
 
+inline std::string makeLinearCacheSegmentKey(size_t segment_id, const std::string& cache_key) {
+    return "linear_segment_" + std::to_string(segment_id) + "_" + cache_key;
+}
+
 }  // namespace rtp_llm

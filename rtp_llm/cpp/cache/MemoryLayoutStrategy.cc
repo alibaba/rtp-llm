@@ -56,22 +56,53 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
     layer_kv_tensors_.reserve(config_.layer_num);
 
     if (config_.use_mla && config_.seq_size_per_block > 0) {
-        // MLA: concat_and_cache_mla expects [num_blocks, block_size, stride] per layer
-        RTP_LLM_CHECK_WITH_INFO(kv_block_stride_elems % config_.seq_size_per_block == 0,
-                                "kv_block_stride_elems=%zu must be divisible by seq_size_per_block=%zu for MLA",
-                                kv_block_stride_elems,
-                                config_.seq_size_per_block);
-        const size_t  stride_elems    = kv_block_stride_elems / config_.seq_size_per_block;
-        torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
-                                                                static_cast<int64_t>(config_.block_num),
-                                                                static_cast<int64_t>(config_.seq_size_per_block),
-                                                                static_cast<int64_t>(stride_elems)});
-        clearKVTensor(reshaped_tensor);
-        for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-            layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
-            RTP_LLM_LOG_DEBUG("Layer %d KV tensor shape: [%s] (MLA 3D)",
-                              layer_id,
-                              torch::str(layer_kv_tensors_[layer_id].sizes()).c_str());
+        const size_t logical_mla_block_bytes = config_.k_block_stride_bytes + config_.v_block_stride_bytes;
+        RTP_LLM_CHECK_WITH_INFO(logical_mla_block_bytes > 0,
+                                "MLA logical block bytes must be positive, got k=%zu v=%zu",
+                                config_.k_block_stride_bytes,
+                                config_.v_block_stride_bytes);
+        RTP_LLM_CHECK_WITH_INFO(logical_mla_block_bytes <= config_.kv_block_stride_bytes,
+                                "MLA logical block bytes=%zu exceed physical shared stride=%zu",
+                                logical_mla_block_bytes,
+                                config_.kv_block_stride_bytes);
+
+        if (logical_mla_block_bytes == config_.kv_block_stride_bytes) {
+            // Unpadded MLA: concat_and_cache_mla expects
+            // [num_blocks, block_size, logical_width] per layer.
+            RTP_LLM_CHECK_WITH_INFO(kv_block_stride_elems % config_.seq_size_per_block == 0,
+                                    "kv_block_stride_elems=%zu must be divisible by seq_size_per_block=%zu for MLA",
+                                    kv_block_stride_elems,
+                                    config_.seq_size_per_block);
+            const size_t  stride_elems    = kv_block_stride_elems / config_.seq_size_per_block;
+            torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                    static_cast<int64_t>(config_.block_num),
+                                                                    static_cast<int64_t>(config_.seq_size_per_block),
+                                                                    static_cast<int64_t>(stride_elems)});
+            clearKVTensor(reshaped_tensor);
+            for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+                layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
+                RTP_LLM_LOG_DEBUG("Layer %d KV tensor shape: [%s] (MLA 3D)",
+                                  layer_id,
+                                  torch::str(layer_kv_tensors_[layer_id].sizes()).c_str());
+            }
+        } else {
+            // Padded shared HybridCache: expose the physical block as a raw
+            // [block, stride] tensor. KVCache::getLayerCache later constructs
+            // the logical MLA kernel-page view while LINEAR/KDA keeps this raw
+            // view and interprets the same bytes with mixed FP32/BF16 types.
+            torch::Tensor reshaped_tensor = kv_cache_typed.reshape({static_cast<int64_t>(config_.layer_num),
+                                                                    static_cast<int64_t>(config_.block_num),
+                                                                    static_cast<int64_t>(kv_block_stride_elems)});
+            clearKVTensor(reshaped_tensor);
+            for (uint32_t layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
+                layer_kv_tensors_.push_back(reshaped_tensor[layer_id]);
+                RTP_LLM_LOG_DEBUG(
+                    "Layer %d KV tensor shape: [%s] (padded shared MLA raw view, logical=%zu physical=%zu)",
+                    layer_id,
+                    torch::str(layer_kv_tensors_[layer_id].sizes()).c_str(),
+                    logical_mla_block_bytes,
+                    config_.kv_block_stride_bytes);
+            }
         }
     } else {
         // MHA: [layer_num, block_num, kv_block_stride_elems], per layer 2D.
@@ -200,13 +231,18 @@ std::vector<BlockInfo> MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, 
 
 std::vector<BlockInfo>
 MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
-    // Hybrid attention models are not support asymmetric TP, thus transfer the whole kvache blocks
-    if (config_.is_mla || config_.enable_hybrid_attention) {
-        // For MLA models and hybrid attention models, use the same logic as the simpler convertIndexToBuffer function
-        return createBasicBlockInfo(layer_id, block_id);
+    // Linear state has a different physical layout from MHA. Segment it even
+    // when this layout belongs to an independent hybrid-cache pool so a TP
+    // prefill rank and a DP decode rank describe matching byte ranges.
+    if (config_.is_linear_attention) {
+        return createLinearPartitionedBlockInfo(layer_id, block_id, partition_count, partition_id);
     }
 
-    // TODO(xinfei.sxf) deal with linear attention
+    // MLA state is replicated across attention TP ranks, so the whole latent
+    // block is intentionally transferred for every partition.
+    if (config_.is_mla || config_.enable_hybrid_attention) {
+        return createBasicBlockInfo(layer_id, block_id);
+    }
 
     // For non-MLA models with partitioning
     return createPartitionedBlockInfo(layer_id, block_id, partition_count, partition_id);
@@ -296,6 +332,78 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
         out.insert(out.end(), scale_blocks.begin(), scale_blocks.end());
     }
 
+    return out;
+}
+
+std::vector<BlockInfo> MemoryLayoutStrategy::createLinearPartitionedBlockInfo(int layer_id,
+                                                                              int block_id,
+                                                                              int partition_count,
+                                                                              int partition_id) const {
+    checkLayerIdValidity(layer_id);
+    RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "linear cache partition_count must be positive");
+    RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
+                            "linear cache partition_id=%d is outside [0, %d)",
+                            partition_id,
+                            partition_count);
+    RTP_LLM_CHECK_WITH_INFO(config_.linear_num_k_heads > 0 && config_.linear_num_v_heads > 0,
+                            "linear cache head metadata is missing");
+    RTP_LLM_CHECK_WITH_INFO(config_.linear_num_k_heads % static_cast<size_t>(partition_count) == 0
+                                && config_.linear_num_v_heads % static_cast<size_t>(partition_count) == 0,
+                            "linear cache heads k=%zu v=%zu are not divisible by partition_count=%d",
+                            config_.linear_num_k_heads,
+                            config_.linear_num_v_heads,
+                            partition_count);
+    RTP_LLM_CHECK_WITH_INFO(config_.k_block_stride_bytes % static_cast<size_t>(partition_count) == 0,
+                            "linear SSM bytes=%zu are not divisible by partition_count=%d",
+                            config_.k_block_stride_bytes,
+                            partition_count);
+
+    const size_t q_bytes = config_.linear_q_bytes_per_history;
+    const size_t k_bytes = config_.linear_k_bytes_per_history;
+    const size_t v_bytes = config_.linear_v_bytes_per_history;
+    RTP_LLM_CHECK_WITH_INFO(q_bytes > 0 && k_bytes > 0 && v_bytes > 0,
+                            "linear cache convolution byte metadata is missing");
+    RTP_LLM_CHECK_WITH_INFO(q_bytes % static_cast<size_t>(partition_count) == 0
+                                && k_bytes % static_cast<size_t>(partition_count) == 0
+                                && v_bytes % static_cast<size_t>(partition_count) == 0,
+                            "linear convolution bytes q=%zu k=%zu v=%zu are not divisible by partition_count=%d",
+                            q_bytes,
+                            k_bytes,
+                            v_bytes,
+                            partition_count);
+
+    const size_t history_stride = q_bytes + k_bytes + v_bytes;
+    RTP_LLM_CHECK_WITH_INFO(config_.k_block_stride_bytes + config_.linear_conv_history * history_stride
+                                == config_.kv_block_stride_bytes,
+                            "linear cache layout mismatch: ssm=%zu history=%zu history_stride=%zu total=%zu",
+                            config_.k_block_stride_bytes,
+                            config_.linear_conv_history,
+                            history_stride,
+                            config_.kv_block_stride_bytes);
+    RTP_LLM_CHECK_WITH_INFO(!config_.hasScale(), "linear cache scale partitioning is not supported");
+
+    auto&        layer_tensor = layer_kv_tensors_[layer_id];
+    auto*        block_base   = static_cast<char*>(getBlockPtr(layer_tensor, block_id));
+    const size_t part         = static_cast<size_t>(partition_id);
+    const size_t count        = static_cast<size_t>(partition_count);
+
+    std::vector<BlockInfo> out;
+    out.reserve(1 + config_.linear_conv_history * 3);
+
+    const size_t ssm_part_bytes = config_.k_block_stride_bytes / count;
+    out.push_back(makeBlockInfo(layer_tensor, block_base + part * ssm_part_bytes, ssm_part_bytes));
+
+    const size_t q_part_bytes = q_bytes / count;
+    const size_t k_part_bytes = k_bytes / count;
+    const size_t v_part_bytes = v_bytes / count;
+    auto*        conv_base    = block_base + config_.k_block_stride_bytes;
+    for (size_t history_idx = 0; history_idx < config_.linear_conv_history; ++history_idx) {
+        auto* history_base = conv_base + history_idx * history_stride;
+        out.push_back(makeBlockInfo(layer_tensor, history_base + part * q_part_bytes, q_part_bytes));
+        out.push_back(makeBlockInfo(layer_tensor, history_base + q_bytes + part * k_part_bytes, k_part_bytes));
+        out.push_back(
+            makeBlockInfo(layer_tensor, history_base + q_bytes + k_bytes + part * v_part_bytes, v_part_bytes));
+    }
     return out;
 }
 

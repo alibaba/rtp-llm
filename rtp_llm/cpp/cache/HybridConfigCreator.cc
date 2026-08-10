@@ -141,16 +141,22 @@ void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                    
 
 void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                                              const KVCacheSpecPtr& full_spec,
-                                             const KVCacheSpecPtr& linear_spec) {
-    // Decide the physical KV block/scale sizes by taking max between full and linear specs.
+                                             const KVCacheSpecPtr& linear_spec,
+                                             size_t                attention_tp_size) {
+    // Shared HybridCache uses one physical block-id space for FULL and LINEAR
+    // groups, so the slot is the larger of the two strides.
+    //
+    // The LINEAR stride is now rank-local.  It used to be multiplied by attention
+    // TP so that a TP1 Decode could consume one full-model KDA state out of a
+    // single slot, which meant every Prefill rank wrote its local prefix and left
+    // 7/8 of the slot as padding.  K3 PD is equal-TP only now: prefill rank i and
+    // decode rank i own the same shard, so both sides describe the same rank-local
+    // block and expanding by TP would be pure waste.
+    (void)attention_tp_size;
     const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
     const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
 
-    // now we only support that linear attention block have padding
-    RTP_LLM_CHECK_WITH_INFO(full_kv_block_stride_bytes >= linear_kv_block_stride_bytes,
-                            "not support full attention with padding now");
-
-    config.kv_block_stride_bytes = full_kv_block_stride_bytes;
+    config.kv_block_stride_bytes = std::max(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
     config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
@@ -193,7 +199,8 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     HybridConfigCreator::setupCacheConfigSpecs(config, linear_groups, full_groups, linear_spec, full_spec);
 
     // Setup physical sizes
-    HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
+    HybridConfigCreator::setupPhysicalSizes(
+        config, full_spec, linear_spec, static_cast<size_t>(parallelism_config.get_attn_tp_size()));
 
     // Setup layer to group mapping
     HybridConfigCreator::setupLayerToGroupMapping(config);
