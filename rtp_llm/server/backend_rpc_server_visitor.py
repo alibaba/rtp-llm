@@ -1,7 +1,7 @@
+import asyncio
 import logging
 import os
 import time
-import asyncio
 from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
 
 import torch
@@ -103,9 +103,13 @@ class BackendRPCServerVisitor:
         self.master_config = master_config
         self._page_rr_route_cache_keys = False
         self._page_rr_cp_size = 1
+        self._prefill_cp_active = False
         if parallelism_config is not None:
             cp_config = prefill_cp_config or getattr(
                 parallelism_config, "prefill_cp_config", None
+            )
+            self._prefill_cp_active = bool(
+                cp_config and (cp_config.is_enabled() or cp_config.is_prefill_enabled())
             )
             tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
             kv_cache_sharded = bool(getattr(cp_config, "kv_cache_sharded", False))
@@ -413,6 +417,22 @@ class BackendRPCServerVisitor:
                 "speculative decoding does not support return_all_probs",
             )
 
+    def check_prefill_cp_supported(self, input: GenerateInput) -> None:
+        if not self._prefill_cp_active:
+            return
+
+        unsupported = []
+        if input.generate_config.calculate_loss:
+            unsupported.append("calculate_loss")
+        if input.generate_config.return_all_hidden_states:
+            unsupported.append("return_all_hidden_states")
+        if unsupported:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                "prefill context parallelism does not support request option(s): "
+                + ", ".join(unsupported),
+            )
+
     def fill_request_info(self, input: GenerateInput) -> None:
         if getattr(input, "request_info", None) is None:
             input.request_info = RequestInfo()
@@ -480,6 +500,7 @@ class BackendRPCServerVisitor:
                 )
 
             self.check_sp_supported(input)
+            self.check_prefill_cp_supported(input)
 
             max_new_tokens = min(
                 self.max_seq_len - input.prompt_length,

@@ -22,16 +22,12 @@ struct GraphParams {
     bool                 enable_cuda_graph_debug_mode = false;
     bool                 is_prefill_cuda_graph_mode   = false;
     bool                 is_target_verify             = false;
+    DSparkCallPhase      dspark_call_phase            = DSparkCallPhase::NONE;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
     int                  num_tokens_per_bs = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     int                  sp_steps          = 0;
-    // Fixed-width DSpARK draft graph. Unlike autoregressive MTP, query rows
-    // and target auxiliary rows have different leading dimensions/widths.
-    bool                 is_dspark_draft              = false;
-    int                  input_hidden_rows_per_bs     = 0;
-    std::size_t          input_hidden_size            = 0;
     size_t               max_context_batch_size = 128;
     std::size_t          hidden_size            = 0;
     c10::ScalarType      model_data_type        = c10::ScalarType::Float;
@@ -39,11 +35,10 @@ struct GraphParams {
     std::vector<int>     decode_capture_batch_sizes;
     std::vector<int32_t> kv_cache_layer_to_group;  // layer index -> group id for hybrid kv cache
     int32_t              kv_cache_group_num = 0;   // number of kv cache groups
-    // DSv4 head-channel residual multiplier (default 1, no expansion).
-    // CudaGraphRunner allocates input_hiddens with hidden_size * hc_mult so
-    // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
-    // produced by the target's getMtpTargetHiddenStates accessor.
-    int64_t              hc_mult            = 1;
+    // Width of one input_hiddens row. This is deliberately independent from
+    // hidden_size: regular DSv4 MTP consumes hc_mult * hidden_size while
+    // DSpARK consumes len(target_layer_ids) * hidden_size.
+    std::size_t input_hidden_size = 0;
 };
 
 class GraphBase {

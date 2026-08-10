@@ -19,19 +19,19 @@ projection into each draft layer's paged SWA cache before evaluating the next
 query block.
 
 The width is fixed for the lifetime of a service and comes only from
-``GEN_NUM_PER_CIRCLE``. Decode CUDA graph capture/replay keeps that query width,
-target-feature width, and FlashMLA scheduler metadata stable for each captured
-batch size.
+``GEN_NUM_PER_CIRCLE``. Decode proposal and commit calls use separate prefill
+CUDA-graph contracts (``gamma`` versus ``gamma + 1`` rows per request); prompt
+seeding keeps the standard prefill/CP path.
 """
 
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -39,6 +39,8 @@ from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+from rtp_llm.models_py.modules.dsv4.cp import build_cp_context_for_forward
+from rtp_llm.models_py.modules.dsv4.fp8.attention import BIND_KEEP, bind_attn_cache
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
@@ -55,27 +57,31 @@ from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
+    DSparkMarkovHead,
+    DSparkProposerMixin,
+    optional_tensor,
+)
+from rtp_llm.ops.compute_ops import DSparkCallPhase, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
-class DeepSeekV4DSparkModel(DeepSeekV4Model):
-    """Runtime-fixed-width DeepSeek-V4 DSpark proposer.
+class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
+    """DeepSeek-V4 implementation of the shared DSpark proposer.
 
-    Input contract (all token rows are request-major):
+    The engine input contract, query-block geometry and Markov sampling tail
+    are inherited from :class:`DSparkProposerMixin`; this class implements the
+    model-specific hooks with DeepSeek-V4 specifics: mHC blocks, FP8 SWA
+    paged-cache injection, FlashMLA non-causal top-k indices and the
+    ``mtp.*`` checkpoint weights.
 
-    * ``input_ids``: ``[B * gamma]`` query block.  Column zero is the anchor;
-      the remaining columns are forced to the configured noise token here.
-    * ``input_hiddens``: target auxiliary features, flattenable to
-      ``[rows, len(target_layers) * hidden_size]``.
-    * ``dspark_ctx_lengths`` / ``dspark_ctx_starts``: number and source-row
-      start of newly committed feature rows for each request.
-    * ``attention_inputs.prefix_lengths``: committed sequence length *after*
-      those context rows and immediately before the query block.
-
-    Output ``draft_tokens`` and ``draft_probs`` are respectively
-    ``[B, gamma]`` and ``[B, gamma, vocab]``.
+    Output ``draft_tokens`` is ``[B, gamma]``; the rejection-sampling q is
+    reconstructed engine-side as a point mass on the emitted tokens.
     """
+
+    # Draft side: carries the capture ids for the shared-buffer row-width
+    # derivation but consumes the features — only the target captures.
+    _captures_aux_hidden = False
 
     def __init__(
         self,
@@ -113,9 +119,22 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 "DeepSeekV4DSparkModel requires a positive dspark_markov_rank"
             )
 
-        self._dspark_noise_token_id = int(noise_token_id)
         self._dspark_target_layer_ids = tuple(int(v) for v in target_layer_ids)
         self._dspark_markov_rank = int(markov_rank)
+        self.tp_size = int(getattr(parallelism_config, "tp_size", 1) or 1)
+        self.tp_rank = int(getattr(parallelism_config, "tp_rank", 0) or 0)
+        # Commit-side CP context. Target features remain rank-local after the
+        # target model's zigzag prefill; the commit forward goes through the
+        # standard CP handleInputs, so its row map is derived per call from
+        # the attached context_parallel_info (see map_commit_rows).
+        self._dspark_commit_cp_enabled = False
+        self._dspark_kv_cache_sharded = False
+        _cp_cfg = getattr(parallelism_config, "prefill_cp_config", None)
+        if _cp_cfg is not None and bool(_cp_cfg.is_enabled()) and self.tp_size > 1:
+            self._dspark_commit_cp_enabled = True
+            self._dspark_kv_cache_sharded = bool(
+                getattr(_cp_cfg, "kv_cache_sharded", False)
+            )
 
         if self._gen_num_per_cycle <= 0:
             raise ValueError(
@@ -135,15 +154,17 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         if int(self._v4_args.window_size) <= 0:
             raise ValueError("DeepSeek-V4 DSpark requires a sliding window")
 
-        self._dspark_aux_dim = len(self._dspark_target_layer_ids) * int(
-            self._v4_args.dim
+        self.init_dspark_proposer(
+            width=int(self._gen_num_per_cycle),
+            noise_token_id=int(noise_token_id),
+            aux_feature_dim=len(self._dspark_target_layer_ids) * int(self._v4_args.dim),
+            hidden_dim=int(self._v4_args.dim),
+            vocab_size=int(self._v4_args.vocab_size),
         )
         # Model-level weights are attached by ``_load_extra_weights`` after
         # the inherited V4Transformer has consumed the per-layer dictionaries.
         self.main_norm: Optional[RMSNorm] = None
         self.main_proj = None
-        self.markov_w1: Optional[torch.Tensor] = None
-        self.markov_w2: Optional[torch.Tensor] = None
 
         logging.info(
             "[DeepSeekV4DSparkModel] fixed gamma=%d noise=%d target_layers=%s "
@@ -159,11 +180,10 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
     # Initialization / graph policy
     # ------------------------------------------------------------------
 
-    def _should_capture_cuda_graph(self, attn: Any, is_target_verify: bool) -> bool:
-        # DSpARK always evaluates a fixed-width query block.  Accepted context
-        # lengths remain device data in the persistent CudaGraphRunner input
-        # buffers, so they do not change the captured launch topology.
-        return True
+    def cuda_graph_input_hidden_size(self) -> int:
+        """Return the target-feature row width consumed by commit graphs."""
+
+        return int(self._dspark_aux_feature_dim)
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
@@ -193,31 +213,24 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         self.main_proj = _v4_fp8_linear(
             gw[W.v4_dspark_main_proj_w], gw[W.v4_dspark_main_proj_s]
         )
-        self.markov_w1 = gw[W.v4_dspark_markov_w1]
-        self.markov_w2 = gw[W.v4_dspark_markov_w2]
+        self.markov_head = DSparkMarkovHead(
+            gw[W.v4_dspark_markov_w1],
+            gw[W.v4_dspark_markov_w2],
+            vocab_size=int(self._v4_args.vocab_size),
+            rank=self._dspark_markov_rank,
+        )
 
-        if tuple(self.markov_w1.shape) != (
-            int(self._v4_args.vocab_size),
-            self._dspark_markov_rank,
-        ):
-            raise ValueError(
-                "unexpected DSpark markov_w1 shape: " f"{tuple(self.markov_w1.shape)}"
-            )
-        if tuple(self.markov_w2.shape) != tuple(self.markov_w1.shape):
-            raise ValueError(
-                "DSpark markov_w2 shape must match markov_w1, got "
-                f"{tuple(self.markov_w2.shape)} vs {tuple(self.markov_w1.shape)}"
-            )
+    # ------------------------------------------------------------------
+    # DSparkProposerMixin hooks
+    # ------------------------------------------------------------------
+
+    def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
+        assert self.main_norm is not None and self.main_proj is not None
+        return self.main_norm(self.main_proj(features))
 
     # ------------------------------------------------------------------
     # Framework/paged-cache metadata helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _optional_tensor(value: Any) -> Optional[torch.Tensor]:
-        if value is None or not isinstance(value, torch.Tensor):
-            return None
-        return value if value.numel() > 0 else None
 
     def _swa_block_table(self, attention_inputs: Any, batch_size: int) -> torch.Tensor:
         by_group = getattr(
@@ -284,115 +297,6 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         invalid = invalid | (block_ids <= 0)
         slots = block_ids * entries_per_block + (safe_pos % entries_per_block)
         return torch.where(invalid, torch.full_like(slots, -1), slots)
-
-    @staticmethod
-    def _map_context_rows(
-        starts: torch.Tensor,
-        lengths: torch.Tensor,
-        prefix_lengths: torch.Tensor,
-        row_count: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Map source feature rows to request ids and absolute positions.
-
-        Rows outside every ``[start, start + length)`` interval are padding
-        from a dense target-verify output and receive ``(-1, -1)``.  Keeping
-        this transform independent from the feature projection also makes its
-        packed/dense layout semantics directly unit-testable on CPU.
-        """
-        device = starts.device
-        if row_count == 0:
-            return (
-                torch.empty(0, dtype=torch.int32, device=device),
-                torch.empty(0, dtype=torch.int32, device=device),
-            )
-        batch_size = int(starts.numel())
-        if batch_size == 0:
-            raise ValueError("cannot map non-empty DSpark context without requests")
-
-        rows = torch.arange(row_count, device=device, dtype=torch.long)
-        req = torch.searchsorted(starts.contiguous(), rows, right=True) - 1
-        safe_req = req.clamp(0, batch_size - 1)
-        valid = (req >= 0) & (rows >= starts[safe_req])
-        valid = valid & (rows < starts[safe_req] + lengths[safe_req])
-
-        local_offset = rows - starts[safe_req]
-        positions = prefix_lengths[safe_req] - lengths[safe_req] + local_offset
-        req = torch.where(valid, req, torch.full_like(req, -1))
-        positions = torch.where(valid, positions, torch.full_like(positions, -1))
-        return req.to(torch.int32), positions.to(torch.int32)
-
-    def _project_target_features(
-        self,
-        inputs: PyModelInputs,
-        prefix_lengths: torch.Tensor,
-        batch_size: int,
-        device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return ``main_x, req_ids, positions`` for received target rows.
-
-        Explicit ``starts`` may describe a dense target-verify buffer with
-        holes after each request's accepted prefix.  ``searchsorted`` maps all
-        source rows to requests without a device-to-host length read; hole rows
-        retain a ``-1`` request/position and are skipped by the cache writer.
-        """
-        assert self.main_norm is not None and self.main_proj is not None
-        hidden = self._optional_tensor(getattr(inputs, "input_hiddens", None))
-        lengths = self._optional_tensor(getattr(inputs, "dspark_ctx_lengths", None))
-        if batch_size == 0:
-            return (
-                torch.empty(
-                    (0, int(self._v4_args.dim)),
-                    dtype=torch.bfloat16,
-                    device=device,
-                ),
-                torch.empty(0, dtype=torch.int32, device=device),
-                torch.empty(0, dtype=torch.int32, device=device),
-            )
-        if hidden is None:
-            raise RuntimeError("DSpark requires target features in input_hiddens")
-        if lengths is None or int(lengths.numel()) < batch_size:
-            raise RuntimeError(
-                "DSpark requires dspark_ctx_lengths with one value per request"
-            )
-
-        lengths = lengths[:batch_size].to(device=device, dtype=torch.long)
-        starts_in = self._optional_tensor(getattr(inputs, "dspark_ctx_starts", None))
-        if starts_in is None:
-            starts = lengths.cumsum(0) - lengths
-        else:
-            if int(starts_in.numel()) < batch_size:
-                raise RuntimeError(
-                    "DSpark dspark_ctx_starts has fewer values than the batch"
-                )
-            starts = starts_in[:batch_size].to(device=device, dtype=torch.long)
-
-        if hidden.numel() % self._dspark_aux_dim != 0:
-            raise RuntimeError(
-                "DSpark target feature tensor cannot be reshaped to the "
-                f"configured width {self._dspark_aux_dim}: "
-                f"shape={tuple(hidden.shape)}"
-            )
-        features = hidden.reshape(-1, self._dspark_aux_dim).to(device=device)
-        row_count = int(features.shape[0])
-        if row_count == 0:
-            return (
-                torch.empty(
-                    (0, int(self._v4_args.dim)),
-                    dtype=torch.bfloat16,
-                    device=device,
-                ),
-                torch.empty(0, dtype=torch.int32, device=device),
-                torch.empty(0, dtype=torch.int32, device=device),
-            )
-
-        main_x = self.main_norm(self.main_proj(features))
-        req, positions = self._map_context_rows(
-            starts,
-            lengths,
-            prefix_lengths,
-            row_count,
-        )
-        return main_x, req, positions
 
     def _build_noncausal_indices(
         self,
@@ -466,14 +370,265 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
     # DSpark attention / block forward
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _swa_cache_bound(
+        self,
+        layer_idx: int,
+        block_table: torch.Tensor,
+        cp_ctx: Any = None,
+    ):
+        """Temporarily point one draft layer's attention at this model's
+        paged SWA cache and yield ``(attn, entries_per_block, pool)``.
+
+        ``entries_per_block`` is the full ring-entry domain of one block
+        (both CP slices together under a sharded prefill); ``pool`` is the
+        packed 3-D FP8 view used by the regular writer. Byte-sliced commits
+        also require it for layout validation, then write through the raw
+        per-rank pool selected by ``attn._swa_cp_byte_sliced()``."""
+        attn = self.v4.layers[layer_idx].attn
+        if int(attn.compress_ratio) != 0:
+            raise RuntimeError(
+                f"DSpark layer {layer_idx} is not SWA-only: "
+                f"compress_ratio={attn.compress_ratio}"
+            )
+        with bind_attn_cache(
+            attn,
+            self.kv_cache,
+            {int(SWA_KV): block_table},
+            cp_ctx=cp_ctx if cp_ctx is not None else BIND_KEEP,
+        ):
+            attn._ensure_freqs_cis_bound()
+            entries_per_block = int(attn._swa_entries_per_block())
+            pool = attn._pool_view_3d_fp8(SWA_KV)
+            if entries_per_block <= 0 or pool is None:
+                raise RuntimeError(
+                    f"DSpark layer {layer_idx} has no FP8 SWA paged pool"
+                )
+            yield attn, entries_per_block, pool
+
+    def _commit_layer_features(
+        self,
+        layer_idx: int,
+        main_x: torch.Tensor,
+        context_req_ids: torch.Tensor,
+        context_positions: torch.Tensor,
+        committed_ends: torch.Tensor,
+        block_table: torch.Tensor,
+        tokens_per_block: int,
+        batch_size: int,
+        gathered_req_ids: Optional[torch.Tensor] = None,
+        gathered_positions: Optional[torch.Tensor] = None,
+        cp_ctx: Any = None,
+    ) -> None:
+        """Insert committed target features through one layer's own
+        wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
+        generations carry a -1 slot and are ignored by the FP8 writer.
+
+        Under CP prefill ``main_x``/``context_positions`` are the rank-local
+        zigzag rows; the projected KV is all-gathered across the CP group
+        (proj-then-gather: the per-row wkv/RoPE projection commutes with the
+        row split, and the projected rows are much narrower than the raw
+        feature rows). Replicated caches write the full gathered domain on
+        every rank; byte-sharded caches write only the local slice.
+        """
+        with self._swa_cache_bound(layer_idx, block_table, cp_ctx=cp_ctx) as (
+            attn,
+            entries_per_block,
+            pool,
+        ):
+            safe_context_pos = context_positions.to(torch.long).clamp_min(0)
+            context_freqs = attn.freqs_cis.index_select(
+                0, safe_context_pos
+            ).contiguous()
+            context_kv = fused_rmsnorm_rope(
+                attn._lin(attn.wkv, main_x).contiguous(),
+                attn.kv_norm,
+                context_freqs,
+                int(attn.rope_head_dim),
+                eps=float(attn.eps),
+            )
+            if gathered_positions is not None:
+                from rtp_llm.models_py.distributed.collective_torch import (
+                    Group,
+                    all_gather,
+                )
+
+                context_kv = all_gather(context_kv.contiguous(), group=Group.TP)
+                context_req_ids = gathered_req_ids
+                context_positions = gathered_positions
+            context_rows = int(context_positions.numel())
+            context_slots = compute_swa_slot_mapping_from_positions(
+                block_table=block_table[:batch_size]
+                .to(device=main_x.device, dtype=torch.int32)
+                .contiguous(),
+                req_id_per_token=context_req_ids,
+                positions=context_positions,
+                seq_lens=committed_ends,
+                num_tokens=context_rows,
+                pool_entries_per_block=entries_per_block,
+                tokens_per_block_for_block_table=tokens_per_block,
+                ring_entries=entries_per_block,
+            )
+            if attn._swa_cp_byte_sliced():
+                # Sharded prefill: same full-domain slots, but each rank owns
+                # only its byte slice of every block — route through the
+                # target pool's CP-sliced FP8 writer (used by the target's
+                # own SWA layers) instead of the plain 3-D writer.
+                from rtp_llm.models_py.modules.dsv4.fp8 import (
+                    _swa_kv_insert_triton as insert_ops,
+                )
+
+                compaction = attn._build_swa_cp_byte_compaction(
+                    context_slots,
+                    full_entries_per_block=entries_per_block,
+                    validation_site=f"dspark.commit.layer_{layer_idx}",
+                    negative_mode="skip_minus_one",
+                )
+                if compaction is None:
+                    raise RuntimeError(
+                        f"DSpark layer {layer_idx}: CP-sliced slot compaction "
+                        "is unavailable"
+                    )
+                insert_ops.quantize_and_insert_k_cache_cp_byte_sliced(
+                    context_kv.reshape(-1, int(attn.head_dim)).to(torch.bfloat16),
+                    attn._pool_raw_u8(SWA_KV),
+                    context_slots,
+                    full_entries_per_block=entries_per_block,
+                    cp_rank=int(attn._cp_ctx.cp_rank),
+                    cp_size=int(attn._cp_ctx.cp_size),
+                    compaction=compaction,
+                )
+            else:
+                decode_write_swa_fp8(
+                    kv=context_kv,
+                    slot_mapping=context_slots,
+                    swa_pool_3d=pool,
+                    bsz=context_rows,
+                    q_len=1,
+                    head_dim=int(attn.head_dim),
+                )
+
+    def map_commit_rows(
+        self,
+        starts: torch.Tensor,
+        lengths: torch.Tensor,
+        committed_ends: torch.Tensor,
+        row_count: int,
+        inputs: PyModelInputs,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """CP prefill hands the commit the target's rank-local zigzag rows;
+        this forward went through the same standard CP handleInputs, so the
+        row -> (request, position) map is derived from the CP metadata it
+        attached — the packed ``starts``/``lengths`` layout only describes
+        the non-CP row order."""
+        attention_inputs = inputs.attention_inputs
+        cp_info = getattr(attention_inputs, "context_parallel_info", None)
+        if not self._dspark_commit_cp_enabled or cp_info is None:
+            return super().map_commit_rows(
+                starts, lengths, committed_ends, row_count, inputs
+            )
+        padding_mask = optional_tensor(
+            getattr(cp_info, "prefill_qkv_padding_mask", None)
+        )
+        if padding_mask is None or int(padding_mask.numel()) == 0:
+            # No CP-split prefill stream in this forward (e.g. a dense
+            # decode-phase commit): the packed layout applies unchanged.
+            return super().map_commit_rows(
+                starts, lengths, committed_ends, row_count, inputs
+            )
+        device = committed_ends.device
+        cp_ctx = build_cp_context_for_forward(
+            cp_info,
+            self.tp_size,
+            self.tp_rank,
+            row_count,
+            device,
+            prefix_lengths=optional_tensor(
+                getattr(attention_inputs, "prefix_lengths", None)
+            ),
+            kv_cache_sharded=self._dspark_kv_cache_sharded,
+        )
+        positions = cp_ctx.global_positions
+        if int(positions.numel()) != int(row_count):
+            raise RuntimeError(
+                "DSpark CP commit row mismatch: buffer supplied "
+                f"{row_count} rank-local rows, CPContext maps "
+                f"{int(positions.numel())}"
+            )
+        valid = cp_ctx.local_is_real.to(positions.device)
+        req = cp_ctx.req_id_per_token
+        if req is None:
+            req = torch.zeros_like(valid, dtype=torch.int32)
+        req32 = req.to(device=positions.device, dtype=torch.int32)
+        pos32 = positions.to(torch.int32)
+        # Padding slots must never reach the ring: -1 rows are skipped by the
+        # slot mapping / FP8 writer on every rank after the gather.
+        req32 = torch.where(valid, req32, torch.full_like(req32, -1))
+        pos32 = torch.where(valid, pos32, torch.full_like(pos32, -1))
+        return req32.contiguous(), pos32.contiguous(), cp_ctx
+
+    def commit_feature_rows(
+        self,
+        main_x: torch.Tensor,
+        context_req_ids: torch.Tensor,
+        context_positions: torch.Tensor,
+        committed_ends: torch.Tensor,
+        inputs: PyModelInputs,
+        commit_ctx: Any = None,
+    ) -> None:
+        batch_size = int(committed_ends.numel())
+        if batch_size == 0 or int(main_x.shape[0]) == 0:
+            return
+        attention_inputs = inputs.attention_inputs
+        block_table = self._swa_block_table(attention_inputs, batch_size)
+        tokens_per_block = int(
+            require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
+        )
+        write_cache_store_impl = create_write_cache_store_impl(
+            attention_inputs, self.kv_cache
+        )
+        gathered_req_ids: Optional[torch.Tensor] = None
+        gathered_positions: Optional[torch.Tensor] = None
+        if commit_ctx is not None:
+            # Proj-then-gather: the row map is gathered once here; each
+            # layer's projected KV is gathered inside _commit_layer_features.
+            from rtp_llm.models_py.distributed.collective_torch import (
+                Group,
+                all_gather,
+            )
+
+            gathered_req_ids = all_gather(
+                context_req_ids.contiguous(), group=Group.TP
+            )
+            gathered_positions = all_gather(
+                context_positions.contiguous(), group=Group.TP
+            )
+        for layer_idx in range(len(self.v4.layers)):
+            self._commit_layer_features(
+                layer_idx,
+                main_x,
+                context_req_ids,
+                context_positions,
+                committed_ends,
+                block_table,
+                tokens_per_block,
+                batch_size,
+                gathered_req_ids=gathered_req_ids,
+                gathered_positions=gathered_positions,
+                cp_ctx=commit_ctx,
+            )
+            # PD-separated prefill publishes each committed draft-layer
+            # cache from the commit call: the published range is exactly
+            # the committed rows, so proposal rows never enter the store's
+            # block plan.
+            if write_cache_store_impl is not None:
+                write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
+
     def _forward_dspark_attention(
         self,
         layer_idx: int,
         x: torch.Tensor,
         query_positions: torch.Tensor,
-        main_x: torch.Tensor,
-        context_req_ids: torch.Tensor,
-        context_positions: torch.Tensor,
         prefix_lengths: torch.Tensor,
         active_requests: torch.Tensor,
         block_table: Optional[torch.Tensor],
@@ -486,64 +641,11 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         if block_table is None:
             raise RuntimeError("DSpark attention requires an SWA block table")
 
-        layer = self.v4.layers[layer_idx]
-        attn = layer.attn
-        if int(attn.compress_ratio) != 0:
-            raise RuntimeError(
-                f"DSpark layer {layer_idx} is not SWA-only: "
-                f"compress_ratio={attn.compress_ratio}"
-            )
-
-        previous_cache = attn._kv_cache
-        previous_tables = attn._block_tables_by_type
-        attn._kv_cache = self.kv_cache
-        attn._block_tables_by_type = {int(SWA_KV): block_table}
-        try:
-            attn._ensure_freqs_cis_bound()
-            entries_per_block = int(attn._pool_entries_per_block(SWA_KV))
-            pool = attn._pool_view_3d_fp8(SWA_KV)
-            if entries_per_block <= 0 or pool is None:
-                raise RuntimeError(
-                    f"DSpark layer {layer_idx} has no FP8 SWA paged pool"
-                )
-
-            # Insert newly committed target features through this layer's own
-            # wkv/kv_norm/RoPE pipeline. Hole rows and superseded SWA ring
-            # generations carry a -1 slot and are ignored by the FP8 writer.
-            context_rows = int(main_x.shape[0])
-            if context_rows > 0:
-                safe_context_pos = context_positions.to(torch.long).clamp_min(0)
-                context_freqs = attn.freqs_cis.index_select(
-                    0, safe_context_pos
-                ).contiguous()
-                context_kv = fused_rmsnorm_rope(
-                    attn._lin(attn.wkv, main_x).contiguous(),
-                    attn.kv_norm,
-                    context_freqs,
-                    int(attn.rope_head_dim),
-                    eps=float(attn.eps),
-                )
-                context_slots = compute_swa_slot_mapping_from_positions(
-                    block_table=block_table[:batch_size]
-                    .to(device=x.device, dtype=torch.int32)
-                    .contiguous(),
-                    req_id_per_token=context_req_ids,
-                    positions=context_positions,
-                    seq_lens=prefix_lengths,
-                    num_tokens=context_rows,
-                    pool_entries_per_block=entries_per_block,
-                    tokens_per_block_for_block_table=tokens_per_block,
-                    ring_entries=entries_per_block,
-                )
-                decode_write_swa_fp8(
-                    kv=context_kv,
-                    slot_mapping=context_slots,
-                    swa_pool_3d=pool,
-                    bsz=context_rows,
-                    q_len=1,
-                    head_dim=int(attn.head_dim),
-                )
-
+        with self._swa_cache_bound(layer_idx, block_table) as (
+            attn,
+            entries_per_block,
+            pool,
+        ):
             # Project and insert all query KVs before attention so each query
             # can read every other query position, including future noise.
             qkv = decode_compute_qkv(attn, x, query_positions.reshape(-1))
@@ -593,65 +695,39 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 topk_length=topk_length,
             )
             return decode_output_proj(attn, output, qkv.freqs_cis, batch_size, gamma)
-        finally:
-            attn._kv_cache = previous_cache
-            attn._block_tables_by_type = previous_tables
 
     def _forward_layers(
         self,
         query_ids: torch.Tensor,
         query_positions: torch.Tensor,
-        main_x: torch.Tensor,
-        context_req_ids: torch.Tensor,
-        context_positions: torch.Tensor,
         prefix_lengths: torch.Tensor,
         active_requests: torch.Tensor,
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
-        write_cache_store_impl: Any = None,
     ) -> torch.Tensor:
-        batch_size, gamma = query_ids.shape
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
+        # The hyper-connection choreography lives in Block.forward_decode;
+        # only the attention call is substituted with the non-causal
+        # fixed-block variant.
         for layer_idx, layer in enumerate(self.v4.layers):
-            residual = hidden
-            x_pre, post, comb = layer.attn_hc.pre(hidden)
-            x_pre = layer.attn_norm(
-                x_pre.reshape(batch_size * gamma, int(self._v4_args.dim))
-            ).view(batch_size, gamma, int(self._v4_args.dim))
-            attention_output = self._forward_dspark_attention(
-                layer_idx,
-                x_pre,
-                query_positions,
-                main_x,
-                context_req_ids,
-                context_positions,
-                prefix_lengths,
-                active_requests,
-                block_table,
-                tokens_per_block,
-                graph_metadata,
+            hidden = layer.forward_decode(
+                hidden,
+                attn_metadata=None,
+                input_ids=query_ids,
+                attn_fn=lambda x_pre, layer_idx=layer_idx: self._forward_dspark_attention(
+                    layer_idx,
+                    x_pre,
+                    query_positions,
+                    prefix_lengths,
+                    active_requests,
+                    block_table,
+                    tokens_per_block,
+                    graph_metadata,
+                ),
             )
-            hidden = layer.attn_hc.post(attention_output, residual, post, comb)
-
-            residual = hidden
-            x_pre, post, comb = layer.ffn_hc.pre(hidden)
-            x_pre = layer.ffn_norm(
-                x_pre.reshape(batch_size * gamma, int(self._v4_args.dim))
-            ).view(batch_size, gamma, int(self._v4_args.dim))
-            ffn_output = layer.ffn(x_pre, query_ids)
-            hidden = layer.ffn_hc.post(ffn_output, residual, post, comb)
-
-            # The custom non-causal attention path bypasses the ordinary V4
-            # prefill loop, so it must explicitly publish each completed
-            # draft-layer cache in PD-separated prefill. The forward computes
-            # the fixed query rows locally, while the C++ CacheStore overrides
-            # expose only committed prefix/suffix KV. Decode rebuilds the
-            # speculative rows after loading that committed state.
-            if write_cache_store_impl is not None:
-                write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
 
         return hidden
 
@@ -659,29 +735,46 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
     # Head / framework forward
     # ------------------------------------------------------------------
 
-    def _empty_outputs(self, batch_size: int, device: torch.device) -> PyModelOutputs:
-        gamma = self._gen_num_per_cycle
-        dim = int(self._v4_args.dim)
-        vocab = int(self._v4_args.vocab_size)
-        outputs = PyModelOutputs(
-            torch.zeros(
-                (batch_size * gamma, dim),
-                dtype=torch.bfloat16,
-                device=device,
-            )
+    def forward_query_block(
+        self,
+        query_ids: torch.Tensor,
+        query_positions: torch.Tensor,
+        prefix_lengths: torch.Tensor,
+        active_requests: torch.Tensor,
+        inputs: PyModelInputs,
+        fmha_impl: Any,
+    ) -> torch.Tensor:
+        batch_size = int(query_ids.shape[0])
+        attention_inputs = inputs.attention_inputs
+        block_table = (
+            self._swa_block_table(attention_inputs, batch_size)
+            if batch_size > 0
+            else None
         )
-        outputs.draft_tokens = torch.zeros(
-            (batch_size, gamma), dtype=torch.int32, device=device
+        tokens_per_block = int(
+            require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
         )
-        outputs.draft_probs = torch.zeros(
-            (batch_size, gamma, vocab), dtype=torch.float32, device=device
-        )
-        return outputs
 
-    def _forward_head(
-        self, hidden: torch.Tensor, anchors: torch.Tensor
-    ) -> PyModelOutputs:
-        assert self.markov_w1 is not None and self.markov_w2 is not None
+        # Eager forwards get a fresh owner each round, while CUDA graph capture
+        # receives the persistent object created by ``prepare_fmha_impl``.
+        graph_metadata = (
+            fmha_impl
+            if fmha_impl is not None and hasattr(fmha_impl, "sched_meta_cache")
+            else SimpleNamespace(sched_meta_cache={})
+        )
+        return self._forward_layers(
+            query_ids,
+            query_positions,
+            prefix_lengths,
+            active_requests,
+            block_table,
+            tokens_per_block,
+            graph_metadata,
+        )
+
+    def compute_draft_logits(
+        self, hidden: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         batch_size, gamma = int(hidden.shape[0]), int(hidden.shape[1])
         dim = int(self._v4_args.dim)
 
@@ -693,25 +786,35 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         base_logits = torch.mm(
             normalized.to(self.v4.head_weight.dtype), self.v4.head_weight.t()
         ).float()
-        base_logits = base_logits.view(batch_size, gamma, -1)
+        # The lm_head is aliased from the target owner, whose weight is
+        # vocab-sharded across TP ranks; the sequential Markov tail needs the
+        # full vocabulary on every rank. Only k rows per request cross this
+        # gather, so it stays tiny relative to the aliased ~1.8 GiB matrix.
+        local_vocab = int(base_logits.size(-1))
+        if local_vocab < self._dspark_vocab_size:
+            if self.tp_size <= 1:
+                raise RuntimeError(
+                    "DSpARK lm_head output is vocabulary-sharded but TP is disabled: "
+                    f"local={local_vocab}, vocab={self._dspark_vocab_size}"
+                )
+            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-        previous = anchors
-        tokens = []
-        probabilities = []
-        for step in range(gamma):
-            markov_embed = F.embedding(previous, self.markov_w1)
-            markov_bias = F.linear(markov_embed, self.markov_w2).float()
-            logits = base_logits[:, step] + markov_bias
-            probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-            next_token = torch.argmax(probs, dim=-1)
-            probabilities.append(probs)
-            tokens.append(next_token.to(torch.int32))
-            previous = next_token
-
-        outputs = PyModelOutputs(normalized)
-        outputs.draft_tokens = torch.stack(tokens, dim=1).contiguous()
-        outputs.draft_probs = torch.stack(probabilities, dim=1).contiguous()
-        return outputs
+            rows = int(base_logits.size(0))
+            gathered = all_gather(base_logits.contiguous(), group=Group.TP)
+            shard_vocab = local_vocab
+            base_logits = (
+                gathered.reshape(self.tp_size, rows, shard_vocab)
+                .permute(1, 0, 2)
+                .reshape(rows, self.tp_size * shard_vocab)
+            )
+            if int(base_logits.size(-1)) < self._dspark_vocab_size:
+                raise RuntimeError(
+                    "DSpARK gathered lm_head output is narrower than vocabulary: "
+                    f"gathered={int(base_logits.size(-1))}, "
+                    f"vocab={self._dspark_vocab_size}"
+                )
+        base_logits = base_logits[..., : self._dspark_vocab_size].contiguous()
+        return normalized, base_logits.view(batch_size, gamma, -1)
 
     @torch.inference_mode()
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
@@ -719,6 +822,10 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
         device = self.v4.embed.weight.device
         gamma = self._gen_num_per_cycle
+        phase = getattr(inputs, "dspark_call_phase", DSparkCallPhase.NONE)
+        if phase == DSparkCallPhase.NONE:
+            raise RuntimeError("DSpark forward requires an explicit proposal/commit phase")
+        is_commit = phase == DSparkCallPhase.COMMIT
 
         # PyWrappedModel warmup intentionally has no KVCache.  Produce stable
         # shapes without invoking any paged-cache or FlashMLA kernels.
@@ -730,96 +837,22 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 "returning warmup placeholders for batch=%d",
                 batch_size,
             )
-            return self._empty_outputs(batch_size, device)
+            if is_commit:
+                return PyModelOutputs(
+                    torch.zeros(
+                        (0, int(self._v4_args.dim)),
+                        dtype=torch.bfloat16,
+                        device=device,
+                    )
+                )
+            return self.dspark_empty_outputs(batch_size, device)
 
         if not bool(self.fp8_kv_cache):
             raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
 
-        attention_inputs = inputs.attention_inputs
-        input_lengths = self._optional_tensor(
-            getattr(attention_inputs, "input_lengths", None)
-        )
-        batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
-        expected_tokens = batch_size * gamma
-        if int(inputs.input_ids.numel()) != expected_tokens:
-            raise RuntimeError(
-                "DSpark input_ids must contain exactly B*gamma tokens: "
-                f"numel={inputs.input_ids.numel()}, batch={batch_size}, "
-                f"gamma={gamma}"
-            )
-
-        prefix = self._optional_tensor(
-            getattr(attention_inputs, "prefix_lengths", None)
-        )
-        if batch_size > 0 and (prefix is None or int(prefix.numel()) < batch_size):
-            raise RuntimeError(
-                "DSpark requires prefix_lengths with one value per request"
-            )
-        prefix_lengths = (
-            prefix[:batch_size].to(device=device, dtype=torch.int32)
-            if prefix is not None
-            else torch.empty(0, dtype=torch.int32, device=device)
-        )
-
-        raw_ids = inputs.input_ids.to(device=device, dtype=torch.int32).view(
-            batch_size, gamma
-        )
-        anchors = raw_ids[:, 0].clone()
-        query_ids = torch.full_like(raw_ids, self._dspark_noise_token_id)
-        if batch_size > 0:
-            query_ids[:, 0].copy_(anchors)
-        query_positions = prefix_lengths.to(torch.long).view(batch_size, 1)
-        query_positions = query_positions + torch.arange(
-            gamma, device=device, dtype=torch.long
-        ).view(1, gamma)
-
-        main_x, context_req_ids, context_positions = self._project_target_features(
-            inputs, prefix_lengths.to(torch.long), batch_size, device
-        )
-        ctx_lengths = self._optional_tensor(getattr(inputs, "dspark_ctx_lengths", None))
-        active_requests = (
-            ctx_lengths[:batch_size].to(device=device) > 0
-            if ctx_lengths is not None
-            else torch.zeros(batch_size, dtype=torch.bool, device=device)
-        )
-        block_table = (
-            self._swa_block_table(attention_inputs, batch_size)
-            if batch_size > 0
-            else None
-        )
-        tokens_per_block = int(
-            require_pool_tokens_per_block(self.kv_cache, region=int(SWA_KV))
-        )
-        write_cache_store_impl = create_write_cache_store_impl(
-            attention_inputs, self.kv_cache
-        )
-
-        # Eager forwards get a fresh owner each round, while CUDA graph capture
-        # receives the persistent object created by ``prepare_fmha_impl``.
-        graph_metadata = (
-            fmha_impl
-            if fmha_impl is not None and hasattr(fmha_impl, "sched_meta_cache")
-            else SimpleNamespace(sched_meta_cache={})
-        )
-        hidden = self._forward_layers(
-            query_ids,
-            query_positions,
-            main_x,
-            context_req_ids,
-            context_positions,
-            prefix_lengths,
-            active_requests,
-            block_table,
-            tokens_per_block,
-            graph_metadata,
-            write_cache_store_impl,
-        )
-
-        # Empty DP ranks must still execute every MoE layer above so EP
-        # collectives remain balanced; only the non-collective head is skipped.
-        if batch_size == 0:
-            return self._empty_outputs(0, device)
-        return self._forward_head(hidden, anchors)
+        if is_commit:
+            return self.run_commit_step(inputs, device)
+        return self.run_propose_step(inputs, fmha_impl, device)
 
 
 __all__ = ["DeepSeekV4DSparkModel"]

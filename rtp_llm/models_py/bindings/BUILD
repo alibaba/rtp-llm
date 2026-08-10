@@ -15,6 +15,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:dspark_call_phase",
     ],
     visibility = ["//visibility:public"],
     alwayslink = 1,

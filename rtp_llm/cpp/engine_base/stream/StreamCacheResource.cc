@@ -179,11 +179,11 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                           payload->memory_reuse_len);
     }
 
-    // 3. Speculative proposal info
+    // 3. Speculative proposal info. Unlike the gRPC handoff, this channel
+    // carries real reuse accounting (block 2) and initKVBlock refreshes the
+    // positions after allocation, so proposal-less streams keep them intact.
     if (!payload->propose_tokens.empty()) {
-        stream->setReuseLength(stream->seqLength() - 1);
-        stream->setSpEditRun(false);
-        stream->setMtpTokenIndex(stream->seqLength() - 1);
+        stream->initSpeculativeHandoffPositions();
         stream->setContainProposeToken(true);
         stream->setProposeToken(payload->propose_tokens);
 

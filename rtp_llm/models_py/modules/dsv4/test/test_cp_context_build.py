@@ -44,6 +44,9 @@ def _load_cp_module():
         if name not in sys.modules:
             sys.modules[name] = types.ModuleType(name)
     sys.modules["rtp_llm.models_py.distributed.collective_torch"] = _CT
+    profiler_module = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
+    profiler_module.record_function_range = torch.profiler.record_function
+    sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler_module
 
     here = os.path.dirname(os.path.abspath(__file__))
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))

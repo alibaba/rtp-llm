@@ -11,26 +11,10 @@
 
 namespace rtp_llm {
 
-CacheStoreTensorSyncMetadata getCacheStoreTensorSyncMetadata(const GptModelInputs& inputs) {
-    CacheStoreTensorSyncMetadata metadata;
-    metadata.input_lengths_count =
-        inputs.cache_store_input_lengths.defined() ? inputs.cache_store_input_lengths.numel() : 0;
-    metadata.prefix_lengths_count =
-        inputs.cache_store_prefix_lengths.defined() ? inputs.cache_store_prefix_lengths.numel() : 0;
-    if (inputs.cache_store_input_lengths.defined() && inputs.cache_store_input_lengths.is_cuda()) {
-        metadata.device_bits |= GptModelInputDeviceBit::kDeviceBitCacheStoreInputLengths;
-    }
-    if (inputs.cache_store_prefix_lengths.defined() && inputs.cache_store_prefix_lengths.is_cuda()) {
-        metadata.device_bits |= GptModelInputDeviceBit::kDeviceBitCacheStorePrefixLengths;
-    }
-    return metadata;
-}
-
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
     shape_hints[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
-    shape_hints[GptModelInputIndex::inputLengths] =
-        inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
+    shape_hints[GptModelInputIndex::inputLengths] = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::sequenceLengths] =
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::prefixLengths] =
@@ -81,13 +65,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
-    shape_hints[GptModelInputIndex::dsparkCtxLengths] =
-        inputs.dspark_ctx_lengths.defined() ? inputs.dspark_ctx_lengths.numel() : 0;
-    shape_hints[GptModelInputIndex::dsparkCtxStarts] =
-        inputs.dspark_ctx_starts.defined() ? inputs.dspark_ctx_starts.numel() : 0;
-    const auto cache_store_sync_metadata = getCacheStoreTensorSyncMetadata(inputs);
-    shape_hints[GptModelInputIndex::cacheStoreInputLengths] = cache_store_sync_metadata.input_lengths_count;
-    shape_hints[GptModelInputIndex::cacheStorePrefixLengths] = cache_store_sync_metadata.prefix_lengths_count;
 
     uint32_t device_bits = 0;
     if (inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()) {
@@ -105,13 +82,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
     }
-    if (inputs.dspark_ctx_lengths.defined() && inputs.dspark_ctx_lengths.is_cuda()) {
-        device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkCtxLengths;
-    }
-    if (inputs.dspark_ctx_starts.defined() && inputs.dspark_ctx_starts.is_cuda()) {
-        device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts;
-    }
-    device_bits |= cache_store_sync_metadata.device_bits;
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
     return shape_hints;
 }
@@ -127,13 +97,11 @@ std::array<int64_t, 2> decodeMtpHiddenStatesShape(int64_t total_numel, int64_t r
     RTP_LLM_CHECK_WITH_INFO(total_numel >= 0,
                             "last_hidden_states total_numel must be non-negative, got %lld",
                             static_cast<long long>(total_numel));
-    RTP_LLM_CHECK_WITH_INFO(rows >= 0,
-                            "last_hidden_states rows must be non-negative, got %lld",
-                            static_cast<long long>(rows));
+    RTP_LLM_CHECK_WITH_INFO(
+        rows >= 0, "last_hidden_states rows must be non-negative, got %lld", static_cast<long long>(rows));
     if (total_numel == 0) {
-        RTP_LLM_CHECK_WITH_INFO(rows == 0,
-                                "empty last_hidden_states must have zero rows, got %lld",
-                                static_cast<long long>(rows));
+        RTP_LLM_CHECK_WITH_INFO(
+            rows == 0, "empty last_hidden_states must have zero rows, got %lld", static_cast<long long>(rows));
         return {0, 0};
     }
     RTP_LLM_CHECK_WITH_INFO(rows > 0, "non-empty last_hidden_states must have a positive row count");
@@ -192,27 +160,21 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     auto checkedHint = [&](GptModelInputIndex index, const char* name) -> int64_t {
         const auto value = shape_hints_ptr[index];
-        RTP_LLM_CHECK_WITH_INFO(value >= 0,
-                                "tpSyncModelInputs received negative %s shape hint: %lld",
-                                name,
-                                static_cast<long long>(value));
+        RTP_LLM_CHECK_WITH_INFO(
+            value >= 0, "tpSyncModelInputs received negative %s shape hint: %lld", name, static_cast<long long>(value));
         return value;
     };
-    const auto max_kernel_blocks =
-        checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
+    const auto max_kernel_blocks  = checkedHint(GptModelInputIndex::maxKernelBlocksPerBatch, "maxKernelBlocksPerBatch");
     const auto max_blocks = checkedHint(GptModelInputIndex::maxBlocksPerBatch, "maxBlocksPerBatch");
     const auto cache_keys_width = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
     const auto kv_cache_group_num = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
-    const auto layer_to_group_len =
-        checkedHint(GptModelInputIndex::kvCacheLayerToGroupLen, "kvCacheLayerToGroupLen");
+    const auto layer_to_group_len = checkedHint(GptModelInputIndex::kvCacheLayerToGroupLen, "kvCacheLayerToGroupLen");
     const auto group_types_len = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
-    const auto combo_position_ids_size =
-        checkedHint(GptModelInputIndex::comboPositionIds, "comboPositionIds");
+    const auto combo_position_ids_size = checkedHint(GptModelInputIndex::comboPositionIds, "comboPositionIds");
     const auto text_tokens_mask_size = checkedHint(GptModelInputIndex::textTokensMask, "textTokensMask");
     const auto mm_features_locs_size = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
     const auto hidden_states_size = checkedHint(GptModelInputIndex::mtpHiddenStates, "mtpHiddenStates");
-    const auto request_length =
-        checkedHint(GptModelInputIndex::gptModelRequestLength, "gptModelRequestLength");
+    const auto request_length = checkedHint(GptModelInputIndex::gptModelRequestLength, "gptModelRequestLength");
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<int64_t>    dims,
@@ -220,9 +182,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         auto torch_dtype = dataTypeToTorchType(dtype);
         int64_t numel     = 1;
         for (const auto dim : dims) {
-            RTP_LLM_CHECK_WITH_INFO(dim >= 0,
-                                    "tpSyncModelInputs cannot allocate a negative dimension: %lld",
-                                    static_cast<long long>(dim));
+            RTP_LLM_CHECK_WITH_INFO(
+                dim >= 0, "tpSyncModelInputs cannot allocate a negative dimension: %lld", static_cast<long long>(dim));
             if (dim == 0) {
                 numel = 0;
                 continue;
@@ -277,8 +238,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 rtp_llm::DataType::TYPE_INT32,
                 {kv_cache_group_num, checkedHint(GptModelInputIndex::inputLengths, "inputLengths"), max_kernel_blocks},
                 rtp_llm::AllocationType::DEVICE);
-            inputs.kv_cache_update_mapping = allocBuf(
-                rtp_llm::DataType::TYPE_INT32,
+            inputs.kv_cache_update_mapping =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
                 {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 2});
         }
         if (max_blocks != 0) {
@@ -314,30 +275,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         } else {
             inputs.last_hidden_states = torch::Tensor();
         }
-        if (shape_hints_ptr[GptModelInputIndex::dsparkCtxLengths]) {
-            inputs.dspark_ctx_lengths =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {checkedHint(GptModelInputIndex::dsparkCtxLengths, "dsparkCtxLengths")},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkCtxLengths));
-        }
-        if (shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]) {
-            inputs.dspark_ctx_starts =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {checkedHint(GptModelInputIndex::dsparkCtxStarts, "dsparkCtxStarts")},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts));
-        }
-        if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
-            inputs.cache_store_input_lengths =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {checkedHint(GptModelInputIndex::cacheStoreInputLengths, "cacheStoreInputLengths")},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheStoreInputLengths));
-        }
-        if (shape_hints_ptr[GptModelInputIndex::cacheStorePrefixLengths]) {
-            inputs.cache_store_prefix_lengths =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {checkedHint(GptModelInputIndex::cacheStorePrefixLengths, "cacheStorePrefixLengths")},
-                         pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheStorePrefixLengths));
-        }
         if (text_tokens_mask_size) {
             inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {text_tokens_mask_size});
         }
@@ -351,9 +288,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             for (int64_t mm_index = 0; mm_index < mm_features_num; ++mm_index) {
                 const auto mm_rows = mm_features_shape_ptr[mm_index];
                 const auto mm_cols = checkedHint(GptModelInputIndex::mmFeaturesSize, "mmFeaturesSize");
-                mm_features.emplace_back(allocBuf(mm_data_type,
-                                                  {mm_rows, mm_cols},
-                                                  rtp_llm::AllocationType::DEVICE));
+                mm_features.emplace_back(allocBuf(mm_data_type, {mm_rows, mm_cols}, rtp_llm::AllocationType::DEVICE));
             }
             inputs.multimodal_features = std::move(mm_features);
         }
@@ -406,26 +341,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (hidden_states_size) {
         collect(inputs.last_hidden_states);
     }
-    if (shape_hints_ptr[GptModelInputIndex::dsparkCtxLengths]) {
-        collect(inputs.dspark_ctx_lengths);
-    }
-    if (shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]) {
-        collect(inputs.dspark_ctx_starts);
-    }
-    if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
-        collect(inputs.cache_store_input_lengths);
-    }
-    if (shape_hints_ptr[GptModelInputIndex::cacheStorePrefixLengths]) {
-        collect(inputs.cache_store_prefix_lengths);
-    }
 
     // Classify tensors by device type (runtime check) and calculate packed sizes.
     // Align each entry to 16 bytes so that typed access at any offset is safe
     // and GPU memory coalescing / NCCL transfers stay on fast paths.
     constexpr int64_t kPackAlignment = 16;
     auto              align_up       = [](int64_t size, int64_t alignment) -> int64_t {
-        RTP_LLM_CHECK_WITH_INFO(size >= 0 && alignment > 0,
-                                "tpSyncModelInputs invalid packed-buffer alignment input");
+        RTP_LLM_CHECK_WITH_INFO(size >= 0 && alignment > 0, "tpSyncModelInputs invalid packed-buffer alignment input");
         RTP_LLM_CHECK_WITH_INFO(size <= std::numeric_limits<int64_t>::max() - (alignment - 1),
                                 "tpSyncModelInputs packed-buffer alignment overflow");
         return (size + alignment - 1) & ~(alignment - 1);

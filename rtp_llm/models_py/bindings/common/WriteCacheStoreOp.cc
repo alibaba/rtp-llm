@@ -19,12 +19,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
 
     // Capture all torch::Tensors by value so the underlying memory stays alive
     // in the background thread. torch::Tensor copy is a cheap refcount bump.
-    auto captured_input_lengths = cache_store_inputs.store_input_lengths.defined() ?
-                                      cache_store_inputs.store_input_lengths :
-                                      input_lengths;
-    auto captured_prefix_lengths = cache_store_inputs.store_prefix_lengths.defined() ?
-                                       cache_store_inputs.store_prefix_lengths :
-                                       prefix_lengths;
+    auto captured_input_lengths          = input_lengths;
+    auto captured_prefix_lengths         = prefix_lengths;
     auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
     auto captured_cache_store            = cache_store_inputs;
     auto captured_kv_cache               = kv_cache.value();
@@ -53,7 +49,8 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             RTP_LLM_CHECK_WITH_INFO(store_tokens > 0, "cache-store tokens_per_block must be positive");
 
             if (store_tokens >= layer_tokens) {
-                RTP_LLM_CHECK_WITH_INFO(store_tokens % layer_tokens == 0,
+                RTP_LLM_CHECK_WITH_INFO(
+                    store_tokens % layer_tokens == 0,
                                         "cache-store tokens_per_block=%zu must be divisible by layer tokens_per_block=%zu "
                                         "for cache-store %s write",
                                         store_tokens,
@@ -76,8 +73,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
 
         size_t kv_block_stride_bytes = captured_cache_store.kv_block_stride_bytes;
         if (captured_kv_cache.kv_cache_base.defined() && captured_kv_cache.kv_cache_base.dim() == 2) {
-            kv_block_stride_bytes =
-                resolve_store_stride(captured_kv_cache.kv_cache_base, kv_block_stride_bytes, "kv");
+            kv_block_stride_bytes = resolve_store_stride(captured_kv_cache.kv_cache_base, kv_block_stride_bytes, "kv");
         }
         size_t kv_scale_stride_bytes = captured_cache_store.kv_scale_stride_bytes;
         if (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.dim() == 2) {

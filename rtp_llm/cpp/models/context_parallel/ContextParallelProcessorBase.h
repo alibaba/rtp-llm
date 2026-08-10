@@ -19,8 +19,8 @@ enum class ProcessorType {
 
 class IContextParallelProcessor {
 public:
-    explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config):
-        parallelism_config_(parallelism_config) {}
+    explicit IContextParallelProcessor(const ParallelismConfig& parallelism_config, bool split_hidden_states):
+        parallelism_config_(parallelism_config), split_hidden_states_(split_hidden_states) {}
     virtual ~IContextParallelProcessor() = default;
 
     /// @brief Prepare context parallel inputs: split and shuffle tokens, compute restore indices and masks.
@@ -41,8 +41,9 @@ public:
     /// hidden_states is replaced by that [num_lm, hidden] tensor, ordered to match
     /// lm_output_indexes (identical to index_select(restored_hidden, lm_output_indexes)).
     ///
-    /// Only valid when no consumer needs the full sequence hidden, i.e.
-    /// !need_all_logits && !need_all_hidden_states. See PyWrappedModel::forward.
+    /// Only valid when no consumer needs the full sequence hidden. Requests
+    /// that require all logits or all hidden states are rejected before they
+    /// enter a prefill-CP engine.
     virtual void handleOutputsLastHidden(torch::Tensor&                            hidden_states,
                                          const GptModelInputs&                     inputs,
                                          const torch_ext::PyContextParallelParams& cp_params) = 0;
@@ -69,12 +70,16 @@ protected:
                                                  int                  cp_size) = 0;
 
     ParallelismConfig parallelism_config_;
+    // Fixed for the lifetime of the model instance. Models consuming an MTP
+    // hidden buffer receive rank-local CP rows and set this to false; models
+    // receiving a global hidden tensor set it to true.
+    const bool split_hidden_states_;
 };
 
 class ContextParallelProcessorFactory {
 public:
-    static std::unique_ptr<IContextParallelProcessor> create(ProcessorType            type,
-                                                             const ParallelismConfig& parallelism_config);
+    static std::unique_ptr<IContextParallelProcessor>
+    create(ProcessorType type, const ParallelismConfig& parallelism_config, bool split_hidden_states);
 };
 
 }  // namespace rtp_llm

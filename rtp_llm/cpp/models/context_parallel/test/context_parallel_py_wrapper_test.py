@@ -208,6 +208,61 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             )
         )
 
+    def test_rank_local_hidden_states_pass_through_standard_split(self):
+        """MTP/DSpARK draft commit may re-enter CP with local feature rows."""
+        total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
+        input_lengths = torch.tensor([6], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        rank_local_hidden = torch.tensor(
+            [[20.0, 20.5], [21.0, 21.5], [22.0, 22.5], [23.0, 23.5]],
+            dtype=torch.float32,
+        )
+
+        tokens, lengths, hidden, shuffle = cp_test.handle_inputs_with_hidden(
+            total_tokens,
+            input_lengths,
+            sequence_lengths,
+            rank_local_hidden,
+            0,
+            2,
+            split_hidden_states=False,
+        )
+
+        self.assertTrue(
+            torch.equal(tokens, torch.tensor([10, 11, 0, 0], dtype=torch.int32))
+        )
+        self.assertTrue(torch.equal(lengths, torch.tensor([4], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(shuffle, torch.tensor([0, 1, 6, 7], dtype=torch.int32))
+        )
+        # The features already follow this rank's target-prefill layout. The
+        # ordinary CP input processor must not apply the shuffle a second time.
+        self.assertTrue(torch.equal(hidden, rank_local_hidden))
+
+    def test_configured_local_hidden_is_not_split_when_row_counts_are_ambiguous(self):
+        # The processor layout policy is fixed at construction. Even when
+        # global_tokens == local_padded_tokens, rank-local hidden states must
+        # not be split again.
+        total_tokens = torch.tensor([10, 11], dtype=torch.int32)
+        input_lengths = torch.tensor([2], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        local_hidden = torch.tensor([[11.0, 11.5], [99.0, 99.5]], dtype=torch.float32)
+
+        tokens, lengths, hidden, shuffle = cp_test.handle_inputs_with_hidden(
+            total_tokens,
+            input_lengths,
+            sequence_lengths,
+            local_hidden,
+            1,
+            2,
+            split_hidden_states=False,
+        )
+
+        self.assertTrue(torch.equal(tokens, torch.tensor([11, 0], dtype=torch.int32)))
+        self.assertTrue(torch.equal(lengths, torch.tensor([2], dtype=torch.int32)))
+        self.assertTrue(torch.equal(shuffle, torch.tensor([1, 2], dtype=torch.int32)))
+        self.assertTrue(torch.equal(hidden, local_hidden))
+
 
 class TestGenerateQKVRestoreIndices(unittest.TestCase):
     def __init__(self, methodName: str = "runTest") -> None:
@@ -499,90 +554,6 @@ class TestComputeLocalLastHidden(unittest.TestCase):
 
     def test_multi_stream_cp4_with_padding(self):
         self._run_case(stream_lens=[10, 20, 7], cp_size=4)
-
-
-class TestChunkedOutputRestore(unittest.TestCase):
-    """The bounded-scratch restore must match the legacy full index_select."""
-
-    @staticmethod
-    def _pad_to(value: int, multiple: int) -> int:
-        return ((value + multiple - 1) // multiple) * multiple
-
-    def _run_case(self, stream_lens, cp_size, chunk_sizes, hidden_dim=5):
-        padded_lens = [self._pad_to(s, 2 * cp_size) for s in stream_lens]
-        chunk_lens = [p // cp_size for p in padded_lens]
-        padding_lens = [p - s for p, s in zip(padded_lens, stream_lens)]
-        chunk_lengths = torch.tensor(chunk_lens, dtype=torch.int32)
-        padding_lengths = torch.tensor(padding_lens, dtype=torch.int32)
-
-        restore_indices = cp_test.generate_qkv_restore_indices(
-            chunk_lengths, cp_size
-        )
-        padding_mask = cp_test.generate_qkv_padding_mask(
-            chunk_lengths, padding_lengths, cp_size
-        )
-        local_token_num = int(chunk_lengths.sum().item())
-        padded_token_num = cp_size * local_token_num
-
-        original_padded = torch.arange(
-            1,
-            padded_token_num * hidden_dim + 1,
-            dtype=torch.float32,
-        ).reshape(padded_token_num, hidden_dim)
-        rank_major = torch.empty_like(original_padded)
-        rank_major.index_copy_(
-            0, restore_indices.to(torch.long), original_padded
-        )
-        rank_chunks = rank_major.reshape(
-            cp_size, local_token_num, hidden_dim
-        )
-
-        valid_indices = torch.nonzero(padding_mask).squeeze(-1).to(torch.long)
-        expected = original_padded.index_select(0, valid_indices)
-        for chunk_rows in chunk_sizes:
-            with self.subTest(
-                streams=stream_lens,
-                cp_size=cp_size,
-                chunk_rows=chunk_rows,
-            ):
-                actual = cp_test.restore_rank_chunks(
-                    rank_chunks,
-                    restore_indices,
-                    padding_mask,
-                    chunk_rows,
-                )
-                self.assertTrue(
-                    torch.equal(actual, expected),
-                    f"chunked restore mismatch for chunk_rows={chunk_rows}",
-                )
-
-    def test_single_stream_no_padding_cp4(self):
-        self._run_case(
-            stream_lens=[32],
-            cp_size=4,
-            chunk_sizes=[1, 3, 8, 13],
-        )
-
-    def test_single_stream_padding_and_tail_chunk(self):
-        self._run_case(
-            stream_lens=[29],
-            cp_size=4,
-            chunk_sizes=[1, 3, 5, 11],
-        )
-
-    def test_multiple_streams_padding_cp2(self):
-        self._run_case(
-            stream_lens=[6, 10, 5],
-            cp_size=2,
-            chunk_sizes=[1, 4, 7, 20],
-        )
-
-    def test_multiple_streams_padding_cp4(self):
-        self._run_case(
-            stream_lens=[10, 20, 7],
-            cp_size=4,
-            chunk_sizes=[1, 5, 7, 19],
-        )
 
 
 if __name__ == "__main__":

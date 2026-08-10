@@ -155,12 +155,10 @@ TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMe
     fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len);
     ASSERT_TRUE(torch::equal(dst_memcpy, dst_torch));
 
-    auto memcpy_us =
-        benchmarkUs([&]() { fillScoreTokenIdsWithMemcpy(dst_memcpy, complete_token_ids, seq_lens, score_len); },
-                    iterations);
-    auto torch_us =
-        benchmarkUs([&]() { fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len); },
-                    iterations);
+    auto memcpy_us = benchmarkUs(
+        [&]() { fillScoreTokenIdsWithMemcpy(dst_memcpy, complete_token_ids, seq_lens, score_len); }, iterations);
+    auto torch_us = benchmarkUs(
+        [&]() { fillScoreTokenIdsWithTorchCopy(dst_torch, complete_token_ids, seq_lens, score_len); }, iterations);
 
     std::cout << "[mtp-score-token-ids-copy] streams=" << stream_count << " score_len=" << score_len
               << " max_seq_len=" << max_seq_len << " iterations=" << iterations << " memcpy_us=" << memcpy_us
@@ -198,7 +196,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
         torch::empty({static_cast<int64_t>(stream_groups.size() * (sp_config.gen_num_per_cycle + 1)), 4},
                      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_inputs, model_output);
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output);
     ASSERT_TRUE(sampler_inputs_status.ok());
 
     auto token_ids = sampler_inputs_status.value().token_ids;
@@ -240,18 +238,47 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     GptModelOutputs model_output;
     model_output.logits = torch::zeros({3, 16}, torch::kFloat32);
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output);
+    // Since the spec-logits overlap (#1262), stateful processors (think,
+    // grammar) are excluded from the inline score-batch states and applied
+    // through the SpecLogitsVerifyRunner vocab mask instead. Build that mask
+    // exactly the way MtpExecutor::buildSpecLogitsVerifyInline wires it.
+    SpecLogitsVerifyRunner             runner;
+    SpecLogitsVerifyRunner::LaunchTask task;
+    task.total_streams = 1;
+    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
+    task.vocab_size    = model_config.vocab_size;
+    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+    size_t processor_idx = 0;
+    for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
+        auto spec_processor = std::dynamic_pointer_cast<SpecLogitsProcessor>(processor_ptr);
+        ASSERT_NE(spec_processor, nullptr);
+        ASSERT_TRUE(spec_processor->isSpecVerifyEligible());
+        task.active.push_back({spec_processor,
+                               /*stream_idx=*/0,
+                               processor_idx,
+                               static_cast<uint64_t>(stream->streamId()),
+                               static_cast<int64_t>(stream->seqLength()),
+                               static_cast<int64_t>(stream->outputTokenLen())});
+        ++processor_idx;
+    }
+    ASSERT_EQ(1u, task.active.size());
+    auto spec_result = runner.buildInline(task);
+    ASSERT_TRUE(spec_result.has_active_processor);
+
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = sampler_inputs_status.value();
 
     ASSERT_NE(sampler_inputs.logits_processor_states_ptr, nullptr);
+    sampler_inputs.logits = sampler_inputs.logits.cuda();
     sampler_inputs.logits_processor_states_ptr->batchProcess(sampler_inputs);
+    auto logits_cpu = sampler_inputs.logits.cpu();
 
     float neg_inf = -std::numeric_limits<float>::max();
     for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
-        EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
+        EXPECT_EQ(neg_inf, logits_cpu[i][7].item<float>());
+        EXPECT_EQ(neg_inf, logits_cpu[i][8].item<float>());
+        EXPECT_EQ(0, logits_cpu[i][9].item<float>());
     }
 }
 
@@ -350,6 +377,40 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverri
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {8.1, 8.2});
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkCommitOnlyPrefillDispatch) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types          = {CacheGroupType::FULL};
+    model_config.max_seq_len          = 2048;
+    model_config.vocab_size           = 8;
+    model_config.num_layers           = 1;
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle       = 3;
+    sp_config.sp_dspark_mask_token_id = 0;
+
+    ResourceContext         resource_context;
+    auto                    stream = createContextStream(model_config, runtime_config, resource_context, {2}, 1);
+    StreamGroups            stream_groups({stream});
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    MergedOutput target_output;
+    target_output.sampler_output.token_ids = torch::tensor({3}, torch::kInt32).reshape({1, 1});
+    MergedOutput commit_output;
+
+    auto status = processor.dispatchPrefill(stream_groups, target_output, commit_output);
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ((std::vector<int>{2, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
+    EXPECT_TRUE(stream->getProposeToken().empty());
+    EXPECT_FALSE(stream->getSPOutputBuffer()->all_probs.defined());
+    EXPECT_FALSE(stream->getSPOutputBuffer()->hidden_states.defined());
+    EXPECT_FALSE(stream->getSPOutputBuffer()->propose_tokens_gpu.defined());
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
@@ -402,10 +463,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
+    // MtpAsyncDeviceState publication moved to MtpExecutor's dispatch wrappers
+    // (45564fbc57); the processor-level dispatchDecode deliberately leaves the
+    // stream device state untouched.
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, -1);
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, -1);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
@@ -746,9 +808,8 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
-    auto expect_positions = [](const GptModelInputs& input,
-                               const vector<int>&    expected_prefix,
-                               const vector<int>&    expected_sequence) {
+    auto expect_positions =
+        [](const GptModelInputs& input, const vector<int>& expected_prefix, const vector<int>& expected_sequence) {
         EXPECT_TRUE(input.prefix_lengths.is_cuda());
         EXPECT_TRUE(input.sequence_lengths.is_cuda());
         EXPECT_EQ(torch::kInt32, input.prefix_lengths.scalar_type());
@@ -806,35 +867,43 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     model_input.input_lengths  = torch::tensor({3, 2}, torch::kInt32);
     model_input.prefix_lengths = torch::tensor({7, 4}, torch::kInt32);
 
-    GptModelOutputs model_output;
-    model_output.aux_hidden_states =
+    auto target_features =
         torch::arange(0, 60, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({5, 12});
 
-    SamplerOutput sampler_output;
-    sampler_output.token_ids =
-        torch::tensor({10, 101, 20, 202}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
-            .reshape({2, 2});
-
     TensorHolder host_holder;
-    processor.updatePrefillPostDSparkDraftModelInput(model_input, model_output, sampler_output, host_holder);
+    model_input.last_hidden_states = target_features;
+    // A well-formed commit input passes; the validator does not mutate it.
+    EXPECT_NO_THROW(processor.validatePrefillDSparkCommitInput(model_input));
+
+    // Missing aux features must refuse the commit.
+    GptModelInputs no_features   = model_input;
+    no_features.last_hidden_states = torch::Tensor();
+    EXPECT_THROW(processor.validatePrefillDSparkCommitInput(no_features), std::exception);
+
+    // A non-positive draft width must refuse the commit.
+    SpeculativeExecutionConfig zero_width_config = sp_config;
+    zero_width_config.gen_num_per_cycle          = 0;
+    MtpBatchStreamProcessor    zero_width(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, zero_width_config, false);
+    EXPECT_THROW(zero_width.validatePrefillDSparkCommitInput(model_input), std::exception);
+
+    // Anchors / committed ends now come from stream state at the decode round
+    // head (buildDSparkProposeInputFromStreams); feed equivalent values here.
+    torch::Tensor anchors        = torch::tensor({101, 202}, torch::kInt32);
+    torch::Tensor committed_ends = torch::tensor({10, 6}, torch::kInt32);
+    processor.buildDSparkProposeInput(model_input, anchors, committed_ends, host_holder);
 
     EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, 202, mask_id, mask_id}),
               toVec<int32_t>(model_input.combo_tokens));
-    EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.dspark_ctx_lengths));
-    EXPECT_EQ((std::vector<int32_t>{0, 3}), toVec<int32_t>(model_input.dspark_ctx_starts));
-    EXPECT_EQ((std::vector<int32_t>{7, 4}), toVec<int32_t>(model_input.cache_store_prefix_lengths));
-    EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.cache_store_input_lengths));
+    EXPECT_FALSE(model_input.last_hidden_states.defined());
     EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, gamma}), toVec<int32_t>(model_input.lm_output_indexes));
-    EXPECT_EQ(5, model_input.last_hidden_states.size(0));
-    EXPECT_EQ(12, model_input.last_hidden_states.size(1));
+    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::PROPOSE);
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillCacheStoreUsesCommittedPromptLength) {
+TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeCommitPreservesDenseVerifyGeometry) {
     constexpr int32_t gamma          = 3;
-    constexpr int32_t mask_id        = 12345;
-    constexpr int32_t tokens_per_blk = 256;
 
     ModelConfig                 model_config;
     PDSepConfig                 pd_sep_config;
@@ -844,42 +913,30 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillCacheStoreUsesCommittedProm
     cache_config.group_types          = {CacheGroupType::FULL};
     sp_config.type                    = SP_TYPE_DSPARK;
     sp_config.gen_num_per_cycle       = gamma;
-    sp_config.sp_dspark_mask_token_id = mask_id;
 
     MtpBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
 
-    const std::vector<int32_t> prompt_lengths = {4349, 4350, 4351, 4352, 4353, 43775, 68095};
-    const std::vector<bool>    speculative_rows_cross_block = {false, true, true, true, false, true, true};
     GptModelInputs             model_input;
-    model_input.input_lengths  = torch::tensor(prompt_lengths, torch::kInt32);
-    model_input.prefix_lengths = torch::zeros({static_cast<int64_t>(prompt_lengths.size())}, torch::kInt32);
+    model_input.combo_tokens      = torch::tensor({11, 12, 13, 14, 21, 22, 23, 24}, torch::kInt32);
+    model_input.input_lengths     = torch::tensor({gamma + 1, gamma + 1}, torch::kInt32);
+    model_input.prefix_lengths    = torch::tensor({7, 15}, torch::kInt32);
+    model_input.lm_output_indexes = torch::tensor({3, 7}, torch::kInt32);
+    const auto combo_tokens       = model_input.combo_tokens.clone();
+    const auto input_lengths      = model_input.input_lengths.clone();
+    const auto prefix_lengths     = model_input.prefix_lengths.clone();
+    const auto lm_output_indexes  = model_input.lm_output_indexes.clone();
+    const auto target_features =
+        torch::arange(0, 48, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({8, 6});
 
-    GptModelOutputs model_output;
-    model_output.aux_hidden_states = torch::zeros(
-        {static_cast<int64_t>(prompt_lengths.size()), 1},
-        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    processor.updateDecodePostDSparkCommitInput(model_input, target_features, 2);
 
-    SamplerOutput sampler_output;
-    sampler_output.token_ids = torch::zeros(
-        {static_cast<int64_t>(prompt_lengths.size()), 2},
-        torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-
-    TensorHolder host_holder;
-    processor.updatePrefillPostDSparkDraftModelInput(model_input, model_output, sampler_output, host_holder);
-
-    const auto store_lengths = toVec<int32_t>(model_input.cache_store_input_lengths);
-    EXPECT_EQ(prompt_lengths, store_lengths);
-    for (size_t i = 0; i < prompt_lengths.size(); ++i) {
-        const auto prompt_blocks = (prompt_lengths[i] + tokens_per_blk - 1) / tokens_per_blk;
-        const auto store_blocks  = (store_lengths[i] + tokens_per_blk - 1) / tokens_per_blk;
-        EXPECT_EQ(prompt_blocks, store_blocks) << "prompt_length=" << prompt_lengths[i];
-
-        const auto speculative_blocks =
-            (prompt_lengths[i] + gamma + tokens_per_blk - 1) / tokens_per_blk;
-        EXPECT_EQ(speculative_rows_cross_block[i], speculative_blocks > prompt_blocks)
-            << "prompt_length=" << prompt_lengths[i];
-    }
+    EXPECT_TRUE(torch::equal(model_input.combo_tokens, combo_tokens));
+    EXPECT_TRUE(torch::equal(model_input.input_lengths, input_lengths));
+    EXPECT_TRUE(torch::equal(model_input.prefix_lengths, prefix_lengths));
+    EXPECT_TRUE(torch::equal(model_input.lm_output_indexes, lm_output_indexes));
+    EXPECT_TRUE(torch::equal(model_input.last_hidden_states, target_features));
+    EXPECT_EQ(model_input.dspark_call_phase, DSparkCallPhase::COMMIT);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

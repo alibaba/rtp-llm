@@ -38,7 +38,6 @@ public:
 
     absl::StatusOr<SamplerInputs>
     gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
-                           const GptModelInputs&                       model_inputs,
                            const GptModelOutputs&                      model_output,
                            const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {}) const;
 
@@ -67,29 +66,43 @@ public:
                                           const SamplerOutput&   sampler_output,
                                           TensorHolder&          host_holder);
 
-    // DSpARK proposes a fixed-width block in one draft forward.  gamma is
-    // propose_step_: draft input is [anchor, noise x (gamma - 1)], while the
-    // target verifies [anchor, proposal x gamma].
-    void updatePrefillPostDSparkDraftModelInput(GptModelInputs&        model_input,
-                                                const GptModelOutputs& model_output,
-                                                const SamplerOutput&   sampler_output,
+    // DSpARK runs two standard-slot draft calls per round: a commit call
+    // (incremental-prefill shape, normalized target feature rows handed off
+    // through last_hidden_states) and a
+    // fixed-width propose call ([anchor, noise x (gamma - 1)] against the
+    // committed feature KV).
+    void validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const;
+
+    void buildDSparkProposeInput(GptModelInputs&      model_input,
+                                 const torch::Tensor& anchors,
+                                 const torch::Tensor& committed_ends,
                                                 TensorHolder&          host_holder);
 
-    void prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
+    // Round-head stream state (anchor = last accepted token, committed_end =
+    // committed length - 1), derived once per decode round and consumed by
+    // both the propose and verify input builders below; new PD streams and
+    // steady streams take the same path. Consumers must treat both tensors as
+    // immutable — propose and verify alias this one storage.
+    struct DSparkRoundHead {
+        torch::Tensor anchors;
+        torch::Tensor committed_ends;
+    };
+    DSparkRoundHead buildDSparkRoundHead(const StreamGroups&   stream_groups,
+                                         const GptModelInputs& model_input,
+                                         TensorHolder&         host_holder) const;
+
+    void buildDSparkProposeInputFromStreams(const DSparkRoundHead& round_head,
                                        GptModelInputs&     model_input,
                                        TensorHolder&       host_holder);
 
-    void updateDSparkDraftSamplerOutput(const StreamGroups& stream_groups,
-                                        SamplerOutput&      draft_sampler_output,
-                                        torch::Tensor&      draft_token_probs_d_t,
+    void prepareDSparkVerifyModelInput(const DSparkRoundHead& round_head,
+                                       GptModelInputs&        model_input,
+                                       const torch::Tensor&   proposals,
                                         TensorHolder&       host_holder);
 
-    void updateDecodePostDSparkDraftModelInput(GptModelInputs&                              model_input,
-                                               const GptModelOutputs&                       model_output,
-                                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                               size_t                                       batch_size,
-                                               torch::Tensor&                               hidden_states_d_t,
-                                               TensorHolder&                                host_holder);
+    void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
+                                           const torch::Tensor& target_features,
+                                           size_t               batch_size);
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,

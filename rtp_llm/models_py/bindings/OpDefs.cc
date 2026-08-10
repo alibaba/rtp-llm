@@ -3,6 +3,11 @@
 namespace torch_ext {
 
 void registerPyOpDefs(pybind11::module& m) {
+    pybind11::enum_<rtp_llm::DSparkCallPhase>(m, "DSparkCallPhase")
+        .value("NONE", rtp_llm::DSparkCallPhase::NONE)
+        .value("PROPOSE", rtp_llm::DSparkCallPhase::PROPOSE)
+        .value("COMMIT", rtp_llm::DSparkCallPhase::COMMIT);
+
     pybind11::enum_<rtp_llm::CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
         .value("FULL", rtp_llm::CacheGroupType::FULL)
@@ -193,22 +198,23 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs>(),
+        .def(pybind11::init<torch::Tensor,
+                            torch::Tensor,
+                            PyAttentionInputs,
+                            BertEmbeddingInputs,
+                            rtp_llm::DSparkCallPhase>(),
              pybind11::arg("input_ids")             = torch::empty(0),
              pybind11::arg("input_hiddens")         = torch::empty(0),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
-             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
+             pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs(),
+             pybind11::arg("dspark_call_phase")     = rtp_llm::DSparkCallPhase::NONE)
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
-        .def_readwrite("dspark_ctx_lengths",
-                       &PyModelInputs::dspark_ctx_lengths,
-                       "Optional int32 [batch] DSpARK feature-window lengths")
-        .def_readwrite("dspark_ctx_starts",
-                       &PyModelInputs::dspark_ctx_starts,
-                       "Optional int32 [batch] DSpARK feature-window starts");
+        .def_readwrite(
+            "dspark_call_phase", &PyModelInputs::dspark_call_phase, "Explicit DSpARK proposal/commit phase");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -233,12 +239,7 @@ void registerPyOpDefs(pybind11::module& m) {
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
         .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
-        .def_readwrite("aux_hidden_states",
-                       &PyModelOutputs::aux_hidden_states,
-                       "Optional [token, layers, hidden] target features for DSpARK")
-        .def_readwrite("draft_tokens", &PyModelOutputs::draft_tokens, "Optional [batch, gamma] DSpARK draft tokens")
-        .def_readwrite(
-            "draft_probs", &PyModelOutputs::draft_probs, "Optional [batch, gamma, vocab] DSpARK draft probabilities");
+        .def_readwrite("draft_tokens", &PyModelOutputs::draft_tokens, "Optional [batch, gamma] DSpARK draft tokens");
 }
 
 }  // namespace torch_ext

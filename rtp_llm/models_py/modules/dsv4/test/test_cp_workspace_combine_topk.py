@@ -13,6 +13,7 @@ runs without ``libth_transformer_config.so`` being built (matches
 ``test_cp_indexer_seq_total`` / ``test_cp_topk_idxs_align``).
 """
 
+import contextlib
 import importlib.util
 import os
 import sys
@@ -45,6 +46,9 @@ def _load_cp_module():
         if name not in sys.modules:
             sys.modules[name] = types.ModuleType(name)
     sys.modules["rtp_llm.models_py.distributed.collective_torch"] = _CT
+    profiler = types.ModuleType("rtp_llm.models_py.modules.dsv4._profiler")
+    profiler.record_function_range = lambda _: contextlib.nullcontext()
+    sys.modules["rtp_llm.models_py.modules.dsv4._profiler"] = profiler
 
     here = os.path.dirname(os.path.abspath(__file__))
     cp_path = os.path.normpath(os.path.join(here, os.pardir, "cp.py"))
