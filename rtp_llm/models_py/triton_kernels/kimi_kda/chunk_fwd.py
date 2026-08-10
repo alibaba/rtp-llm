@@ -7,14 +7,11 @@
 #
 # Adapted for rtp-llm: forward-only, no CP, no backward.
 
-import os
-
 import torch
 
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
 from rtp_llm.models_py.triton_kernels.fla.utils import RCP_LN2
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_delta_h import (
-    chunk_gated_delta_rule_fwd_h,
     chunk_gated_delta_rule_fwd_h_cublas,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_intra import chunk_kda_fwd_intra
@@ -80,18 +77,11 @@ def chunk_kda_fwd(
         disable_recompute=disable_recompute,
     )
 
-    state_backend = os.environ.get("KIMI_K3_KDA_CHUNK_STATE_BACKEND", "cublas").lower()
-    if state_backend == "cublas":
-        state_forward = chunk_gated_delta_rule_fwd_h_cublas
-    elif state_backend == "triton":
-        state_forward = chunk_gated_delta_rule_fwd_h
-    else:
-        raise ValueError(
-            "KIMI_K3_KDA_CHUNK_STATE_BACKEND must be 'cublas' or "
-            f"'triton', got {state_backend!r}"
-        )
-
-    h, v_new, final_state = state_forward(
+    # The chunk-state recurrence is always the deterministic CUBLAS GEMM path.
+    # KIMI_K3_KDA_CHUNK_STATE_BACKEND used to allow swapping in the FLA Triton
+    # kernel for comparison; it accumulates BF16 tensor-core products and was
+    # never a production choice.
+    h, v_new, final_state = chunk_gated_delta_rule_fwd_h_cublas(
         k=kg,
         w=w,
         u=u,

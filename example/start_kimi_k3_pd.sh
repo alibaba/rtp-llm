@@ -66,10 +66,6 @@ Optional environment variables:
                                          running a nested Bazel build
   KIMI_K3_DEEPGEMM_JIT_COMPILER        auto|nvcc|nvrtc; auto repairs a stale
                                          NVCC -ccbin path when necessary
-  KIMI_K3_FASTSAFETENSORS_STREAMING     defaults to 1; close each staging
-                                         batch before loading the next
-  KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH
-                                         defaults to 1 for bounded GPU staging
   KIMI_K3_SERVICE_ID                    defaults to kimi-k3-pd
   KIMI_K3_MAX_SEQ_LEN                   defaults to 16384
   KIMI_K3_KV_CACHE_MEM_MB               defaults to 8192
@@ -80,47 +76,22 @@ Optional environment variables:
   MAX_CONTEXT_BATCH_SIZE                defaults to 1
   KIMI_K3_REUSE_CACHE                   defaults to 0; set both PD roles to 1
                                          to validate prefix-cache reuse
-  KIMI_K3_DECODE_CPU_OFFLOAD_START      defaults to auto; integer or none
   KIMI_K3_DECODE_TOPOLOGY               defaults to tp8_ep8; one of:
                                          tp8_ep8, dp8_ep8
   KIMI_K3_EXECUTION_MODE                defaults to optimized; one of:
                                          optimized, accuracy
-  KIMI_K3_USE_HOST_METADATA             optimized defaults to 1; accuracy to 0
-  KIMI_K3_SP_MOE                        optimized TP8/EP8 defaults to 1;
-                                         all other modes/topologies default to 0
-  KIMI_K3_KDA_BACKEND                   optimized Prefill defaults to cula;
-                                         accuracy Prefill defaults to kernel;
-                                         Decode tp8_ep8 defaults to kernel;
-                                         Decode dp8_ep8 defaults to
-                                         fla37_precompiled
-  KIMI_K3_MOE_BACKEND                   optimized TP8/EP8 defaults to
-                                         deep_gemm_mega; otherwise deepep
-  KIMI_K3_MLA_BACKEND                   optimized Prefill defaults to
-                                         flashmla; Decode defaults to kernel
-  KIMI_K3_PERF_FUSIONS                  optimized TP8/EP8 defaults to 1;
-                                         all other modes/topologies default to 0
   KIMI_K3_FUSED_AG_GEMM                 auto|off|force; defaults to auto;
                                          Prefill SP global M<32K uses NCCL AG+GEMM
   KIMI_K3_BATCHED_KDA_DECODE            optimized TP8/EP8 Decode defaults to 1;
                                          all other modes/topologies default to 0
-  KIMI_K3_PERF_MODE                     strict performance-path validation only
-  KIMI_K3_KDA_FLA37_PRECOMPILED_DIR     defaults to the bundled SM103 image
-                                         for fla37_precompiled
-  KIMI_K3_DEEP_EP_PYTHONPATH            optional DeepEP site-packages overlay;
-                                         otherwise installs the pinned CUDA13
-                                         wheel from the repo or shared NAS
-  KIMI_K3_DEEP_EP_WHEEL                 optional path to the pinned DeepEP
-                                         wheel
+  KIMI_K3_DEBUG                         1 enables every K3 diagnostic log
+                                         stream (Decode SP, PD transfer)
+  KIMI_K3_TENSOR_DUMP                   <dir>[,rank=|mode=|forward=|router=
+                                         |token=|enable_file=|shard_bytes=];
+                                         unset disables per-operator tracing
   KIMI_K3_OPERATOR_PYTHONPATH           optional KDA/DeepGEMM operator overlay;
                                          optimized Prefill otherwise installs
                                          the bundled fixed wheels automatically
-  KIMI_K3_ACCURACY_MODE                 defaults to native; one of:
-                                         canonical, native_mla, native
-  KIMI_K3_ACCURACY_CANONICAL_TP         optional 0/1 diagnostic override
-  KIMI_K3_ACCURACY_CANONICAL_EP         optional 0/1 diagnostic override
-  KIMI_K3_ACCURACY_CANONICAL_MLA        optional 0/1 diagnostic override
-  KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS
-                                         defaults to 0 in this service launcher
   ENABLE_CUDA_GRAPH                     defaults to 0; set Decode to 1 for
                                          CUDA Graph capture/replay validation
   ENABLE_CUDA_GRAPH_DEBUG_MODE          defaults to 0; emits CUDA Graph DOT
@@ -246,68 +217,10 @@ export FLASHINFER_WORKSPACE_BASE="${flashinfer_workspace_base}"
 export FLASHINFER_CUDA_ARCH_LIST="${KIMI_K3_FLASHINFER_CUDA_ARCH_LIST:-10.3a}"
 mkdir -p "${FLASHINFER_WORKSPACE_BASE}"
 
-# Optimized TP8/EP8 uses DeepGEMM MegaMoE, whose dispatch/combine is fused
-# inside the symmetric-memory kernel.  Do not require or install DeepEP on
-# that path.  Accuracy mode, legacy DP8, or an explicit deepep selection still
-# resolves the pinned wheel exactly as before.
-requested_moe_backend="${KIMI_K3_MOE_BACKEND:-}"
-need_deep_ep=0
-if [[ "${requested_moe_backend}" == "deepep" ]] \
-    || { [[ -z "${requested_moe_backend}" ]] \
-        && { [[ "${execution_mode}" == "accuracy" ]] \
-            || { [[ "${role}" == "DECODE" ]] \
-                && [[ "${decode_topology}" == "dp8_ep8" ]]; }; }; }; then
-    need_deep_ep=1
-fi
-if [[ "${need_deep_ep}" == "1" && -z "${KIMI_K3_DEEP_EP_PYTHONPATH:-}" ]]; then
-    deep_ep_bundle="${repo_root}/example/kimi_k3_pd/wheels"
-    deep_ep_manifest="${deep_ep_bundle}/SHA256SUMS"
-    deep_ep_wheel_name="deep_ep-1.2.1.12+37fda1c.base-cp310-cp310-linux_x86_64.whl"
-    [[ -f "${deep_ep_manifest}" ]] || die "missing DeepEP checksum manifest"
-    deep_ep_expected_sha="$(awk -v name="${deep_ep_wheel_name}" '$2 == name {print $1}' "${deep_ep_manifest}")"
-    [[ -n "${deep_ep_expected_sha}" ]] || die "DeepEP wheel is absent from checksum manifest"
-    deep_ep_wheel=""
-    for candidate in \
-        "${KIMI_K3_DEEP_EP_WHEEL:-}" \
-        "${deep_ep_bundle}/${deep_ep_wheel_name}" \
-        "/mnt/nas1/rtp-llm-k3-deps/${deep_ep_wheel_name}"; do
-        if [[ -n "${candidate}" && -f "${candidate}" ]]; then
-            deep_ep_wheel="${candidate}"
-            break
-        fi
-    done
-    [[ -n "${deep_ep_wheel}" ]] \
-        || die "pinned CUDA13 DeepEP wheel not found; set KIMI_K3_DEEP_EP_WHEEL"
-    [[ "$(sha256sum "${deep_ep_wheel}" | awk '{print $1}')" == "${deep_ep_expected_sha}" ]] \
-        || die "DeepEP wheel checksum failed: ${deep_ep_wheel}"
-    deep_ep_manifest_sha="$(sha256sum "${deep_ep_manifest}" | awk '{print $1}')"
-    deep_ep_overlay="${run_root}/deep-ep-overlay/${deep_ep_manifest_sha}"
-    deep_ep_marker="${deep_ep_overlay}/.kimi-k3-deep-ep-installed"
-    if [[ ! -f "${deep_ep_marker}" ]]; then
-        mkdir -p "${deep_ep_overlay}"
-        "${python_bin}" -m pip install \
-            --no-deps --upgrade \
-            --target "${deep_ep_overlay}" \
-            "${deep_ep_wheel}"
-        touch "${deep_ep_marker}"
-    fi
-    export KIMI_K3_DEEP_EP_PYTHONPATH="${deep_ep_overlay}"
-fi
-
-runtime_pythonpath=""
-if [[ -n "${KIMI_K3_DEEP_EP_PYTHONPATH:-}" ]]; then
-    [[ -d "${KIMI_K3_DEEP_EP_PYTHONPATH}" ]] \
-        || die "KIMI_K3_DEEP_EP_PYTHONPATH is not a directory"
-    runtime_pythonpath="${KIMI_K3_DEEP_EP_PYTHONPATH}"
-fi
-if [[ -n "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
-    [[ -d "${KIMI_K3_OPERATOR_PYTHONPATH}" ]] \
-        || die "KIMI_K3_OPERATOR_PYTHONPATH is not a directory"
-    runtime_pythonpath="${KIMI_K3_OPERATOR_PYTHONPATH}${runtime_pythonpath:+:${runtime_pythonpath}}"
-fi
-if [[ -n "${runtime_pythonpath}" ]]; then
-    export PYTHONPATH="${runtime_pythonpath}${PYTHONPATH:+:${PYTHONPATH}}"
-fi
+# K3 的 MoE 只有 DeepGEMM MegaMoE 一条实现,它的 dispatch/combine 融在
+# symmetric-memory kernel 里。DeepEP 那条路径(以及解析 DeepEP wheel 的整段)
+# 已随 KIMI_K3_MOE_BACKEND 一起删除 —— Torch 专家循环会把选中的专家反量化成
+# BF16,93 层 Decode 首次使用即耗尽显存。
 
 max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-16384}"
 max_batch_tokens_size="${MAX_BATCH_TOKENS_SIZE:-}"
@@ -319,98 +232,29 @@ reuse_cache="${KIMI_K3_REUSE_CACHE:-0}"
 default_batched_kda_decode=0
 case "${execution_mode}" in
     optimized)
-        default_accuracy_mode=native
         if [[ "${role}" == "DECODE" ]]; then
-            if [[ "${decode_topology}" == "tp8_ep8" ]]; then
-                # The bundled FLA 3.7 cubin is specialized for the TP1
-                # 96-head state.  TP8 owns 12 heads per rank and therefore
-                # uses the shape-generic recurrent Triton kernel.
-                default_kda_backend=kernel
-                # MegaMoE owns the EP dispatch/combine and consumes the
-                # checkpoint-native MXFP4 experts directly.  The old
-                # DeepEP+Torch expert loop dequantizes selected experts to
-                # BF16 and exhausts a full 93-layer Decode on first use.
-                default_moe_backend=deep_gemm_mega
-                default_sp_moe=1
-                default_perf_fusions=1
-                default_batched_kda_decode=1
-                default_decode_offload_start=none
-            else
-                default_kda_backend=fla37_precompiled
-                default_moe_backend=deepep
-                default_sp_moe=0
-                default_perf_fusions=0
-                default_decode_offload_start=auto
-            fi
-            default_kv_cache_mem_mb=8192
-        else
-            default_kda_backend=cula
-            default_moe_backend=deep_gemm_mega
-            default_mla_backend=flashmla
-            default_sp_moe=1
-            default_perf_fusions=1
-            default_kv_cache_mem_mb=8192
-            default_decode_offload_start=auto
+            # dp8_ep8 Decode 走的是已删除的 DeepEP MoE。默默换成 MegaMoE 会给出
+            # 一个没人验证过的组合,所以直接拒绝。
+            [[ "${decode_topology}" == "tp8_ep8" ]] \
+                || die "KIMI_K3_DECODE_TOPOLOGY=${decode_topology} needs the removed DeepEP MoE; use tp8_ep8"
+            default_batched_kda_decode=1
         fi
-        if [[ "${role}" == "DECODE" ]]; then
-            default_mla_backend=kernel
-        fi
-        default_use_host_metadata=1
         ;;
-    accuracy)
-        # The validated 93-layer baseline is fully native TP/EP/MLA with the
-        # FLA 0.5.1 recurrent image on Decode.  canonical TP/EP is retained as
-        # an explicit diagnostic mode, but gathering full 93-layer weights can
-        # exceed one B300.
-        default_accuracy_mode=native
-        if [[ "${role}" == "DECODE" ]]; then
-            default_kv_cache_mem_mb=8192
-            if [[ "${decode_topology}" == "tp8_ep8" ]]; then
-                default_kda_backend=kernel
-                default_sp_moe=1
-                default_decode_offload_start=none
-            else
-                default_kda_backend=fla37_precompiled
-                default_sp_moe=0
-                default_decode_offload_start=auto
-            fi
-        else
-            default_kda_backend=kernel
-            default_kv_cache_mem_mb=8192
-            default_sp_moe=0
-            default_decode_offload_start=auto
-        fi
-        default_moe_backend=deepep
-        default_mla_backend=kernel
-        default_perf_fusions=0
-        # These are capacity choices only.  Keep the validated mathematical
-        # path while retaining enough margin for eight concurrent
-        # fastsafetensors loaders on one B300 node.
-        default_use_host_metadata=0
-        ;;
-    *) die "unsupported KIMI_K3_EXECUTION_MODE=${execution_mode}" ;;
+    accuracy) ;;
 esac
+# KDA/MLA 后端与 perf fusions 现在由模型按 PD 角色决定(kimi_k3.py 的
+# _is_prefill_role),不再经环境变量传入。
+default_kv_cache_mem_mb=8192
 
-use_host_metadata="${KIMI_K3_USE_HOST_METADATA:-${default_use_host_metadata}}"
-sp_moe="${KIMI_K3_SP_MOE:-${default_sp_moe}}"
-kda_backend="${KIMI_K3_KDA_BACKEND:-${default_kda_backend}}"
-moe_backend="${KIMI_K3_MOE_BACKEND:-${default_moe_backend}}"
-mla_backend="${KIMI_K3_MLA_BACKEND:-${default_mla_backend}}"
-perf_fusions="${KIMI_K3_PERF_FUSIONS:-${default_perf_fusions}}"
 fused_ag_gemm="${KIMI_K3_FUSED_AG_GEMM:-auto}"
 batched_kda_decode="${KIMI_K3_BATCHED_KDA_DECODE:-${default_batched_kda_decode}}"
-perf_mode="${KIMI_K3_PERF_MODE:-0}"
-accuracy_mode="${KIMI_K3_ACCURACY_MODE:-${default_accuracy_mode}}"
 kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-${default_kv_cache_mem_mb}}"
-kda_fla37_precompiled_dir="${KIMI_K3_KDA_FLA37_PRECOMPILED_DIR:-${repo_root}/example/kimi_k3_pd/fla37-sm103}"
 enable_cuda_graph="${ENABLE_CUDA_GRAPH:-0}"
 enable_cuda_graph_debug_mode="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
 decode_capture_config="${DECODE_CAPTURE_CONFIG:-}"
 prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
 
-if { [[ "${role}" == "PREFILL" ]] \
-        && [[ "${kda_backend}" == "flash_kda" ]]; } \
-    || [[ "${moe_backend}" == "deep_gemm_mega" ]]; then
+if true; then
     if [[ -z "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
         operator_bundle="${repo_root}/example/kimi_k3_prefill_perf/wheels"
         operator_manifest="${operator_bundle}/SHA256SUMS"
@@ -421,17 +265,12 @@ if { [[ "${role}" == "PREFILL" ]] \
             sha256sum --check SHA256SUMS
         ) || die "bundled K3 operator wheel checksum failed"
         operator_manifest_sha="$(sha256sum "${operator_manifest}" | awk '{print $1}')"
-        operator_overlay="${run_root}/operator-overlay/${operator_manifest_sha}-${kda_backend}-${moe_backend}"
+        operator_overlay="${run_root}/operator-overlay/${operator_manifest_sha}-${role,,}"
         operator_marker="${operator_overlay}/.kimi-k3-operators-installed"
         if [[ ! -f "${operator_marker}" ]]; then
             mkdir -p "${operator_overlay}"
             operator_wheels=()
-            if [[ "${kda_backend}" == "flash_kda" ]]; then
-                operator_wheels+=(
-                    "${operator_bundle}/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl"
-                )
-            fi
-            if [[ "${moe_backend}" == "deep_gemm_mega" ]]; then
+            if true; then
                 operator_wheels+=(
                     "${operator_bundle}/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl"
                 )
@@ -445,16 +284,14 @@ if { [[ "${role}" == "PREFILL" ]] \
             touch "${operator_marker}"
         fi
         export KIMI_K3_OPERATOR_PYTHONPATH="${operator_overlay}"
-        export PYTHONPATH="${operator_overlay}${PYTHONPATH:+:${PYTHONPATH}}"
     fi
+    # 调用方自带 overlay 时也要进 PYTHONPATH。原先这一步靠 runtime_pythonpath
+    # 拼接,它同时服务 DeepEP 和算子 overlay 两条路径;DeepEP 那条删掉之后只剩这一条。
+    export PYTHONPATH="${KIMI_K3_OPERATOR_PYTHONPATH}${PYTHONPATH:+:${PYTHONPATH}}"
 fi
 
 for flag_name in \
-    use_host_metadata \
-    sp_moe \
-    perf_fusions \
     batched_kda_decode \
-    perf_mode \
     reuse_cache \
     enable_cuda_graph \
     enable_cuda_graph_debug_mode; do
@@ -483,74 +320,7 @@ for integer_name in \
         || die "${integer_name} must resolve to a positive integer, got ${integer_value}"
 done
 
-case "${kda_backend}" in
-    kernel | reference) ;;
-    cula | flash_kda)
-        [[ "${role}" == "PREFILL" ]] \
-            || die "KIMI_K3_KDA_BACKEND=${kda_backend} is Prefill-only"
-        ;;
-    fla37_precompiled)
-        [[ -d "${kda_fla37_precompiled_dir}" ]] \
-            || die "KIMI_K3_KDA_FLA37_PRECOMPILED_DIR is not a directory"
-        ;;
-    *) die "unsupported KIMI_K3_KDA_BACKEND=${kda_backend}" ;;
-esac
 
-case "${moe_backend}" in
-    deepep) ;;
-    deep_gemm_mega)
-        if [[ "${role}" == "DECODE" && "${decode_topology}" != "tp8_ep8" ]]; then
-            die "KIMI_K3_MOE_BACKEND=deep_gemm_mega Decode requires tp8_ep8"
-        fi
-        [[ -n "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]] \
-            || die "deep_gemm_mega requires KIMI_K3_OPERATOR_PYTHONPATH"
-        ;;
-    *) die "unsupported KIMI_K3_MOE_BACKEND=${moe_backend}" ;;
-esac
-
-case "${mla_backend}" in
-    kernel | reference) ;;
-    flashmla)
-        [[ "${role}" == "PREFILL" ]] \
-            || die "KIMI_K3_MLA_BACKEND=flashmla is Prefill-only"
-        ;;
-    *) die "unsupported KIMI_K3_MLA_BACKEND=${mla_backend}" ;;
-esac
-
-case "${accuracy_mode}" in
-    canonical)
-        canonical_tp=1
-        canonical_ep=1
-        canonical_mla=1
-        ;;
-    native_mla)
-        canonical_tp=1
-        canonical_ep=1
-        canonical_mla=0
-        ;;
-    native)
-        canonical_tp=0
-        canonical_ep=0
-        canonical_mla=0
-        ;;
-    *) die "unsupported KIMI_K3_ACCURACY_MODE=${accuracy_mode}" ;;
-esac
-
-canonical_tp="${KIMI_K3_ACCURACY_CANONICAL_TP:-${canonical_tp}}"
-canonical_ep="${KIMI_K3_ACCURACY_CANONICAL_EP:-${canonical_ep}}"
-canonical_mla="${KIMI_K3_ACCURACY_CANONICAL_MLA:-${canonical_mla}}"
-for flag_name in canonical_tp canonical_ep canonical_mla; do
-    flag_value="${!flag_name}"
-    [[ "${flag_value}" == "0" || "${flag_value}" == "1" ]] \
-        || die "${flag_name} must resolve to 0 or 1, got ${flag_value}"
-done
-
-if [[ "${role}" == "DECODE" && "${decode_topology}" == "tp8_ep8" ]]; then
-    [[ "${sp_moe}" == "1" ]] \
-        || die "Decode TP8/EP8 requires KIMI_K3_SP_MOE=1"
-    [[ "${canonical_tp}" == "0" ]] \
-        || die "Decode TP8/EP8 token-SP requires native TP projections"
-fi
 
 if [[ "${role}" == "PREFILL" ]]; then
     local_endpoint="${PREFILL_ENDPOINT}"
@@ -598,29 +368,13 @@ export TOKENIZER_PATH="${tokenizer_path}"
 export LOAD_METHOD="${LOAD_METHOD:-fastsafetensors}"
 export REMOTE_RPC_SERVER_IP="${remote_endpoint}"
 export MODEL_SERVICE_CONFIG="${model_service_config}"
-export KIMI_K3_KDA_BACKEND="${kda_backend}"
-export KIMI_K3_MOE_BACKEND="${moe_backend}"
-export KIMI_K3_MLA_BACKEND="${mla_backend}"
-export KIMI_K3_USE_HOST_METADATA="${use_host_metadata}"
-export KIMI_K3_SP_MOE="${sp_moe}"
-export KIMI_K3_PERF_FUSIONS="${perf_fusions}"
 export KIMI_K3_FUSED_AG_GEMM="${fused_ag_gemm}"
 export KIMI_K3_BATCHED_KDA_DECODE="${batched_kda_decode}"
-export KIMI_K3_PERF_MODE="${perf_mode}"
 [[ "${KIMI_K3_FUSED_AG_GEMM}" =~ ^(auto|off|force)$ ]] \
     || die "KIMI_K3_FUSED_AG_GEMM must be auto, off, or force"
-export KIMI_K3_FASTSAFETENSORS_STREAMING="${KIMI_K3_FASTSAFETENSORS_STREAMING:-1}"
-export KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH="${KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH:-1}"
-[[ "${KIMI_K3_FASTSAFETENSORS_STREAMING}" == "0" \
-    || "${KIMI_K3_FASTSAFETENSORS_STREAMING}" == "1" ]] \
-    || die "KIMI_K3_FASTSAFETENSORS_STREAMING must be 0 or 1"
-[[ "${KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH}" =~ ^[1-8]$ ]] \
-    || die "KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH must be in [1, 8]"
-if [[ "${moe_backend}" == "deep_gemm_mega" ]]; then
-    export KIMI_K3_REQUIRE_DEEP_EP=0
-    use_deepep_moe=0
-else
-    export KIMI_K3_REQUIRE_DEEP_EP=1
+# MegaMoE 自己做 dispatch/combine,框架侧的 DeepEP MoE 恒不启用。
+use_deepep_moe=0
+if false; then
     use_deepep_moe=1
 fi
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
@@ -643,7 +397,7 @@ if [[ ! -x "${CUDAHOSTCXX:-}" ]]; then
     export CUDAHOSTCXX
 fi
 deepgemm_jit_compiler=none
-if [[ "${moe_backend}" == "deep_gemm_mega" ]]; then
+if true; then
     deepgemm_jit_compiler="${KIMI_K3_DEEPGEMM_JIT_COMPILER:-auto}"
     case "${deepgemm_jit_compiler}" in
         auto)
@@ -677,7 +431,6 @@ if [[ "${moe_backend}" == "deep_gemm_mega" ]]; then
     else
         export DG_JIT_USE_NVRTC=0
     fi
-    export KIMI_K3_DEEPGEMM_EXPECTED_PATH="${KIMI_K3_OPERATOR_PYTHONPATH}"
     export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK="${KIMI_K3_MEGA_MAX_TOKENS_PER_RANK:-8192}"
     export OPS_OVERLAY="${KIMI_K3_OPERATOR_PYTHONPATH}"
 else
@@ -685,62 +438,8 @@ else
     unset OPS_OVERLAY
 fi
 
-unset KIMI_K3_KDA_FLA37_PRECOMPILED_DIR
-unset KIMI_K3_KDA_CHUNK_STATE_BACKEND
-if [[ "${kda_backend}" == "fla37_precompiled" ]]; then
-    export KIMI_K3_KDA_FLA37_PRECOMPILED_DIR="${kda_fla37_precompiled_dir}"
-fi
-if [[ "${role}" == "PREFILL" && "${kda_backend}" == "kernel" ]]; then
-    export KIMI_K3_KDA_CHUNK_STATE_BACKEND=triton
-fi
 
-export KIMI_K3_ACCURACY_CANONICAL_TP="${canonical_tp}"
-export KIMI_K3_ACCURACY_CANONICAL_EP="${canonical_ep}"
-export KIMI_K3_ACCURACY_CANONICAL_MLA="${canonical_mla}"
-# A 93-layer TP8 Prefill otherwise retains tens of GiB of gathered diagnostic
-# weights and can OOM on its first request. Re-gathering preserves the canonical
-# GEMM result while keeping the one-request accuracy service within memory.
-export KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS="${KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS:-0}"
-if [[ -z "${KIMI_K3_ACCURACY_TRACE_DIR:-}" ]]; then
-    unset KIMI_K3_ACCURACY_TRACE_MODE
-    unset KIMI_K3_ACCURACY_TRACE_ENABLE_FILE
-    unset KIMI_K3_ACCURACY_TRACE_FULL_ROUTER
-    unset KIMI_K3_ACCURACY_TRACE_FORWARD_INDEX
-    unset KIMI_K3_ACCURACY_TRACE_INPUT_TOKEN_ID
-    unset KIMI_K3_ACCURACY_TRACE_RANK
-fi
-
-unset KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START
 if [[ "${role}" == "DECODE" ]]; then
-    offload_start="${KIMI_K3_DECODE_CPU_OFFLOAD_START:-${default_decode_offload_start}}"
-    if [[ "${offload_start}" == "auto" ]]; then
-        num_hidden_layers="$(
-            "${python_bin}" -c '
-import json
-import sys
-
-config = json.load(open(sys.argv[1], encoding="utf-8"))
-config = config.get("text_config", config)
-print(config["num_hidden_layers"])
-' "${CHECKPOINT_PATH}/config.json"
-        )"
-        # Keep a deterministic safety margin during eight concurrent
-        # fastsafetensors loads. With the full 93-layer checkpoint, a cutoff
-        # of 60 still reaches the B300 limit during rank-0 staging; 30 is the
-        # validated cold-start setting. Small sliced checkpoints need none.
-        if (( num_hidden_layers > 60 )); then
-            offload_start=30
-        else
-            offload_start=none
-        fi
-    fi
-    if [[ "${offload_start}" != "none" ]]; then
-        [[ "${decode_topology}" == "dp8_ep8" ]] \
-            || die "Decode TP8/EP8 does not support CPU expert offload"
-        [[ "${offload_start}" =~ ^[0-9]+$ ]] \
-            || die "KIMI_K3_DECODE_CPU_OFFLOAD_START must be auto, an integer, or none"
-        export KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START="${offload_start}"
-    fi
     if [[ "${execution_mode}" == "accuracy" ]]; then
         export ACCL_DISPATCH_NUM_WARP_GROUPS="${ACCL_DISPATCH_NUM_WARP_GROUPS:-2}"
         export ACCL_COMBINE_NUM_WARP_GROUPS="${ACCL_COMBINE_NUM_WARP_GROUPS:-2}"
@@ -760,17 +459,9 @@ if [[ "${role}" == "DECODE" ]]; then
 fi
 echo "  load method:     ${LOAD_METHOD}"
 echo "  execution mode:  ${execution_mode}"
-echo "  accuracy mode:   ${accuracy_mode}"
-echo "  host metadata:   ${use_host_metadata}"
-echo "  SP MoE:          ${sp_moe}"
-echo "  KDA backend:     ${kda_backend}"
-echo "  MoE backend:     ${moe_backend}"
-echo "  MLA backend:     ${mla_backend}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
-echo "  perf fusions:    ${perf_fusions}"
 echo "  fused AG/GEMM:   ${fused_ag_gemm}"
 echo "  batched KDA:     ${batched_kda_decode}"
-echo "  perf validation: ${perf_mode}"
 echo "  concurrency:     generate=${concurrency_limit}, context=${max_context_batch_size}"
 if [[ -n "${max_batch_tokens_size}" ]]; then
     echo "  batch tokens:    ${max_batch_tokens_size}"
@@ -784,7 +475,6 @@ fi
 if [[ -n "${prefill_capture_config}" ]]; then
     echo "  Prefill captures:${prefill_capture_config}"
 fi
-echo "  fastsafetensors: streaming=${KIMI_K3_FASTSAFETENSORS_STREAMING}, files_per_batch=${KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH}"
 echo "  FlashInfer JIT:  ${FLASHINFER_WORKSPACE_BASE} (arch=${FLASHINFER_CUDA_ARCH_LIST})"
 echo "  runtime tmp:     ${TMPDIR}"
 echo "  logs:            ${LOG_PATH}"

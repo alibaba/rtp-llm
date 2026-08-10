@@ -67,8 +67,10 @@ bool hasSegmentedLinearCacheGroup(const CacheConfig& cache_config) {
     });
 }
 
+// One switch drives every K3 diagnostic log stream; KIMI_K3_PD_TRACE_LOG_ENABLE
+// used to gate only this one.
 bool kimiK3PdTraceLogEnabled() {
-    const char* value = std::getenv("KIMI_K3_PD_TRACE_LOG_ENABLE");
+    const char* value = std::getenv("KIMI_K3_DEBUG");
     return value != nullptr && std::string(value) == "1";
 }
 
@@ -186,10 +188,14 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                 decode_context.request_key.c_str(),
                                 decode_context.prefill_cache_dtype,
                                 static_cast<int32_t>(cache_config.dtype));
+        // K3 PD is equal-TP only.  Prefill rank i and decode rank i own the same
+        // KDA/MLA attention shard, so the state moves rank-to-rank with no
+        // re-slicing.  The removed P8->D1 fan-in instead required one decode rank
+        // to reassemble all 96 KDA heads, which is what forced the cache layout to
+        // reserve a full-head slot and pad every rank-local block up to it.
         const int decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
-        RTP_LLM_CHECK_WITH_INFO(decode_attention_tp == 1
-                                    || decode_attention_tp == decode_context.prefill_attention_tp_size,
-                                "request [%s] K3 PD supports only P8->D1 or P8->D8 attention TP, got P%d->D%d",
+        RTP_LLM_CHECK_WITH_INFO(decode_attention_tp == decode_context.prefill_attention_tp_size,
+                                "request [%s] K3 PD requires equal attention TP on both sides, got P%d->D%d",
                                 decode_context.request_key.c_str(),
                                 decode_context.prefill_attention_tp_size,
                                 decode_attention_tp);
@@ -207,24 +213,17 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                 decode_context.prefill_conv_state_dtype,
                 static_cast<int32_t>(linear_spec->ssm_state_dtype),
                 static_cast<int32_t>(linear_spec->conv_state_dtype));
-            if (decode_attention_tp == decode_context.prefill_attention_tp_size) {
-                constexpr uint32_t kK3TotalLinearHeads = 96;
-                constexpr uint32_t kK3LocalLinearHeads = kK3TotalLinearHeads / kK3PrefillAttentionTp;
-                RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == kK3LocalLinearHeads
-                                            && linear_spec->local_num_v_heads == kK3LocalLinearHeads,
-                                        "request [%s] equal-TP K3 PD requires 12 local KDA heads, got k=%u v=%u",
-                                        decode_context.request_key.c_str(),
-                                        linear_spec->local_num_k_heads,
-                                        linear_spec->local_num_v_heads);
-            } else {
-                RTP_LLM_CHECK_WITH_INFO(
-                    linear_spec->local_num_k_heads % decode_context.prefill_attention_tp_size == 0
-                        && linear_spec->local_num_v_heads % decode_context.prefill_attention_tp_size == 0,
-                    "request [%s] P8->D1 K3 PD requires full KDA heads divisible by TP=8, got k=%u v=%u",
-                    decode_context.request_key.c_str(),
-                    linear_spec->local_num_k_heads,
-                    linear_spec->local_num_v_heads);
-            }
+            // Equal TP was already asserted above, so the decode side always holds
+            // exactly its own 96/8 KDA heads.  The dropped branch existed only to
+            // let a TP1 decode accept the full 96 heads.
+            constexpr uint32_t kK3TotalLinearHeads = 96;
+            constexpr uint32_t kK3LocalLinearHeads = kK3TotalLinearHeads / kK3PrefillAttentionTp;
+            RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads == kK3LocalLinearHeads
+                                        && linear_spec->local_num_v_heads == kK3LocalLinearHeads,
+                                    "request [%s] equal-TP K3 PD requires 12 local KDA heads, got k=%u v=%u",
+                                    decode_context.request_key.c_str(),
+                                    linear_spec->local_num_k_heads,
+                                    linear_spec->local_num_v_heads);
         }
         RTP_LLM_LOG_INFO("[K3_PD] request=%s cache_mapping=P%d_to_D%d peers=%zu",
                          decode_context.request_key.c_str(),
@@ -430,11 +429,20 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     request.set_prefill_cp_size(load_context.prefill_cp_size);
 
     const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
-    const bool  hybrid_linear_fan_in =
+    const bool  segmented_linear_cache =
         load_context.prefill_cp_size <= 1 && peer_addrs.size() > 1 && hasSegmentedLinearCacheGroup(cache_config);
     const int  decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
-    const bool equal_attention_tp  = hybrid_linear_fan_in && decode_attention_tp > 1
+    const bool equal_attention_tp  = segmented_linear_cache && decode_attention_tp > 1
                                     && static_cast<size_t>(decode_attention_tp) == peer_addrs.size();
+    // A segmented linear cache is head-sharded, so it can only be moved
+    // rank-to-rank.  The removed P8->D1 fan-in pulled every prefill peer so one
+    // decode rank could stitch all 96 segments together; with that gone an
+    // unequal mapping must fail loudly instead of silently falling through to the
+    // generic block split below, which would hand decode the wrong head slices.
+    RTP_LLM_CHECK_WITH_INFO(!segmented_linear_cache || equal_attention_tp,
+                            "K3 hybrid cache PD requires equal attention TP, got D%d with %zu prefill peers",
+                            decode_attention_tp,
+                            peer_addrs.size());
 
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: each prefill peer holds 1/N RR shard, pull from all N peers
@@ -448,14 +456,6 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
                                 peer_addrs.size());
         // P rank i and D rank i own the same KDA/MLA attention shard.
         request.add_peer_addrs(peer_addrs[index]);
-    } else if (hybrid_linear_fan_in) {
-        // MLA state is replicated across prefill TP ranks, but a hybrid KDA
-        // state is head-sharded. The selected decode DP rank therefore needs
-        // every prefill TP peer so loadCache() can copy each rank-local KDA
-        // segment into the matching destination head slice.
-        for (const auto& addr : peer_addrs) {
-            request.add_peer_addrs(addr);
-        }
     } else if (resource_.workers.size() % peer_addrs.size() == 0) {
         // D >= P
         int part_cnt = resource_.workers.size() / peer_addrs.size();
@@ -494,6 +494,13 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     const int   decode_attention_tp = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
     const bool  equal_attention_tp =
         k3_hybrid_cache && decode_attention_tp > 1 && static_cast<size_t>(decode_attention_tp) == peer_addrs.size();
+    // Same reason as constructRemoteLoadRequestForMla: without the removed
+    // P8->D1 fan-in an unequal mapping would drop through to the generic block
+    // split and give decode the wrong KDA head slices, silently.
+    RTP_LLM_CHECK_WITH_INFO(!k3_hybrid_cache || load_context.prefill_cp_size > 1 || equal_attention_tp,
+                            "K3 hybrid cache PD requires equal attention TP, got D%d with %zu prefill peers",
+                            decode_attention_tp,
+                            peer_addrs.size());
     if (load_context.prefill_cp_size > 1) {
         // CP-sharded prefill: pull from all peers (each holds 1/N RR shard)
         request.set_partition_count(1);
@@ -854,6 +861,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
     const bool                                is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
+    // Receive-side fan-in.  This is deliberately kept even though the P8->D1
+    // sender path is gone: it is still the live path for CP-sharded prefill,
+    // where constructRemoteLoadRequest* adds every peer and peer_cnt stays > 1.
+    // For equal-TP non-CP K3 the sender now adds exactly one peer, so peer_cnt is
+    // 1 and this is unreachable — do not "clean it up" without checking CP.
     const bool hybrid_linear_fan_in =
         use_mla && !is_page_level_rr && peer_cnt > 1 && hasSegmentedLinearCacheGroup(cache_config);
     auto layerGroupIds = [](const CacheConfig& cfg, bool use_hybrid, size_t layer_id) {

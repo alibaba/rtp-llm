@@ -146,8 +146,10 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
 
 namespace {
 
+// One switch drives every K3 diagnostic log stream; KIMI_K3_PD_TRACE_LOG_ENABLE
+// used to gate only this one.
 bool kimiK3PdTraceLogEnabled() {
-    const char* value = std::getenv("KIMI_K3_PD_TRACE_LOG_ENABLE");
+    const char* value = std::getenv("KIMI_K3_DEBUG");
     return value != nullptr && std::string(value) == "1";
 }
 

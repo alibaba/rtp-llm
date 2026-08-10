@@ -10,7 +10,7 @@ mapped onto RTP's paged linear-cache ABI; MLA uses RTP's compressed latent
 cache layout, so the same layer caches can flow through PD transfer.
 
 Both attention modules keep a pure-Torch reference selectable via env var
-(``KIMI_K3_KDA_BACKEND`` / ``KIMI_K3_MLA_BACKEND``, default ``kernel``) for
+(fixed per PD role: Prefill uses cuLA, Decode the shape-generic kernel) for
 precision comparison against the framework/Triton kernels.
 """
 
@@ -59,6 +59,8 @@ from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.kimi_k3.diagnostics.accuracy_trace import (
     accuracy_trace_mode,
     kimi_k3_accuracy_trace,
+    tensor_dump_enabled,
+    tensor_dump_full_router,
     mark_accuracy_fake_stream,
     record_accuracy_tensor,
 )
@@ -84,9 +86,6 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     kimi_kda_short_conv_paged_decode,
     kimi_kda_short_conv_prefill,
 )
-from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
-    fused_recurrent_kda_fla37_precompiled,
-)
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -104,9 +103,13 @@ if TYPE_CHECKING:
 
 
 KIMI_K3_MLA_LATENT_NORM_EPS = 1e-6
+# 上游 f59c38cb0 新增的融合 AG GEMM 门限,保留。
 _FUSED_AG_GEMM_MIN_GLOBAL_TOKENS = 32 * 1024
-_FLASH_KDA_WORKSPACES: dict[tuple[int, int], torch.Tensor] = {}
-_FLASH_KDA_LOGGED_DEVICES: set[int] = set()
+# Headroom the KDA A2A preflight leaves free after replicating the per-layer
+# weights.  It used to be tunable through KIMI_K3_KDA_A2A_SAFETY_GIB; nobody
+# ever moved it off 8 GiB, and A2A is capped at three layers anyway, so the
+# knob was pure surface area.
+_KDA_A2A_SAFETY_BYTES = 8 * (1 << 30)
 _CULA_LOGGED_DEVICES: set[int] = set()
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 
@@ -115,16 +118,34 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return os.environ.get(name, "1" if default else "0").strip() == "1"
 
 
-def _perf_mode_enabled() -> bool:
-    """Enable strict validation and profiler annotations, not model math."""
+def _is_prefill_role(parallelism_config) -> bool:
+    """Prefill vs Decode,取引擎已经镜像进 parallelism_config 的 role。
 
-    return _env_flag("KIMI_K3_PERF_MODE")
+    engine_config.py 把 role_config.role_type 镜像到 parallelism_config,正是为了
+    让模型构造期不必去读 os.environ["ROLE_TYPE"];DSv4 也是这么取的。K3 只以 PD
+    分离部署,所以 PDFUSION 这类取值是配置错误,直接报出来而不是默默当 Decode。
+    """
+
+    role = str(parallelism_config.role_type).rsplit(".", 1)[-1].upper()
+    if role == "PREFILL":
+        return True
+    if role == "DECODE":
+        return False
+    raise RuntimeError(
+        f"Kimi K3 只支持 PD 分离部署,role_type={role} 不受支持"
+    )
 
 
 def _perf_fusions_enabled() -> bool:
-    """Select the explicitly staged performance-fusion implementations."""
+    """Select the explicitly staged performance-fusion implementations.
 
-    return _env_flag("KIMI_K3_PERF_FUSIONS")
+    恒定开启:两个角色的生产配置都是 1,精度已按这个组合封版。原先的
+    KIMI_K3_PERF_FUSIONS 只有 Prefill 侧 KDA=kernel 时才有第二个取值,而那正是
+    实测会破坏精度的坏组合(融合 kernel 是围绕 cuLA 设计与验证的)—— 现在 KDA
+    按角色固定,这个开关就没有合法的第二个值了。
+    """
+
+    return True
 
 
 def _fused_ag_gemm_mode() -> str:
@@ -143,7 +164,9 @@ def _batched_kda_decode_enabled() -> bool:
 
 
 def _perf_profile(name: str, tensor: Optional[torch.Tensor] = None):
-    if not _perf_mode_enabled():
+    # PERF_MODE 已删:profiler 标注恒不产出。保留这个壳是因为调用点遍布前向,
+    # 一并摘掉会把改动摊到几十处无关的地方。
+    if True:
         return nullcontext()
     suffix = ""
     if tensor is not None:
@@ -152,89 +175,16 @@ def _perf_profile(name: str, tensor: Optional[torch.Tensor] = None):
     return torch.autograd.profiler.record_function(f"{name}{suffix}")
 
 
-def _validate_perf_environment() -> None:
-    """Reject mixed accuracy/reference settings in a measured performance run."""
-
-    if not _perf_mode_enabled():
-        return
-    conflicting_flags = [
-        name
-        for name in (
-            "KIMI_K3_ACCURACY_CANONICAL_TP",
-            "KIMI_K3_ACCURACY_CANONICAL_EP",
-            "KIMI_K3_ACCURACY_CANONICAL_MLA",
-            "KIMI_K3_ACCURACY_LOCAL_EAGER_MLA",
-        )
-        if _env_flag(name)
-    ]
-    if os.environ.get("KIMI_K3_ACCURACY_TRACE_DIR"):
-        conflicting_flags.append("KIMI_K3_ACCURACY_TRACE_DIR")
-    expected = {
-        "KIMI_K3_MOE_BACKEND": "deep_gemm_mega",
-        "KIMI_K3_MLA_BACKEND": "flashmla",
-        "KIMI_K3_USE_HOST_METADATA": "1",
-        "KIMI_K3_SP_MOE": "1",
-        "KIMI_K3_PERF_FUSIONS": "1",
-    }
-    wrong_settings = [
-        f"{name}={os.environ.get(name, '')!r}"
-        for name, value in expected.items()
-        if os.environ.get(name, "").strip().lower() != value
-    ]
-    kda_backend = os.environ.get("KIMI_K3_KDA_BACKEND", "").strip().lower()
-    if kda_backend != "cula":
-        wrong_settings.append(f"KIMI_K3_KDA_BACKEND={kda_backend!r}")
-    if conflicting_flags or wrong_settings:
-        details = ", ".join(conflicting_flags + wrong_settings)
-        raise RuntimeError(
-            "KIMI_K3_PERF_MODE only labels the fully optimized path and "
-            "forbids accuracy/reference work; invalid settings: "
-            f"{details}"
-        )
-
-
-def _sp_moe_enabled() -> bool:
-    """Enable K3 token sequence parallelism for the selected role."""
-
-    return os.environ.get("KIMI_K3_SP_MOE", "0").strip() == "1"
-
-
 def _kda_comm_backend() -> str:
-    backend = os.environ.get("KIMI_K3_KDA_COMM_BACKEND", "rs_ag").strip().lower()
-    if backend != "rs_ag":
-        raise RuntimeError(
-            "KIMI_K3_KDA_COMM_BACKEND supports only production 'rs_ag'; "
-            f"the experimental A2A path is disabled, got {backend!r}"
-        )
-    return backend
+    # KDA 通信只有 rs_ag 一种生产实现。这里原先读 KIMI_K3_KDA_COMM_BACKEND,
+    # 但代码对任何其它取值都直接抛错 —— 这个变量事实上没有第二个合法值。
+    return "rs_ag"
 
 
-def _decode_sp_debug_enabled() -> bool:
-    return os.environ.get("KIMI_K3_DECODE_SP_DEBUG", "0").strip() == "1"
+def _debug_enabled() -> bool:
+    """One switch for every K3 diagnostic log stream (Decode SP, PD transfer)."""
 
-
-def _flash_kda_workspace(
-    flash_kda: Any,
-    q: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-) -> torch.Tensor:
-    """Return a process-local reusable FlashKDA workspace."""
-
-    device_index = q.device.index if q.device.index is not None else 0
-    sequence_count = int(cu_seqlens.numel() - 1)
-    required = int(
-        flash_kda.get_workspace_size(
-            int(q.shape[0] * q.shape[1]),
-            int(q.shape[2]),
-            sequence_count,
-        )
-    )
-    key = (device_index, int(q.shape[2]))
-    workspace = _FLASH_KDA_WORKSPACES.get(key)
-    if workspace is None or workspace.numel() < required:
-        workspace = torch.empty(required, dtype=torch.uint8, device=q.device)
-        _FLASH_KDA_WORKSPACES[key] = workspace
-    return workspace
+    return _env_flag("KIMI_K3_DEBUG")
 
 
 def _linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -248,71 +198,23 @@ def _linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     return torch.matmul(x, weight)
 
 
-def _accuracy_canonical_tp_enabled() -> bool:
-    """Return the process-wide selector for source-GEMM TP reconstruction."""
-
-    return os.environ.get("KIMI_K3_ACCURACY_CANONICAL_TP", "0") == "1"
-
-
-def _accuracy_retain_full_tp_weights() -> bool:
-    """Whether canonical TP keeps gathered full weights across forwards.
-
-    Retaining them avoids repeated collectives, but a full 93-layer TP8 K3
-    Prefill accumulates tens of GiB of duplicate weights during its first
-    request. Correctness-only full-model runs can disable retention while
-    preserving the same gathered GEMM for every projection.
-    """
-
-    return os.environ.get("KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS", "1") == "1"
-
-
-def _accuracy_full_router_trace_enabled() -> bool:
-    """Keep full O(T) router diagnostics in an otherwise boundary-only trace."""
-
-    return os.environ.get("KIMI_K3_ACCURACY_TRACE_FULL_ROUTER", "0") == "1"
-
-
 def _accuracy_trace_enabled() -> bool:
     """Return whether this forward is actively recording accuracy tensors."""
 
-    return not _perf_mode_enabled() and accuracy_trace_mode() is not None
+    return accuracy_trace_mode() is not None
 
 
 def _accuracy_trace_requested() -> bool:
     """Return the process-wide trace selector shared by every TP rank."""
 
-    return bool(os.environ.get("KIMI_K3_ACCURACY_TRACE_DIR"))
+    return bool(os.environ.get("KIMI_K3_TENSOR_DUMP"))
 
 
 def _host_metadata_enabled() -> bool:
     """Use gather-time pinned host metadata instead of synchronous D2H reads."""
 
-    return os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
-
-
-def _accuracy_canonical_mla_enabled() -> bool:
-    """Reproduce the Dummy eager-MLA accumulation in accuracy runs only."""
-
-    return os.environ.get("KIMI_K3_ACCURACY_CANONICAL_MLA", "0") == "1"
-
-
-def _accuracy_local_eager_mla_enabled() -> bool:
-    """Use TP-local source MLA math while retaining RTP cache writeback.
-
-    This default-off diagnostic mode keeps the framework FMHA invocation so
-    HybridCache and CacheStore observe the normal production write path, but
-    replaces the FlashInfer context with K3's two-matmul eager formulation.
-    Unlike ``KIMI_K3_ACCURACY_CANONICAL_MLA``, it does not all-gather all
-    attention heads before the quadratic attention calculation.
-    """
-
-    return os.environ.get("KIMI_K3_ACCURACY_LOCAL_EAGER_MLA", "0") == "1"
-
-
-def _accuracy_canonical_ep_enabled() -> bool:
-    """Reproduce source-layout MoE math in accuracy runs only."""
-
-    return os.environ.get("KIMI_K3_ACCURACY_CANONICAL_EP", "0") == "1"
+    # 恒定开启:档 A→B 实测精度无差异,生产两端都是 1。
+    return True
 
 
 def _prepare_mla_fmha_for_group(
@@ -365,55 +267,6 @@ def _select_mla_attention_inputs(
     if explicit_inputs is not None:
         return explicit_inputs
     return getattr(fmha_impl, "attn_inputs", None)
-
-
-def _column_parallel_linear(
-    x: torch.Tensor,
-    local_weight: torch.Tensor,
-    tp_size: int,
-    tp_rank: int,
-    full_weight_cache: dict[str, torch.Tensor],
-    cache_key: str,
-) -> torch.Tensor:
-    """Reproduce the source full-width GEMM before selecting a TP output shard.
-
-    Splitting a column-parallel BF16 weight changes GEMM N and can make cuBLAS
-    select a different reduction path.  The resulting one-ULP activation error
-    is normally harmless, but K3's near-tied routed experts can amplify it into
-    a different token.  The default-off accuracy path gathers each weight once,
-    runs the source-width GEMM on every TP rank, and returns the local columns.
-    """
-
-    if tp_size <= 1 or not _accuracy_canonical_tp_enabled():
-        return _linear(x, local_weight)
-    if x.ndim != 2 or local_weight.ndim != 2:
-        raise ValueError(
-            "canonical K3 TP column projection requires rank-2 input and weight"
-        )
-    retain_full_weight = _accuracy_retain_full_tp_weights()
-    full_weight = full_weight_cache.get(cache_key) if retain_full_weight else None
-    if full_weight is None:
-        gathered = all_gather(local_weight.transpose(0, 1).contiguous(), group=Group.TP)
-        expected_shape = (
-            tp_size * local_weight.shape[1],
-            local_weight.shape[0],
-        )
-        if tuple(gathered.shape) != expected_shape:
-            raise ValueError(
-                "unexpected gathered K3 column weight shape "
-                f"{tuple(gathered.shape)}, expected {expected_shape}"
-            )
-        full_weight = gathered.transpose(0, 1).contiguous()
-        if retain_full_weight:
-            full_weight_cache[cache_key] = full_weight
-    full_output = _linear(x, full_weight)
-    local_width = local_weight.shape[1]
-    begin = tp_rank * local_width
-    # Several KDA Triton kernels consume flattened tensors and therefore
-    # require the local projection to have a compact row stride.  A plain
-    # column slice keeps the full-width GEMM stride and silently reads across
-    # TP-head boundaries.
-    return full_output[:, begin : begin + local_width].contiguous()
 
 
 def _replicated_column_weight(
@@ -535,9 +388,8 @@ def _use_fused_prefill_ag_gemm(global_token_count: int) -> bool:
         return True
     return (
         _perf_fusions_enabled()
-        and not _accuracy_canonical_tp_enabled()
-        and not _accuracy_canonical_mla_enabled()
-        and not _accuracy_local_eager_mla_enabled()
+        # canonical / local-eager 对照模式已删除,这里只剩 trace:tracing 需要
+        # 源实现的投影边界,所以不能走融合 AG GEMM。
         and not _accuracy_trace_requested()
     )
 
@@ -614,30 +466,6 @@ def _row_parallel_linear(
         )
     if tp_size <= 1:
         return _linear(x, weight)
-    if _accuracy_canonical_tp_enabled():
-        if x.ndim != 2 or weight.ndim != 2:
-            raise ValueError(
-                "canonical K3 TP row projection requires rank-2 input and weight"
-            )
-        # A sum of independently accumulated TP shards is mathematically
-        # equivalent to the source model's full-width GEMM, but it is not
-        # bitwise equivalent in BF16.  Near-tied MoE routes can amplify one
-        # output ULP into a different expert selection.  Accuracy tracing
-        # therefore reconstructs the source GEMM boundary on every TP rank.
-        # This default-off diagnostic path is intentionally not a production
-        # performance implementation.
-        full_weight = all_gather(weight.contiguous(), group=Group.TP)
-        full_x = (
-            all_gather(x.transpose(0, 1).contiguous(), group=Group.TP)
-            .transpose(0, 1)
-            .contiguous()
-        )
-        if full_x.shape[1] != full_weight.shape[0]:
-            raise ValueError(
-                "canonical K3 TP row projection gathered incompatible shapes: "
-                f"x={tuple(full_x.shape)}, weight={tuple(full_weight.shape)}"
-            )
-        return _linear(full_x, full_weight)
     if (
         x.is_cuda
         and x.ndim == 2
@@ -734,72 +562,6 @@ def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor
     # multiply in FP32 changes BF16 values by one or two ULPs, which is enough
     # to change a routed expert when the top-k boundary margin is small.
     return weight * normalized.to(dtype=x.dtype)
-
-
-def _source_eager_attention_context(
-    query_by_head: torch.Tensor,
-    key_by_head: torch.Tensor,
-    value_by_head: torch.Tensor,
-    softmax_scale: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Match Dummy's eager MLA matmul, mask, softmax, and value matmul.
-
-    Inputs are head-major ``[H, T, D]``, ``[H, S, D]``, and ``[H, S, V]``.
-    The leading batch dimension is retained for both matmuls because cuBLAS
-    kernel selection can depend on the complete source-model shape.
-    """
-
-    if query_by_head.ndim != 3 or key_by_head.ndim != 3:
-        raise ValueError("canonical eager MLA query/key must be rank-3")
-    if value_by_head.ndim != 3:
-        raise ValueError("canonical eager MLA value must be rank-3")
-    if query_by_head.shape[0] != key_by_head.shape[0]:
-        raise ValueError("canonical eager MLA query/key head counts differ")
-    if key_by_head.shape[:2] != value_by_head.shape[:2]:
-        raise ValueError("canonical eager MLA key/value shapes differ")
-    query_tokens = query_by_head.shape[1]
-    total_tokens = key_by_head.shape[1]
-    past_tokens = total_tokens - query_tokens
-    if past_tokens < 0:
-        raise ValueError("canonical eager MLA key length is shorter than query")
-
-    scores = (
-        torch.matmul(
-            query_by_head.unsqueeze(0),
-            key_by_head.unsqueeze(0).transpose(2, 3),
-        )
-        * softmax_scale
-    )
-    causal = torch.zeros(
-        (1, 1, query_tokens, total_tokens),
-        dtype=scores.dtype,
-        device=scores.device,
-    )
-    if query_tokens > 1:
-        local = torch.triu(
-            torch.full(
-                (query_tokens, query_tokens),
-                torch.finfo(scores.dtype).min,
-                dtype=scores.dtype,
-                device=scores.device,
-            ),
-            diagonal=1,
-        )
-        causal[:, :, :, past_tokens:] = local
-    scores = scores + causal
-    probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(
-        dtype=query_by_head.dtype
-    )
-    context = (
-        torch.matmul(probabilities, value_by_head.unsqueeze(0))
-        .transpose(1, 2)
-        .contiguous()
-    )
-    return (
-        context.squeeze(0),
-        scores.squeeze(0),
-        probabilities.squeeze(0),
-    )
 
 
 def _situ(
@@ -1520,11 +1282,9 @@ class KimiK3KDA(nn.Module):
         self.attn_tp_rank = int(parallelism_config.get_attn_tp_rank())
         self.total_heads = total_heads
         self.local_heads = total_heads // tp_size
-        self._accuracy_full_weight_cache: dict[str, torch.Tensor] = {}
         self._segment_cu_seqlens: dict[tuple[int, int], torch.Tensor] = {}
         self.projection_size = self.local_heads * self.head_dim
         self.full_projection_size = self.total_heads * self.head_dim
-        self._full_column_weights: dict[str, torch.Tensor] = {}
         self._segment_cu_seqlens_cpu: dict[int, torch.Tensor] = {}
         self._kda_comm_backend = _kda_comm_backend()
         logging.info(
@@ -1539,21 +1299,14 @@ class KimiK3KDA(nn.Module):
         self._a2a_buffers: dict[str, torch.Tensor] = {}
         self.eps = float(config.layernorm_eps)
         self.gate_lower_bound = runtime.kda_gate_lower_bound
-        # KDA delta-net core backend: the ported Triton kernel by default, with
-        # the pure-Torch reference reachable for precision verification.
-        self._kda_backend = os.environ.get("KIMI_K3_KDA_BACKEND", "kernel").lower()
-        if self._kda_backend not in (
-            "kernel",
-            "reference",
-            "fla37_precompiled",
-            "flash_kda",
-            "cula",
-        ):
-            raise ValueError(
-                "KIMI_K3_KDA_BACKEND must be 'kernel', 'reference', "
-                "'fla37_precompiled', 'flash_kda', or 'cula', got "
-                f"{self._kda_backend!r}"
-            )
+        # KDA delta-net core backend.  Only the two production implementations
+        # remain: cuLA chunked prefill and the ported Triton recurrent decode.
+        # 'reference' (pure Torch), 'flash_kda' and 'fla37_precompiled' were
+        # bring-up comparators and are gone.
+        # Prefill 走 cula,Decode 走 kernel:随 KIMI_K3_KDA_BACKEND 一起固定下来。
+        # 打包的 FLA 3.7 cubin 专用于 TP1 的 96 头状态,TP8 每 rank 只有 12 头,
+        # 所以 Decode 用形状通用的 recurrent Triton kernel。
+        self._kda_backend = "cula" if _is_prefill_role(parallelism_config) else "kernel"
         if not runtime.kda_use_full_rank_gate:
             raise NotImplementedError(
                 "K3 checkpoint manifest currently requires full-rank KDA output gate"
@@ -1589,10 +1342,6 @@ class KimiK3KDA(nn.Module):
             self.total_heads,
             dim=1,
         )
-        if _accuracy_canonical_tp_enabled():
-            # Preserve the old independent-GEMM leading dimensions in the
-            # diagnostic path. Production keeps zero-copy section views.
-            fused_sections = tuple(section.contiguous() for section in fused_sections)
         (
             self.kda_q_w,
             self.kda_k_w,
@@ -1730,7 +1479,6 @@ class KimiK3KDA(nn.Module):
         self.kda_q_w = None
         self.kda_k_w = None
         self.kda_v_w = None
-        self._full_column_weights.clear()
         self._a2a_weights_ready = True
         logging.info(
             "[K3_KDA_A2A] materialized %s qkvb=%s gate=%s output=%s",
@@ -1788,14 +1536,7 @@ class KimiK3KDA(nn.Module):
             f"{self.trace_prefix}.forget_gate_up_projection",
             forget_latent,
         ):
-            raw_gate = _column_parallel_linear(
-                forget_latent,
-                self.weights[W.linear_attn_f_b_w],
-                self.attn_tp_size,
-                self.attn_tp_rank,
-                self._full_column_weights,
-                "forget_gate_up",
-            )
+            raw_gate = _linear(forget_latent, self.weights[W.linear_attn_f_b_w])
         beta_begin = self.attn_tp_rank * self.local_heads
         raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
         return (
@@ -1848,8 +1589,7 @@ class KimiK3KDA(nn.Module):
             or attention_inputs is None
             or not hidden_states.is_cuda
             or _accuracy_trace_enabled()
-            or _accuracy_canonical_tp_enabled()
-            or self._kda_backend not in ("kernel", "flash_kda")
+            or self._kda_backend != "kernel"
             or bool(getattr(attention_inputs, "is_target_verify", False))
         ):
             return None
@@ -1959,7 +1699,7 @@ class KimiK3KDA(nn.Module):
         Drop-in for the ``kimi_kda`` reference: same ``[1,T,H,*]`` I/O and a
         ``[N,H,K,V]`` fp32 final state.  Defaults to the ported Triton kernel
         (``chunk_kda``/``fused_recurrent_kda``); the
-        pure-Torch reference stays reachable via ``KIMI_K3_KDA_BACKEND=reference``
+        pure-Torch reference is no longer selectable
         for precision verification. Kernel/reference agreement covers the
         non-zero initial-state prefill/decode seams.
         """
@@ -1973,7 +1713,7 @@ class KimiK3KDA(nn.Module):
                 "FP32 checkpoint states are supported only by cuLA prefill"
             )
 
-        if self._kda_backend == "reference" or not q.is_cuda:
+        if not q.is_cuda:
             return kimi_kda(
                 q,
                 k,
@@ -2017,7 +1757,7 @@ class KimiK3KDA(nn.Module):
                     from cula.kda import chunk_kda as cula_chunk_kda
                 except Exception as error:
                     raise RuntimeError(
-                        "KIMI_K3_KDA_BACKEND=cula was requested but the "
+                        "Prefill requires cuLA but the "
                         "cuda-linear-attention package could not be imported: "
                         f"{type(error).__name__}: {error}"
                     ) from error
@@ -2096,87 +1836,6 @@ class KimiK3KDA(nn.Module):
                         output = output_target
                 return output.to(dtype=q.dtype), final_state
 
-            if self._kda_backend == "flash_kda":
-                try:
-                    import flash_kda
-                    import flash_kda_C
-                except Exception as error:
-                    raise RuntimeError(
-                        "KIMI_K3_KDA_BACKEND=flash_kda was requested but the "
-                        "FlashKDA extension could not be imported"
-                    ) from error
-                required_api = ("fwd", "get_workspace_size")
-                missing = [
-                    name for name in required_api if not hasattr(flash_kda, name)
-                ]
-                if missing:
-                    raise RuntimeError(
-                        "FlashKDA overlay is missing required API: "
-                        + ", ".join(missing)
-                    )
-                if self.gate_lower_bound is None:
-                    raise RuntimeError("FlashKDA requires K3's finite gate lower bound")
-
-                state_v_first = (
-                    None
-                    if state_in is None
-                    else state_in.transpose(-1, -2).contiguous()
-                )
-                sequence_count = int(cu_seqlens.numel() - 1)
-                final_state_v_first = torch.empty(
-                    (
-                        sequence_count,
-                        self.local_heads,
-                        self.head_dim,
-                        self.head_dim,
-                    ),
-                    dtype=(
-                        state_v_first.dtype
-                        if state_v_first is not None
-                        else torch.float32
-                    ),
-                    device=q.device,
-                )
-                output = torch.empty_like(v) if output_target is None else output_target
-                if tuple(output.shape) != tuple(v.shape) or not output.is_contiguous():
-                    raise ValueError(
-                        "FlashKDA output target must be contiguous and match V: "
-                        f"output={tuple(output.shape)} v={tuple(v.shape)}"
-                    )
-                workspace = _flash_kda_workspace(flash_kda, q, cu_seqlens)
-                device_index = q.device.index if q.device.index is not None else 0
-                if device_index not in _FLASH_KDA_LOGGED_DEVICES:
-                    logging.info(
-                        "[KimiK3 FlashKDA] enabled device=%s python=%s extension=%s "
-                        "workspace_bytes=%d",
-                        q.device,
-                        getattr(flash_kda, "__file__", "<unknown>"),
-                        getattr(flash_kda_C, "__file__", "<unknown>"),
-                        workspace.numel(),
-                    )
-                    _FLASH_KDA_LOGGED_DEVICES.add(device_index)
-                with torch.autograd.profiler.record_function("k3.kda.flashkda"):
-                    flash_kda.fwd(
-                        q.contiguous(),
-                        k.contiguous(),
-                        v.contiguous(),
-                        raw_gate.to(dtype=q.dtype).contiguous(),
-                        raw_beta.to(dtype=q.dtype).contiguous(),
-                        self.head_dim**-0.5,
-                        output,
-                        a_log.float().contiguous(),
-                        dt_bias.float()
-                        .reshape(self.local_heads, self.head_dim)
-                        .contiguous(),
-                        float(self.gate_lower_bound),
-                        initial_state=state_v_first,
-                        final_state=final_state_v_first,
-                        cu_seqlens=cu_seqlens.contiguous(),
-                        workspace=workspace,
-                    )
-                final_state = final_state_v_first.transpose(-1, -2).contiguous()
-                return output.to(dtype=q.dtype), final_state
-
             # Dummy/FLA executes KDA with ``transpose_state_layout=True``.
             # Besides changing storage from [K,V] to [V,K], that selector
             # changes the TensorCore reduction order used for the chunk state
@@ -2209,11 +1868,6 @@ class KimiK3KDA(nn.Module):
             )
             final_state = final_state_v_first.transpose(-1, -2).contiguous()
         elif mode == "decode":
-            if self._kda_backend == "flash_kda":
-                raise RuntimeError(
-                    "KIMI_K3_KDA_BACKEND=flash_kda only implements Prefill; "
-                    "select kernel or fla37_precompiled for Decode"
-                )
             # Match Dummy's recurrent call boundary: gate activation, beta
             # sigmoid, V-first register layout and state update all stay in
             # one Triton program.  Precomputing gate/beta or transposing the
@@ -2222,37 +1876,23 @@ class KimiK3KDA(nn.Module):
             state_v_first = (
                 None if state_in is None else state_in.transpose(-1, -2).contiguous()
             )
-            if self._kda_backend == "fla37_precompiled":
-                output, final_state_v_first = fused_recurrent_kda_fla37_precompiled(
-                    q,
-                    k,
-                    v,
-                    raw_gate,
-                    raw_beta.float(),
-                    initial_state=state_v_first,
-                    A_log=a_log,
-                    dt_bias=dt_bias,
-                    cu_seqlens=cu_seqlens,
-                    lower_bound=self.gate_lower_bound,
-                )
-            else:
-                output, final_state_v_first = fused_recurrent_kda(
-                    q,
-                    k,
-                    v,
-                    raw_gate,
-                    raw_beta.float(),
-                    initial_state=state_v_first,
-                    A_log=a_log,
-                    dt_bias=dt_bias,
-                    inplace_final_state=False,
-                    use_qk_l2norm_in_kernel=True,
-                    use_gate_in_kernel=True,
-                    use_beta_sigmoid_in_kernel=True,
-                    lower_bound=self.gate_lower_bound,
-                    state_v_first=True,
-                    cu_seqlens=cu_seqlens,
-                )
+            output, final_state_v_first = fused_recurrent_kda(
+                q,
+                k,
+                v,
+                raw_gate,
+                raw_beta.float(),
+                initial_state=state_v_first,
+                A_log=a_log,
+                dt_bias=dt_bias,
+                inplace_final_state=False,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                lower_bound=self.gate_lower_bound,
+                state_v_first=True,
+                cu_seqlens=cu_seqlens,
+            )
             final_state = final_state_v_first.transpose(-1, -2).contiguous()
         else:
             raise ValueError(f"unsupported KDA execution mode {mode!r}")
@@ -2590,10 +2230,7 @@ class KimiK3KDA(nn.Module):
                 beta_for_core = raw_beta[cursor:segment_end].reshape(
                     1, segment_length, self.local_heads
                 )
-                if not (
-                    _perf_fusions_enabled()
-                    and self._kda_backend in ("flash_kda", "cula")
-                ):
+                if not (_perf_fusions_enabled() and self._kda_backend == "cula"):
                     beta_for_core = beta_for_core.float()
                 with _perf_profile(
                     f"{page_prefix}.{self._kda_backend}_recurrence_and_output"
@@ -2778,76 +2415,21 @@ class KimiK3KDA(nn.Module):
                 "Parallel with TP>1"
             )
         local_token_count = hidden_states.shape[0]
-        if prefill_input_is_sharded and _accuracy_canonical_tp_enabled():
-            hidden_states = all_gather(hidden_states, group=Group.TP)
-            prefill_input_is_sharded = False
+        # 这里原本只为 canonical TP 把分片输入 all_gather 回整份;canonical 已删,
+        # 分片输入直接交给下游的融合投影处理。
         token_count = hidden_states.shape[0]
-        if _accuracy_canonical_tp_enabled():
-            with _perf_profile(
-                f"{self.trace_prefix}.canonical_qkvg_column_parallel_projections",
-                hidden_states,
-            ):
-                q_projected = _column_parallel_linear(
-                    hidden_states,
-                    self.kda_q_w,
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "q",
-                )
-                k_projected = _column_parallel_linear(
-                    hidden_states,
-                    self.kda_k_w,
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "k",
-                )
-                v_projected = _column_parallel_linear(
-                    hidden_states,
-                    self.kda_v_w,
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "v",
-                )
-                output_gate_projected = _column_parallel_linear(
-                    hidden_states,
-                    self.kda_g_w,
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "output_gate",
-                )
-            with _perf_profile(
-                f"{self.trace_prefix}.canonical_forget_gate_and_beta_projections",
-                hidden_states,
-            ):
-                forget_latent = _linear(hidden_states, self.kda_f_a_w)
-                raw_gate = _column_parallel_linear(
-                    forget_latent,
-                    self.weights[W.linear_attn_f_b_w],
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "forget_gate_up",
-                )
-                full_raw_beta = _linear(hidden_states, self.kda_beta_w)
-            beta_begin = self.attn_tp_rank * self.local_heads
-            raw_beta = full_raw_beta.narrow(1, beta_begin, self.local_heads)
-        else:
-            (
-                q_projected,
-                k_projected,
-                v_projected,
-                raw_gate,
-                raw_beta,
-                output_gate_projected,
-            ) = self._project_fused_kda_inputs(
-                hidden_states,
-                prefill_input_is_sharded=prefill_input_is_sharded,
-            )
-            token_count = q_projected.shape[0]
+        (
+            q_projected,
+            k_projected,
+            v_projected,
+            raw_gate,
+            raw_beta,
+            output_gate_projected,
+        ) = self._project_fused_kda_inputs(
+            hidden_states,
+            prefill_input_is_sharded=prefill_input_is_sharded,
+        )
+        token_count = q_projected.shape[0]
         head_shape = (1, token_count, self.local_heads, self.head_dim)
         output_gate = output_gate_projected.reshape(head_shape)
         if trace_enabled:
@@ -3167,7 +2749,7 @@ class KimiK3MLA(MlaAttention):
     packed Q-A/KV-A/output-gate projection. Accuracy and reference paths keep
     the source model's independent projection boundaries. The pure-Torch
     attention implementation remains selectable with
-    ``KIMI_K3_MLA_BACKEND=reference``.
+    a pure-Torch reference is no longer selectable.
     """
 
     def __init__(
@@ -3188,7 +2770,7 @@ class KimiK3MLA(MlaAttention):
         self.config = config
         self.weights = weights
         self.trace_prefix = f"layer.{layer_idx}.mla" if layer_idx >= 0 else "mla"
-        self._perf_profile_prefix = self.trace_prefix if _perf_mode_enabled() else None
+        self._perf_profile_prefix = None
         self._perf_accepts_strided_latent = _perf_fusions_enabled()
         tp_size = int(parallelism_config.get_attn_tp_size())
         self.attn_tp_size = tp_size
@@ -3199,7 +2781,6 @@ class KimiK3MLA(MlaAttention):
             )
         self.local_heads = total_heads // tp_size
         self.attn_tp_rank = int(parallelism_config.get_attn_tp_rank())
-        self._accuracy_full_weight_cache: dict[str, torch.Tensor] = {}
         self.q_lora_rank = int(config.attn_config.q_lora_rank)
         self.kv_lora_rank = int(config.attn_config.kv_lora_rank)
         self.nope_dim = int(config.attn_config.nope_head_dim)
@@ -3218,13 +2799,11 @@ class KimiK3MLA(MlaAttention):
                 "Kimi K3 requires the physical MLA suffix to remain no-RoPE"
             )
         self.use_output_gate = runtime.mla_use_output_gate
-        self._mla_backend = os.environ.get("KIMI_K3_MLA_BACKEND", "kernel").lower()
-        if self._mla_backend not in ("kernel", "flashmla", "reference"):
-            raise ValueError(
-                "KIMI_K3_MLA_BACKEND must be 'kernel', 'flashmla' or "
-                f"'reference', "
-                f"got {self._mla_backend!r}"
-            )
+        # Prefill 走 FlashMLA(dense prefill),Decode 走 FlashInfer("kernel")。
+        # 与 KDA 一样按 PD 角色定,不再由 KIMI_K3_MLA_BACKEND 传入。
+        self._mla_backend = (
+            "flashmla" if _is_prefill_role(parallelism_config) else "kernel"
+        )
 
         self._q_a_norm = weights[W.mla_q_a_ln_gamma]
         self._q_b_w = weights[W.mla_q_b_w]
@@ -3242,11 +2821,9 @@ class KimiK3MLA(MlaAttention):
 
     def _use_source_projection_boundaries(self) -> bool:
         return (
-            self._mla_backend == "reference"
-            or not _perf_fusions_enabled()
-            or _accuracy_canonical_tp_enabled()
-            or _accuracy_canonical_mla_enabled()
-            or _accuracy_local_eager_mla_enabled()
+            not _perf_fusions_enabled()
+            # canonical / local-eager 与 MLA reference 后端都已删除,只剩 trace
+            # 需要源实现的投影边界。
             or _accuracy_trace_requested()
         )
 
@@ -3259,14 +2836,7 @@ class KimiK3MLA(MlaAttention):
         kv_a = _linear(hidden_states, self._packed_qkv_gate_w[:, q_end:kv_end])
         output_gate = None
         if self.use_output_gate:
-            output_gate = _column_parallel_linear(
-                hidden_states,
-                self._packed_qkv_gate_w[:, kv_end:],
-                self.attn_tp_size,
-                self.attn_tp_rank,
-                self._accuracy_full_weight_cache,
-                "mla_output_gate",
-            )
+            output_gate = _linear(hidden_states, self._packed_qkv_gate_w[:, kv_end:])
         return torch.cat((q_a, kv_a), dim=-1), output_gate
 
     def _project_qkv_a_input(
@@ -3365,13 +2935,6 @@ class KimiK3MLA(MlaAttention):
             and attn_inputs is not None
             and not attn_inputs.is_prefill
         )
-        if self._sp_active_for_forward and _accuracy_canonical_tp_enabled():
-            self._sp_active_for_forward = False
-            raise RuntimeError(
-                "Kimi K3 Sequence Parallel is incompatible with canonical TP; "
-                "disable one of KIMI_K3_SP_MOE and "
-                "KIMI_K3_ACCURACY_CANONICAL_TP"
-            )
         try:
             return self._forward_impl(
                 hidden_states,
@@ -3413,17 +2976,12 @@ class KimiK3MLA(MlaAttention):
                 kv_cache=kv_cache,
                 attention_inputs=attn_inputs,
             )
-        canonical_mla = _accuracy_canonical_mla_enabled()
-        local_eager_mla = _accuracy_local_eager_mla_enabled()
-        if accuracy_trace_mode() is None and not canonical_mla and not local_eager_mla:
+        if accuracy_trace_mode() is None:
             return super().forward(hidden_states, fmha_impl, kv_cache)
 
-        # Trace the real MLA kernel/cache path, or run the explicitly enabled
-        # canonical-accuracy math without requiring tensor trace persistence.
-        # The regular trace remains O(T) and recomputes only the final
-        # score/probability row.  Canonical mode additionally materializes
-        # Dummy's eager O(T^2) attention so source and distributed accumulation
-        # can be compared without changing the default production path.
+        # Trace the real MLA kernel/cache path.  The trace stays O(T) and
+        # recomputes only the final score/probability row, so it never changes
+        # the production math it is observing.
         fused_qkv, output_gate = self._project_qkv_a_input(hidden_states)
         input_shape = fused_qkv.shape[:-1]
         q, compressed = torch.split(
@@ -3435,18 +2993,7 @@ class KimiK3MLA(MlaAttention):
             dim=-1,
         )
         query_latent = self.q_a_layernorm(q.contiguous())
-        query_projection = (
-            _column_parallel_linear(
-                query_latent,
-                self._q_b_w,
-                self.parallelism_config.get_attn_tp_size(),
-                self.attn_tp_rank,
-                self._accuracy_full_weight_cache,
-                "mla_q_b",
-            )
-            if canonical_mla or local_eager_mla
-            else self.q_b_proj(query_latent)
-        )
+        query_projection = self.q_b_proj(query_latent)
         query = query_projection.reshape(-1, self.num_heads, self.q_head_dim)
         compressed_kv, key_suffix = torch.split(
             compressed,
@@ -3521,18 +3068,7 @@ class KimiK3MLA(MlaAttention):
             dim=-1,
         )
         expanded_input = all_compressed_kv.to(dtype=self._kv_b_w.dtype)
-        expanded_projection = (
-            _column_parallel_linear(
-                expanded_input,
-                self._kv_b_w,
-                self.parallelism_config.get_attn_tp_size(),
-                self.attn_tp_rank,
-                self._accuracy_full_weight_cache,
-                "mla_kv_b",
-            )
-            if canonical_mla or local_eager_mla
-            else _linear(expanded_input, self._kv_b_w)
-        )
+        expanded_projection = _linear(expanded_input, self._kv_b_w)
         expanded = expanded_projection.reshape(
             all_compressed_kv.shape[0],
             self.local_heads,
@@ -3546,27 +3082,13 @@ class KimiK3MLA(MlaAttention):
             ),
             dim=-1,
         )
-        if canonical_mla:
-            context_by_head, scores, probabilities = self._canonical_eager_context(
-                query, key, value
-            )
-            context = context_by_head.reshape(fused_qkv.shape[0], -1).contiguous()
-        elif local_eager_mla:
-            context_by_head, scores, probabilities = _source_eager_attention_context(
-                query.transpose(0, 1).contiguous(),
-                key.transpose(0, 1).contiguous(),
-                value.transpose(0, 1).contiguous(),
-                self.softmax_scale,
-            )
-            context = context_by_head.reshape(fused_qkv.shape[0], -1).contiguous()
-        else:
-            context_by_head = context.reshape(
-                fused_qkv.shape[0], self.num_heads, self.v_head_dim
-            )
-            scores = torch.einsum("thd,shd->hts", query[-1:], key) * self.softmax_scale
-            probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(
-                dtype=query.dtype
-            )
+        context_by_head = context.reshape(
+            fused_qkv.shape[0], self.num_heads, self.v_head_dim
+        )
+        scores = torch.einsum("thd,shd->hts", query[-1:], key) * self.softmax_scale
+        probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(
+            dtype=query.dtype
+        )
         record_accuracy_tensor(
             f"{self.trace_prefix}.context_last_query",
             context_by_head[-1:],
@@ -3590,46 +3112,9 @@ class KimiK3MLA(MlaAttention):
                 token_dim=0,
             )
             context = context * torch.sigmoid(output_gate)
-        if canonical_mla or local_eager_mla:
-            output = _row_parallel_linear(
-                context,
-                self._o_w,
-                self.parallelism_config.get_attn_tp_size(),
-                reduce_scatter_tokens=self._sp_active_for_forward,
-                pad_reduce_scatter_tokens=self._sp_padded_for_forward,
-            )
-        else:
-            output = self._project_output(context)
+        output = self._project_output(context)
         record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
         return output
-
-    def _canonical_eager_context(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        query_by_head = query.transpose(0, 1).contiguous()
-        key_by_head = key.transpose(0, 1).contiguous()
-        value_by_head = value.transpose(0, 1).contiguous()
-        tp_size = self.parallelism_config.get_attn_tp_size()
-        if tp_size > 1:
-            query_by_head = all_gather(query_by_head, group=Group.TP)
-            key_by_head = all_gather(key_by_head, group=Group.TP)
-            value_by_head = all_gather(value_by_head, group=Group.TP)
-        context, scores, probabilities = _source_eager_attention_context(
-            query_by_head,
-            key_by_head,
-            value_by_head,
-            self.softmax_scale,
-        )
-        begin = self.attn_tp_rank * self.local_heads
-        end = begin + self.local_heads
-        return (
-            context[:, begin:end].contiguous(),
-            scores[begin:end, -1:, :].contiguous(),
-            probabilities[begin:end, -1:, :].contiguous(),
-        )
 
     def _trace_cache_snapshot(
         self,
@@ -4014,29 +3499,16 @@ class KimiK3DenseMLP(nn.Module):
             "sp_up",
             sequence_parallel=sp_active,
         )
-        if sp_active:
-            with _perf_profile(
-                f"{self.trace_prefix}.replicated_gate_and_up_gemm", hidden_states
-            ):
-                gate = _linear(hidden_states, gate_weight)
-                up = _linear(hidden_states, up_weight)
-        else:
-            gate = _column_parallel_linear(
-                hidden_states,
-                gate_weight,
-                self.ffn_tp_size,
-                self.ffn_tp_rank,
-                self._full_column_weights,
-                "gate",
-            )
-            up = _column_parallel_linear(
-                hidden_states,
-                up_weight,
-                self.ffn_tp_size,
-                self.ffn_tp_rank,
-                self._full_column_weights,
-                "up",
-            )
+        # Sequence parallel feeds the all-gathered full-width weight here, so
+        # the GEMM itself is the same call in both cases; only the label
+        # distinguishes them in a profile.
+        with _perf_profile(
+            f"{self.trace_prefix}."
+            + ("replicated_gate_and_up_gemm" if sp_active else "gate_and_up_gemm"),
+            hidden_states,
+        ):
+            gate = _linear(hidden_states, gate_weight)
+            up = _linear(hidden_states, up_weight)
         if trace_enabled:
             record_accuracy_tensor(f"{self.trace_prefix}.gate", gate, token_dim=0)
             record_accuracy_tensor(f"{self.trace_prefix}.up", up, token_dim=0)
@@ -4139,16 +3611,10 @@ class KimiK3LatentMoE(nn.Module):
                 f"{self.latent_size}"
             )
         self.layer_idx = int(layer_idx)
-        self._moe_backend = (
-            os.environ.get("KIMI_K3_MOE_BACKEND", "deepep").strip().lower()
-        )
-        if self._moe_backend not in ("deepep", "deep_gemm_mega"):
-            raise ValueError(
-                "KIMI_K3_MOE_BACKEND must be 'deepep' or "
-                f"'deep_gemm_mega', got {self._moe_backend!r}"
-            )
-        if self._moe_backend == "deep_gemm_mega":
-            self._setup_deep_gemm_mega()
+        # K3 的 MoE 只有 DeepGEMM mega 一条生产路径。DeepEP 的 Torch 专家循环把
+        # 选中的专家反量化成 BF16,93 层 Decode 首次使用即耗尽显存,所以那条分支
+        # 连同它的开关一并删掉 —— 不是"默认走 mega",而是只有 mega。
+        self._setup_deep_gemm_mega()
 
     @staticmethod
     def _packed_fp4_view(tensor: torch.Tensor) -> torch.Tensor:
@@ -4219,11 +3685,14 @@ class KimiK3LatentMoE(nn.Module):
         missing_parameters = required_parameters.difference(mega_signature.parameters)
         if missing_parameters:
             raise RuntimeError(
-                "KIMI_K3_MOE_BACKEND=deep_gemm_mega resolved an old DeepGEMM "
+                "Kimi K3 DeepGEMM mega resolved an old DeepGEMM "
                 "without K3 SiTU support; missing parameters: "
                 + ", ".join(sorted(missing_parameters))
             )
-        expected_root = os.environ.get("KIMI_K3_DEEPGEMM_EXPECTED_PATH")
+        # 守卫:MegaMoE 依赖 DeepGEMM 的一组特定 API,机器上常有多份 DeepGEMM,
+        # 解析到旧的那份表现不是报错而是数值不对。原先靠 KIMI_K3_DEEPGEMM_EXPECTED_PATH
+        # 钉住路径,而 launcher 里它就是照抄 KIMI_K3_OPERATOR_PYTHONPATH —— 直接读源头。
+        expected_root = os.environ.get("KIMI_K3_OPERATOR_PYTHONPATH")
         deep_gemm_path = os.path.realpath(getattr(deep_gemm, "__file__", ""))
         if expected_root and not deep_gemm_path.startswith(
             os.path.realpath(expected_root) + os.sep
@@ -4417,17 +3886,7 @@ class KimiK3LatentMoE(nn.Module):
 
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         router_weight = self.weights[K3W.MOE_GATE]
-        if _accuracy_canonical_ep_enabled():
-            # The checkpoint owns a contiguous [experts, hidden] nn.Linear
-            # weight. RTP stores its contiguous transpose [hidden, experts].
-            # FP32 GEMM accumulation on SM10x is observably layout-sensitive;
-            # restore the source layout for the default-off accuracy path.
-            router_logits = F.linear(
-                hidden_states.float(),
-                router_weight.transpose(0, 1).contiguous().float(),
-            )
-        else:
-            router_logits = _linear(hidden_states.float(), router_weight.float())
+        router_logits = _linear(hidden_states.float(), router_weight.float())
         scores = torch.sigmoid(router_logits)
         choice_scores = scores + self.weights[
             K3W.MOE_CORRECTION_BIAS
@@ -4448,7 +3907,7 @@ class KimiK3LatentMoE(nn.Module):
             choice_scores = choice_scores.masked_fill(~expert_mask, float("-inf"))
         if accuracy_trace_mode() is not None:
             boundary = choice_scores.topk(self.top_k + 1, dim=-1).values
-            router_token_dim = None if _accuracy_full_router_trace_enabled() else 0
+            router_token_dim = None if tensor_dump_full_router() else 0
             record_accuracy_tensor(
                 f"{self.trace_prefix}.router_scores", scores, token_dim=0
             )
@@ -4597,54 +4056,6 @@ class KimiK3LatentMoE(nn.Module):
             .mul(routing_weights.unsqueeze(-1))
             .sum(dim=1)
             .to(dtype=expert_slots.dtype)
-        )
-
-    def _canonical_ep_collective(
-        self,
-        routed_input: torch.Tensor,
-        expert_ids: torch.Tensor,
-        routing_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        """NCCL correctness fallback when CUDA13 has no DeepEP provider.
-
-        Prefill TP8/DP1 carries a replicated token matrix, so every rank
-        evaluates its local experts and an all-reduce reconstructs each top-k
-        slot.  Decode TP1/DP8 carries one independent real/fake stream per
-        rank; gather those streams first, evaluate every rank's local experts,
-        reconstruct the slots, then return this rank's original rows.
-        """
-
-        group = Group.DP_AND_TP
-        if self.attn_tp_size == self.ep_size:
-            local_slots = self._local_expert_slots(
-                routed_input,
-                expert_ids,
-                ids_are_local=False,
-            )
-            expert_slots = all_reduce(local_slots, group=group)
-            return self._reduce_expert_slots(expert_slots, routing_weights)
-
-        if self.attn_tp_size == 1:
-            local_token_count = routed_input.shape[0]
-            gathered_input = all_gather(routed_input.contiguous(), group=group)
-            gathered_ids = all_gather(expert_ids.contiguous(), group=group)
-            gathered_weights = all_gather(routing_weights.contiguous(), group=group)
-            local_slots = self._local_expert_slots(
-                gathered_input,
-                gathered_ids,
-                ids_are_local=False,
-            )
-            expert_slots = all_reduce(local_slots, group=group)
-            gathered_output = self._reduce_expert_slots(
-                expert_slots,
-                gathered_weights,
-            )
-            begin = self.ep_rank * local_token_count
-            return gathered_output.narrow(0, begin, local_token_count)
-
-        raise RuntimeError(
-            "Kimi K3 canonical NCCL EP fallback currently supports only "
-            "TP=EP/DP1 prefill or TP1/DP=EP decode"
         )
 
     def _pad_dispatch_payload(self, latent: torch.Tensor) -> torch.Tensor:
@@ -4844,95 +4255,6 @@ class KimiK3LatentMoE(nn.Module):
             )[:, :topk]
             return self._reduce_expert_slots(source_slots, routing_weights)
 
-    def _deepep_normal_canonical_slots(
-        self,
-        wrapper: Any,
-        routed_input: torch.Tensor,
-        expert_ids: torch.Tensor,
-        routing_weights: torch.Tensor,
-    ) -> torch.Tensor:
-        """Preserve Dummy's ordered top-k reduction through DeepEP.
-
-        Normal DeepEP combines expert contributions by destination rank and
-        K3 additionally splits top-k 16 into supported widths 10 + 6.  Both
-        regroup the FP32 additions relative to Dummy's single ordered
-        ``sum(dim=topk)``.  For accuracy tracing, dispatch one real slot at a
-        time (padded to DeepEP's width four), combine its unweighted BF16
-        expert output, then apply all router weights and the ordered FP32 sum
-        on the source rank.  Expert ownership and the actual DeepEP transport
-        remain exercised; only the reduction schedule is canonicalized.
-        """
-
-        if expert_ids.shape != routing_weights.shape:
-            raise ValueError("expert ids and routing weights must have equal shape")
-        buffer = wrapper.buffer
-        dispatch_input = self._pad_dispatch_payload(routed_input)
-        slot_outputs: list[torch.Tensor] = []
-        for slot_idx in range(expert_ids.shape[1]):
-            slot_ids = torch.full(
-                (expert_ids.shape[0], 4),
-                -1,
-                dtype=expert_ids.dtype,
-                device=expert_ids.device,
-            )
-            slot_ids[:, 0] = expert_ids[:, slot_idx]
-            unit_weights = torch.zeros(
-                (expert_ids.shape[0], 4),
-                dtype=routing_weights.dtype,
-                device=routing_weights.device,
-            )
-            unit_weights[:, 0] = 1
-            (
-                num_tokens_per_rank,
-                num_tokens_per_rdma_rank,
-                num_tokens_per_expert,
-                is_token_in_rank,
-                _,
-            ) = buffer.get_dispatch_layout(slot_ids, self.expert_num)
-            (
-                recv_x,
-                recv_topk_idx,
-                recv_topk_weights,
-                _,
-                handle,
-                _,
-            ) = buffer.dispatch(
-                dispatch_input,
-                None,
-                num_tokens_per_rank,
-                num_tokens_per_rdma_rank,
-                is_token_in_rank,
-                num_tokens_per_expert,
-                slot_ids,
-                unit_weights,
-                expert_alignment=1,
-            )
-            if not isinstance(recv_x, torch.Tensor):
-                raise RuntimeError(
-                    "Kimi K3 canonical DeepEP path requires BF16 dispatch"
-                )
-            local_latent = self._local_expert_sum(
-                recv_x[:, : self.latent_size],
-                recv_topk_idx,
-                recv_topk_weights,
-                ids_are_local=True,
-            )
-            combined, _, _ = buffer.combine(
-                self._pad_dispatch_payload(local_latent),
-                handle,
-            )
-            slot_outputs.append(
-                combined[:, : self.latent_size].to(dtype=routed_input.dtype)
-            )
-
-        expert_slots = torch.stack(slot_outputs, dim=1)
-        return (
-            expert_slots.to(dtype=routing_weights.dtype)
-            .mul(routing_weights.unsqueeze(-1))
-            .sum(dim=1)
-            .to(dtype=routed_input.dtype)
-        )
-
     def _deepep_low_latency(
         self,
         wrapper: Any,
@@ -4989,7 +4311,7 @@ class KimiK3LatentMoE(nn.Module):
         *,
         sequence_parallel: bool = False,
     ) -> torch.Tensor:
-        if self._moe_backend == "deep_gemm_mega":
+        if True:
             if sequence_parallel:
                 return self._deep_gemm_mega_expert_sum(
                     routed_input,
@@ -5015,25 +4337,6 @@ class KimiK3LatentMoE(nn.Module):
             DeepEPWrapper,
         )
 
-        canonical_slots = _accuracy_canonical_ep_enabled()
-        if sequence_parallel and canonical_slots and not DeepEPWrapper.supported():
-            raise RuntimeError(
-                "Kimi K3 Sequence Parallel requires DeepEP when canonical EP "
-                "is enabled; the NCCL replicated-token fallback is incompatible"
-            )
-        if canonical_slots and not DeepEPWrapper.supported():
-            if not getattr(self, "_canonical_ep_fallback_logged", False):
-                logging.warning(
-                    "Kimi K3 canonical EP is using NCCL correctness fallback "
-                    "because DeepEP is unavailable"
-                )
-                self._canonical_ep_fallback_logged = True
-            return self._canonical_ep_collective(
-                routed_input,
-                expert_ids,
-                routing_weights,
-            )
-
         wrapper = self._deepep_wrapper()
         sp_active = sequence_parallel and self.attn_tp_size > 1 and routed_input.is_cuda
         if sp_active:
@@ -5046,21 +4349,8 @@ class KimiK3LatentMoE(nn.Module):
                 self._tp_token_slice(routed_input, expert_ids, routing_weights)
             )
         if wrapper.mode == DeepEPMode.NORMAL:
-            # Every EP rank must execute the same dispatch/combine schedule.
-            # Decode DP uses collective-only fake streams on the non-owning
-            # ranks, and those streams intentionally disable tensor capture.
-            # Tying this choice to ``accuracy_trace_mode()`` therefore made the
-            # owning rank run 16 slot-wise collectives while its peers ran the
-            # ordinary 10+6 schedule.  The process-wide accuracy switch is the
-            # only valid selector; tracing controls persistence, not math.
-            local_output = (
-                self._deepep_normal_canonical_slots(
-                    wrapper, sliced_input, sliced_ids, sliced_weights
-                )
-                if canonical_slots
-                else self._deepep_normal(
-                    wrapper, sliced_input, sliced_ids, sliced_weights
-                )
+            local_output = self._deepep_normal(
+                wrapper, sliced_input, sliced_ids, sliced_weights
             )
         elif wrapper.mode == DeepEPMode.LOW_LATENCY:
             local_output = self._deepep_low_latency(
@@ -5106,7 +4396,7 @@ class KimiK3LatentMoE(nn.Module):
                 expert_ids[valid_token_count:] = -1
                 routing_weights[valid_token_count:] = 0
         if trace_enabled:
-            router_token_dim = None if _accuracy_full_router_trace_enabled() else 0
+            router_token_dim = None if tensor_dump_full_router() else 0
             record_accuracy_tensor(
                 f"{self.trace_prefix}.expert_ids",
                 expert_ids,
@@ -5198,30 +4488,13 @@ class KimiK3LatentMoE(nn.Module):
             "sp_shared_up",
             sequence_parallel=sp_active,
         )
-        if sp_active:
-            with _perf_profile(
-                f"{self.trace_prefix}.shared_expert_replicated_gate_up_gemm",
-                hidden_states,
-            ):
-                shared_gate = _linear(hidden_states, shared_gate_weight)
-                shared_up = _linear(hidden_states, shared_up_weight)
-        else:
-            shared_gate = _column_parallel_linear(
-                hidden_states,
-                shared_gate_weight,
-                self.ffn_tp_size,
-                self.ffn_tp_rank,
-                self._full_column_weights,
-                "shared_gate",
-            )
-            shared_up = _column_parallel_linear(
-                hidden_states,
-                shared_up_weight,
-                self.ffn_tp_size,
-                self.ffn_tp_rank,
-                self._full_column_weights,
-                "shared_up",
-            )
+        with _perf_profile(
+            f"{self.trace_prefix}.shared_expert_"
+            + ("replicated_gate_up_gemm" if sp_active else "gate_up_gemm"),
+            hidden_states,
+        ):
+            shared_gate = _linear(hidden_states, shared_gate_weight)
+            shared_up = _linear(hidden_states, shared_up_weight)
         with _perf_profile(f"{self.trace_prefix}.shared_expert_situ", shared_gate):
             shared_activation = _situ(
                 shared_gate,
@@ -5318,7 +4591,7 @@ class KimiK3DecoderLayer(nn.Module):
         trace_prefix = f"layer.{self.layer_idx}"
         trace_enabled = _accuracy_trace_enabled()
         decode_sp = sequence_parallel and mode == "decode"
-        decode_sp_debug = decode_sp and _decode_sp_debug_enabled()
+        decode_sp_debug = decode_sp and _debug_enabled()
         logical_tokens = int(hidden_states.shape[0])
         tp_size = int(self.self_attn.parallelism_config.get_attn_tp_size())
         tp_rank = int(self.self_attn.parallelism_config.get_attn_tp_rank())
@@ -5533,7 +4806,6 @@ class KimiK3Model(GptModelBase):
         self._layer_group_ids: Optional[tuple[int, ...]] = None
         self._kda_a2a_weights_materialized = False
         self._fused_ag_gemm_workspace_ready = False
-        _validate_perf_environment()
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         """Bind runtime resources and reserve the largest Prefill AG workspace."""
@@ -5623,10 +4895,7 @@ class KimiK3Model(GptModelBase):
                 "checkpoint."
             )
         extra_bytes = sum(layer.a2a_extra_weight_bytes() for layer in a2a_layers)
-        safety_gib = float(os.environ.get("KIMI_K3_KDA_A2A_SAFETY_GIB", "8"))
-        if safety_gib < 0:
-            raise ValueError("KIMI_K3_KDA_A2A_SAFETY_GIB must be non-negative")
-        safety_bytes = int(safety_gib * (1 << 30))
+        safety_bytes = _KDA_A2A_SAFETY_BYTES
         free_bytes, total_bytes = torch.cuda.mem_get_info()
         free_tensor = torch.tensor(
             [free_bytes],
@@ -5709,8 +4978,6 @@ class KimiK3Model(GptModelBase):
         return cu_seqlens
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        if _perf_mode_enabled():
-            return self._forward_impl(inputs, fmha_impl)
         attention_inputs = inputs.attention_inputs
         phase = (
             "prefill"
@@ -5735,7 +5002,9 @@ class KimiK3Model(GptModelBase):
         input_ids = inputs.input_ids.reshape(-1)
         trace_enabled = _accuracy_trace_enabled()
         tp_size = int(self.parallelism_config.get_attn_tp_size())
-        sp_requested = _sp_moe_enabled() and tp_size > 1
+        # SP MoE 是 K3 modeling 唯一的流程,不再由开关决定 —— Decode TP8/EP8
+        # 不走 SP 就在启动时 die,Prefill 侧生产配置同样一直是 SP。
+        sp_requested = tp_size > 1
         prefill_sp = (
             sp_requested
             and attention_inputs.is_prefill
@@ -5750,7 +5019,7 @@ class KimiK3Model(GptModelBase):
                 "[K3_DECODE_SP] rank=%d env=%s requested=%s active=%s "
                 "tokens=%d tp=%d ep=%d",
                 int(self.parallelism_config.get_attn_tp_rank()),
-                os.environ.get("KIMI_K3_SP_MOE"),
+                "1",
                 sp_requested,
                 decode_sp,
                 input_ids.numel(),
@@ -5758,28 +5027,6 @@ class KimiK3Model(GptModelBase):
                 int(self.parallelism_config.ep_size),
             )
             self._decode_sp_startup_logged = True
-        if _perf_mode_enabled():
-            if not prefill_sp:
-                raise RuntimeError(
-                    "K3 performance profiling requires divisible TP8/EP8 "
-                    f"Prefill Sequence Parallel; tokens={input_ids.numel()}, "
-                    f"TP={tp_size}, is_prefill={attention_inputs.is_prefill}"
-                )
-            # Kineto can arm ranks at slightly different wall times.  Align
-            # once before model operators so the first embedding collective
-            # does not absorb scheduler skew.  This named range is excluded
-            # from model-kernel latency.
-            with _perf_profile(
-                "profiling.rank_entry_barrier.exclude_from_model_latency"
-            ):
-                barrier(Group.TP)
-                # NCCL barrier completion alone does not guarantee that every
-                # rank's current CUDA stream has drained before Python starts
-                # submitting the profiled model operators.  Without the
-                # device sync, late ranks make the first A2A kernel on early
-                # ranks look several milliseconds slower than the transfer
-                # itself.  Keep both operations inside the excluded range.
-                torch.cuda.synchronize()
         cu_seqlens = self._cu_seqlens(attention_inputs, input_ids)
         if sp_active:
             ep_size = int(self.parallelism_config.ep_size)
@@ -5787,12 +5034,6 @@ class KimiK3Model(GptModelBase):
                 raise RuntimeError(
                     "Kimi K3 Sequence Parallel currently requires TP == EP; "
                     f"got TP={tp_size}, EP={ep_size}"
-                )
-            if _accuracy_canonical_tp_enabled():
-                raise RuntimeError(
-                    "Kimi K3 Sequence Parallel is incompatible with canonical "
-                    "TP; disable one of KIMI_K3_SP_MOE and "
-                    "KIMI_K3_ACCURACY_CANONICAL_TP"
                 )
             if prefill_sp and any(
                 layer.is_kda

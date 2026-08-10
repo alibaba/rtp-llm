@@ -29,11 +29,6 @@ using namespace std;
 
 namespace rtp_llm {
 
-static bool kimiK3PerfModeEnabled() {
-    const char* value = std::getenv("KIMI_K3_PERF_MODE");
-    return value != nullptr && std::strcmp(value, "1") == 0;
-}
-
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
         return torch::Tensor();
@@ -1057,9 +1052,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_output_indexes_to_long)");
             // CUDA index_select accepts int32 and int64. Keep RTP's existing
             // contiguous int32 index in the explicitly isolated timeline path.
-            lm_output_indexes_device = kimiK3PerfModeEnabled() && lm_output_indexes.scalar_type() == torch::kInt32 ?
-                                           lm_output_indexes :
-                                           lm_output_indexes.to(torch::kLong).contiguous();
+            lm_output_indexes_device = lm_output_indexes.to(torch::kLong).contiguous();
         }
 
         torch::Tensor last_hidden;
@@ -1091,7 +1084,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
             logits = tpSyncEmbeddingOrLogits(logits);
         }
-        if (!kimiK3PerfModeEnabled() && description_.round_lm_head_to_model_dtype
+        if (description_.round_lm_head_to_model_dtype
             && logits.scalar_type() != dataTypeToTorchType(description_.data_type)) {
             // K3's source nn.Linear returns BF16 logits, then exposes them as
             // FP32. The BF16 rounding point is observable for tied argmaxes.
@@ -1148,7 +1141,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
     }
-    if (!kimiK3PerfModeEnabled() && description_.round_lm_head_to_model_dtype
+    if (description_.round_lm_head_to_model_dtype
         && logits.scalar_type() != dataTypeToTorchType(description_.data_type)) {
         logits = logits.to(dataTypeToTorchType(description_.data_type)).to(torch::kFloat32);
     }

@@ -44,7 +44,7 @@ def get_mla_impl(
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         # TODO: support fast path for cp prefill
         if (
-            os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+            True
             and attn_inputs.is_prefill
         ):
             input_host = getattr(attn_inputs, "input_lengths_host", None)

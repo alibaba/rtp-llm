@@ -11,7 +11,6 @@ checkpoint="${CHECKPOINT_PATH:-/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight}
 start_port="${START_PORT:-27188}"
 cuda_devices="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 python_bin="${PYTHON_BIN:-/opt/conda310/bin/python3}"
-kda_comm_backend="${KIMI_K3_KDA_COMM_BACKEND:-rs_ag}"
 enable_cuda_graph="${ENABLE_CUDA_GRAPH:-0}"
 enable_cuda_graph_debug_mode="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
 decode_capture_config="${DECODE_CAPTURE_CONFIG:-}"
@@ -46,10 +45,6 @@ if [[ ! -f "${checkpoint}/config.json" ]]; then
   echo "checkpoint config not found: ${checkpoint}/config.json" >&2
   exit 2
 fi
-if [[ "${kda_comm_backend}" != "rs_ag" ]]; then
-  echo "KIMI_K3_KDA_COMM_BACKEND must be rs_ag for the fused-prefix layout" >&2
-  exit 2
-fi
 
 # CpuTpBroadcaster uses a Unix-domain socket below TMPDIR, whose full path
 # must stay below 108 bytes.  /dev/shm avoids both that limit and host /tmp
@@ -80,22 +75,9 @@ export TOKENIZER_PATH="${TOKENIZER_PATH:-${checkpoint}}"
 export LOAD_METHOD=fastsafetensors
 
 export KIMI_K3_EXECUTION_MODE=optimized
-export KIMI_K3_PERF_MODE="${KIMI_K3_PERF_MODE:-1}"
-export KIMI_K3_PERF_FUSIONS=1
 export KIMI_K3_FUSED_AG_GEMM="${KIMI_K3_FUSED_AG_GEMM:-auto}"
-export KIMI_K3_USE_HOST_METADATA=1
-export KIMI_K3_SP_MOE=1
-export KIMI_K3_KDA_BACKEND="${KIMI_K3_KDA_BACKEND:-cula}"
-export KIMI_K3_KDA_COMM_BACKEND="${kda_comm_backend}"
-export KIMI_K3_MOE_BACKEND=deep_gemm_mega
-export KIMI_K3_MLA_BACKEND="${KIMI_K3_MLA_BACKEND:-flashmla}"
-export KIMI_K3_DEEPGEMM_EXPECTED_PATH="${OPS_OVERLAY}"
 export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK=8192
 export KIMI_K3_ACCURACY_ALLOW_TOKEN_IDS=1
-export KIMI_K3_ACCURACY_CANONICAL_TP=0
-export KIMI_K3_ACCURACY_CANONICAL_EP=0
-export KIMI_K3_ACCURACY_CANONICAL_MLA=0
-export KIMI_K3_ACCURACY_LOCAL_EAGER_MLA=0
 
 export DSV4_MEGA_MOE_INPUT_PACKER=fused
 export DG_JIT_CACHE_DIR="${K3_PERF_DG_JIT_CACHE_DIR:-${RUN_ROOT}/runtime/deep_gemm_cache}"
@@ -109,14 +91,9 @@ export GEN_TIMELINE_SYNC=1
 
 unset REMOTE_RPC_SERVER_IP
 unset MODEL_SERVICE_CONFIG
-unset KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START
-unset KIMI_K3_FULL_DECODE_CPU_OFFLOAD_START
-if [[ "${KIMI_K3_PERF_MODE}" == "1" ]]; then
-  unset KIMI_K3_ACCURACY_TRACE_DIR
-  unset KIMI_K3_ACCURACY_TRACE_MODE
-  unset KIMI_K3_ACCURACY_TRACE_ENABLE_FILE
-  unset KIMI_K3_ACCURACY_TRACE_FULL_ROUTER
-fi
+# 打性能不能同时开 tensor dump(它会同步并落盘,把测量搅乱)。原先这条挂在
+# KIMI_K3_PERF_MODE 下,那个变量已删,这里无条件生效。
+unset KIMI_K3_TENSOR_DUMP
 
 mkdir -p \
   "${TMPDIR}" \
@@ -127,9 +104,8 @@ mkdir -p \
   "${FLASHINFER_WORKSPACE_BASE}" \
   "${RUN_ROOT}/work"
 echo \
-  "[K3_PERF_CONFIG] kda_comm=${KIMI_K3_KDA_COMM_BACKEND} " \
-  "kda=${KIMI_K3_KDA_BACKEND} moe=${KIMI_K3_MOE_BACKEND} " \
-  "mla=${KIMI_K3_MLA_BACKEND} graph=${enable_cuda_graph}" \
+  "[K3_PERF_CONFIG] kda=${KIMI_K3_KDA_BACKEND} " \
+  "graph=${enable_cuda_graph}" \
   >&2
 cd "${RUN_ROOT}/work"
 

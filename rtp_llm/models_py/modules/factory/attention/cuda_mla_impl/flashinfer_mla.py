@@ -221,7 +221,9 @@ class MlaFlashInferPrefillOp(object):
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
 
-        self._k3_cache_plan = os.environ.get("KIMI_K3_PERF_FUSIONS", "0").strip() == "1"
+        # 恒定开启:K3 两个 PD 角色的生产配置都启用了这批融合实现,精度已按这个
+        # 组合封版。原先的 KIMI_K3_PERF_FUSIONS 开关已删。
+        self._k3_cache_plan = True
         self.prefill_wrapper = (
             None
             if self._k3_cache_plan

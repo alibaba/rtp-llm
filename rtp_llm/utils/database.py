@@ -302,14 +302,12 @@ class CkptDatabase(BaseDatabase):
             )
             if stacked_key_config:
                 streaming = (
-                    os.environ.get("KIMI_K3_FASTSAFETENSORS_STREAMING", "0") == "1"
+                    # 恒定开启:逐批关闭 staging 是 93 层唯一能在 8 卡上完成加载的方式。
+                    True
                 )
-                files_per_batch = int(
-                    os.environ.get(
-                        "KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH",
-                        "0",
-                    )
-                )
+                # 恒定 1:每批一个文件是 93 层在 8 卡上完成加载的验证值,
+                # 调大只会抬高 staging 峰值。
+                files_per_batch = 1
                 if streaming:
                     # ParallelLoader's queue_size=0 acknowledges a batch as
                     # soon as the consumer dequeues it.  queue_size=-1 defers

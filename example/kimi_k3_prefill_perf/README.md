@@ -59,7 +59,7 @@ leave that service running. Override `RUN_ROOT`, `START_PORT` or
 `CUDA_VISIBLE_DEVICES` when needed. On an inode-constrained host, set
 `KIMI_K3_BAZEL_OUTPUT_BASE` to an existing compatible CUDA13/SM10x Bazel
 output base so the incremental build reuses its external repositories.
-Set `KIMI_K3_KDA_BACKEND=flash_kda` for an A/B run; the default is `cula`.
+The KDA prefill backend is always `cula`.
 
 ## Refresh or rebuild the operators
 

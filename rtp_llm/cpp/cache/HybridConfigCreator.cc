@@ -144,16 +144,17 @@ void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                                              const KVCacheSpecPtr& linear_spec,
                                              size_t                attention_tp_size) {
     // Shared HybridCache uses one physical block-id space for FULL and LINEAR
-    // groups.  Size the slot from topology-invariant logical states so a
-    // TP-sharded Prefill and a TP1 Decode describe the same physical block.
+    // groups, so the slot is the larger of the two strides.
     //
-    // LinearKVCacheSpec is rank-local; all KDA state/conv dimensions scale
-    // linearly with attention TP, so multiplying by TP reconstructs the full
-    // model state size.  Each Prefill rank uses only its local prefix and leaves
-    // the rest as padding. Decode TP1 consumes the complete slot.
-    const size_t full_kv_block_stride_bytes = full_spec->block_size_bytes();
-    const size_t linear_kv_block_stride_bytes =
-        linear_spec->block_size_bytes() * std::max<size_t>(attention_tp_size, 1);
+    // The LINEAR stride is now rank-local.  It used to be multiplied by attention
+    // TP so that a TP1 Decode could consume one full-model KDA state out of a
+    // single slot, which meant every Prefill rank wrote its local prefix and left
+    // 7/8 of the slot as padding.  K3 PD is equal-TP only now: prefill rank i and
+    // decode rank i own the same shard, so both sides describe the same rank-local
+    // block and expanding by TP would be pure waste.
+    (void)attention_tp_size;
+    const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
+    const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
 
     config.kv_block_stride_bytes = std::max(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;

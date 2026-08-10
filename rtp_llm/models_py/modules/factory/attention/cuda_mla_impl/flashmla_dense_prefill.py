@@ -64,7 +64,7 @@ class MlaFlashMLAPrefillOp:
             import flash_mla.cuda as flash_mla_cuda
         except ImportError as error:
             raise RuntimeError(
-                "KIMI_K3_MLA_BACKEND=flashmla requires the CUDA13 flash-mla package"
+                "K3 Prefill requires the CUDA13 flash-mla package"
             ) from error
 
         self.flash_mla_cuda = flash_mla_cuda

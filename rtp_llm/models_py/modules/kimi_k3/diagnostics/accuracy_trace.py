@@ -1,9 +1,28 @@
 """Opt-in tensor tracing for Kimi K3 accuracy diagnostics.
 
 The production path pays one ContextVar lookup per explicit trace point and
-does not copy tensors unless ``KIMI_K3_ACCURACY_TRACE_DIR`` is set.  Accuracy
-runs intentionally synchronize tensors to CPU so each model-forward artifact
-is self-contained and can be compared in another Python environment.
+does not copy tensors unless ``KIMI_K3_TENSOR_DUMP`` is set.  Accuracy runs
+intentionally synchronize tensors to CPU so each model-forward artifact is
+self-contained and can be compared in another Python environment.
+
+Configuration is one variable so that a run's entire diagnostic setup is
+visible on the command line:
+
+    KIMI_K3_TENSOR_DUMP=<dir>[,key=value]...
+
+The bare first field is the output directory; an empty or unset variable
+disables tracing entirely.  Recognized keys:
+
+    rank=<int>          only this global rank records; -1 records every rank
+    mode=boundary|semantic_full
+    forward=<int>       only this model-forward ordinal records
+    router=full         keep the full O(T) router rows, not just the last
+    token=<int>         only record when the single decode input id matches
+    enable_file=<path>  record only while this file exists
+    shard_bytes=<int>   safetensors shard ceiling
+
+This replaced eight separate KIMI_K3_ACCURACY_TRACE_* variables whose
+combined state nobody could read off a launch command.
 """
 
 from __future__ import annotations
@@ -29,6 +48,62 @@ _ACTIVE_RECORDER: ContextVar[Optional["KimiK3AccuracyRecorder"]] = ContextVar(
 )
 _FORWARD_COUNTER = itertools.count()
 
+_SPEC_KEYS = frozenset(
+    {"rank", "mode", "forward", "router", "token", "enable_file", "shard_bytes"}
+)
+
+
+def _tensor_dump_spec() -> dict[str, str]:
+    """Parse KIMI_K3_TENSOR_DUMP into {"dir": ..., <key>: <value>}."""
+
+    raw = os.environ.get("KIMI_K3_TENSOR_DUMP", "").strip()
+    if not raw:
+        return {}
+    fields = [field.strip() for field in raw.split(",")]
+    if not fields[0] or "=" in fields[0]:
+        raise ValueError(
+            "KIMI_K3_TENSOR_DUMP must start with the output directory, got "
+            f"{raw!r}"
+        )
+    spec = {"dir": fields[0]}
+    for field_text in fields[1:]:
+        if not field_text:
+            continue
+        key, separator, value = field_text.partition("=")
+        key = key.strip()
+        if not separator or key not in _SPEC_KEYS:
+            raise ValueError(
+                f"unsupported KIMI_K3_TENSOR_DUMP field {field_text!r}; "
+                f"expected one of {sorted(_SPEC_KEYS)}"
+            )
+        spec[key] = value.strip()
+    return spec
+
+
+def _spec_int(spec: dict[str, str], key: str) -> Optional[int]:
+    value = spec.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(
+            f"KIMI_K3_TENSOR_DUMP {key}= must be an integer, got {value!r}"
+        ) from error
+    return parsed
+
+
+def tensor_dump_full_router() -> bool:
+    """Whether the router trace keeps every token row instead of the last."""
+
+    return _tensor_dump_spec().get("router") == "full"
+
+
+def tensor_dump_enabled() -> bool:
+    """Whether any tensor dump directory is configured for this process."""
+
+    return bool(_tensor_dump_spec())
+
 
 def _global_rank() -> int:
     if torch.distributed.is_available() and torch.distributed.is_initialized():
@@ -47,6 +122,8 @@ class KimiK3AccuracyRecorder:
     mode: str = "boundary"
     rank: int = 0
     forward_index: int = 0
+    input_token_id: Optional[int] = None
+    max_shard_size_bytes: int = DEFAULT_MAX_SHARD_SIZE_BYTES
     tensors: dict[str, torch.Tensor] = field(default_factory=dict)
     token_dims: dict[str, int] = field(default_factory=dict)
     capture_enabled: bool = True
@@ -72,32 +149,15 @@ class KimiK3AccuracyRecorder:
         if token_dim is not None:
             self.token_dims[name] = int(token_dim)
         self.tensors[name] = value.contiguous().cpu()
-        if name == "input_ids":
-            requested_input_token = os.environ.get(
-                "KIMI_K3_ACCURACY_TRACE_INPUT_TOKEN_ID"
-            )
-            if requested_input_token is not None:
-                try:
-                    requested_input_token_id = int(requested_input_token)
-                except ValueError as error:
-                    raise ValueError(
-                        "KIMI_K3_ACCURACY_TRACE_INPUT_TOKEN_ID must be an "
-                        f"integer, got {requested_input_token!r}"
-                    ) from error
-                if requested_input_token_id < 0:
-                    raise ValueError(
-                        "KIMI_K3_ACCURACY_TRACE_INPUT_TOKEN_ID must be "
-                        f"non-negative, got {requested_input_token_id}"
-                    )
-                flat_input_ids = value.reshape(-1)
-                if flat_input_ids.numel() != 1:
-                    raise ValueError(
-                        "KIMI_K3_ACCURACY_TRACE_INPUT_TOKEN_ID only supports "
-                        "single-token Decode forwards, got "
-                        f"{flat_input_ids.numel()} input tokens"
-                    )
-                if int(flat_input_ids.item()) != requested_input_token_id:
-                    self.capture_enabled = False
+        if name == "input_ids" and self.input_token_id is not None:
+            flat_input_ids = value.reshape(-1)
+            if flat_input_ids.numel() != 1:
+                raise ValueError(
+                    "KIMI_K3_TENSOR_DUMP token= only supports single-token "
+                    f"Decode forwards, got {flat_input_ids.numel()} input tokens"
+                )
+            if int(flat_input_ids.item()) != self.input_token_id:
+                self.capture_enabled = False
 
     def mark_fake_stream(self, is_fake: bool, device: torch.device) -> None:
         self.record(
@@ -144,12 +204,7 @@ class KimiK3AccuracyRecorder:
                 "rank": self.rank,
                 "forward_index": self.forward_index,
             },
-            max_shard_size_bytes=int(
-                os.environ.get(
-                    "KIMI_K3_ACCURACY_TRACE_MAX_SHARD_BYTES",
-                    str(DEFAULT_MAX_SHARD_SIZE_BYTES),
-                )
-            ),
+            max_shard_size_bytes=self.max_shard_size_bytes,
         )
         metadata["tensor_artifact"] = artifact_path.name
         (self.output_dir / f"{stem}.json").write_text(
@@ -182,54 +237,58 @@ def mark_accuracy_fake_stream(is_fake: bool, device: torch.device) -> None:
 
 @contextmanager
 def kimi_k3_accuracy_trace(phase: str) -> Iterator[Optional[KimiK3AccuracyRecorder]]:
-    output = os.environ.get("KIMI_K3_ACCURACY_TRACE_DIR")
-    if not output:
+    spec = _tensor_dump_spec()
+    if not spec:
         yield None
         return
-    enable_file = os.environ.get("KIMI_K3_ACCURACY_TRACE_ENABLE_FILE")
+    enable_file = spec.get("enable_file")
     if enable_file and not Path(enable_file).is_file():
         yield None
         return
 
     rank = _global_rank()
-    requested_rank = int(os.environ.get("KIMI_K3_ACCURACY_TRACE_RANK", "0"))
+    requested_rank = _spec_int(spec, "rank")
+    if requested_rank is None:
+        requested_rank = 0
     if requested_rank >= 0 and rank != requested_rank:
         yield None
         return
 
-    mode = os.environ.get("KIMI_K3_ACCURACY_TRACE_MODE", "boundary")
+    mode = spec.get("mode") or "boundary"
     if mode == "full":
         mode = "semantic_full"
     if mode not in ("boundary", "semantic_full"):
         raise ValueError(
-            "KIMI_K3_ACCURACY_TRACE_MODE must be 'boundary' or "
-            "'semantic_full', "
+            "KIMI_K3_TENSOR_DUMP mode= must be 'boundary' or 'semantic_full', "
             f"got {mode!r}"
         )
     forward_index = next(_FORWARD_COUNTER)
-    requested_forward = os.environ.get("KIMI_K3_ACCURACY_TRACE_FORWARD_INDEX")
+    requested_forward = _spec_int(spec, "forward")
     if requested_forward is not None:
-        try:
-            requested_forward_index = int(requested_forward)
-        except ValueError as error:
+        if requested_forward < 0:
             raise ValueError(
-                "KIMI_K3_ACCURACY_TRACE_FORWARD_INDEX must be an integer, "
-                f"got {requested_forward!r}"
-            ) from error
-        if requested_forward_index < 0:
-            raise ValueError(
-                "KIMI_K3_ACCURACY_TRACE_FORWARD_INDEX must be non-negative, "
-                f"got {requested_forward_index}"
+                "KIMI_K3_TENSOR_DUMP forward= must be non-negative, got "
+                f"{requested_forward}"
             )
-        if forward_index != requested_forward_index:
+        if forward_index != requested_forward:
             yield None
             return
+    input_token_id = _spec_int(spec, "token")
+    if input_token_id is not None and input_token_id < 0:
+        raise ValueError(
+            f"KIMI_K3_TENSOR_DUMP token= must be non-negative, got {input_token_id}"
+        )
+    shard_bytes = _spec_int(spec, "shard_bytes")
     recorder = KimiK3AccuracyRecorder(
-        output_dir=Path(output),
+        output_dir=Path(spec["dir"]),
         phase=phase,
         mode=mode,
         rank=rank,
         forward_index=forward_index,
+        input_token_id=input_token_id,
+        max_shard_size_bytes=(
+            DEFAULT_MAX_SHARD_SIZE_BYTES if shard_bytes is None else shard_bytes
+        ),
     )
     token = _ACTIVE_RECORDER.set(recorder)
     try:
@@ -245,4 +304,6 @@ __all__ = [
     "kimi_k3_accuracy_trace",
     "mark_accuracy_fake_stream",
     "record_accuracy_tensor",
+    "tensor_dump_enabled",
+    "tensor_dump_full_router",
 ]

@@ -60,7 +60,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         self.fmha_impl: Any = fmha_impl
         if (
             self.fmha_impl is not None
-            and os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+            and True
         ):
             input_host = getattr(attn_inputs, "input_lengths_host", None)
             prefix_host = getattr(attn_inputs, "prefix_lengths_host", None)
@@ -101,7 +101,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         # Keep cache-store consumers on the same view as the planner.
         self.attn_inputs = attn_inputs
         check_attention_inputs(attn_inputs)
-        use_host_metadata = os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+        use_host_metadata = True
         prefix_lengths = (
             getattr(attn_inputs, "prefix_lengths_host", None)
             if use_host_metadata
@@ -205,7 +205,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         assert self.rope_impl is not None and self.fmha_params is not None
 
         def profile(stage: str, shape: tuple[int, ...]):
-            if os.environ.get("KIMI_K3_PERF_MODE", "0").strip() != "1":
+            if True:
                 return nullcontext()
             shape_text = "x".join(str(dim) for dim in shape)
             return torch.autograd.profiler.record_function(
@@ -296,7 +296,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             parallelism_config,
         )
         self.has_reuse_cache = False
-        use_host_metadata = os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+        use_host_metadata = True
         prefix_host = (
             getattr(attn_inputs, "prefix_lengths_host", None)
             if use_host_metadata
@@ -344,12 +344,9 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return (
-            attn_configs.use_mla
-            and attn_inputs.is_prefill
-            and os.environ.get("KIMI_K3_MLA_BACKEND", "kernel").strip().lower()
-            != "flashmla"
-        )
+        # K3 的 Prefill 恒走 FlashMLA(见 MlaFlashMLAPrefillImpl),所以这条
+        # FlashInfer Prefill 实现不再被选中。原先由 KIMI_K3_MLA_BACKEND 决定。
+        return False
 
     def _handle_long_sequence(
         self,
@@ -481,12 +478,11 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        # Prefill 按 PD 角色恒走 FlashMLA,不再由 KIMI_K3_MLA_BACKEND 传入。
         return (
             attn_configs.use_mla
             and not attn_configs.is_sparse
             and attn_inputs.is_prefill
-            and os.environ.get("KIMI_K3_MLA_BACKEND", "kernel").strip().lower()
-            == "flashmla"
         )
 
 
@@ -504,7 +500,7 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        use_host_metadata = os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+        use_host_metadata = True
         sequence_lengths_host = (
             getattr(attn_inputs, "sequence_lengths_host", None)
             if use_host_metadata

@@ -15,7 +15,7 @@ def select_block_map_for_layer(
     if group_id is None:
         host_map = (
             getattr(attention_inputs, "kv_cache_layer_to_group_host", None)
-            if os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+            if True
             else None
         )
         if host_map is not None and host_map.numel():

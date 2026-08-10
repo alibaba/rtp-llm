@@ -57,23 +57,13 @@ ids = [100 + ((index * 7919 + 17) % 160000) for index in range(length)]
 RTP trace 使用：
 
 ```bash
-export KIMI_K3_ACCURACY_TRACE_DIR=/path/to/trace
-export KIMI_K3_ACCURACY_TRACE_MODE=semantic_full
-export KIMI_K3_ACCURACY_TRACE_RANK=0
-export KIMI_K3_ACCURACY_TRACE_FULL_ROUTER=1
+export KIMI_K3_TENSOR_DUMP=/path/to/trace,mode=semantic_full,rank=0,router=full
 export KIMI_K3_ACCURACY_ALLOW_TOKEN_IDS=1
 ```
 
-Canonical TP8/EP8 基线额外使用：
-
-```bash
-export KIMI_K3_EXECUTION_MODE=accuracy
-export KIMI_K3_ACCURACY_CANONICAL_TP=1
-export KIMI_K3_ACCURACY_CANONICAL_EP=1
-export KIMI_K3_ACCURACY_CANONICAL_MLA=1
-export KIMI_K3_SP_MOE=0
-export KIMI_K3_PERF_FUSIONS=0
-```
+Canonical TP/EP/MLA 对照模式已从代码里删除：它们各自额外引入一条分支，而每条
+分支都会扩大"精度对不上"的可能原因集合。逐算子对照现在只靠上面的 trace，观测
+的就是生产路径本身。
 
 ## 4. 逐算子边界
 

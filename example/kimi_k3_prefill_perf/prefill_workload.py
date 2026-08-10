@@ -141,7 +141,7 @@ def main() -> None:
         default="rs_ag",
     )
     parser.add_argument("--timeout", type=int, default=14400)
-    parser.add_argument("--backend", choices=("cula", "flash_kda"), default="cula")
+    parser.add_argument("--backend", choices=("cula",), default="cula")
     parser.add_argument("--mla-backend", choices=("kernel", "flashmla"), default="flashmla")
     parser.add_argument("--min-warmups", type=int, default=10)
     parser.add_argument("--max-warmups", type=int, default=20)
