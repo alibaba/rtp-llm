@@ -428,8 +428,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_auto_tpm_preempted_maps_to_throttling_aborted(self) -> None:
         """Master 8429 PRIORITY_PREEMPTED (Auto-TPM victim) must surface as
-        ABORT(10) / 429 / Throttling.Aborted with the AUTO_TPM_PREEMPTED
-        marker in status_message — not the generic CAPACITY mapping."""
+        ABORT(10) / 429 / Throttling.Aborted with status_message unified to
+        "Too many requests." when qos header is present."""
         req = self._minimal_request()
 
         class _PreemptedVisitor:
@@ -451,7 +451,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(),
+                OtherParams(request_headers={"x-dashscope-inner-qos-level": "40"}),
                 _PreemptedVisitor(),
                 rtp_llm_request_id=1,
                 access_agg=access_agg,
@@ -464,14 +464,109 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error_no, LLMFinishReason.ABORT)
         self.assertEqual(payload["status_code"], 429)
         self.assertEqual(payload["status_name"], "Throttling.Aborted")
-        self.assertIn("AUTO_TPM_PREEMPTED", payload["status_message"])
-        self.assertIn(
-            "preempted by higher-priority request 77", payload["status_message"]
-        )
+        self.assertEqual(payload["status_message"], "Too many requests.")
         self.assertEqual(
             _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
         )
         self.assertEqual(access_agg.backend_error_code, "8429_PRIORITY_PREEMPTED")
+
+    async def test_auto_tpm_low_priority_capacity_service_overloaded(self) -> None:
+        """autoTPM 场景：低优(priority<=40) CAPACITY 拒绝 →
+        status_name=Throttling.ServiceOverloaded, status_message="Too many requests."
+        """
+        req = self._minimal_request()
+
+        class _CapacityVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "traffic limit exceeded",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(request_headers={"x-dashscope-inner-qos-level": "40"}),
+                _CapacityVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "Throttling.ServiceOverloaded")
+        self.assertEqual(payload["status_message"], "Too many requests.")
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+
+    async def test_auto_tpm_high_priority_capacity_resource_exhausted(self) -> None:
+        """autoTPM 场景：高优(priority>40) CAPACITY 拒绝 →
+        status_name=Throttling.ResourceExhausted, status_message="Too many requests."
+        """
+        req = self._minimal_request()
+
+        class _CapacityVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "traffic limit exceeded",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(request_headers={"x-dashscope-inner-qos-level": "50"}),
+                _CapacityVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "Throttling.ResourceExhausted")
+        self.assertEqual(payload["status_message"], "Too many requests.")
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+
+    async def test_no_qos_capacity_keeps_legacy_too_many_requests(self) -> None:
+        """无 qos header 的 CAPACITY 拒绝：返回 503 ServiceUnavailable，
+        status_message="Service unavailable."（塘主规范）。"""
+        req = self._minimal_request()
+
+        class _CapacityVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "traffic limit exceeded",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _CapacityVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_name"], "ServiceUnavailable")
+        self.assertEqual(payload["status_message"], "Service unavailable.")
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
 
     async def test_engine_task_list_full_ft_exception_mapped_to_429(self) -> None:
         """Engine abort with TASK_LIST_FULL arrives as FtRuntimeException(UNKNOWN_ERROR)

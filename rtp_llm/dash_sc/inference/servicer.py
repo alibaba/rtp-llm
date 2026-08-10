@@ -1012,11 +1012,31 @@ async def iter_real_model_stream_infer(
         if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
             error_spec = DASH_ERROR_CAPACITY
         status_message = str(e)
-        # Auto-TPM preemption: status_message must carry the explicit
-        # AUTO_TPM_PREEMPTED marker so callers can attribute the 429 to
-        # priority preemption rather than generic throttling.
-        if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
-            status_message = f"AUTO_TPM_PREEMPTED: {status_message}"
+        # autoTPM 429 响应规范：有 qos header 时按 priority 区分 status_name，
+        # 统一 status_message 为 "Too many requests."；无 qos header 的容量拒绝
+        # 返回 503 ServiceUnavailable / "Service unavailable."（塘主规范）。
+        if error_spec.status_code == 429:
+            qos_priority = (
+                getattr(locals().get("generate_config"), "qos_priority", 0) or 0
+            )
+            if qos_priority > 0:
+                if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
+                    pass  # status_name 已经是 Throttling.Aborted
+                elif qos_priority <= 40:
+                    error_spec = error_spec._replace(
+                        status_name="Throttling.ServiceOverloaded"
+                    )
+                else:
+                    error_spec = error_spec._replace(
+                        status_name="Throttling.ResourceExhausted"
+                    )
+                status_message = "Too many requests."
+            else:
+                error_spec = error_spec._replace(
+                    status_code=503,
+                    status_name="ServiceUnavailable",
+                )
+                status_message = "Service unavailable."
         if error_spec.status_code == 500:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
         elif error_spec.status_code == 499:
@@ -1048,8 +1068,31 @@ async def iter_real_model_stream_infer(
         if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
             error_spec = DASH_ERROR_CAPACITY
         fallback_status_message = f"{type(e).__name__}: {e}"
-        if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
-            fallback_status_message = f"AUTO_TPM_PREEMPTED: {fallback_status_message}"
+        # autoTPM 429 响应规范：有 qos header 时按 priority 区分 status_name，
+        # 统一 status_message 为 "Too many requests."；无 qos header 的容量拒绝
+        # 返回 503 ServiceUnavailable / "Service unavailable."（塘主规范）。
+        if error_spec.status_code == 429:
+            qos_priority = (
+                getattr(locals().get("generate_config"), "qos_priority", 0) or 0
+            )
+            if qos_priority > 0:
+                if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
+                    pass  # status_name 已经是 Throttling.Aborted
+                elif qos_priority <= 40:
+                    error_spec = error_spec._replace(
+                        status_name="Throttling.ServiceOverloaded"
+                    )
+                else:
+                    error_spec = error_spec._replace(
+                        status_name="Throttling.ResourceExhausted"
+                    )
+                fallback_status_message = "Too many requests."
+            else:
+                error_spec = error_spec._replace(
+                    status_code=503,
+                    status_name="ServiceUnavailable",
+                )
+                fallback_status_message = "Service unavailable."
         response = build_dash_error_response(
             str(request.id),
             request.model_name,

@@ -591,28 +591,6 @@ public class MetricConstant {
     public static final String AUTO_TPM_DECODE_RUNNING_COUNT = "auto_tpm.decode.running.count";
 
     /**
-     * Auto-TPM deadline-rescue candidate processing count (QPS), tags:
-     * priority, result (success / requeue_failed / cas_skipped / limited).
-     */
-    public static final String AUTO_TPM_RESCUE_COUNT = "auto_tpm.rescue.count";
-
-    /**
-     * Auto-TPM deadline-rescue migration latency in ms (timer), tags:
-     * from_endpoint (source prefill endpoint), to_endpoint (new prefill
-     * endpoint on success, "-" on failure), priority, result
-     * (success / requeue_failed). Reported per rescueOne attempt (§14.4);
-     * auxiliary to {@link #AUTO_TPM_RESCUE_COUNT}, whose tags are unchanged.
-     */
-    public static final String AUTO_TPM_RESCUE_LATENCY_MS = "auto_tpm.rescue.latency_ms";
-
-    /**
-     * Auto-TPM cross-endpoint transfer attempt count (QPS), tags: priority,
-     * result (success / requeue_failed). Reported only when a request was
-     * actually removed from its source queue for migration.
-     */
-    public static final String AUTO_TPM_TRANSFER_COUNT = "auto_tpm.transfer.count";
-
-    /**
      * Auto-TPM decode accepted-not-running (engine KV-allocated) request
      * count (gauge), tags: endpoint. Introduced by the Phase 5 layered view:
      * before Phase 5 this layer was folded into
