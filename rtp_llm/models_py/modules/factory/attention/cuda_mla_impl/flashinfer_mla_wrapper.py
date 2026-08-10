@@ -1,3 +1,5 @@
+import os
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -38,6 +40,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
+        warmup_flashinfer: bool = True,
     ) -> None:
         super().__init__(
             attn_configs,
@@ -51,9 +54,26 @@ class MlaFlashInferImplBase(MlaImplBase):
             is_cuda_graph=is_cuda_graph,
             parallelism_config=parallelism_config,
         )
-        warmup_flashinfer_python()
+        if warmup_flashinfer:
+            warmup_flashinfer_python()
         self.seq_size_per_block = seq_size_per_block
         self.fmha_impl: Any = fmha_impl
+        if (
+            self.fmha_impl is not None
+            and True
+        ):
+            input_host = getattr(attn_inputs, "input_lengths_host", None)
+            prefix_host = getattr(attn_inputs, "prefix_lengths_host", None)
+            if input_host is not None and input_host.numel():
+                input_values = [int(value) for value in input_host.tolist()]
+                prefix_values = (
+                    [int(value) for value in prefix_host.tolist()]
+                    if prefix_host is not None and prefix_host.numel()
+                    else [0] * len(input_values)
+                )
+                self.fmha_impl.total_kv_lens_hint = sum(input_values) + sum(
+                    prefix_values
+                )
         self.fmha_params = None
         self.rope_params = None
         self.rope_impl = rope_impl
@@ -77,16 +97,98 @@ class MlaFlashInferImplBase(MlaImplBase):
         assert (
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
+        # HybridCache switches the explicit PyAttentionInputs view per group.
+        # Keep cache-store consumers on the same view as the planner.
+        self.attn_inputs = attn_inputs
         check_attention_inputs(attn_inputs)
+        use_host_metadata = True
+        prefix_lengths = (
+            getattr(attn_inputs, "prefix_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        sequence_lengths = (
+            getattr(attn_inputs, "sequence_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        input_lengths = (
+            getattr(attn_inputs, "input_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        prefix_lengths = (
+            prefix_lengths
+            if prefix_lengths is not None and prefix_lengths.numel()
+            else attn_inputs.prefix_lengths
+        )
+        sequence_lengths = (
+            sequence_lengths
+            if sequence_lengths is not None and sequence_lengths.numel()
+            else attn_inputs.sequence_lengths
+        )
+        input_lengths = (
+            input_lengths
+            if input_lengths is not None and input_lengths.numel()
+            else attn_inputs.input_lengths
+        )
         self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
+            prefix_lengths,
+            sequence_lengths,
+            input_lengths,
             attn_inputs.kv_cache_kernel_block_id_host,
             self.seq_size_per_block,
             forbid_realloc,
         )
         self.fmha_impl.plan(self.fmha_params)
+
+    def _device_decode_slot_mapping(self) -> Optional[torch.Tensor]:
+        """Build the current HybridCache group's decode write locations.
+
+        The regular host planner populates ``fmha_params.slot_mapping``.  The
+        graph-safe group refresh intentionally skips that planner, so derive
+        the same mapping from its device metadata and the currently selected
+        group block table.  The tensor operations are captured and therefore
+        read live sequence lengths and block IDs on every replay.
+        """
+
+        assert self.fmha_params is not None
+        slot_mapping = getattr(self.fmha_params, "slot_mapping", None)
+        if slot_mapping is not None:
+            return None
+
+        # The pybind surface exposes the stable device buffers, not the
+        # transient C++ aliases (positions/batch_indice).
+        positions = getattr(self.fmha_params, "positions_d", None)
+        batch_indices = getattr(self.fmha_params, "batch_indice_d", None)
+        block_table = getattr(
+            self.attn_inputs, "kv_cache_kernel_block_id_device", None
+        )
+        if (
+            positions is None
+            or batch_indices is None
+            or block_table is None
+            or positions.numel() == 0
+            or batch_indices.numel() == 0
+            or block_table.numel() == 0
+        ):
+            raise RuntimeError(
+                "CUDA Graph MLA cache write requires device positions, "
+                "batch indices, and the selected group block table"
+            )
+
+        positions_i64 = positions.to(torch.int64)
+        batch_indices_i64 = batch_indices.to(torch.int64)
+        block_indices = torch.div(
+            positions_i64,
+            self.seq_size_per_block,
+            rounding_mode="floor",
+        )
+        block_numbers = block_table[batch_indices_i64, block_indices].to(torch.int64)
+        return (
+            block_numbers * self.seq_size_per_block
+            + torch.remainder(positions_i64, self.seq_size_per_block)
+        )
 
     def forward(
         self,
@@ -101,17 +203,34 @@ class MlaFlashInferImplBase(MlaImplBase):
             topk_indices is None
         ), "topk_indices should be None for MlaFlashInferImplBase"
         assert self.rope_impl is not None and self.fmha_params is not None
+
+        def profile(stage: str, shape: tuple[int, ...]):
+            del stage, shape
+            return nullcontext()
+
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
 
         # Apply RoPE to Q and K
-        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+        with profile("nope_rope_adapter", tuple(q_pe.shape)):
+            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
         # Write compressed KV and position-encoded K to cache
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        with profile(
+            "kv_cache_update_normalized_latent_plus_suffix",
+            tuple(compressed_kv.shape),
+        ):
+            self.kv_cache_write_op.forward(
+                compressed_kv,
+                k_pe,
+                kv_cache,
+                self.rope_params,
+                slot_mapping_override=self._device_decode_slot_mapping(),
+            )
 
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+        with profile("cache_store_publish_noop_for_standalone_prefill", ()):
+            common.apply_write_cache_store(
+                self.write_cache_store_impl, self.attn_inputs, kv_cache
+            )
 
         # Split query for FMHA
         q_nope, q_pe = torch.split(
@@ -120,7 +239,8 @@ class MlaFlashInferImplBase(MlaImplBase):
             dim=-1,
         )
         assert self.fmha_impl is not None
-        res = self.fmha_impl.forward(q_nope, q_pe, kv_cache, layer_id)
+        with profile("flashinfer_causal_attention_context", tuple(q.shape)):
+            res = self.fmha_impl.forward(q_nope, q_pe, kv_cache, layer_id)
         return res
 
 
@@ -172,15 +292,31 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             parallelism_config,
         )
         self.has_reuse_cache = False
-        # Type narrowing: check and assign
-        if attn_inputs.prefix_lengths is not None:
-            max_prefix_val = attn_inputs.prefix_lengths.max().item()  # type: ignore
-            self.has_reuse_cache = max_prefix_val > 0
+        use_host_metadata = True
+        prefix_host = (
+            getattr(attn_inputs, "prefix_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        if prefix_host is not None and prefix_host.numel():
+            self.has_reuse_cache = max(int(v) for v in prefix_host.tolist()) > 0
+        elif attn_inputs.prefix_lengths is not None:
+            # Compatibility fallback for older bindings.
+            self.has_reuse_cache = bool(attn_inputs.prefix_lengths.max().item() > 0)
 
         self.absorb_opt_len = (
             fmha_config.absorb_opt_len if fmha_config is not None else 1024
         )
-        q_len = attn_inputs.input_lengths.sum().item()
+        input_host = (
+            getattr(attn_inputs, "input_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        q_len = (
+            sum(int(v) for v in input_host.tolist())
+            if input_host is not None and input_host.numel()
+            else attn_inputs.input_lengths.sum().item()
+        )
         self.absorb_fmha: Optional[MlaFlashInferDecodeOp] = None
         if (
             q_len < self.absorb_opt_len
@@ -204,7 +340,9 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return attn_configs.use_mla and attn_inputs.is_prefill
+        # K3 的 Prefill 恒走 FlashMLA(见 MlaFlashMLAPrefillImpl),所以这条
+        # FlashInfer Prefill 实现不再被选中。原先由 KIMI_K3_MLA_BACKEND 决定。
+        return False
 
     def _handle_long_sequence(
         self,
@@ -277,6 +415,73 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         return self.compute_prefill_context(q, compressed_kv, k_pe, kv_cache, layer_id)
 
 
+class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
+    """Dense FlashMLA variant of RTP's shared MLA Prefill pipeline."""
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        weights: List[Dict[str, torch.Tensor]],
+        cos_sin_cache: torch.Tensor,
+        fmha_config: Optional[FMHAConfig] = None,
+        use_trt_fmha: bool = False,
+        quant_config: Optional[object] = None,
+        max_seq_len: int = 0,
+        is_cuda_graph: bool = False,
+        parallelism_config: Optional[ParallelismConfig] = None,
+    ) -> None:
+        from .flashmla_dense_prefill import MlaFlashMLAPrefillOp
+
+        MlaFlashInferImplBase.__init__(
+            self,
+            MlaFlashMLAPrefillOp(
+                attn_configs.head_num,
+                attn_configs.kv_lora_rank,
+                attn_configs.rope_head_dim,
+                attn_configs.nope_head_dim,
+                attn_configs.v_head_dim,
+                attn_configs.kernel_tokens_per_block,
+                attn_configs.softmax_extra_scale,
+                attn_configs.use_mla,
+                weights,
+                quant_config,
+                attn_configs.kv_cache_dtype,
+            ),
+            NewMlaRotaryEmbeddingOp(
+                cos_sin_cache=cos_sin_cache,
+                is_neox_style=attn_configs.rope_config.is_neox_style,
+            ),
+            MlaKVCacheWriteOp(kv_cache_dtype=attn_configs.kv_cache_dtype),
+            attn_inputs,
+            attn_configs.kernel_tokens_per_block,
+            attn_configs,
+            weights,
+            cos_sin_cache,
+            fmha_config,
+            use_trt_fmha,
+            quant_config,
+            max_seq_len,
+            is_cuda_graph,
+            parallelism_config,
+            warmup_flashinfer=False,
+        )
+        self.has_reuse_cache = False
+        self.absorb_opt_len = 0
+        self.absorb_fmha = None
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        # Prefill 按 PD 角色恒走 FlashMLA,不再由 KIMI_K3_MLA_BACKEND 传入。
+        return (
+            attn_configs.use_mla
+            and not attn_configs.is_sparse
+            and attn_inputs.is_prefill
+        )
+
+
 class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
 
     def __init__(
@@ -291,6 +496,19 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
+        use_host_metadata = True
+        sequence_lengths_host = (
+            getattr(attn_inputs, "sequence_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        if sequence_lengths_host is not None and sequence_lengths_host.numel() > 0:
+            sequence_values = [int(value) for value in sequence_lengths_host.tolist()]
+            max_bs = len(sequence_values)
+            num_tokens = sum(sequence_values)
+        else:
+            max_bs = attn_inputs.sequence_lengths.size(0)
+            num_tokens = int(attn_inputs.sequence_lengths.sum().item())
         super().__init__(
             MlaFlashInferDecodeOp(
                 attn_configs.head_num,
@@ -302,9 +520,9 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 attn_configs.use_mla,
                 attn_configs.is_sparse,
                 weights,
-                max_bs=attn_inputs.sequence_lengths.size(0),
+                max_bs=max_bs,
                 max_context_len=max_seq_len,
-                num_tokens=int(attn_inputs.sequence_lengths.sum().item()),
+                num_tokens=num_tokens,
                 is_cuda_graph=is_cuda_graph,
             ),
             NewMlaRotaryEmbeddingOp(
@@ -339,3 +557,62 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.prepare(attn_inputs, forbid_realloc=True)
+
+    def prepare_cuda_graph_group(self, attn_inputs: PyAttentionInputs) -> None:
+        """Refresh one HybridCache FULL group inside graph capture.
+
+        ``prepare_cuda_graph`` runs before replay and may call FlashInfer's
+        host-side planner.  Kimi K3 additionally switches the selected FULL
+        cache group between MLA layers *inside* the captured forward.  Calling
+        the regular ``prepare`` there would materialize CUDA lengths and block
+        tables on the host, which CUDA Graph capture forbids.
+
+        The batch shape and sequence lengths are identical for every FULL
+        group, so the plan prepared before capture/replay remains valid.  Only
+        regenerate the compact page indices on device and copy them into
+        FlashInfer's stable CUDA Graph indices buffer before the group runs.
+        Both operations are then recorded in the graph and use the live
+        per-group block table on every replay.
+        """
+
+        assert self.fmha_impl is not None
+        assert self.fmha_params is not None
+        self.attn_inputs = attn_inputs
+        sequence_lengths_plus_1 = getattr(
+            attn_inputs, "sequence_lengths_plus_1_d", None
+        )
+        block_table = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device", None
+        )
+        if (
+            sequence_lengths_plus_1 is None
+            or sequence_lengths_plus_1.numel() == 0
+        ):
+            raise RuntimeError(
+                "K3 CUDA Graph MLA group refresh requires "
+                "sequence_lengths_plus_1_d"
+            )
+        if block_table is None or block_table.numel() == 0:
+            raise RuntimeError(
+                "K3 CUDA Graph MLA group refresh requires a device block table"
+            )
+
+        self.fmha_params.fill_decode_cuda_graph_params(
+            sequence_lengths_plus_1,
+            block_table,
+            self.seq_size_per_block,
+        )
+        page_indices = self.fmha_params.page_indice_d
+        graph_indices = self.fmha_impl.kv_indices_d
+        if page_indices.numel() < graph_indices.numel():
+            raise RuntimeError(
+                "K3 CUDA Graph MLA compact page-index source is too small: "
+                f"source={page_indices.numel()} target={graph_indices.numel()}"
+            )
+        # CudaGraphRunner rounds each request's block-table width up to a full
+        # KV-cache page.  ``page_indices`` therefore has padded tail capacity,
+        # while FlashInfer reserves only ceil(max_context/kernel_page) entries
+        # per request.  The device preparation kernel compacts every live page
+        # at the front, so copying the stable graph-buffer capacity preserves
+        # all usable indices and deliberately drops only that padded tail.
+        graph_indices.copy_(page_indices[: graph_indices.numel()])

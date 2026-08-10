@@ -28,3 +28,11 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "flashinfer_mla_wrapper_test",
+    srcs = ["flashinfer_mla_wrapper_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)

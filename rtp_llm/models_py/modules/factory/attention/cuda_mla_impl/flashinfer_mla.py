@@ -1,4 +1,6 @@
+import fcntl
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -28,42 +30,56 @@ def warmup_flashinfer_python():
     global warm_up_done
     if warm_up_done:
         return
-    warm_up_done = True
-    modules = []
-    for backend in ["fa2", "fa3"]:
-        if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
-            continue
-        modules.append(
-            gen_batch_prefill_module(
-                backend,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.int32,
-                192,
-                128,
-                0,
-                False,
-                False,
-                False,
-            )
-        )
 
-    for backend in ["fa2", "fa3"]:
-        if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
-            continue
-        modules.append(
-            gen_batch_mla_module(
-                backend,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.int32,
-                512,
-                64,
-                False,
-            )
-        )
+    # FlashInfer's Python JIT cache is shared by all local rank processes.
+    # Eight TP ranks can enter the first Decode request at the same time; loading
+    # or materializing the same generated extension concurrently has caused
+    # ranks to block in dlopen and eventually segfault.  Serialize this one-time
+    # process-local initialization.  Subsequent requests remain lock-free.
+    lock_dir = os.environ.get("TMPDIR", "/tmp")
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, "rtp_llm_flashinfer_jit.lock")
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            modules = []
+            for backend in ["fa2", "fa3"]:
+                if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
+                    continue
+                modules.append(
+                    gen_batch_prefill_module(
+                        backend,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                        torch.int32,
+                        192,
+                        128,
+                        0,
+                        False,
+                        False,
+                        False,
+                    )
+                )
+
+            for backend in ["fa2", "fa3"]:
+                if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
+                    continue
+                modules.append(
+                    gen_batch_mla_module(
+                        backend,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                        torch.int32,
+                        512,
+                        64,
+                        False,
+                    )
+                )
+            warm_up_done = True
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
@@ -162,6 +178,7 @@ def concat_and_cast_mha_k_triton(
 
 class MlaFlashInferPrefillOp(object):
     _triton_compat_warned = False  # Class variable to track warning status
+    _k3_perf_wrapper_cache: dict[tuple[Any, ...], Any] = {}
 
     def __init__(
         self,
@@ -198,34 +215,94 @@ class MlaFlashInferPrefillOp(object):
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_kv_b_w).device,
+                # Workspace placement must not depend on DeepSeek-specific
+                # MLA projection keys.  Distributed startup has already set
+                # the current CUDA device for this rank.
+                device=torch.device("cuda", torch.cuda.current_device()),
             )
 
-        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            g_workspace_buffer,
-            "NHD",
-            backend="auto",
-            use_cuda_graph=False,
+        # 恒定开启:K3 两个 PD 角色的生产配置都启用了这批融合实现,精度已按这个
+        # 组合封版。原先的 KIMI_K3_PERF_FUSIONS 开关已删。
+        self._k3_cache_plan = True
+        self.prefill_wrapper = (
+            None
+            if self._k3_cache_plan
+            else BatchPrefillWithRaggedKVCacheWrapper(
+                g_workspace_buffer,
+                "NHD",
+                backend="auto",
+                use_cuda_graph=False,
+            )
         )
 
     def plan(self, mla_params: Any):
-        self.prefill_wrapper.plan(
-            mla_params.qo_indptr_d,
-            mla_params.prefill_ragged_kv_len_indptr_d,
-            self.num_heads,
-            self.num_heads,
-            self.qk_rope_head_dim + self.qk_nope_head_dim,
-            self.v_head_dim,
-            sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
-            * self.softmax_extra_scale,
-            causal=True,
-            q_data_type=torch.bfloat16,
-            kv_data_type=torch.bfloat16,
-        )
+        if self._k3_cache_plan:
+            qo_host = mla_params.qo_indptr_h
+            kv_host = mla_params.prefill_ragged_kv_len_indptr_h
+            signature = (
+                torch.cuda.current_device(),
+                tuple(int(value) for value in qo_host.tolist()),
+                tuple(int(value) for value in kv_host.tolist()),
+                self.num_heads,
+                self.qk_rope_head_dim + self.qk_nope_head_dim,
+                self.v_head_dim,
+                self.scale,
+                self.softmax_extra_scale,
+            )
+            cached_wrapper = self._k3_perf_wrapper_cache.get(signature)
+            if cached_wrapper is not None:
+                self.prefill_wrapper = cached_wrapper
+                self._k3_perf_plan_signature = signature
+            elif getattr(self, "_k3_perf_plan_signature", None) != signature:
+                if self.prefill_wrapper is None:
+                    self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                        g_workspace_buffer,
+                        "NHD",
+                        backend="auto",
+                        use_cuda_graph=False,
+                    )
+                self.prefill_wrapper.plan(
+                    mla_params.qo_indptr_d,
+                    mla_params.prefill_ragged_kv_len_indptr_d,
+                    self.num_heads,
+                    self.num_heads,
+                    self.qk_rope_head_dim + self.qk_nope_head_dim,
+                    self.v_head_dim,
+                    sm_scale=(
+                        1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5
+                    )
+                    * self.softmax_extra_scale,
+                    causal=True,
+                    q_data_type=torch.bfloat16,
+                    kv_data_type=torch.bfloat16,
+                )
+                self._k3_perf_wrapper_cache[signature] = self.prefill_wrapper
+                self._k3_perf_plan_signature = signature
+        else:
+            assert self.prefill_wrapper is not None
+            self.prefill_wrapper.plan(
+                mla_params.qo_indptr_d,
+                mla_params.prefill_ragged_kv_len_indptr_d,
+                self.num_heads,
+                self.num_heads,
+                self.qk_rope_head_dim + self.qk_nope_head_dim,
+                self.v_head_dim,
+                sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
+                * self.softmax_extra_scale,
+                causal=True,
+                q_data_type=torch.bfloat16,
+                kv_data_type=torch.bfloat16,
+            )
+        assert self.prefill_wrapper is not None
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d
-        self.total_kv_lens = mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
+        total_kv_lens_hint = getattr(self, "total_kv_lens_hint", None)
+        self.total_kv_lens = (
+            int(total_kv_lens_hint)
+            if total_kv_lens_hint is not None
+            else mla_params.prefill_ragged_kv_len_indptr_d[-1].item()
+        )
         self.block_table = mla_params.page_indice_d.unsqueeze(0)
         self.workspace_starts = torch.zeros(
             1, dtype=torch.int32, device=self.block_table.device
@@ -429,7 +506,11 @@ class MlaFlashInferDecodeOp(object):
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_vc).device,
+                # The workspace belongs to the decode indices, not to a
+                # model-specific projection weight.  Kimi K3 does not expose
+                # DeepSeek's ``mla_vc`` key, while ``kv_indices_d`` is already
+                # allocated on the correct CUDA rank.
+                device=self.kv_indices_d.device,
             )
 
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(
