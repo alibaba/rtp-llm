@@ -110,6 +110,7 @@ def _register_builtin_lazy_renderers() -> None:
     )
     register_lazy_renderer(["internvl"], "rtp_llm.openai.renderers.internvl_renderer")
     register_lazy_renderer(["kimi_k2"], "rtp_llm.openai.renderers.kimik2_renderer")
+    register_lazy_renderer(["kimi_k3"], "rtp_llm.openai.renderers.kimi_k3_renderer")
     register_lazy_renderer(["llava"], "rtp_llm.openai.renderers.llava_renderer")
     register_lazy_renderer(["minicpmv"], "rtp_llm.openai.renderers.minicpmv_renderer")
     register_lazy_renderer(

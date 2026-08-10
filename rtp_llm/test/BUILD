@@ -83,6 +83,18 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_renderer_test",
+    srcs = [
+        "kimi_k3_renderer_test.py",
+    ],
+    data = [],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",
