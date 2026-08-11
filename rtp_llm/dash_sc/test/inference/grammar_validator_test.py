@@ -225,6 +225,15 @@ class GrammarValidatorCompileExceptionTest(unittest.TestCase):
         self.assertFalse(retire_worker)
         self.assertEqual(message, str(error))
 
+    def test_compile_error_message_is_bounded(self) -> None:
+        status, retire_worker, message = _compile_exception_reply(
+            ValueError("x" * 2048)
+        )
+
+        self.assertIs(status, _WorkerStatus.INVALID)
+        self.assertFalse(retire_worker)
+        self.assertEqual(len(message), 1024)
+
 
 class GrammarValidatorSandboxTest(unittest.TestCase):
     def test_real_xgrammar_compiles_in_spawned_worker(self) -> None:

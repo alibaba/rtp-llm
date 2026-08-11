@@ -37,8 +37,7 @@ from rtp_llm.ops import GrammarConfig
 
 logger = logging.getLogger(__name__)
 
-_CRASH_CONFIRMATION_ATTEMPTS = 2
-_MAX_COMPILE_ERROR_MESSAGE_LENGTH = 4096
+_MAX_COMPILE_ERROR_MESSAGE_LENGTH = 1024
 
 
 class _WorkerStatus(Enum):
@@ -434,7 +433,6 @@ class GrammarValidator:
         checkout_deadline = time.monotonic() + self._queue_timeout_s
         queue_wait_s = 0.0
         last_error: Exception | None = None
-        crash_attempts = 0
         owned_worker: tuple[Any, Any] | None = None
         self._ensure_pool()
 
@@ -514,24 +512,14 @@ class GrammarValidator:
                 try:
                     reply = conn.recv()
                 except (EOFError, OSError, BrokenPipeError, ValueError) as e:
-                    crash_attempts += 1
                     retire_owned()
-                    if crash_attempts >= _CRASH_CONFIRMATION_ATTEMPTS:
-                        logger.warning(
-                            _with_request_id(
-                                "GrammarValidator: independent sandbox workers reproducibly "
-                                f"died compiling this spec ({e}); rejecting it"
-                            )
-                        )
-                        return False
                     logger.warning(
                         _with_request_id(
-                            "GrammarValidator: sandbox worker died compiling this spec; "
-                            "retrying once in an independent worker"
+                            "GrammarValidator: sandbox worker died compiling this spec "
+                            f"({e}); rejecting it"
                         )
                     )
-                    checkout_deadline = time.monotonic() + self._queue_timeout_s
-                    continue
+                    return False
 
                 if (
                     not isinstance(reply, tuple)
@@ -684,8 +672,8 @@ class GrammarValidator:
     def _worker_loop(self, conn: Any) -> None:
         """Spawned worker: announce its local compiler, then serve compile requests.
 
-        A bad-case compile may SIGSEGV this process; the parent confirms such crashes
-        independently before caching rejection.
+        A bad-case compile may SIGSEGV this process; the parent rejects that grammar
+        and replaces the worker.
         """
         if self._worker_memory_limit_bytes > 0:
             # RLIMIT_AS is absolute, so add the configured headroom to the spawned
