@@ -274,6 +274,7 @@ class HybridKVCacheSpecTest(TestCase):
             {
                 "vision_start_token_id": 1,
                 "vision_end_token_id": 2,
+                "vision_config": {},
                 "text_config": {
                     "intermediate_size": 256,
                     "num_attention_heads": 2,
@@ -314,6 +315,7 @@ class HybridKVCacheSpecTest(TestCase):
                 {
                     "vision_start_token_id": 1,
                     "vision_end_token_id": 2,
+                    "vision_config": {},
                     "text_config": {
                         "intermediate_size": 256,
                         "num_attention_heads": 2,
