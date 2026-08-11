@@ -126,15 +126,6 @@ class QWen3_VL(QwenV3):
             )
 
         config.attn_config.rope_config.style = 7
-        # Qwen3-VL interleaves T/H/W rotary pairs; the model default for a
-        # 128-dim rotary region is 24/20/20 (64 pairs total).
-        rope_scaling = config_json.get("rope_scaling", {})
-        if "mrope_section" not in rope_scaling:
-            logging.warning(
-                "Qwen3-VL config does not specify mrope_section; using the "
-                "upstream Qwen3-VL 128-dim fallback [24, 20, 20]"
-            )
-        mrope_section = rope_scaling.get("mrope_section", [24, 20, 20])
         apply_mrope_section(
             config.attn_config.rope_config,
             mrope_section,
