@@ -6,7 +6,10 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeDecoderLayer
+from rtp_llm.models_py.model_desc.generic_moe import (
+    GenericMoeDecoderLayer,
+    GenericMoeLayer,
+)
 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe import GLM5MegaMoE
 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8 import GLM5MegaMoEFP8
 from rtp_llm.models_py.modules.hybrid import glm5_cmp as bridge
@@ -56,7 +59,7 @@ def test_dense_cmp_requires_ue8m0_fp8_input() -> None:
         attn_config=SimpleNamespace(use_mla=True, kernel_tokens_per_block=64),
     )
     cmp.self_attn = SimpleNamespace(has_indexer=False)
-    cmp._has_moe = False
+    cmp._is_moe_layer = False
     cmp.mlp = SimpleNamespace(
         accepts_fp8_input=True,
         up_proj=SimpleNamespace(scale_ue8m0=True),
@@ -69,23 +72,20 @@ def test_dense_cmp_requires_ue8m0_fp8_input() -> None:
     )
 
 
-def _selection_cmp(*, has_indexer: bool, reuses_indexer: bool, has_moe: bool):
+def _selection_cmp(*, has_indexer: bool, reuses_indexer: bool, is_moe_layer: bool):
     cmp = object.__new__(bridge.Glm5Cmp)
     cmp._disabled_reason = None
-    cmp._has_moe = has_moe
+    cmp._is_moe_layer = is_moe_layer
     cmp.self_attn = SimpleNamespace(
         has_indexer=has_indexer,
         reuse_topk_indices=reuses_indexer,
-    )
-    cmp.mlp = SimpleNamespace(
-        fused_moe=SimpleNamespace(prepacked_input_views=lambda rows: object())
     )
     return cmp
 
 
 def test_model_execution_is_selected_once_for_all_layers() -> None:
-    full = _selection_cmp(has_indexer=True, reuses_indexer=False, has_moe=False)
-    main = _selection_cmp(has_indexer=False, reuses_indexer=True, has_moe=True)
+    full = _selection_cmp(has_indexer=True, reuses_indexer=False, is_moe_layer=False)
+    main = _selection_cmp(has_indexer=False, reuses_indexer=True, is_moe_layer=True)
     full._unsupported_call_reason = lambda *args: None
     layers = [
         SimpleNamespace(cmp=full),
@@ -96,10 +96,65 @@ def test_model_execution_is_selected_once_for_all_layers() -> None:
         layers, 2, torch.empty((16, 6144)), object(), kv_cache
     )
 
+    main._moe_prepack_disabled_reason = "unsupported activation layout"
+    assert bridge.should_enable_glm5_cmp(
+        layers, 2, torch.empty((16, 6144)), object(), kv_cache
+    )
+
     full._disabled_reason = "unsupported"
     assert not bridge.should_enable_glm5_cmp(
         layers, 2, torch.empty((16, 6144)), object(), kv_cache
     )
+
+
+def test_moe_prepacked_input_abi() -> None:
+    valid = (
+        torch.empty((16, 6144), dtype=torch.float8_e4m3fn),
+        torch.empty((16, 48), dtype=torch.int32),
+        torch.empty((16, 8), dtype=torch.int64),
+        torch.empty((16, 8), dtype=torch.float32),
+    )
+
+    def make_cmp(views):
+        cmp = object.__new__(bridge.Glm5Cmp)
+        cmp._is_moe_layer = True
+        cmp._moe_prepack_disabled_reason = None
+        cmp._moe_prepack_abi_validated = False
+        cmp.mlp = SimpleNamespace(
+            fused_moe=SimpleNamespace(prepacked_input_views=Mock(return_value=views))
+        )
+        return cmp
+
+    assert make_cmp(valid).moe_prepacked_input_views(16) == valid
+
+    invalid = (valid[0], valid[1].float(), valid[2], valid[3])
+    assert make_cmp(invalid).moe_prepacked_input_views(16) == (
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def test_fused_shared_expert_is_not_added_twice() -> None:
+    expected = torch.empty((6, 8), dtype=torch.bfloat16)
+    shared_expert = Mock(side_effect=AssertionError("shared expert ran twice"))
+    layer = SimpleNamespace(
+        fake_balance_expert=None,
+        fused_moe=SimpleNamespace(forward_prepacked=Mock(return_value=expected)),
+        _use_mega_moe_fused_shared=True,
+        shared_expert=shared_expert,
+    )
+
+    result = GenericMoeLayer.forward_prepacked(
+        layer,
+        torch.empty((6, 8), dtype=torch.bfloat16),
+        torch.empty((6, 8), dtype=torch.int64),
+        torch.empty((6, 8), dtype=torch.float32),
+    )
+
+    assert result is expected
+    shared_expert.assert_not_called()
 
 
 def test_integration_has_no_whole_attention_resource_cache() -> None:
@@ -138,34 +193,6 @@ def test_side_streams_are_shared_once_per_device(monkeypatch) -> None:
     ]
 
 
-def test_dense_post_norm_quant_calls_the_op_directly() -> None:
-    outputs = (
-        torch.empty((16, 6144)),
-        torch.empty((16, 6144)),
-        torch.empty((16, 6144), dtype=torch.float8_e4m3fn),
-        torch.empty((16, 12), dtype=torch.int32),
-    )
-    attention_output = torch.empty((16, 6144))
-    residual = torch.empty((16, 6144))
-    cmp = object.__new__(bridge.Glm5Cmp)
-    cmp.post_attention_layernorm = SimpleNamespace(
-        weight=SimpleNamespace(data=torch.empty(6144)),
-        variance_epsilon=1.0e-6,
-    )
-    runtime = Mock(add_norm_quant=Mock(return_value=outputs))
-    cmp.ops = runtime
-
-    result = cmp.add_norm_quant(attention_output, residual)
-
-    assert result is outputs
-    runtime.add_norm_quant.assert_called_once_with(
-        attention_output,
-        residual,
-        cmp.post_attention_layernorm.weight.data,
-        epsilon=1.0e-6,
-    )
-
-
 def test_decoder_forward_consumes_cmp_topk_before_flashmla() -> None:
     calls: list[str] = []
     topk_indices = torch.empty((16, 2048), dtype=torch.int32)
@@ -177,7 +204,14 @@ def test_decoder_forward_consumes_cmp_topk_before_flashmla() -> None:
     routed_weights = torch.empty((16, 8))
     cmp = SimpleNamespace(
         has_indexer=True,
-        has_moe=True,
+        moe_prepacked_input_views=Mock(
+            return_value=(
+                torch.empty((16, 6144), dtype=torch.float8_e4m3fn),
+                torch.empty((16, 48), dtype=torch.int32),
+                routed_indices,
+                routed_weights,
+            )
+        ),
         mla_prologue=Mock(
             side_effect=lambda *args: calls.append("pre")
             or (residual, query, topk_indices)
@@ -186,7 +220,7 @@ def test_decoder_forward_consumes_cmp_topk_before_flashmla() -> None:
             side_effect=lambda *args: calls.append("flashmla") or mla_output
         ),
         mla_post_moe_pre=Mock(
-            side_effect=lambda *args: calls.append("post")
+            side_effect=lambda *args, **kwargs: calls.append("post")
             or (moe_hidden, residual, routed_indices, routed_weights)
         ),
     )
@@ -214,26 +248,20 @@ def test_decoder_forward_consumes_cmp_topk_before_flashmla() -> None:
     assert result.topk_indices is topk_indices
 
 
-def test_dense_decoder_uses_post_norm_quant_and_returns_its_residual() -> None:
+def test_dense_decoder_uses_existing_mlp_path() -> None:
     topk_indices = torch.empty((16, 2048), dtype=torch.int32)
     mla_output = torch.empty((16, 64, 512))
     residual = torch.empty((16, 6144))
     query = torch.empty((16, 64, 576))
     attention_output = torch.empty((16, 6144))
     dense_residual = torch.empty((16, 6144))
-    dense_post = (
-        dense_residual,
-        torch.empty((16, 6144)),
-        torch.empty((16, 6144), dtype=torch.float8_e4m3fn),
-        torch.empty((16, 12), dtype=torch.int32),
-    )
+    normalized = torch.empty((16, 6144))
     cmp = SimpleNamespace(
         has_indexer=False,
-        has_moe=False,
+        moe_prepacked_input_views=Mock(return_value=(None, None, None, None)),
         mla_prologue=Mock(return_value=(residual, query, topk_indices)),
         sparse_mla=Mock(return_value=mla_output),
         mla_post_moe_pre=Mock(return_value=(attention_output, residual)),
-        add_norm_quant=Mock(return_value=dense_post),
     )
     mlp = Mock(return_value=torch.empty((16, 6144)))
     mlp.up_proj = SimpleNamespace(scale_ue8m0=True)
@@ -241,7 +269,9 @@ def test_dense_decoder_uses_post_norm_quant_and_returns_its_residual() -> None:
     torch.nn.Module.__init__(layer)
     layer.cmp = cmp
     layer.mlp = mlp
-    layer._fuse_post_norm_quant = True
+    layer.post_attention_layernorm = Mock(return_value=(normalized, dense_residual))
+    layer._fuse_post_norm_quant = False
+    layer._fuse_post_norm_quant_moe = False
 
     result = layer.forward(
         torch.empty((16, 6144)),
@@ -252,12 +282,8 @@ def test_dense_decoder_uses_post_norm_quant_and_returns_its_residual() -> None:
         enable_cmp=True,
     )
 
-    cmp.add_norm_quant.assert_called_once_with(attention_output, residual)
-    mlp.assert_called_once_with(
-        attention_output,
-        x_fp8=dense_post[2],
-        x_scale=dense_post[3],
-    )
+    layer.post_attention_layernorm.assert_called_once_with(attention_output, residual)
+    mlp.assert_called_once_with(normalized)
     assert result.residual is dense_residual
 
 
@@ -272,9 +298,7 @@ def test_sparse_mla_calls_rtp_flashmla_directly() -> None:
     cmp.layer_idx = 3
     cmp._attention_impl = Mock(return_value=implementation)
 
-    result = cmp.sparse_mla(
-        query, topk, object(), SimpleNamespace(kv_cache_base=cache)
-    )
+    result = cmp.sparse_mla(query, topk, object(), SimpleNamespace(kv_cache_base=cache))
 
     assert result is output
     flashmla.forward.assert_called_once_with(query, cache, topk, layer_id=3)
