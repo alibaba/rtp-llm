@@ -1,3 +1,5 @@
+load("//bazel:arch_select.bzl", "tokenspeed_mla_test_deps")
+
 # only can run in cu129 so mark as manual
 py_test(
     name = "sparse_mla_op_test",
@@ -35,4 +37,25 @@ py_test(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
+)
+
+py_test(
+    name = "tokenspeed_mla_impl_test",
+    srcs = ["tokenspeed_mla_impl_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
+py_test(
+    name = "tokenspeed_mla_decode_op_test",
+    srcs = ["tokenspeed_mla_decode_op_test.py"],
+    deps = [
+        "//rtp_llm:apache-tvm-ffi",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ] + tokenspeed_mla_test_deps(),
+    env = {"RTP_MLA_DECODE_KERNEL": "tokenspeed_mla"},
+    tags = ["manual"],
+    exec_properties = {'gpu': 'SM100'},
 )

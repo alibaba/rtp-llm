@@ -82,6 +82,10 @@ def whl_deps():
         "//conditions:default": ["torch==2.1.2"],
     })
 
+def tokenspeed_mla_test_deps():
+    # TokenSpeed is distributed only by the internal CUDA 13 dependency set.
+    return []
+
 def platform_deps():
     return select({
         "@//:using_arm": [],
