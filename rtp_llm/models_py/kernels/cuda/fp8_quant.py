@@ -93,7 +93,11 @@ def _transform_scale_ue8m0(sf, mn):
     import deep_gemm.utils.layout
 
     if not sf.is_cuda:
-        raise ValueError("UE8M0 scale packing requires a CUDA tensor")
+        # Legacy and force-CPU loading paths perform the weight conversion on
+        # the host. DeepGEMM's TMA layout packer is CUDA-only, so preserve the
+        # established compatibility behavior by moving just the small scale
+        # tensor to the active CUDA device before packing it.
+        sf = sf.to(device=torch.cuda.current_device())
     sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
     return deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
 
