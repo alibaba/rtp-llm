@@ -39,12 +39,19 @@ def _fetch_head_commit_date(repo, head_sha, github_token):
     return (((commit.get("commit") or {}).get("committer") or {}).get("date")) or ""
 
 
-def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
-    # type: (str, str, str, str, str) -> bool
-    """Check whether a fresh LGTM issue comment from *lgtm_user* exists.
+def parse_lgtm_users(lgtm_user):
+    # type: (str) -> set
+    """Parse a comma-separated ``--lgtm-user`` value into a set of logins."""
+    return {u.strip() for u in (lgtm_user or "").split(",") if u.strip()}
+
+
+def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user, pr_author=""):
+    # type: (str, str, str, str, str, str) -> bool
+    """Check whether a fresh LGTM issue comment from an *lgtm_user* exists.
 
     Freshness is defined as ``comment.updated_at >= head_commit.committer.date``
-    because issue comments have no ``commit_id`` field.
+    because issue comments have no ``commit_id`` field. Comments from the PR
+    author never qualify (no self-LGTM).
     """
     head_date = _fetch_head_commit_date(repo, head_sha, github_token)
     if not head_date:
@@ -56,6 +63,7 @@ def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgt
         "fetching issue comments for PR #%s" % pr_number, github_token,
     )
 
+    lgtm_users = parse_lgtm_users(lgtm_user)
     lgtm_phrase = "lgtm ready to ci"
     latest_match = None  # type: Any
     for comment in comments:
@@ -64,13 +72,14 @@ def _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgt
         user = (comment.get("user") or {}).get("login", "")
         body = (comment.get("body") or "").lower()
         updated_at = comment.get("updated_at", "")
-        if user == lgtm_user and lgtm_phrase in body and updated_at >= head_date:
+        if user in lgtm_users and user != pr_author and lgtm_phrase in body and updated_at >= head_date:
             if latest_match is None or updated_at > (latest_match.get("updated_at") or ""):
                 latest_match = comment
 
     if latest_match:
         log("PR #%s has fresh LGTM issue comment from %s (updated_at: %s >= commit: %s)"
-            % (pr_number, lgtm_user, latest_match.get("updated_at", ""), head_date))
+            % (pr_number, (latest_match.get("user") or {}).get("login", ""),
+               latest_match.get("updated_at", ""), head_date))
         return True
 
     log("PR #%s has no qualifying fresh issue comment" % pr_number)
@@ -98,15 +107,16 @@ def check_review_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
         log("PR #%s has a latest fresh APPROVED review" % pr_number)
         return True
 
+    lgtm_users = parse_lgtm_users(lgtm_user)
     lgtm_phrase = "lgtm ready to ci"
     for review in fresh:
         user = (review.get("user") or {}).get("login")
         body = (review.get("body") or "").lower()
-        if user == lgtm_user and review.get("state") == "COMMENTED" and lgtm_phrase in body:
-            log("PR #%s has latest fresh LGTM from %s" % (pr_number, lgtm_user))
+        if user in lgtm_users and review.get("state") == "COMMENTED" and lgtm_phrase in body:
+            log("PR #%s has latest fresh LGTM from %s" % (pr_number, user))
             return True
 
-    if _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user):
+    if _check_issue_comments_qualified(pr_number, repo, head_sha, github_token, lgtm_user, pr_author):
         return True
 
     log("PR #%s has no qualifying fresh review or issue comment" % pr_number)

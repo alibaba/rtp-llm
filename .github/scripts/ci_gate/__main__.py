@@ -26,7 +26,8 @@ def main(argv):
     check_review.add_argument("repository")
     check_review.add_argument("head_sha")
     check_review.add_argument("--github-token", required=True)
-    check_review.add_argument("--lgtm-user", default="LLLLKKKK")
+    check_review.add_argument("--lgtm-user", default="LLLLKKKK,netaddi",
+                              help="comma-separated logins allowed to LGTM")
 
     resolve = subparsers.add_parser("resolve-context")
     resolve.add_argument("--github-token", required=True)
@@ -39,7 +40,8 @@ def main(argv):
     resolve.add_argument("--event-pr-number", default="")
     resolve.add_argument("--event-clone-url", default="")
     resolve.add_argument("--output-file", default="")
-    resolve.add_argument("--lgtm-user", default="LLLLKKKK")
+    resolve.add_argument("--lgtm-user", default="LLLLKKKK,netaddi",
+                         help="comma-separated logins allowed to LGTM")
 
     check_merge_parser = subparsers.add_parser("check-merge")
     check_merge_parser.add_argument("pr_number")
