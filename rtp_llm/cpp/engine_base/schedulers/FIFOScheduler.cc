@@ -391,39 +391,15 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
     }
     const size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
 
-    // Batch group scheduling support:
-    // 1. Group completeness: force_batch streams with same batch_group_id are scheduled together
-    //    only when group size reaches batch_group_size
-    // 2. Timeout fallback: if batch_group_timeout expires, incomplete group is scheduled as normal
-    // 3. Batch isolation: each scheduling round handles only one type:
-    //    - normal streams, OR
-    //    - streams from a single force_batch group
-
-    struct GroupInfo {
-        int64_t first_arrival_time = 0;
-        int     count              = 0;
-    };
-    std::unordered_map<int64_t, GroupInfo> request_group_info;
-
-    int64_t now = autil::TimeUtility::currentTimeInMilliSeconds();
-
-    // Build group info statistics for force_batch streams
-    for (const auto& stream : waiting_streams) {
-        if (stream->isGroup()) {
-            auto& info = request_group_info[stream->groupId()];
-            if (info.count == 0) {
-                info.first_arrival_time = stream->enqueueTime() / 1000;
-            }
-            info.count++;
-        }
-    }
+    // Explicit groups are scheduled through enqueueGroup() and the dedicated group
+    // queues. group_id/group_size on a stream in waiting_streams are status metadata;
+    // they must not delay or isolate ordinary FIFO admission.
 
     ScheduleRuntime schedule_runtime;
 
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        auto  current     = it++;
-        auto& stream      = *current;
-        bool  force_batch = stream->isGroup();
+        auto  current = it++;
+        auto& stream  = *current;
 
         if (stream->hasError()) {
             auto state     = stream->getStatus();
@@ -440,40 +416,6 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
         if (max_batch_tokens_without_cache_ > 0
             && schedule_runtime.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_) {
             continue;
-        }
-
-        // Check if this stream can be scheduled based on batch group rules
-        if (force_batch) {
-            const auto group_id                 = stream->groupId();
-            const bool group_partially_admitted = partially_admitted_force_batch_group_ids_.find(group_id)
-                                                  != partially_admitted_force_batch_group_ids_.end();
-            auto& info = request_group_info[group_id];
-            // A partially admitted group remains complete even though its residual
-            // member count is smaller than the original batch_group_size.
-            if (!group_partially_admitted) {
-                if (now - info.first_arrival_time > stream->groupTimeout()) {
-                    force_batch = false;
-                } else if (info.count < stream->groupSize()) {
-                    // Group incomplete, skip this stream.
-                    continue;
-                }
-            }
-        }
-
-        // Batch isolation: force_batch streams and normal streams cannot mix in the same round.
-        // The first stream that makes scheduling progress determines the batch type for this round.
-        if (schedule_runtime.batch_type_selected) {
-            if (schedule_runtime.force_batch_group_id != -1) {
-                // Already in force_batch mode, only accept same group
-                if (!force_batch || stream->groupId() != schedule_runtime.force_batch_group_id) {
-                    continue;
-                }
-            } else {
-                // Already in normal mode, skip force_batch streams
-                if (force_batch) {
-                    continue;
-                }
-            }
         }
 
         // Check admission capacity and memory constraints.
@@ -505,14 +447,6 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
                                          || (new_state == StreamState::WAITING && (kv_initialized || load_initiated));
 
         if (scheduling_progress) {
-            if (!schedule_runtime.batch_type_selected) {
-                schedule_runtime.batch_type_selected = true;
-            }
-            if (schedule_runtime.force_batch_group_id == -1 && force_batch) {
-                schedule_runtime.force_batch_group_id = stream->groupId();
-                partially_admitted_force_batch_group_ids_.insert(schedule_runtime.force_batch_group_id);
-            }
-
             if (new_state == StreamState::RUNNING) {
                 ++schedule_runtime.admitted_running_stream_count;
                 schedule_runtime.admitted_prefill_token_size_with_cache += prefillTokenCostWithCache(stream);
@@ -530,20 +464,6 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
         if (new_state != state) {
             addStreamToNewState(stream, new_state);
             waiting_streams.erase(current);
-        }
-    }
-
-    for (auto group_it = partially_admitted_force_batch_group_ids_.begin();
-         group_it != partially_admitted_force_batch_group_ids_.end();) {
-        const auto group_id = *group_it;
-        const bool still_waiting =
-            std::any_of(waiting_streams.begin(), waiting_streams.end(), [group_id](const auto& stream) {
-                return stream->isGroup() && stream->groupId() == group_id;
-            });
-        if (still_waiting) {
-            ++group_it;
-        } else {
-            group_it = partially_admitted_force_batch_group_ids_.erase(group_it);
         }
     }
 }
