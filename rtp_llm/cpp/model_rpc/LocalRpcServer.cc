@@ -646,9 +646,13 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         }
         {
             py::gil_scoped_acquire acquire;
-            if (weight_manager_.is_none()) {
-                return {grpc::StatusCode::UNIMPLEMENTED,
-                        "UpdateWeights is not supported when NewModelLoader is enabled"};
+            if (!weight_manager_ || weight_manager_.is_none()) {
+                const std::string error_msg =
+                    "UpdateWeights is unavailable because no weight manager is configured";
+                RTP_LLM_LOG_WARNING("Reject update weights request from %s: %s",
+                                    context->peer().c_str(),
+                                    error_msg.c_str());
+                return {grpc::StatusCode::UNIMPLEMENTED, error_msg};
             }
             py::dict               req;
             req["name"]   = request->name();
