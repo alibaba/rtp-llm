@@ -175,6 +175,126 @@ class MLATest(TestCase):
             ):
                 self._run_mla_test(*params)
 
+    def test_kimi_k3_fused_sigmoid_topk(self):
+        torch.manual_seed(20260810)
+        num_tokens = 17
+        num_experts = 896
+        topk = 16
+        scale = 2.5
+        logits = torch.randn(
+            num_tokens,
+            num_experts,
+            dtype=torch.float32,
+            device="cuda",
+        )
+        bias = 0.1 * torch.randn(
+            num_experts,
+            dtype=torch.float32,
+            device="cuda",
+        )
+        scores = logits.sigmoid()
+        expected_ids = (scores + bias.unsqueeze(0)).topk(
+            topk, dim=-1, sorted=True
+        ).indices
+        expected_weights = scores.gather(1, expected_ids)
+        expected_weights = (
+            expected_weights
+            / (expected_weights.sum(dim=-1, keepdim=True) + 1e-20)
+            * scale
+        )
+
+        group_topk = GroupTopK()
+        self.assertTrue(
+            group_topk.fused_sigmoid_supported(
+                logits,
+                bias,
+                n_group=1,
+                topk_group=1,
+                topk=topk,
+            )
+        )
+        for index_dtype in (torch.int32, torch.int64):
+            with self.subTest(index_dtype=index_dtype):
+                actual_weights = torch.empty(
+                    num_tokens,
+                    topk,
+                    dtype=torch.float32,
+                    device="cuda",
+                )
+                actual_ids = torch.empty(
+                    num_tokens,
+                    topk,
+                    dtype=index_dtype,
+                    device="cuda",
+                )
+                group_topk.forward_fused_sigmoid(
+                    actual_weights,
+                    actual_ids,
+                    logits,
+                    bias,
+                    topk,
+                    True,
+                    scale,
+                )
+
+                torch.testing.assert_close(
+                    actual_ids.long(), expected_ids, rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    actual_weights,
+                    expected_weights,
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
+
+    def test_kimi_k3_fused_sigmoid_topk_near_boundary(self):
+        num_experts = 896
+        topk = 16
+        # Non-zero, all-distinct logits so sigmoid(logit) genuinely varies —
+        # a broken tanh/sigmoid computation can no longer pass by luck. The
+        # bias then compresses the top-16 boundary to ~1e-5 deterministically.
+        logits = torch.linspace(
+            -3.0, 3.0, num_experts, dtype=torch.float32, device="cuda"
+        ).unsqueeze(0)
+        scores = logits.sigmoid()
+        # Rank experts purely by an index-monotone bias so the selected set is
+        # deterministic, while keeping consecutive choice scores ~1e-5 apart.
+        bias = (
+            torch.arange(num_experts, dtype=torch.float32, device="cuda") * 1e-5
+            - scores.squeeze(0)
+        )
+        choice_scores = scores + bias.unsqueeze(0)
+        # Highest bias-index experts win; verify the boundary is genuinely tight.
+        expected_ids = choice_scores.topk(topk, dim=-1, sorted=True).indices
+        boundary = choice_scores.topk(topk + 1, dim=-1).values
+        self.assertLess(
+            float(boundary[0, topk - 1] - boundary[0, topk]), 5e-5
+        )
+        expected_weights = scores.gather(1, expected_ids)
+        expected_weights = expected_weights / (
+            expected_weights.sum(dim=-1, keepdim=True) + 1e-20
+        )
+        actual_weights = torch.empty_like(expected_weights)
+        actual_ids = torch.empty_like(expected_ids)
+
+        GroupTopK().forward_fused_sigmoid(
+            actual_weights,
+            actual_ids,
+            logits,
+            bias,
+            topk,
+            True,
+            1.0,
+        )
+
+        torch.testing.assert_close(actual_ids, expected_ids, rtol=0, atol=0)
+        torch.testing.assert_close(
+            actual_weights,
+            expected_weights,
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
 
 if __name__ == "__main__":
     main()

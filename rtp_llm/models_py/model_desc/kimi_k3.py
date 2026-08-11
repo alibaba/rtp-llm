@@ -53,6 +53,7 @@ from rtp_llm.models_py.model_desc.kimi_k3_cuda_graph_cache import (
     store_cuda_graph_decode_state,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
+from rtp_llm.models_py.modules.base import GroupTopK
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     create_write_cache_store_impl,
 )
@@ -75,8 +76,10 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
     fused_recurrent_kda,
+    is_kimi_k3_attn_res_supported,
     is_kimi_kda_short_conv_paged_decode_supported,
     kimi_k3_a2a_unpack_rms_norm_sigmoid_gate,
+    kimi_k3_attn_res,
     kimi_k3_interleave_tp_hidden,
     kimi_k3_pack_a2a_projection,
     kimi_k3_rms_norm_strided,
@@ -679,6 +682,11 @@ def _attention_residual(
     norm_weight: torch.Tensor,
     projection_weight: torch.Tensor,
     eps: float,
+    output_norm_weight: Optional[torch.Tensor] = None,
+    output_norm_eps: Optional[float] = None,
+    delta: Optional[torch.Tensor] = None,
+    num_blocks: Optional[int] = None,
+    block_write_idx: int = -1,
 ) -> torch.Tensor:
     """Exact K3 AttnRes soft selection over block anchors and prefix sum."""
 
@@ -694,24 +702,61 @@ def _attention_residual(
             f"prefix_sum={tuple(prefix_sum.shape)}, "
             f"block_residual={tuple(block_residual.shape)}"
         )
-    if _perf_fusions_enabled() and prefix_sum.is_cuda and block_residual.shape[1] == 1:
-        return kimi_k3_two_way_attn_res(
+    active_blocks = block_residual.shape[1] if num_blocks is None else int(num_blocks)
+    if active_blocks < 0 or active_blocks > block_residual.shape[1]:
+        raise ValueError("AttnRes valid block count is outside the residual bank")
+    if block_write_idx < -1 or block_write_idx >= block_residual.shape[1]:
+        raise ValueError("AttnRes block write index is outside the residual bank")
+    if _perf_fusions_enabled() and is_kimi_k3_attn_res_supported(
+        prefix_sum,
+        block_residual,
+        norm_weight,
+        projection_weight,
+        output_norm_weight,
+        delta,
+        active_blocks,
+        block_write_idx,
+    ):
+        return kimi_k3_attn_res(
             prefix_sum,
             block_residual,
             norm_weight,
             projection_weight,
             eps,
+            output_norm_weight,
+            output_norm_eps,
+            delta,
+            active_blocks,
+            block_write_idx,
         )
-    candidates = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
-    candidates_float = candidates.float()
-    normalized = candidates_float * torch.rsqrt(
-        candidates_float.square().mean(dim=-1, keepdim=True) + eps
-    )
-    score_weight = norm_weight.float() * projection_weight.reshape(-1).float()
-    probabilities = torch.softmax((normalized * score_weight).sum(dim=-1), dim=-1)
-    return torch.einsum("tb,tbd->td", probabilities, candidates_float).to(
-        dtype=prefix_sum.dtype
-    )
+    if delta is not None:
+        prefix_sum.add_(delta)
+    if block_write_idx >= 0:
+        block_residual[:, block_write_idx].copy_(prefix_sum)
+    if active_blocks == 0:
+        output = prefix_sum
+    else:
+        candidates = torch.cat(
+            (block_residual[:, :active_blocks], prefix_sum.unsqueeze(1)), dim=1
+        )
+        candidates_float = candidates.float()
+        normalized = candidates_float * torch.rsqrt(
+            candidates_float.square().mean(dim=-1, keepdim=True) + eps
+        )
+        score_weight = norm_weight.float() * projection_weight.reshape(-1).float()
+        probabilities = torch.softmax(
+            (normalized * score_weight).sum(dim=-1), dim=-1
+        )
+        output = torch.einsum("tb,tbd->td", probabilities, candidates_float).to(
+            dtype=prefix_sum.dtype
+        )
+    if output_norm_weight is not None:
+        if output_norm_eps is None:
+            raise ValueError(
+                "output_norm_eps is required when output RMSNorm is requested"
+            )
+        return _rms_norm(output, output_norm_weight, output_norm_eps)
+    return output
 
 
 def _sequence_offsets(
@@ -4023,6 +4068,16 @@ class KimiK3LatentMoE(nn.Module):
                 f"{self.latent_size}"
             )
         self.layer_idx = int(layer_idx)
+        # The gate is used only by this module. Replace the checkpoint BF16
+        # tensor once so Decode does not materialize 92 FP32 copies per step.
+        self.weights[K3W.MOE_GATE] = self.weights[K3W.MOE_GATE].float()
+        self.weights[K3W.MOE_CORRECTION_BIAS] = self.weights[
+            K3W.MOE_CORRECTION_BIAS
+        ].float()
+        self._group_topk = GroupTopK()
+        # Kill switch 恒定,不必在每个 Decode step 重解析环境变量;trace 模式仍
+        # 在 _route 里按请求判断,不能缓存到这里。
+        self._fused_router_enabled = _env_flag("KIMI_K3_FUSED_ROUTER", True)
         # K3 的 MoE 只有 DeepGEMM mega 一条生产路径。DeepEP 的 Torch 专家循环把
         # 选中的专家反量化成 BF16,93 层 Decode 首次使用即耗尽显存,所以那条分支
         # 连同它的开关一并删掉 —— 不是"默认走 mega",而是只有 mega。
@@ -4298,11 +4353,42 @@ class KimiK3LatentMoE(nn.Module):
 
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         router_weight = self.weights[K3W.MOE_GATE]
-        router_logits = _linear(hidden_states.float(), router_weight.float())
+        router_logits = _linear(hidden_states.float(), router_weight)
+        correction_bias = self.weights[K3W.MOE_CORRECTION_BIAS]
+        if (
+            self._fused_router_enabled
+            and accuracy_trace_mode() is None
+            and self._group_topk.fused_sigmoid_supported(
+                router_logits,
+                correction_bias,
+                self.num_expert_group,
+                self.topk_group,
+                self.top_k,
+            )
+        ):
+            expert_weights = torch.empty(
+                (hidden_states.shape[0], self.top_k),
+                dtype=torch.float32,
+                device=hidden_states.device,
+            )
+            expert_ids = torch.empty(
+                (hidden_states.shape[0], self.top_k),
+                dtype=torch.int64,
+                device=hidden_states.device,
+            )
+            self._group_topk.forward_fused_sigmoid(
+                expert_weights,
+                expert_ids,
+                router_logits,
+                correction_bias,
+                self.top_k,
+                self.renormalize,
+                self.routed_scaling_factor,
+            )
+            return expert_ids, expert_weights
+
         scores = torch.sigmoid(router_logits)
-        choice_scores = scores + self.weights[
-            K3W.MOE_CORRECTION_BIAS
-        ].float().unsqueeze(0)
+        choice_scores = scores + correction_bias.unsqueeze(0)
         if self.num_expert_group > 1 and self.num_expert_group > self.topk_group:
             grouped = choice_scores.reshape(
                 hidden_states.shape[0], self.num_expert_group, -1
@@ -5028,22 +5114,45 @@ class KimiK3DecoderLayer(nn.Module):
         if trace_enabled:
             record_accuracy_tensor(f"{trace_prefix}.input", hidden_states, token_dim=0)
         prefix_sum: Optional[torch.Tensor] = hidden_states
-        if block_residual.shape[1] > 0:
+        expected_previous_blocks = (
+            self.layer_idx + self.attn_res_block_size - 1
+        ) // self.attn_res_block_size
+        previous_blocks = min(expected_previous_blocks, block_residual.shape[1])
+        writes_block = self.layer_idx % self.attn_res_block_size == 0
+        block_write_idx = (
+            previous_blocks
+            if writes_block and block_residual.shape[1] > previous_blocks
+            else -1
+        )
+        attention_input: Optional[torch.Tensor] = None
+        if previous_blocks > 0 or block_write_idx >= 0:
             with _perf_profile(f"{trace_prefix}.self_attn_residual_mix", prefix_sum):
-                hidden_states = _attention_residual(
+                attention_input = _attention_residual(
                     prefix_sum,
                     block_residual,
                     self.weights[K3W.SELF_ATTN_RES_NORM],
                     self.weights[K3W.SELF_ATTN_RES_PROJ],
                     self.eps,
+                    self.weights[W.pre_ln_gamma],
+                    self.eps,
+                    num_blocks=previous_blocks,
+                    block_write_idx=block_write_idx,
                 )
-        if self.layer_idx % self.attn_res_block_size == 0:
-            block_residual = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
+        if writes_block:
+            if block_write_idx < 0:
+                block_residual = torch.cat(
+                    (block_residual, prefix_sum.unsqueeze(1)), dim=1
+                )
             prefix_sum = None
-        with _perf_profile(f"{trace_prefix}.attention_input_rmsnorm", hidden_states):
-            attention_input = _rms_norm(
-                hidden_states, self.weights[W.pre_ln_gamma], self.eps
-            )
+        active_blocks = previous_blocks + int(writes_block)
+        active_block_residual = block_residual[:, :active_blocks]
+        if attention_input is None:
+            with _perf_profile(
+                f"{trace_prefix}.attention_input_rmsnorm", hidden_states
+            ):
+                attention_input = _rms_norm(
+                    hidden_states, self.weights[W.pre_ln_gamma], self.eps
+                )
         if trace_enabled:
             record_accuracy_tensor(
                 f"{trace_prefix}.attention_input", attention_input, token_dim=0
@@ -5087,8 +5196,8 @@ class KimiK3DecoderLayer(nn.Module):
                     tp_size,
                     tp_rank,
                 )
-            block_residual, block_valid_tokens = _padded_token_shard(
-                block_residual,
+            active_block_residual, block_valid_tokens = _padded_token_shard(
+                active_block_residual,
                 logical_tokens,
                 tp_size,
                 tp_rank,
@@ -5099,26 +5208,46 @@ class KimiK3DecoderLayer(nn.Module):
                 raise RuntimeError(
                     "K3 Decode token-SP residual shards disagree on valid rows"
                 )
+        attention_delta: Optional[torch.Tensor] = None
         with _perf_profile(f"{trace_prefix}.attention_prefix_sum", attention_output):
-            prefix_sum = (
-                attention_output
-                if prefix_sum is None
-                else prefix_sum + attention_output
-            )
+            if prefix_sum is None:
+                prefix_sum = attention_output
+            elif (
+                not trace_enabled
+                and _perf_fusions_enabled()
+                and prefix_sum.is_cuda
+            ):
+                attention_delta = attention_output
+            else:
+                prefix_sum = prefix_sum + attention_output
+        mlp_input: Optional[torch.Tensor] = None
         with _perf_profile(f"{trace_prefix}.mlp_attn_residual_mix", prefix_sum):
-            mlp_input = _attention_residual(
-                prefix_sum,
-                block_residual,
-                self.weights[K3W.MLP_RES_NORM],
-                self.weights[K3W.MLP_RES_PROJ],
-                self.eps,
-            )
-        if trace_enabled:
+            if trace_enabled:
+                mlp_input = _attention_residual(
+                    prefix_sum,
+                    active_block_residual,
+                    self.weights[K3W.MLP_RES_NORM],
+                    self.weights[K3W.MLP_RES_PROJ],
+                    self.eps,
+                )
+            else:
+                normalized_mlp_input = _attention_residual(
+                    prefix_sum,
+                    active_block_residual,
+                    self.weights[K3W.MLP_RES_NORM],
+                    self.weights[K3W.MLP_RES_PROJ],
+                    self.eps,
+                    self.weights[W.post_ln_gamma],
+                    self.eps,
+                    attention_delta,
+                    active_blocks,
+                )
+        if mlp_input is not None:
             record_accuracy_tensor(f"{trace_prefix}.mlp_input", mlp_input, token_dim=0)
-        with _perf_profile(f"{trace_prefix}.mlp_input_rmsnorm", mlp_input):
-            normalized_mlp_input = _rms_norm(
-                mlp_input, self.weights[W.post_ln_gamma], self.eps
-            )
+            with _perf_profile(f"{trace_prefix}.mlp_input_rmsnorm", mlp_input):
+                normalized_mlp_input = _rms_norm(
+                    mlp_input, self.weights[W.post_ln_gamma], self.eps
+                )
         if trace_enabled:
             record_accuracy_tensor(
                 f"{trace_prefix}.normalized_mlp_input",
@@ -5142,15 +5271,12 @@ class KimiK3DecoderLayer(nn.Module):
                 output,
             ):
                 output = all_gather_trim(output, logical_tokens, group=Group.TP)
-                block_residual = all_gather_trim(
-                    block_residual,
-                    logical_tokens,
-                    group=Group.TP,
-                )
         if trace_enabled:
             record_accuracy_tensor(f"{trace_prefix}.output", output, token_dim=0)
             record_accuracy_tensor(
-                f"{trace_prefix}.block_residual", block_residual, token_dim=0
+                f"{trace_prefix}.block_residual",
+                block_residual[:, :active_blocks],
+                token_dim=0,
             )
         return output, block_residual
 
@@ -5178,6 +5304,12 @@ class KimiK3Model(GptModelBase):
             device_resource_config=device_resource_config,
         )
         self.embedding_weight = weights.get_global_weight(W.embedding)
+        self.attn_res_block_size = int(
+            model_config.k3_runtime_config.attn_res_block_size
+        )
+        self.num_attn_res_blocks = (
+            self.layer_num + self.attn_res_block_size - 1
+        ) // self.attn_res_block_size
         self.layers = nn.ModuleList(
             [
                 KimiK3DecoderLayer(
@@ -5503,7 +5635,9 @@ class KimiK3Model(GptModelBase):
                     prefill_sp_layout,
                 )
         block_residual = hidden_states.new_empty(
-            hidden_states.shape[0], 0, hidden_states.shape[1]
+            hidden_states.shape[0],
+            self.num_attn_res_blocks,
+            hidden_states.shape[1],
         )
         mode: KDAExecutionMode = "prefill" if attention_inputs.is_prefill else "decode"
         write_cache_store_impl = create_write_cache_store_impl(
@@ -5661,19 +5795,33 @@ class KimiK3Model(GptModelBase):
             self._mtp_hidden_buffer = mtp_hidden_buffer
             self._mtp_hidden_valid_tokens = self._mtp_hidden_buffer.size(0)
         with _perf_profile("model.output_attn_residual_mix", hidden_states):
-            hidden_states = _attention_residual(
-                hidden_states,
-                block_residual,
-                self.output_attn_res_norm,
-                self.output_attn_res_proj,
-                self.config.layernorm_eps,
-            )
+            active_block_residual = block_residual[:, : self.num_attn_res_blocks]
+            if trace_enabled:
+                output_attn_res = _attention_residual(
+                    hidden_states,
+                    active_block_residual,
+                    self.output_attn_res_norm,
+                    self.output_attn_res_proj,
+                    self.config.layernorm_eps,
+                )
+            else:
+                hidden_states = _attention_residual(
+                    hidden_states,
+                    active_block_residual,
+                    self.output_attn_res_norm,
+                    self.output_attn_res_proj,
+                    self.config.layernorm_eps,
+                    self.final_norm_weight,
+                    self.config.layernorm_eps,
+                )
         if trace_enabled:
-            record_accuracy_tensor("output_attn_res", hidden_states, token_dim=0)
-        with _perf_profile("model.final_rmsnorm", hidden_states):
-            hidden_states = _rms_norm(
-                hidden_states, self.final_norm_weight, self.config.layernorm_eps
-            )
+            record_accuracy_tensor("output_attn_res", output_attn_res, token_dim=0)
+            with _perf_profile("model.final_rmsnorm", output_attn_res):
+                hidden_states = _rms_norm(
+                    output_attn_res,
+                    self.final_norm_weight,
+                    self.config.layernorm_eps,
+                )
         if prefill_sp:
             assert prefill_sp_layout is not None
             with _perf_profile(

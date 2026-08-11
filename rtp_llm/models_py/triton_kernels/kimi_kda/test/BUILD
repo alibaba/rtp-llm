@@ -3,6 +3,19 @@ load("//bazel:arch_select.bzl", "requirement")
 requirement(["torch", "triton"])
 
 py_test(
+    name = "attn_res_test",
+    srcs = ["attn_res_test.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+    exec_properties = {"gpu": "B300"},
+    tags = ["B300"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
     name = "rms_norm_gate_test",
     srcs = ["rms_norm_gate_test.py"],
     deps = [

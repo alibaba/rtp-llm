@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2019-2024, NVIDIA CORPORATION.  All rights reserved.
  * Copyright (c) 2021, NAVER Corp.  Authored by CLOVA.
+ * Copyright contributors to the vLLM project.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -579,6 +580,112 @@ __global__ void group_idx_and_topk_idx_kernel(T*            scores,
 #endif
 }
 
+// Kimi K3 single-group router, adapted from vLLM's 896-expert/top-16 tier.
+template<typename IdxT>
+__global__ void fused_sigmoid_topk_kernel(float const* router_logits,
+                                          float const* correction_bias,
+                                          float*       topk_values,
+                                          IdxT*        topk_indices,
+                                          int64_t      num_experts,
+                                          int64_t      topk,
+                                          bool         renormalize,
+                                          float        routed_scaling_factor) {
+    constexpr int32_t kBlockSize = 256;
+    constexpr int32_t kNumWarps  = kBlockSize / WARP_SIZE;
+    constexpr int32_t kMaxTopK   = 16;
+    constexpr int32_t kMaxExperts = 896;
+    constexpr int32_t kExpertsPerWarp = (kMaxExperts + kNumWarps - 1) / kNumWarps;
+    constexpr int32_t kIntermediateCount = kNumWarps * kMaxTopK;
+
+    int32_t const token   = blockIdx.x;
+    int32_t const warp_id = threadIdx.x / WARP_SIZE;
+    int32_t const lane_id = threadIdx.x % WARP_SIZE;
+    float const* token_logits = router_logits + static_cast<int64_t>(token) * num_experts;
+
+    __shared__ float unbiased_scores[kMaxExperts];
+    __shared__ float intermediate_scores[kIntermediateCount];
+    __shared__ int32_t intermediate_indices[kIntermediateCount];
+
+    warp_topk::WarpSelect<WARP_SIZE, true, float, int32_t, true> worker_queue(topk, -INFINITY);
+    int32_t const worker_begin = warp_id * kExpertsPerWarp;
+    int32_t const worker_end   = min(worker_begin + kExpertsPerWarp, static_cast<int32_t>(num_experts));
+    int32_t const aligned_end  = warp_topk::round_up_to_multiple_of<WARP_SIZE>(worker_end - worker_begin)
+                                + worker_begin;
+    for (int32_t expert = worker_begin + lane_id; expert < aligned_end; expert += WARP_SIZE) {
+        float unbiased = 0.0f;
+        float selection = -INFINITY;
+        if (expert < worker_end) {
+            float const logit = token_logits[expert];
+            float const bias  = correction_bias[expert];
+            if (isfinite(logit) && isfinite(bias)) {
+                unbiased = 0.5f * tanhf(0.5f * logit) + 0.5f;
+                selection = unbiased + bias;
+                selection = selection == 0.0f ? 0.0f : selection;
+            }
+            unbiased_scores[expert] = unbiased;
+        }
+        worker_queue.add(selection, expert);
+    }
+    worker_queue.done();
+    worker_queue.dump(
+        intermediate_scores + warp_id * kMaxTopK,
+        intermediate_indices + warp_id * kMaxTopK);
+    __syncthreads();
+
+    warp_topk::WarpSelect<WARP_SIZE, true, float, int32_t, true> merge_queue(topk, -INFINITY);
+    if (warp_id == 0) {
+        for (int32_t candidate = lane_id; candidate < kIntermediateCount; candidate += WARP_SIZE) {
+            merge_queue.add(intermediate_scores[candidate], intermediate_indices[candidate]);
+        }
+    }
+    merge_queue.done();
+    if (warp_id == 0) {
+        merge_queue.dump(intermediate_scores, intermediate_indices);
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int32_t const expert = lane_id < topk ? intermediate_indices[lane_id] : -1;
+        float const unbiased = lane_id < topk && expert >= 0 && expert < num_experts ?
+                                   unbiased_scores[expert] :
+                                   0.0f;
+        cg::thread_block block = cg::this_thread_block();
+        cg::thread_block_tile<WARP_SIZE> tile = cg::tiled_partition<WARP_SIZE>(block);
+        float const sum = cg::reduce(tile, unbiased, cg::plus<float>());
+        if (lane_id < topk) {
+            float scale = routed_scaling_factor;
+            if (renormalize) {
+                scale /= sum + 1e-20f;
+            }
+            topk_values[static_cast<int64_t>(token) * topk + lane_id] = unbiased * scale;
+            topk_indices[static_cast<int64_t>(token) * topk + lane_id] = static_cast<IdxT>(expert);
+        }
+    }
+}
+
+template<typename IdxT>
+void invokeFusedSigmoidTopk(float const*       router_logits,
+                            float const*       correction_bias,
+                            float*             topk_values,
+                            IdxT*              topk_indices,
+                            int64_t const      num_tokens,
+                            int64_t const      num_experts,
+                            int64_t const      topk,
+                            bool               renormalize,
+                            double const       routed_scaling_factor,
+                            cudaStream_t const stream) {
+    fused_sigmoid_topk_kernel<IdxT><<<num_tokens, 256, 2048, stream>>>(router_logits,
+                                                                      correction_bias,
+                                                                      topk_values,
+                                                                      topk_indices,
+                                                                      num_experts,
+                                                                      topk,
+                                                                      renormalize,
+                                                                      static_cast<float>(
+                                                                          routed_scaling_factor));
+    check_cuda_error();
+}
+
 template<typename T, typename IdxT>
 void invokeNoAuxTc(T*                 scores,
                    T*                 group_scores,
@@ -650,6 +757,26 @@ void invokeNoAuxTc(T*                 scores,
 
 INSTANTIATE_NOAUX_TC(float, int32_t);
 INSTANTIATE_NOAUX_TC(float, int64_t);
+template void invokeFusedSigmoidTopk<int32_t>(float const*,
+                                              float const*,
+                                              float*,
+                                              int32_t*,
+                                              int64_t,
+                                              int64_t,
+                                              int64_t,
+                                              bool,
+                                              double,
+                                              cudaStream_t);
+template void invokeFusedSigmoidTopk<int64_t>(float const*,
+                                              float const*,
+                                              float*,
+                                              int64_t*,
+                                              int64_t,
+                                              int64_t,
+                                              int64_t,
+                                              bool,
+                                              double,
+                                              cudaStream_t);
 // INSTANTIATE_NOAUX_TC(half, int32_t);
 // #ifdef ENABLE_BF16
 // INSTANTIATE_NOAUX_TC(__nv_bfloat16, int32_t);
