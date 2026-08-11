@@ -1,9 +1,34 @@
+#include <exception>
 #include <mutex>
 #include <unordered_map>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+namespace {
+
+std::exception_ptr invokeWatchFuncs(
+    const std::vector<RequestBlockBuffer::WatchFunc>&             watch_funcs,
+    bool                                                          ok,
+    const std::vector<std::shared_ptr<BlockBuffer>>&              blocks,
+    std::exception_ptr                                            first_error = nullptr) {
+    for (const auto& watch_func : watch_funcs) {
+        if (!watch_func) {
+            continue;
+        }
+        try {
+            watch_func(ok, blocks);
+        } catch (...) {
+            if (!first_error) {
+                first_error = std::current_exception();
+            }
+        }
+    }
+    return first_error;
+}
+
+}  // namespace
 
 RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, const std::string& request_key):
     requestid_(requestid), request_key_(request_key) {}
@@ -14,8 +39,23 @@ RequestBlockBuffer::RequestBlockBuffer(const std::string& requestid, std::shared
 RequestBlockBuffer::~RequestBlockBuffer() {}
 
 void RequestBlockBuffer::notifyRequestDone() {
-    // request block buffer 关联的request已经结束，触发所有回调
-    triggerWatchFunc(false, {});
+    std::vector<WatchFunc> watch_funcs;
+    {
+        std::unique_lock<std::shared_mutex> lock(watch_func_mutex_);
+        if (request_done_) {
+            return;
+        }
+        request_done_              = true;
+        pending_done_watch_funcs_ = std::move(watch_funcs_);
+        if (active_watch_dispatches_ == 0) {
+            watch_funcs = std::move(pending_done_watch_funcs_);
+        }
+    }
+
+    auto callback_error = invokeWatchFuncs(watch_funcs, false, {});
+    if (callback_error) {
+        std::rethrow_exception(callback_error);
+    }
 }
 
 const std::string& RequestBlockBuffer::getRequestId() const {
@@ -97,10 +137,20 @@ bool RequestBlockBuffer::isValid() const {
 }
 
 bool RequestBlockBuffer::setWatchFunc(RequestBlockBuffer::WatchFunc&& watch_func) {
-    // set callback
+    bool request_done = false;
     {
         std::unique_lock<std::shared_mutex> lock(watch_func_mutex_);
-        watch_funcs_.push_back(watch_func);
+        request_done = request_done_;
+        if (!request_done) {
+            watch_funcs_.push_back(std::move(watch_func));
+        }
+    }
+
+    if (request_done) {
+        if (watch_func) {
+            watch_func(false, {});
+        }
+        return false;
     }
 
     // current blocks trigger once
@@ -121,20 +171,34 @@ bool RequestBlockBuffer::setWatchFunc(RequestBlockBuffer::WatchFunc&& watch_func
 void RequestBlockBuffer::triggerWatchFunc(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) {
     std::vector<WatchFunc> tmp_watch_funcs;
     {
-        std::shared_lock<std::shared_mutex> lock(watch_func_mutex_);
+        std::unique_lock<std::shared_mutex> lock(watch_func_mutex_);
+        if (request_done_) {
+            return;
+        }
         tmp_watch_funcs = watch_funcs_;
+        ++active_watch_dispatches_;
     }
 
-    for (auto watch_func : tmp_watch_funcs) {
-        if (watch_func) {
-            watch_func(ok, blocks);
+    auto callback_error = invokeWatchFuncs(tmp_watch_funcs, ok, blocks);
+
+    std::vector<WatchFunc> done_watch_funcs;
+    {
+        std::unique_lock<std::shared_mutex> lock(watch_func_mutex_);
+        --active_watch_dispatches_;
+        if (request_done_ && active_watch_dispatches_ == 0) {
+            done_watch_funcs = std::move(pending_done_watch_funcs_);
         }
+    }
+    callback_error = invokeWatchFuncs(done_watch_funcs, false, {}, callback_error);
+    if (callback_error) {
+        std::rethrow_exception(callback_error);
     }
 }
 
 std::string RequestBlockBuffer::debugInfo() const {
     std::ostringstream stream;
     stream << "request id: " << requestid_ << ", blocks count: " << getBlocksCount();
+    std::shared_lock<std::shared_mutex> lock(watch_func_mutex_);
     if (!watch_funcs_.empty()) {
         stream << ", has watch func";
     } else {

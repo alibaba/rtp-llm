@@ -50,7 +50,7 @@ public:
 
     bool isValid() const;
 
-    // change with true callback, dtor with false callback
+    // Block changes use true; request completion uses false.
     typedef std::function<void(bool ok, const std::vector<std::shared_ptr<BlockBuffer>>&)> WatchFunc;
     bool setWatchFunc(WatchFunc&& watch_func);
     void notifyRequestDone();
@@ -72,6 +72,9 @@ private:
 
     mutable std::shared_mutex watch_func_mutex_;
     std::vector<WatchFunc>    watch_funcs_;
+    std::vector<WatchFunc>    pending_done_watch_funcs_;
+    size_t                    active_watch_dispatches_{0};
+    bool                      request_done_{false};
 };
 
 }  // namespace rtp_llm
