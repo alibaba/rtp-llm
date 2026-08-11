@@ -2,8 +2,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
+from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
@@ -208,6 +211,114 @@ class KimiLinearNewLoaderTest(unittest.TestCase):
         self.assertEqual(model.layers[0].self_attn.conv1d.weight.shape, (24, 4))
         self.assertEqual(len(model._mla_kernel_layout.weights), 2)
         self.assertEqual(model._mla_kernel_layout.weights[0], {})
+
+    def test_mixed_cache_groups_route_kda_and_mla_per_layer(self):
+        class TaggedKVCache:
+            def __init__(self):
+                self.caches = [
+                    SimpleNamespace(tag="linear0"),
+                    SimpleNamespace(tag="full"),
+                ]
+
+            def get_layer_cache_groups(self, layer_idx):
+                return [self.caches[layer_idx]]
+
+            def get_layer_cache(self, layer_idx):
+                return self.caches[layer_idx]
+
+        class RecordingLayer(nn.Module):
+            def __init__(self, is_linear):
+                super().__init__()
+                self.is_linear = is_linear
+                self.seen = None
+                if not is_linear:
+                    self.self_attn = SimpleNamespace(
+                        _build_mla_kernel_weights=lambda: {"fake": object()}
+                    )
+
+            def forward(
+                self,
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                attention_inputs,
+                metadata,
+            ):
+                self.seen = SimpleNamespace(
+                    fmha_impl=fmha_impl,
+                    kv_cache=kv_cache,
+                    attention_inputs=attention_inputs,
+                    metadata=metadata,
+                )
+                return hidden_states, residual
+
+        class IdentityNorm(nn.Module):
+            def forward(self, hidden_states, residual):
+                return hidden_states, residual
+
+        model = KimiLinearForCausalLM(_model_config(self.tempdir.name), _load_config())
+        linear_layer = RecordingLayer(is_linear=True)
+        full_layer = RecordingLayer(is_linear=False)
+        model.embed_tokens = nn.Embedding(16, 8)
+        model.layers = nn.ModuleList([linear_layer, full_layer])
+        model.norm = IdentityNorm()
+        model.kv_cache = TaggedKVCache()
+        kernel_layout = object()
+        model._mla_kernel_layout = kernel_layout
+
+        full_block_map = torch.tensor([[11]], dtype=torch.int32)
+        linear_block_map = torch.tensor([[22]], dtype=torch.int32)
+        full_inputs = SimpleNamespace(
+            is_prefill=False,
+            is_target_verify=False,
+            kv_cache_kernel_block_id_device=full_block_map,
+        )
+        linear_inputs = SimpleNamespace(
+            is_prefill=False,
+            is_target_verify=False,
+            kv_cache_kernel_block_id_device=linear_block_map,
+        )
+        inputs = SimpleNamespace(
+            input_ids=torch.tensor([1, 2]),
+            attention_inputs={"full": full_inputs, "linear0": linear_inputs},
+        )
+
+        with patch(
+            "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
+            side_effect=lambda _config, _parallelism, weight, group_inputs, _fmha, _graph: SimpleNamespace(
+                weight=weight, group_inputs=group_inputs
+            ),
+        ) as factory:
+            fmha_impl = model.prepare_fmha_impl(inputs)
+
+        self.assertEqual(model._get_fmha_group_tags(), ["full"])
+        self.assertEqual(set(fmha_impl), {"full"})
+        self.assertIs(fmha_impl["full"].weight, kernel_layout)
+        self.assertIs(fmha_impl["full"].group_inputs, full_inputs)
+        factory.assert_called_once()
+
+        model._apply(lambda tensor: tensor)
+        self.assertIs(model.weight, model._mla_kernel_layout)
+        self.assertIsNot(model.weight, kernel_layout)
+
+        outputs = model.forward(inputs, fmha_impl)
+
+        self.assertEqual(outputs.hidden_states.shape, (2, 8))
+        self.assertIs(linear_layer.seen.attention_inputs, linear_inputs)
+        self.assertIs(
+            linear_layer.seen.attention_inputs.kv_cache_kernel_block_id_device,
+            linear_block_map,
+        )
+        self.assertIsNone(linear_layer.seen.fmha_impl)
+        self.assertEqual(linear_layer.seen.kv_cache.tag, "linear0")
+        self.assertIs(full_layer.seen.attention_inputs, full_inputs)
+        self.assertIs(
+            full_layer.seen.attention_inputs.kv_cache_kernel_block_id_device,
+            full_block_map,
+        )
+        self.assertIs(full_layer.seen.fmha_impl, fmha_impl["full"])
+        self.assertEqual(full_layer.seen.kv_cache.tag, "full")
 
     def test_unknown_and_missing_tensors_fail_fast(self):
         with self.subTest("unknown"):
