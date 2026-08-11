@@ -77,10 +77,10 @@ def validate_v_layout(
     page = attn_configs.kernel_tokens_per_block
     head = attn_configs.size_per_head
     width = _kv_vector_width(attn_configs)
-    # The prefill writer determines the physical V layout shared with decode.
-    # Linear V has no vector-width page requirement; only vectorized V does.
+    # The CK prefill reader reshapes every V page into page//width groups for
+    # both linear and vectorized V, so page must always be a multiple of width.
     prefill_vec = prefill_writes_vectorized_v(attn_configs, fmha_config)
-    if head % width or page <= 0 or (prefill_vec and page % width):
+    if head % width or page <= 0 or page % width:
         raise ValueError(f"invalid V geometry: {head=}, {page=}, {width=}")
     if attn_inputs.is_prefill:
         return
@@ -1310,11 +1310,19 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
         num_seqs, num_heads, head_size = query.shape
         block_size = value_cache.shape[2]
         output = self._get_output(query).view((num_seqs, num_heads, head_size))
-        if max_seq_len <= 16384 and (not using_fp8_kvcache) and head_size <= 128:
-            _PARTITION_SIZE_ROCM = 512
-            max_num_partitions = (
-                max_seq_len + _PARTITION_SIZE_ROCM - 1
-            ) // _PARTITION_SIZE_ROCM
+        use_512_partition = (
+            max_seq_len <= 16384 and (not using_fp8_kvcache) and head_size <= 128
+        )
+        _PARTITION_SIZE_ROCM = 512 if use_512_partition else 256
+        if _PARTITION_SIZE_ROCM % block_size:
+            raise ValueError(
+                f"page={block_size} must divide the non-ASM decode partition "
+                f"{_PARTITION_SIZE_ROCM}; enable --use_triton_pa 1"
+            )
+        max_num_partitions = (
+            max_seq_len + _PARTITION_SIZE_ROCM - 1
+        ) // _PARTITION_SIZE_ROCM
+        if use_512_partition:
             x = 16 // key_cache.element_size()
             grp_size = num_heads // num_kv_heads
             kv_sizes = value_cache.shape
@@ -1352,16 +1360,6 @@ class AiterDecodeAttnOpNonAsm(AiterDecodeAttnOpBase):
                 alibi_slopes,
             )
         else:
-            _PARTITION_SIZE_ROCM = 256
-
-            max_num_partitions = (
-                max_seq_len + _PARTITION_SIZE_ROCM - 1
-            ) // _PARTITION_SIZE_ROCM
-            if _PARTITION_SIZE_ROCM % block_size:
-                raise ValueError(
-                    f"page={block_size} must divide the non-ASM decode partition "
-                    f"{_PARTITION_SIZE_ROCM}; enable --use_triton_pa 1"
-                )
             # output already allocated above via _get_output(query); reuse it here.
             # init tmp_output
             tmp_output = torch.empty(
