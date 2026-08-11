@@ -25,6 +25,7 @@ public class ConfigService {
     private static final String PREFILL_TIME_FORMULA_ENV = "PREFILL_TIME_FORMULA";
     private static final String TRAFFIC_POLICY_CONFIG_ENV = "TRAFFIC_POLICY_CONFIG";
     private static final String TRAFFIC_POLICY_CONFIG_FILE_ENV = "TRAFFIC_POLICY_CONFIG_FILE";
+    private static final String STRATEGY_CONFIGS_ENV = "STRATEGY_CONFIGS";
 
     /**
      * Critical config fields whose parse failures must abort startup (fail-fast)
@@ -57,6 +58,7 @@ public class ConfigService {
     private static final Set<String> DEPRECATED_ENV_VARS = Set.of("FLEXLB_BATCH_ENABLED", "ENABLE_QUEUEING");
 
     private final FlexlbConfig flexlbConfig;
+    private final StrategyConfigs strategyConfigs;
 
     public ConfigService() {
         this(System.getenv());
@@ -82,6 +84,8 @@ public class ConfigService {
         applyTrafficPolicyOverride(config, environment);
         applyPrefillFormulaOverride(config, environment);
 
+        this.strategyConfigs = loadStrategyConfigs(environment);
+
         warnDeprecatedEnvVars();
         warnUnmatchedEnvVars(environment);
 
@@ -100,6 +104,26 @@ public class ConfigService {
 
     public FlexlbConfig loadBalanceConfig() {
         return flexlbConfig;
+    }
+
+    private StrategyConfigs loadStrategyConfigs(Map<String, String> environment) {
+        String strategyConfigsStr = environment.get(STRATEGY_CONFIGS_ENV);
+
+        StrategyConfigs configs;
+        if (StringUtils.isNotBlank(strategyConfigsStr)) {
+            log.warn("STRATEGY_CONFIGS = {}", strategyConfigsStr);
+            configs = JsonUtils.toObjectOrNull(strategyConfigsStr, StrategyConfigs.class);
+            if (configs == null) {
+                log.warn("Failed to parse STRATEGY_CONFIGS, use default strategy configs");
+                configs = new StrategyConfigs();
+            }
+        } else {
+            log.debug("STRATEGY_CONFIGS is not set, use default strategy configs");
+            configs = new StrategyConfigs();
+        }
+
+        configs.normalize();
+        return configs;
     }
 
     public synchronized void updateTrafficPolicy(TrafficPolicyConfig trafficPolicy) {
