@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/api_server/common/HealthService.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpRouter.h"
+#include "rtp_llm/cpp/api_server/test/mock/MockChatRender.h"
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {
@@ -37,6 +39,41 @@ TEST_F(HttpApiServerTest, testApiServerStart) {
     ASSERT_EQ(server.getListenAddr(), addr);
     server.stop();
     ASSERT_TRUE(server.isStoped());
+}
+
+TEST_F(HttpApiServerTest, MissingRendererDoesNotExposeChatRoutes) {
+    ASSERT_EQ(server_->render_, nullptr);
+    EXPECT_EQ(server_->chat_service_, nullptr);
+
+    const auto& router = server_->http_server_->_router;
+    ASSERT_NE(router, nullptr);
+    EXPECT_FALSE(router->FindRoute("POST", "/chat/completions").has_value());
+    EXPECT_FALSE(router->FindRoute("POST", "/v1/chat/completions").has_value());
+    EXPECT_FALSE(router->FindRoute("POST", "/chat/render").has_value());
+    EXPECT_FALSE(router->FindRoute("POST", "/v1/chat/render").has_value());
+
+    EXPECT_TRUE(router->FindRoute("GET", "/health").has_value());
+    EXPECT_TRUE(router->FindRoute("POST", "/tokenizer/encode").has_value());
+    EXPECT_TRUE(router->FindRoute("POST", "/").has_value());
+    EXPECT_TRUE(router->FindRoute("POST", "/inference_internal").has_value());
+}
+
+TEST(HttpApiServerRendererTest, ConfiguredRendererExposesChatRoutes) {
+    const auto        port = autil::NetUtil::randomPort();
+    const std::string addr = "tcp:0.0.0.0:" + std::to_string(port);
+    EngineInitParams  params;
+    HttpApiServer     server(nullptr, nullptr, addr, params, py::none());
+    server.render_ = std::make_shared<::testing::NiceMock<MockChatRender>>();
+
+    ASSERT_TRUE(server.start());
+    ASSERT_NE(server.chat_service_, nullptr);
+    const auto& router = server.http_server_->_router;
+    ASSERT_NE(router, nullptr);
+    EXPECT_TRUE(router->FindRoute("POST", "/chat/completions").has_value());
+    EXPECT_TRUE(router->FindRoute("POST", "/v1/chat/completions").has_value());
+    EXPECT_TRUE(router->FindRoute("POST", "/chat/render").has_value());
+    EXPECT_TRUE(router->FindRoute("POST", "/v1/chat/render").has_value());
+    server.stop();
 }
 
 TEST_F(HttpApiServerTest, testApiServerStop) {

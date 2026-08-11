@@ -196,6 +196,11 @@ bool HttpApiServer::registerTokenizerService() {
 }
 
 bool HttpApiServer::registerChatService() {
+    if (!render_) {
+        RTP_LLM_LOG_INFO("chat renderer is not configured, skip chat service routes");
+        return true;
+    }
+
     chat_service_.reset(new ChatService(
         engine_, mm_processor_, request_counter_, tokenizer_, render_, params_.model_config_, metric_reporter_));
     auto chat_completions_callback = [active_request_count = active_request_count_,
