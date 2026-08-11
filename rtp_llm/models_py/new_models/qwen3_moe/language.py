@@ -58,7 +58,9 @@ class Qwen3MoeBlock(RtpModule):
             output_size=num_experts,
             tp_size=1,
             tp_rank=0,
-            quant_config=quant_config,
+            # Router logits determine expert selection and must remain in the
+            # checkpoint dtype. Quantization is only applied to expert weights.
+            quant_config=None,
             prefix=f"{prefix}.gate",
             bias=False,
             params_dtype=params_dtype,
