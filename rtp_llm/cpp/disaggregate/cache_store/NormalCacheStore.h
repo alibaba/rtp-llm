@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
 #include "autil/ThreadPool.h"
 
+#include <chrono>
 #include <memory>
 
 namespace rtp_llm {
@@ -61,6 +62,11 @@ public:
     const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override;
 
 private:
+    using LoadClock    = std::chrono::steady_clock;
+    using LoadDeadline = LoadClock::time_point;
+
+    static bool getRemainingTimeoutMs(LoadDeadline deadline, LoadDeadline now, uint32_t& remaining_timeout_ms);
+
     bool init(const CacheStoreInitParams& params);
     void runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              value,
                       CacheStoreStoreDoneCallback                             callback,
@@ -71,7 +77,7 @@ private:
                      const std::string&                                           ip,
                      uint32_t                                                     port,
                      uint32_t                                                     rdma_port,
-                     uint32_t                                                     timeout_ms,
+                     LoadDeadline                                                 deadline,
                      const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collelctor,
                      int                                                          partition_count,
                      int                                                          partition_id);

@@ -4,9 +4,31 @@
 
 #include "autil/LockFreeThreadPool.h"
 
+#include <chrono>
 #include <cstring>
+#include <limits>
 
 namespace rtp_llm {
+
+bool NormalCacheStore::getRemainingTimeoutMs(LoadDeadline deadline,
+                                             LoadDeadline now,
+                                             uint32_t&    remaining_timeout_ms) {
+    const auto remaining = deadline - now;
+    if (remaining <= LoadClock::duration::zero()) {
+        remaining_timeout_ms = 0;
+        return false;
+    }
+
+    auto rounded_ms = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
+    if (std::chrono::duration_cast<LoadClock::duration>(rounded_ms) < remaining) {
+        ++rounded_ms;
+    }
+    constexpr auto kMaxTimeoutMs = static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
+    remaining_timeout_ms = rounded_ms.count() >= kMaxTimeoutMs ?
+                               std::numeric_limits<uint32_t>::max() :
+                               static_cast<uint32_t>(rounded_ms.count());
+    return true;
+}
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
@@ -162,6 +184,7 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                             uint32_t                                   timeout_ms,
                             int                                        partition_count,
                             int                                        partition_id) {
+    const auto deadline = LoadClock::now() + std::chrono::milliseconds(timeout_ms);
     if (request_block_buffer == nullptr || !request_block_buffer->isValid() || ip.empty()) {
         RTP_LLM_LOG_WARNING("normal cache store run load failed, invalid params");
         callback(false, CacheStoreErrorCode::InvalidParams);
@@ -171,6 +194,17 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
     if (port == 0 || (memory_util_->isRdmaMode() && rdma_port == 0)) {
         RTP_LLM_LOG_WARNING("normal cache store run load failed, port is 0");
         callback(false, CacheStoreErrorCode::InvalidParams);
+        return;
+    }
+
+    uint32_t remaining_timeout_ms = 0;
+    if (!getRemainingTimeoutMs(deadline, LoadClock::now(), remaining_timeout_ms)) {
+        RTP_LLM_LOG_WARNING("normal cache store load deadline expired before admission for request id [%s]",
+                            request_block_buffer->getRequestId().c_str());
+        auto collector = std::make_shared<CacheStoreClientLoadMetricsCollector>(
+            metrics_reporter_, request_block_buffer->getBlocksCount(), request_block_buffer->getBlocksSize());
+        collector->markEnd(false);
+        callback(false, CacheStoreErrorCode::LoadBufferTimeout);
         return;
     }
 
@@ -188,15 +222,15 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                  ip,
                  port,
                  rdma_port,
-                 timeout_ms,
+                 deadline,
                  collector,
                  partition_count,
                  partition_id]() {
         this->runLoadTask(
-            request_block_buffer, callback, ip, port, rdma_port, timeout_ms, collector, partition_count, partition_id);
+            request_block_buffer, callback, ip, port, rdma_port, deadline, collector, partition_count, partition_id);
     };
 
-    if (thread_pool_->pushTask(task) != autil::ThreadPoolBase::ERROR_NONE) {
+    if (thread_pool_->pushTask(task, false) != autil::ThreadPoolBase::ERROR_NONE) {
         RTP_LLM_LOG_WARNING("normal cache store push load task for request id [%s] to thread pool failed",
                             request_block_buffer->getRequestId().c_str());
         collector->markEnd(false);
@@ -210,13 +244,22 @@ void NormalCacheStore::runLoadTask(const std::shared_ptr<RequestBlockBuffer>&   
                                    const std::string&                                           ip,
                                    uint32_t                                                     port,
                                    uint32_t                                                     rdma_port,
-                                   uint32_t                                                     timeout_ms,
+                                   std::chrono::steady_clock::time_point                        deadline,
                                    const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
                                    int                                                          partition_count,
                                    int                                                          partition_id) {
     collector->markTaskRun();
+    uint32_t remaining_timeout_ms = 0;
+    if (!getRemainingTimeoutMs(deadline, LoadClock::now(), remaining_timeout_ms)) {
+        RTP_LLM_LOG_WARNING("normal cache store load task timed out in queue for request id [%s]",
+                            request_block_buffer->getRequestId().c_str());
+        collector->markEnd(false);
+        callback(false, CacheStoreErrorCode::LoadBufferTimeout);
+        return;
+    }
+
     auto load_request = std::make_shared<LoadRequest>(
-        ip, port, rdma_port, request_block_buffer, callback, timeout_ms, partition_count, partition_id);
+        ip, port, rdma_port, request_block_buffer, callback, remaining_timeout_ms, partition_count, partition_id);
     messager_->load(load_request, collector);
 }
 

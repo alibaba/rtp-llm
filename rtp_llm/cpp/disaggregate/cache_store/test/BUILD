@@ -33,7 +33,10 @@ cc_library(
 
 cc_test(
     name = "cache_store_gtest",
-    srcs = glob(["*.cpp"], exclude = test_base_sources),
+    srcs = glob(
+        ["*.cpp"],
+        exclude = test_base_sources + ["NormalCacheStoreLoadAdmissionTest.cpp"],
+    ),
     deps = [
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
         ":cache_store_test_base",
@@ -48,3 +51,17 @@ cc_test(
     exec_properties = {'gpu':'H20'},
 )
 
+cc_test(
+    name = "normal_cache_store_load_admission_test",
+    srcs = ["NormalCacheStoreLoadAdmissionTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {
+        "CACHE_STORE_RDMA_MODE": "0",
+    },
+    copts = ["-fno-access-control"] + copts(),
+)
