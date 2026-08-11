@@ -77,10 +77,10 @@ SEND_MODE_QPS="${SEND_MODE_QPS:-}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
 # Load client implementation switch (single env, no multi-layer override):
-# python (default) keeps the historical flexlb_load_client.py path untouched;
-# java starts JavaLoadClient via run_java_load_client so SEND_MODE and
-# SEND_MODE_QPS are effective end to end.
-LOAD_CLIENT_IMPL="${LOAD_CLIENT_IMPL:-python}"
+# java (default) starts JavaLoadClient via run_java_load_client so SEND_MODE
+# and SEND_MODE_QPS are effective end to end; python is the explicit fallback
+# to the historical flexlb_load_client.py path (replay only).
+LOAD_CLIENT_IMPL="${LOAD_CLIENT_IMPL:-java}"
 if [[ "${LOAD_CLIENT_IMPL}" != "python" && "${LOAD_CLIENT_IMPL}" != "java" ]]; then
   echo "Unsupported LOAD_CLIENT_IMPL=${LOAD_CLIENT_IMPL}; expected python or java" >&2
   exit 1
