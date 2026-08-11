@@ -1392,8 +1392,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             const bool disable_sp_prefill_by_env   = kDisableSpPrefillCudaGraphByEnv;
             const bool force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv;
             const bool draft_uses_mega_moe         = params.moe_config.moe_strategy == "mega_moe"
+                                             || params.moe_config.moe_strategy == "mega_moe_se"
                                              || params.moe_config.moe_strategy == "mega_moe_fused"
                                              || mtp_params->moe_config.moe_strategy == "mega_moe"
+                                             || mtp_params->moe_config.moe_strategy == "mega_moe_se"
                                              || mtp_params->moe_config.moe_strategy == "mega_moe_fused";
             const bool draft_uses_ep_collective =
                 params.parallelism_config.ep_size > 1 || mtp_params->parallelism_config.ep_size > 1;

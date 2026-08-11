@@ -56,8 +56,9 @@ def _apply_mega_moe_fp4_wrappers(
         fallback: legacy ``experts.*.weight_scale`` keys): replace with
         :class:`OfflineMegaMoeFp4MoeWeight` (direct load; scale key is
         ``.scale`` for UE8M0 or ``.weight_scale`` for float32).
-        ``MOE_STRATEGY=mega_moe_fused`` additionally wraps shared experts as
-        FP8 per-block (:class:`OfflineMegaMoeFp8SharedExpertWeight`);
+        ``MOE_STRATEGY=mega_moe_se`` or ``mega_moe_fused`` additionally wraps
+        shared experts as FP8 per-block
+        (:class:`OfflineMegaMoeFp8SharedExpertWeight`);
         ``MOE_STRATEGY=mega_moe`` leaves shared experts on the normal FFN path.
       - ``MoeAtomicWeight`` (BF16 ckpt): wrap with
         :class:`OnlineMegaMoeFp4Weight` (BF16 → FP4).

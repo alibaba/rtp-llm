@@ -29,12 +29,7 @@ from rtp_llm.model_loader.weight_module import (
     WeightModule,
 )
 from rtp_llm.utils.database import BaseDatabase
-from rtp_llm.utils.model_weight import (
-    CkptWeightInfo,
-    W,
-    concat_0,
-    identity,
-)
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
 
 _MEGA_MOE_KERNEL_NAMES = (W.moe_w1, W.moe_w2)
 _SHARED_EXPERT_KERNEL_NAMES = (W.ffn_w13, W.ffn_w2)
@@ -278,16 +273,16 @@ class OfflineMegaMoeFp8SharedExpertWeight(CompositeWeight, QuantWeight):
                 f"ffn_tp_size=1, got tp_size={load_config.tp_size}, "
                 f"ffn_tp_size={load_config.ffn_tp_size}"
             )
-        split_kernel = self.kernel._split(
-            {self.kernel.name: tensor[self.kernel.name]}, load_config
-        )
-        split_scale = self.scale._split(
-            {self.scale.name: tensor[self.scale.name]}, load_config
-        )
-        out: Dict[str, torch.Tensor] = {}
-        out.update(split_kernel)
-        out.update(split_scale)
-        return out
+        # The fused shared expert is replicated on every EP/DP rank.  Generic
+        # FfnAtomicWeight splitting keys off ep_size/dp_size too, and would run
+        # ffn_sp_neg1_w13 even though ffn_tp_size is one.  Besides needlessly
+        # rebuilding an already-full tensor, that path calls torch.cat on the
+        # UE8M0 scale, which CUDA does not implement.  Keep both tensors intact;
+        # routed experts are still sharded by their separate MoE loader.
+        return {
+            self.kernel.name: tensor[self.kernel.name],
+            self.scale.name: tensor[self.scale.name],
+        }
 
     def _postprocess(self, tensor, device: str, load_config: LoadConfig):
         return {
@@ -308,8 +303,7 @@ import re as _re
 # FP4 MoE and FP8 linears — those must not be used for FP4 detection (all-FP8
 # ckpts share the same ``.scale`` suffix); rely on ``expert_dtype`` instead.
 _OFFLINE_FP4_SCALE_RE = _re.compile(
-    r"model\.layers\.\d+\.mlp\.experts\.\d+\."
-    r"(gate|up|down)_proj\.weight_scale$"
+    r"model\.layers\.\d+\.mlp\.experts\.\d+\." r"(gate|up|down)_proj\.weight_scale$"
 )
 
 
@@ -376,9 +370,9 @@ def wrap_shared_expert_for_offline_fp4(
 ) -> WeightModule:
     """Replace shared-expert FFN weights with the offline FP8 per-block loader.
 
-    ``mega_moe_fused`` consumes the shared expert as FP8 e4m3 per-block weights
-    (``deep_gemm.fp8_fp4_mega_moe_fused``); FP4 shared-expert weights are no
-    longer supported.
+    ``mega_moe_se`` consumes the shared expert as FP8 e4m3 per-block weights
+    through the unified ``deep_gemm.fp8_fp4_mega_moe`` optional-shared API.
+    The legacy ``mega_moe_fused`` strategy uses the same checkpoint contract.
     """
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 
@@ -403,8 +397,8 @@ def wrap_for_offline_fp4(
 ) -> WeightModule:
     """Replace offline FP4 MoE weights, optionally including shared experts.
 
-    ``mega_moe`` only consumes routed expert weights. ``mega_moe_fused``
-    also wraps shared-expert FP8 per-block weights.
+    ``mega_moe`` only consumes routed expert weights. ``mega_moe_se`` and
+    ``mega_moe_fused`` also wrap shared-expert FP8 per-block weights.
     """
     wrapped = wrap_moe_for_offline_fp4(weight, scale_dtype=scale_dtype)
     if wrapped is not weight or not include_shared_expert:
