@@ -124,6 +124,7 @@ cc_library(
         ":context_parallel_interface",
         "//:rtp_compute_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_input_utils",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
