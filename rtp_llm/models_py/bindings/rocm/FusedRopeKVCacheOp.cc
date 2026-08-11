@@ -39,26 +39,6 @@ void validateMropeConfig(const AttentionConfigs& attn_configs) {
     }
 }
 
-void validateMropePositionIds(const RopeConfig&    rope_config,
-                              const torch::Tensor& position_ids,
-                              int64_t              token_num,
-                              const char*          where) {
-    if (rope_config.style != RopeStyle::Mrope) {
-        return;
-    }
-    if (!position_ids.defined() || position_ids.numel() == 0) {
-        throw std::runtime_error(std::string("MRoPE ") + where
-                                 + " requires combo_position_ids but it is undefined or empty");
-    }
-    const int64_t min_expected = token_num * static_cast<int64_t>(rope_config.index_factor);
-    if (position_ids.numel() < min_expected) {
-        throw std::runtime_error(std::string("MRoPE ") + where + " combo_position_ids too small: got "
-                                 + std::to_string(position_ids.numel()) + ", expected at least "
-                                 + std::to_string(min_expected) + " (token_num=" + std::to_string(token_num)
-                                 + ", index_factor=" + std::to_string(rope_config.index_factor) + ")");
-    }
-}
-
 }  // namespace
 
 static at::ScalarType get_fp8_dtype() {
@@ -629,7 +609,6 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
     const int size_per_head     = attn_configs_.size_per_head;
     const int token_num         = qkv.size(0);
     const int batch_size        = params->sequence_lengths.size(0);
-    validateMropePositionIds(attn_configs_.rope_config, params->position_ids, token_num, "decode");
     torch::Tensor q_output = torch::empty({token_num, local_head_num, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
     validateMropePositionIds(
