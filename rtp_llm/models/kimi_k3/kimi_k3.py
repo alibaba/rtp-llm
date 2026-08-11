@@ -36,6 +36,10 @@ class KimiK3ModelConfig(ModelConfig):
     _python_fields = ModelConfig._python_fields | {"k3_runtime_config"}
     k3_runtime_config: KimiK3RuntimeConfig
 
+    def disables_framework_deepep_moe(self) -> bool:
+        """K3 MegaMoE performs dispatch/combine through symmetric memory."""
+        return True
+
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]
     ) -> None:

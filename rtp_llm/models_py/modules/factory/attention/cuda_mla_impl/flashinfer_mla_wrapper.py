@@ -345,7 +345,7 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         # K3 的 Prefill 恒走 FlashMLA(见 MlaFlashMLAPrefillImpl),所以这条
-        # FlashInfer Prefill 实现不再被选中。原先由 KIMI_K3_MLA_BACKEND 决定。
+        # K3 Prefill 不选择 FlashInfer 实现。
         return False
 
     def _handle_long_sequence(
@@ -478,7 +478,7 @@ class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # Prefill 按 PD 角色恒走 FlashMLA,不再由 KIMI_K3_MLA_BACKEND 传入。
+        # Prefill 按 PD 角色固定走 FlashMLA。
         return (
             attn_configs.use_mla
             and not attn_configs.is_sparse

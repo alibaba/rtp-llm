@@ -1,7 +1,7 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/bf214ca22625e311a2c4c0dfbf7af19128f4919c/vllm/distributed/device_communicators/symm_mem.py
 import logging
 import math
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import torch
 import torch.distributed as dist
@@ -31,6 +31,7 @@ try:
     if torch.cuda.is_available() and torch.version.cuda:
         torch_symm_mem_available = True
 except ImportError:
+    torch_symm_mem = None
     torch_symm_mem_available = False
 
 
@@ -269,3 +270,38 @@ def get_symm_mem_communicator() -> Optional[TorchSymmMemCommunicator]:
     """Get or initialize TorchSymmMemCommunicator (lazy initialization)."""
     global _symm_mem_comm
     return _symm_mem_comm
+
+
+def reserve_fused_all_gather_matmul_workspace(
+    group: ProcessGroup,
+    min_size_bytes: int,
+) -> None:
+    """Allocate and rendezvous the process-lifetime fused AG-GEMM workspace."""
+
+    if not torch_symm_mem_available:
+        raise RuntimeError("PyTorch symmetric memory is unavailable")
+    torch_symm_mem.get_symm_mem_workspace(
+        group.group_name,
+        min_size=min_size_bytes,
+    )
+
+
+def fused_all_gather_matmul(
+    local_a: torch.Tensor,
+    weights: Sequence[torch.Tensor],
+    group: ProcessGroup,
+    *,
+    return_gathered: bool,
+) -> tuple[Optional[torch.Tensor], list[torch.Tensor]]:
+    """Execute PyTorch's dim-0 symmetric-memory AllGather/GEMM operator."""
+
+    if not hasattr(torch.ops.symm_mem, "fused_all_gather_matmul"):
+        raise RuntimeError("PyTorch fused symmetric-memory AG-GEMM is unavailable")
+    gathered, outputs = torch.ops.symm_mem.fused_all_gather_matmul(
+        local_a,
+        list(weights),
+        0,
+        group.group_name,
+        return_A=return_gathered,
+    )
+    return gathered, list(outputs)

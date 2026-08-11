@@ -119,10 +119,6 @@ class KimiK3WeightNames:
     # KDA linear-attention weights migrated to the shared ``W.linear_attn_*``
     # vocabulary (see ``_kda_weights``); no K3-private keys remain for them.
 
-    DENSE_GATE = "kimi_k3.dense.gate"
-    DENSE_UP = "kimi_k3.dense.up"
-    DENSE_DOWN = "kimi_k3.dense.down"
-
     MOE_GATE = "kimi_k3.moe.gate"
     MOE_CORRECTION_BIAS = "kimi_k3.moe.correction_bias"
     MOE_ROUTED_DOWN = "kimi_k3.moe.routed_down"
@@ -614,11 +610,10 @@ class KimiK3Weight(ModelDeployWeightInfo):
         )
 
     def _dense_weights(self) -> List[WeightModule]:
-        n = KimiK3WeightNames
         return [
-            self._linear(n.DENSE_GATE, "mlp.gate_proj.weight", split_func=ffn_sp_neg1),
-            self._linear(n.DENSE_UP, "mlp.up_proj.weight", split_func=ffn_sp_neg1),
-            self._linear(n.DENSE_DOWN, "mlp.down_proj.weight", split_func=ffn_sp_0),
+            self._linear(W.ffn_w1, "mlp.gate_proj.weight", split_func=ffn_sp_neg1),
+            self._linear(W.ffn_w3, "mlp.up_proj.weight", split_func=ffn_sp_neg1),
+            self._linear(W.ffn_w2, "mlp.down_proj.weight", split_func=ffn_sp_0),
         ]
 
     def _moe_weights(self) -> List[WeightModule]:

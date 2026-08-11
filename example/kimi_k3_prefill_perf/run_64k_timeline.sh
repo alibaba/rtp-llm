@@ -24,11 +24,9 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 python_bin="${PYTHON_BIN:-/opt/conda310/bin/python3}"
 checkpoint="${CHECKPOINT_PATH:-/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight}"
 start_port="${START_PORT:-27188}"
-kda_comm_backend="${KIMI_K3_KDA_COMM_BACKEND:-rs_ag}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
-# KDA 通信只有 rs_ag 一种实现,原先的 KIMI_K3_KDA_COMM_BACKEND 入口已删。
 kda_comm_backend=rs_ag
-kda_backend="${KIMI_K3_KDA_BACKEND:-cula}"
+kda_backend=cula
 # Prefill 恒走 FlashMLA(模型按 PD 角色决定),这里只用于拼路径名。
 mla_backend=flashmla
 run_root="${RUN_ROOT:-${HOME}/kimi_k3_perf_runs/${timestamp}-k3-${kda_comm_backend}-${kda_backend}-${mla_backend}-mega-64k}"
@@ -36,11 +34,6 @@ ops_overlay="${run_root}/runtime/ops"
 server_log="${run_root}/launcher.log"
 server_target="//example/kimi_k3_prefill_perf:kimi_k3_prefill_server"
 server_pid=""
-
-if [[ "${kda_backend}" != "cula" ]]; then
-  echo "KIMI_K3_KDA_BACKEND must be cula, got ${kda_backend}" >&2
-  exit 2
-fi
 
 cleanup() {
   if [[ -n "${server_pid}" ]] && kill -0 "${server_pid}" 2>/dev/null; then
@@ -73,10 +66,6 @@ if [[ ! -f "${checkpoint}/config.json" ]]; then
   echo "4-layer checkpoint not found: ${checkpoint}" >&2
   exit 2
 fi
-if [[ "${kda_comm_backend}" != "rs_ag" ]]; then
-  echo "KIMI_K3_KDA_COMM_BACKEND must be rs_ag for the fused-prefix layout" >&2
-  exit 2
-fi
 if curl --silent --fail "http://127.0.0.1:${start_port}/health" >/dev/null 2>&1; then
   echo "port ${start_port} already serves a healthy process; refusing to replace it" >&2
   exit 2
@@ -91,9 +80,8 @@ rm -rf "${ops_overlay}"
   --no-deps --target "${ops_overlay}" \
   "${script_dir}/wheels/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl"
 
-KDA_BACKEND="${kda_backend}" PYTHONPATH="${ops_overlay}" "${python_bin}" - <<'PY'
+PYTHONPATH="${ops_overlay}" "${python_bin}" - <<'PY'
 import inspect
-import os
 
 import deep_gemm
 import torch
@@ -110,8 +98,6 @@ if torch.cuda.get_device_capability(0) != (10, 3):
         f"operator wheels target sm_103a, got "
         f"{torch.cuda.get_device_capability(0)}"
     )
-if os.environ["KDA_BACKEND"] != "cula":
-    raise RuntimeError(f"unsupported KDA backend {os.environ['KDA_BACKEND']!r}")
 print("cuLA/FLA=provided by the Bazel dependency set")
 required = {"activation_beta", "activation_linear_beta", "fast_math"}
 missing = required.difference(
@@ -167,9 +153,6 @@ export OPS_OVERLAY="${ops_overlay}"
 export CHECKPOINT_PATH="${checkpoint}"
 export START_PORT="${start_port}"
 export PYTHON_BIN="${python_bin}"
-export KIMI_K3_KDA_BACKEND="${kda_backend}"
-export KIMI_K3_KDA_COMM_BACKEND="${kda_comm_backend}"
-
 setsid "${script_dir}/launch_prefill_server.sh" >"${server_log}" 2>&1 &
 server_pid=$!
 echo "${server_pid}" >"${run_root}/service.pid"

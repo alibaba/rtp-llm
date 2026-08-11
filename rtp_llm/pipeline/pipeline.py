@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import queue
 import threading
 from dataclasses import asdict
@@ -44,58 +43,6 @@ from rtp_llm.utils.word_util import (
 )
 
 request_counter = AtomicCounter()
-_KIMI_K3_ACCURACY_INPUT_IDS_FIELD = "kimi_k3_accuracy_input_ids"
-_KIMI_K3_ACCURACY_PROMPT = "<kimi-k3-accuracy-input-ids>"
-
-
-def _resolve_prompt_token_ids(
-    tokenizer: BaseTokenizer,
-    prompt: str,
-    kwargs: Dict[str, Any],
-) -> List[int]:
-    """Resolve text or the explicitly enabled K3 pretokenized probe input."""
-
-    accuracy_ids = kwargs.pop(_KIMI_K3_ACCURACY_INPUT_IDS_FIELD, None)
-    if accuracy_ids is None:
-        if len(prompt) == 0:
-            raise FtRuntimeException(
-                ExceptionType.EMPTY_PROMPT_ERROR,
-                "prompt should have at least one token!",
-            )
-        if type(prompt) is not str:
-            raise FtRuntimeException(
-                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                "expect string prompt, actual: " + str(prompt),
-            )
-        return [int(token_id) for token_id in tokenizer.encode(prompt)]
-
-    if os.environ.get("KIMI_K3_ACCURACY_ALLOW_TOKEN_IDS") != "1":
-        raise FtRuntimeException(
-            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-            "pretokenized K3 accuracy input is disabled",
-        )
-    if prompt != _KIMI_K3_ACCURACY_PROMPT:
-        raise FtRuntimeException(
-            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-            "pretokenized K3 accuracy input requires its fixed sentinel prompt",
-        )
-    if not isinstance(accuracy_ids, list) or not accuracy_ids:
-        raise FtRuntimeException(
-            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-            "pretokenized K3 accuracy input must be a non-empty list",
-        )
-    if any(type(token_id) is not int for token_id in accuracy_ids):
-        raise FtRuntimeException(
-            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-            "pretokenized K3 accuracy input must contain only integer token ids",
-        )
-    vocab_size = len(tokenizer)
-    if any(token_id < 0 or token_id >= vocab_size for token_id in accuracy_ids):
-        raise FtRuntimeException(
-            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-            f"pretokenized K3 accuracy input contains an id outside [0,{vocab_size})",
-        )
-    return list(accuracy_ids)
 
 
 class Pipeline(object):
@@ -259,7 +206,17 @@ class Pipeline(object):
             else []
         )
 
-        token_ids = _resolve_prompt_token_ids(self.tokenizer, prompt, kwargs)
+        if len(prompt) == 0:
+            raise FtRuntimeException(
+                ExceptionType.EMPTY_PROMPT_ERROR,
+                "prompt should have at least one token!",
+            )
+        if type(prompt) is not str:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "expect string prompt, actual: " + str(prompt),
+            )
+        token_ids = self.tokenizer.encode(prompt)
 
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(

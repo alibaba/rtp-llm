@@ -222,7 +222,7 @@ class MlaFlashInferPrefillOp(object):
             )
 
         # 恒定开启:K3 两个 PD 角色的生产配置都启用了这批融合实现,精度已按这个
-        # 组合封版。原先的 KIMI_K3_PERF_FUSIONS 开关已删。
+        # 组合封版后直接使用融合实现。
         self._k3_cache_plan = True
         self.prefill_wrapper = (
             None

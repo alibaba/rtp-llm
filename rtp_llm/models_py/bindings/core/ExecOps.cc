@@ -144,34 +144,6 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
 // CacheStore (cache_store passed explicitly from KVCacheManager)
 // ============================================================
 
-namespace {
-
-// One switch drives every K3 diagnostic log stream; KIMI_K3_PD_TRACE_LOG_ENABLE
-// used to gate only this one.
-bool kimiK3PdTraceLogEnabled() {
-    const char* value = std::getenv("KIMI_K3_DEBUG");
-    return value != nullptr && std::string(value) == "1";
-}
-
-std::string cacheStoreBlockKeysForTrace(const std::shared_ptr<RequestBlockBuffer>& request_blocks) {
-    std::vector<std::string> keys;
-    keys.reserve(request_blocks->getBlocksCount());
-    for (const auto& [key, _] : request_blocks->getBlocks()) {
-        keys.push_back(key);
-    }
-    std::sort(keys.begin(), keys.end());
-    std::ostringstream stream;
-    for (size_t i = 0; i < keys.size(); ++i) {
-        if (i != 0) {
-            stream << ",";
-        }
-        stream << keys[i];
-    }
-    return stream.str();
-}
-
-}  // namespace
-
 void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             const KvCacheInfo&          kv_cache,
                             bool                        mla_kvcache,
@@ -450,17 +422,6 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
         if (request_blocks->getBlocksCount() > 0) {
-            if (kimiK3PdTraceLogEnabled()) {
-                RTP_LLM_LOG_INFO("[K3_PD_TRACE] event=cache_store_publish request_id=%ld layer=%d gid=%d region=%d "
-                                 "blocks=%zu bytes=%zu keys=%s",
-                                 request_id,
-                                 param.layer_id,
-                                 gid,
-                                 static_cast<int>(param.region_name),
-                                 request_blocks->getBlocksCount(),
-                                 request_blocks->getBlocksSize(),
-                                 cacheStoreBlockKeysForTrace(request_blocks).c_str());
-            }
             cache_store->store(request_blocks, storeCallback);
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",

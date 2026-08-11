@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, patch
@@ -7,6 +6,9 @@ import torch
 from torch import nn
 
 import rtp_llm.models_py.model_desc.kimi_k3 as kimi_k3
+import rtp_llm.models_py.modules.factory.linear.parallel as sequence_parallel
+import rtp_llm.models_py.modules.kimi_k3.kda as kimi_k3_kda
+import rtp_llm.models_py.modules.kimi_k3.mla as kimi_k3_mla
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.model_desc.kimi_k3 import (
     KimiK3DecoderLayer,
@@ -95,7 +97,7 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         self,
     ) -> None:
         module = self._packed_kda_stub(8)
-        layout = kimi_k3._token_shard_layout(9, 8, 0)
+        layout = sequence_parallel.token_shard_layout(9, 8, 0)
         local_hidden = torch.randn(2, 16, dtype=torch.bfloat16)
         projected = torch.randn(
             9,
@@ -104,9 +106,9 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         )
 
         with patch.object(
-            kimi_k3,
-            "_prefill_all_gather_matmul",
-            return_value=projected,
+            kimi_k3_kda,
+            "all_gather_matmul",
+            return_value=[projected],
         ) as project:
             outputs = module._project_fused_kda_inputs(
                 local_hidden,
@@ -115,9 +117,9 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
 
         project.assert_called_once_with(
             local_hidden,
-            module.kda_fused_w,
-            tp_size=8,
+            [module.kda_fused_w],
             logical_tokens=9,
+            use_fused=False,
         )
         for output in outputs:
             self.assertEqual(output.shape[0], 9)
@@ -126,7 +128,9 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         module = KimiK3MLA.__new__(KimiK3MLA)
         nn.Module.__init__(module)
         module._sp_prefill_input_is_sharded = True
-        module._sp_prefill_layout_for_forward = kimi_k3._token_shard_layout(3, 2, 0)
+        module._sp_prefill_layout_for_forward = sequence_parallel.token_shard_layout(
+            3, 2, 0
+        )
         module.attn_tp_size = 2
         module.q_lora_rank = 3
         module.kv_lora_rank = 2
@@ -136,32 +140,24 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         module._mla_backend = "kernel"
         module.use_output_gate = True
         module.attn_tp_rank = 0
-        module._accuracy_full_weight_cache = {}
         packed_weight = torch.randn(5, 14)
         module._packed_qkv_gate_w = packed_weight
         module.weights = {W.mla_fusedqkrope_w: packed_weight}
         local_input = torch.randn(2, 5)
         projected = torch.randn(3, 14)
 
-        with (
-            patch.dict(
-                os.environ,
-                {"KIMI_K3_TENSOR_DUMP": ""},
-                clear=False,
-            ),
-            patch.object(
-                kimi_k3,
-                "_prefill_all_gather_matmul",
-                return_value=projected,
-            ) as project,
-        ):
+        with patch.object(
+            kimi_k3_mla,
+            "all_gather_matmul",
+            return_value=[projected],
+        ) as project:
             actual_qkv_a, actual_gate = module._project_qkv_a_input(local_input)
 
         project.assert_called_once_with(
             local_input,
-            packed_weight,
-            tp_size=2,
+            [packed_weight],
             logical_tokens=3,
+            use_fused=False,
         )
         torch.testing.assert_close(actual_qkv_a, projected[:, :6], rtol=0, atol=0)
         torch.testing.assert_close(actual_gate, projected[:, 6:], rtol=0, atol=0)
@@ -172,24 +168,21 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         output = torch.empty((65536, 1))
         group = SimpleNamespace(group_name="tp-test")
         with (
-            patch.dict(
-                os.environ,
-                {"KIMI_K3_FUSED_AG_GEMM": "force"},
-                clear=False,
-            ),
-            patch.object(kimi_k3, "get_process_group", return_value=group),
             patch.object(
-                kimi_k3,
+                sequence_parallel, "get_process_group", return_value=group
+            ),
+            patch.object(
+                sequence_parallel,
                 "fused_all_gather_matmul",
                 return_value=(None, [output]),
             ) as fused,
         ):
-            actual = kimi_k3._prefill_all_gather_matmul(
+            actual = sequence_parallel.all_gather_matmul(
                 local_input,
-                weight,
-                tp_size=8,
+                [weight],
                 logical_tokens=65536,
-            )
+                use_fused=True,
+            )[0]
 
         fused.assert_called_once_with(
             local_input,
@@ -204,42 +197,37 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         gathered_input = torch.randn(4, 3)
         weight = torch.randn(3, 5)
         with (
-            patch.dict(
-                os.environ,
-                {"KIMI_K3_FUSED_AG_GEMM": "force"},
-                clear=False,
-            ),
             patch.object(
-                kimi_k3,
+                sequence_parallel,
+                "get_process_group",
+                return_value=SimpleNamespace(),
+            ),
+            patch("torch.distributed.get_world_size", return_value=2),
+            patch.object(
+                sequence_parallel,
                 "all_gather_into",
                 return_value=gathered_input,
             ) as gather,
-            patch.object(kimi_k3, "fused_all_gather_matmul") as fused,
+            patch.object(sequence_parallel, "fused_all_gather_matmul") as fused,
         ):
-            actual = kimi_k3._prefill_all_gather_matmul(
+            actual = sequence_parallel.all_gather_matmul(
                 local_input,
-                weight,
-                tp_size=2,
+                [weight],
                 logical_tokens=4,
-            )
+                use_fused=False,
+            )[0]
 
-        gather.assert_called_once_with(local_input, ANY, kimi_k3.Group.TP)
+        gather.assert_called_once_with(local_input, ANY, sequence_parallel.Group.TP)
         fused.assert_not_called()
         torch.testing.assert_close(actual, torch.mm(gathered_input, weight))
 
     def test_auto_policy_starts_at_32k_global_tokens(self) -> None:
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "KIMI_K3_FUSED_AG_GEMM": "auto",
-                    "KIMI_K3_TENSOR_DUMP": "",
-                },
-                clear=False,
-            ),
-        ):
-            self.assertFalse(kimi_k3._use_fused_prefill_ag_gemm(32767))
-            self.assertTrue(kimi_k3._use_fused_prefill_ag_gemm(32768))
+        self.assertFalse(
+            sequence_parallel.should_use_fused_all_gather_matmul(32767)
+        )
+        self.assertTrue(
+            sequence_parallel.should_use_fused_all_gather_matmul(32768)
+        )
 
     def test_padded_shards_cover_logical_tokens_for_tp2_tp4_tp8(self) -> None:
         for tp_size in (2, 4, 8):
@@ -249,12 +237,12 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
                 shards = []
                 valid_tokens = 0
                 for tp_rank in range(tp_size):
-                    layout = kimi_k3._token_shard_layout(
+                    layout = sequence_parallel.token_shard_layout(
                         logical_tokens,
                         tp_size,
                         tp_rank,
                     )
-                    shards.append(kimi_k3._prefill_token_shard(source, layout))
+                    shards.append(sequence_parallel.shard_tokens(source, layout))
                     valid_tokens += layout.local_valid_tokens
 
                 gathered = torch.cat(shards)
@@ -279,25 +267,21 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         group = SimpleNamespace(group_name="tp-test")
         with (
             patch.object(
-                kimi_k3,
-                "_use_fused_prefill_ag_gemm",
-                return_value=True,
-            ) as use_fused,
-            patch.object(kimi_k3, "get_process_group", return_value=group),
+                sequence_parallel, "get_process_group", return_value=group
+            ),
             patch.object(
-                kimi_k3,
+                sequence_parallel,
                 "fused_all_gather_matmul",
                 return_value=(None, [physical_output]),
             ),
         ):
-            actual = kimi_k3._prefill_all_gather_matmul(
+            actual = sequence_parallel.all_gather_matmul(
                 local_input,
-                weight,
-                tp_size=8,
+                [weight],
                 logical_tokens=logical_tokens,
-            )
+                use_fused=True,
+            )[0]
 
-        use_fused.assert_called_once_with(32768)
         self.assertEqual(actual.shape, (logical_tokens, 1))
         torch.testing.assert_close(
             actual,
@@ -312,22 +296,23 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         weight = torch.randn(3, 5)
         with (
             patch.object(
-                kimi_k3,
-                "_use_fused_prefill_ag_gemm",
-                return_value=False,
+                sequence_parallel,
+                "get_process_group",
+                return_value=SimpleNamespace(),
             ),
+            patch("torch.distributed.get_world_size", return_value=2),
             patch.object(
-                kimi_k3,
+                sequence_parallel,
                 "all_gather_into",
                 return_value=gathered_input,
             ),
         ):
-            actual = kimi_k3._prefill_all_gather_matmul(
+            actual = sequence_parallel.all_gather_matmul(
                 local_input,
-                weight,
-                tp_size=2,
+                [weight],
                 logical_tokens=3,
-            )
+                use_fused=False,
+            )[0]
 
         torch.testing.assert_close(
             actual,
@@ -352,16 +337,18 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
 
         with (
             patch.object(
-                kimi_k3,
+                sequence_parallel,
                 "reduce_scatter",
                 side_effect=fake_reduce_scatter,
             ),
-            patch.object(kimi_k3, "reduce_scatter_padded") as legacy_padding,
+            patch.object(
+                sequence_parallel, "reduce_scatter_padded"
+            ) as legacy_padding,
         ):
-            actual = kimi_k3._row_parallel_linear(
+            actual = sequence_parallel.row_parallel_linear(
                 x,
                 weight,
-                tp_size=8,
+                world_size=8,
                 reduce_scatter_tokens=True,
                 pad_reduce_scatter_tokens=True,
                 use_input_dtype_reduce_scatter=True,
@@ -384,16 +371,18 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
 
         with (
             patch.object(
-                kimi_k3,
+                sequence_parallel,
                 "reduce_scatter",
                 side_effect=lambda partial, *, group: partial[:1].clone(),
             ) as reduce_scatter,
-            patch.object(kimi_k3, "_matmul_with_padded_rows") as padded_mm,
+            patch.object(
+                sequence_parallel, "_matmul_with_padded_rows"
+            ) as padded_mm,
         ):
-            actual = kimi_k3._row_parallel_linear(
+            actual = sequence_parallel.row_parallel_linear(
                 x,
                 weight,
-                tp_size=8,
+                world_size=8,
                 reduce_scatter_tokens=True,
                 pad_reduce_scatter_tokens=False,
                 use_input_dtype_reduce_scatter=True,
@@ -554,7 +543,7 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         )
         layer.weights = {W.pre_ln_gamma: torch.ones_like(hidden[0])}
         cu_seqlens = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
-        layout = kimi_k3._token_shard_layout(8, 2, 0)
+        layout = sequence_parallel.token_shard_layout(8, 2, 0)
 
         with (
             patch.object(kimi_k3, "_rms_norm", side_effect=lambda x, *_: x),
@@ -618,7 +607,7 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
             K3W.MLP_RES_NORM: torch.empty(0),
             K3W.MLP_RES_PROJ: torch.empty(0),
         }
-        layout = kimi_k3._token_shard_layout(9, 8, 4)
+        layout = sequence_parallel.token_shard_layout(9, 8, 4)
 
         with (
             patch.object(kimi_k3, "_rms_norm", side_effect=lambda x, *_: x),
@@ -664,14 +653,6 @@ class KimiK3AllGatherMatmulUnitTest(unittest.TestCase):
         expected_bytes = 4096 * 16 * 2
 
         with (
-            patch.dict(
-                os.environ,
-                {
-                    "KIMI_K3_FUSED_AG_GEMM": "auto",
-                    "KIMI_K3_TENSOR_DUMP": "",
-                },
-                clear=False,
-            ),
             patch.object(kimi_k3, "get_process_group", return_value=group),
             patch.object(
                 kimi_k3,

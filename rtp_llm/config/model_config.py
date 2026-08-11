@@ -200,6 +200,10 @@ class ModelConfig(CppModelConfig):
     def is_multimodal(self) -> bool:
         return self.mm_model_config.is_multimodal
 
+    def disables_framework_deepep_moe(self) -> bool:
+        """Whether the model bypasses RTP's framework DeepEP dispatch."""
+        return False
+
     def eval_model_weight_size(self) -> float:
         """
         Evaluate total model size including weights, KV cache, and runtime buffers.

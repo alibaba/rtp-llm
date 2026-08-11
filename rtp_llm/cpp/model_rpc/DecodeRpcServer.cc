@@ -67,34 +67,6 @@ bool hasSegmentedLinearCacheGroup(const CacheConfig& cache_config) {
     });
 }
 
-// One switch drives every K3 diagnostic log stream; KIMI_K3_PD_TRACE_LOG_ENABLE
-// used to gate only this one.
-bool kimiK3PdTraceLogEnabled() {
-    const char* value = std::getenv("KIMI_K3_DEBUG");
-    return value != nullptr && std::string(value) == "1";
-}
-
-std::string loadBufferKeysForTrace(const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers) {
-    std::vector<std::string> keys;
-    for (const auto& buffer : buffers) {
-        if (buffer == nullptr) {
-            continue;
-        }
-        for (const auto& [key, _] : buffer->getBlocks()) {
-            keys.push_back(key);
-        }
-    }
-    std::sort(keys.begin(), keys.end());
-    std::ostringstream stream;
-    for (size_t i = 0; i < keys.size(); ++i) {
-        if (i != 0) {
-            stream << ",";
-        }
-        stream << keys[i];
-    }
-    return stream.str();
-}
-
 }  // namespace
 
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
@@ -1309,25 +1281,6 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                cancel_check_func,
                                                load_context.partition_count,
                                                load_context.partition_id);
-        if (kimiK3PdTraceLogEnabled()) {
-            size_t block_count = 0;
-            size_t block_bytes = 0;
-            for (const auto& layer_cache : layer_caches) {
-                if (layer_cache != nullptr) {
-                    block_count += layer_cache->getBlocksCount();
-                    block_bytes += layer_cache->getBlocksSize();
-                }
-            }
-            RTP_LLM_LOG_INFO("[K3_PD_TRACE] event=cache_store_load_request request_id=%ld peer_index=%d peer=%s "
-                             "buffers=%zu blocks=%zu bytes=%zu keys=%s",
-                             load_context.request_id,
-                             i,
-                             peer_addr.c_str(),
-                             layer_caches.size(),
-                             block_count,
-                             block_bytes,
-                             loadBufferKeysForTrace(layer_caches).c_str());
-        }
         if (!layer_cache_load_context) {
             RTP_LLM_LOG_WARNING("request [%s] load cache failed, layer cache load context is nullptr",
                                 request_key.c_str());

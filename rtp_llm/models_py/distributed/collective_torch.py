@@ -801,57 +801,12 @@ def all_gather_into(
     return output
 
 
-def all_to_all_single(
-    tensor: torch.Tensor,
-    group: Group,
-    *,
-    output: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Exchange equal contiguous dim-0 shards across a process group.
-
-    Kimi K3's Prefill KDA A2A path explicitly packs its destination-major
-    payload before calling this helper.  Accepting an optional reusable output
-    buffer keeps the measured forward free of allocator traffic.
-    """
-
-    process_group = _get_group(group)
-    world_size = torch.distributed.get_world_size(process_group)
-    if world_size <= 1:
-        if output is None:
-            return tensor
-        output.copy_(tensor)
-        return output
-    if tensor.ndim == 0 or tensor.shape[0] % world_size:
-        raise ValueError(
-            "all_to_all_single requires dim0 divisible by group size: "
-            f"shape={tuple(tensor.shape)}, world_size={world_size}"
-        )
-    if not tensor.is_contiguous():
-        raise ValueError(
-            "all_to_all_single requires a pre-packed contiguous input tensor"
-        )
-    if output is None:
-        output = torch.empty_like(tensor)
-    elif (
-        output.shape != tensor.shape
-        or output.dtype != tensor.dtype
-        or output.device != tensor.device
-        or not output.is_contiguous()
-    ):
-        raise ValueError(
-            "all_to_all_single reusable output must match input shape/dtype/device "
-            "and be contiguous"
-        )
-    torch.distributed.all_to_all_single(output, tensor, group=process_group)
-    return output
-
-
 def reduce_scatter(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     """Reduce and scatter equal contiguous dim-0 shards.
 
-    Kimi K3 Sequence Parallel uses this after the attention output projection:
-    every TP rank contributes a partial ``[tokens, hidden]`` tensor and keeps
-    only its contiguous ``[tokens / tp, hidden]`` rows.
+    Token sequence-parallel layers use this after a row-parallel projection:
+    every rank contributes a partial ``[tokens, hidden]`` tensor and keeps only
+    its contiguous ``[tokens / world_size, hidden]`` rows.
     """
 
     process_group = _get_group(group)
@@ -942,7 +897,6 @@ __all__ = [
     "all_gather",
     "all_gather_into",
     "all_gather_trim",
-    "all_to_all_single",
     "reduce_scatter",
     "reduce_scatter_padded",
     "barrier",

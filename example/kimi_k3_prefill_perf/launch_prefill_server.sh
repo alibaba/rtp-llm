@@ -73,11 +73,7 @@ export MODEL_TYPE=kimi_k3
 export CHECKPOINT_PATH="${checkpoint}"
 export TOKENIZER_PATH="${TOKENIZER_PATH:-${checkpoint}}"
 export LOAD_METHOD=fastsafetensors
-
-export KIMI_K3_EXECUTION_MODE=optimized
-export KIMI_K3_FUSED_AG_GEMM="${KIMI_K3_FUSED_AG_GEMM:-auto}"
-export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK=8192
-export KIMI_K3_ACCURACY_ALLOW_TOKEN_IDS=1
+export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK="${KIMI_K3_MEGA_MAX_TOKENS_PER_RANK:-8192}"
 
 export DSV4_MEGA_MOE_INPUT_PACKER=fused
 export DG_JIT_CACHE_DIR="${K3_PERF_DG_JIT_CACHE_DIR:-${RUN_ROOT}/runtime/deep_gemm_cache}"
@@ -91,10 +87,6 @@ export GEN_TIMELINE_SYNC=1
 
 unset REMOTE_RPC_SERVER_IP
 unset MODEL_SERVICE_CONFIG
-# 打性能不能同时开 tensor dump(它会同步并落盘,把测量搅乱)。原先这条挂在
-# KIMI_K3_PERF_MODE 下,那个变量已删,这里无条件生效。
-unset KIMI_K3_TENSOR_DUMP
-
 mkdir -p \
   "${TMPDIR}" \
   "${LOG_PATH}" \
@@ -104,7 +96,7 @@ mkdir -p \
   "${FLASHINFER_WORKSPACE_BASE}" \
   "${RUN_ROOT}/work"
 echo \
-  "[K3_PERF_CONFIG] kda=${KIMI_K3_KDA_BACKEND} " \
+  "[K3_PERF_CONFIG] kda=cula " \
   "graph=${enable_cuda_graph}" \
   >&2
 cd "${RUN_ROOT}/work"

@@ -3,10 +3,7 @@
 # Kimi K3 跨机 PD 启动脚本(精度已验证的生产配置)
 # ============================================================================
 #
-# 这个脚本存在的理由:start_kimi_k3_pd.sh 会从 KIMI_K3_EXECUTION_MODE × 拓扑 ×
-# 角色推导十几个开关的默认值,这些值不出现在命令行上。2026-08-08 就因此踩过坑 ——
-# 以为在测"历史配置",实际 PERF_FUSIONS / BATCHED_KDA_DECODE 都被默认
-# 打开了。这里把每一个变量显式写出来并注明为什么是这个值。
+# 这个脚本把生产部署参数显式写出来，避免依赖 launcher 的隐式默认值。
 #
 #   用法:  kimi_k3_pd_launch.sh prefill|decode
 #
@@ -71,20 +68,10 @@ export KIMI_K3_MAX_SEQ_LEN="${KIMI_K3_MAX_SEQ_LEN:-16384}"
 export KIMI_K3_KV_CACHE_MEM_MB="${KIMI_K3_KV_CACHE_MEM_MB:-8192}"
 export MAX_CONTEXT_BATCH_SIZE="${MAX_CONTEXT_BATCH_SIZE:-1}"
 export MAX_BATCH_TOKENS_SIZE="${MAX_BATCH_TOKENS_SIZE:-$((KIMI_K3_MAX_SEQ_LEN + 4))}"
-# 与实际 token 数不匹配会 illegal memory access(不是 OOM),症状会误导排查
 export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK="${KIMI_K3_MEGA_MAX_TOKENS_PER_RANK:-8192}"
-
 # ---------------------------------------------------------------------------
 # 后端选择 —— Prefill 钉死 cuLA,理由见文件头
 # ---------------------------------------------------------------------------
-export KIMI_K3_EXECUTION_MODE=optimized
-if [[ "${role}" == "prefill" ]]; then
-    export KIMI_K3_KDA_BACKEND=cula
-else
-    export KIMI_K3_KDA_BACKEND=kernel     # Decode 保持原始 recurrent
-fi
-export KIMI_K3_BATCHED_KDA_DECODE=1
-
 # ---------------------------------------------------------------------------
 # 加载
 # ---------------------------------------------------------------------------
@@ -97,14 +84,6 @@ export LOAD_METHOD=fastsafetensors
 # 而 batched KDA decode + CUDA Graph 是同一个提交(2997d252b)引入的,历史上是
 # 精度嫌疑之一。要开请单独跑一轮对照。
 export ENABLE_CUDA_GRAPH="${ENABLE_CUDA_GRAPH:-0}"
-
-# ---------------------------------------------------------------------------
-# 诊断(默认全关)
-# ---------------------------------------------------------------------------
-# KIMI_K3_TENSOR_DUMP=<dir>[,rank=N][,mode=boundary|semantic_full][,forward=N]
-#                          [,router=full][,token=N][,enable_file=PATH][,shard_bytes=N]
-# KIMI_K3_DEBUG=1                      打开全部诊断日志(Decode SP / PD 传输)
-# KIMI_K3_ACCURACY_ALLOW_TOKEN_IDS=1   允许固定 token id 探针(跑精度套件时必开)
 
 export CHECKPOINT_PATH TOKENIZER_PATH="${TOKENIZER_PATH:-${CHECKPOINT_PATH}}"
 export PREFILL_ENDPOINT DECODE_ENDPOINT

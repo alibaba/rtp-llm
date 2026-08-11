@@ -2,7 +2,7 @@ py_test(
     name = "fused_all_gather_matmul_unit_test",
     srcs = ["fused_all_gather_matmul_unit_test.py"],
     deps = [
-        "//rtp_llm/models_py/distributed:fused_all_gather_matmul",
+        "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm:testlib",
     ],
     timeout = "short",

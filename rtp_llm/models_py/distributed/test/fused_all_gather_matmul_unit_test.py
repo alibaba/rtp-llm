@@ -4,13 +4,15 @@ from unittest.mock import patch
 
 import torch
 
-import rtp_llm.models_py.distributed.fused_all_gather_matmul as fused_ag_gemm
+import rtp_llm.models_py.distributed.symm_mem as fused_ag_gemm
 
 
 class FusedAllGatherMatmulUnitTest(unittest.TestCase):
     def test_workspace_reservation_forwards_group_and_size(self) -> None:
         group = SimpleNamespace(group_name="tp-test")
         with patch.object(
+            fused_ag_gemm, "torch_symm_mem_available", True
+        ), patch.object(
             fused_ag_gemm.torch_symm_mem,
             "get_symm_mem_workspace",
         ) as reserve:

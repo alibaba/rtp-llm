@@ -1,4 +1,4 @@
-"""Shared Kimi K3 KDA execution types and canonical cache state."""
+"""Kimi K3 KDA execution types and canonical cache state."""
 
 from __future__ import annotations
 

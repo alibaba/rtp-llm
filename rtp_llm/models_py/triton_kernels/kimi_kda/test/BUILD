@@ -42,18 +42,6 @@ py_test(
 )
 
 py_test(
-    name = "kimi_k3_cuda_graph_cache_test",
-    srcs = ["kimi_k3_cuda_graph_cache_test.py"],
-    deps = [
-        "//rtp_llm/models_py:models",
-        ":torch",
-    ],
-    exec_properties = {"gpu": "H20"},
-    tags = ["H20"],
-    visibility = ["//visibility:public"],
-)
-
-py_test(
     name = "paged_recurrent_layout_test",
     srcs = ["paged_recurrent_layout_test.py"],
     deps = [

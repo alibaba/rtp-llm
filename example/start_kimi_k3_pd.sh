@@ -78,20 +78,11 @@ Optional environment variables:
                                          to validate prefix-cache reuse
   KIMI_K3_DECODE_TOPOLOGY               defaults to tp8_ep8; one of:
                                          tp8_ep8, dp8_ep8
-  KIMI_K3_EXECUTION_MODE                defaults to optimized; one of:
-                                         optimized, accuracy
-  KIMI_K3_FUSED_AG_GEMM                 auto|off|force; defaults to auto;
-                                         Prefill SP global M<32K uses NCCL AG+GEMM
-  KIMI_K3_BATCHED_KDA_DECODE            optimized TP8/EP8 Decode defaults to 1;
-                                         all other modes/topologies default to 0
-  KIMI_K3_DEBUG                         1 enables every K3 diagnostic log
-                                         stream (Decode SP, PD transfer)
-  KIMI_K3_TENSOR_DUMP                   <dir>[,rank=|mode=|forward=|router=
-                                         |token=|enable_file=|shard_bytes=];
-                                         unset disables per-operator tracing
-  KIMI_K3_OPERATOR_PYTHONPATH           optional KDA/DeepGEMM operator overlay;
+  OPS_OVERLAY                           optional KDA/DeepGEMM operator overlay;
                                          optimized Prefill otherwise installs
                                          the bundled fixed wheels automatically
+  KIMI_K3_MEGA_MAX_TOKENS_PER_RANK     DeepGEMM MegaMoE buffer capacity per
+                                         rank; defaults to 8192
   ENABLE_CUDA_GRAPH                     defaults to 0; set Decode to 1 for
                                          CUDA Graph capture/replay validation
   ENABLE_CUDA_GRAPH_DEBUG_MODE          defaults to 0; emits CUDA Graph DOT
@@ -159,12 +150,6 @@ case "${decode_topology}" in
     tp8_ep8 | dp8_ep8) ;;
     *) die "unsupported KIMI_K3_DECODE_TOPOLOGY=${decode_topology}" ;;
 esac
-execution_mode="${KIMI_K3_EXECUTION_MODE:-optimized}"
-case "${execution_mode}" in
-    optimized | accuracy) ;;
-    *) die "unsupported KIMI_K3_EXECUTION_MODE=${execution_mode}" ;;
-esac
-
 # gRPC honors the standard HTTP proxy environment.  The shared CUDA image
 # enables a localhost proxy by default, so same-host P/D traffic would
 # otherwise be redirected through that proxy instead of reaching the peer
@@ -219,7 +204,7 @@ mkdir -p "${FLASHINFER_WORKSPACE_BASE}"
 
 # K3 的 MoE 只有 DeepGEMM MegaMoE 一条实现,它的 dispatch/combine 融在
 # symmetric-memory kernel 里。DeepEP 那条路径(以及解析 DeepEP wheel 的整段)
-# 已随 KIMI_K3_MOE_BACKEND 一起删除 —— Torch 专家循环会把选中的专家反量化成
+# 已删除的 Torch 专家循环会把选中的专家反量化成
 # BF16,93 层 Decode 首次使用即耗尽显存。
 
 max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-16384}"
@@ -229,33 +214,23 @@ kernel_seq_size_per_block="${KERNEL_SEQ_SIZE_PER_BLOCK:-128}"
 concurrency_limit="${CONCURRENCY_LIMIT:-2}"
 max_context_batch_size="${MAX_CONTEXT_BATCH_SIZE:-1}"
 reuse_cache="${KIMI_K3_REUSE_CACHE:-0}"
-default_batched_kda_decode=0
-case "${execution_mode}" in
-    optimized)
-        if [[ "${role}" == "DECODE" ]]; then
-            # dp8_ep8 Decode 走的是已删除的 DeepEP MoE。默默换成 MegaMoE 会给出
-            # 一个没人验证过的组合,所以直接拒绝。
-            [[ "${decode_topology}" == "tp8_ep8" ]] \
-                || die "KIMI_K3_DECODE_TOPOLOGY=${decode_topology} needs the removed DeepEP MoE; use tp8_ep8"
-            default_batched_kda_decode=1
-        fi
-        ;;
-    accuracy) ;;
-esac
+if [[ "${role}" == "DECODE" ]]; then
+    # dp8_ep8 Decode 依赖已经删除的 DeepEP MoE 实现。
+    [[ "${decode_topology}" == "tp8_ep8" ]] \
+        || die "KIMI_K3_DECODE_TOPOLOGY=${decode_topology} needs the removed DeepEP MoE; use tp8_ep8"
+fi
 # KDA/MLA 后端与 perf fusions 现在由模型按 PD 角色决定(kimi_k3.py 的
 # _is_prefill_role),不再经环境变量传入。
 default_kv_cache_mem_mb=8192
 
-fused_ag_gemm="${KIMI_K3_FUSED_AG_GEMM:-auto}"
-batched_kda_decode="${KIMI_K3_BATCHED_KDA_DECODE:-${default_batched_kda_decode}}"
 kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-${default_kv_cache_mem_mb}}"
 enable_cuda_graph="${ENABLE_CUDA_GRAPH:-0}"
 enable_cuda_graph_debug_mode="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
 decode_capture_config="${DECODE_CAPTURE_CONFIG:-}"
 prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
 
-if true; then
-    if [[ -z "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
+operator_overlay="${OPS_OVERLAY:-}"
+if [[ -z "${operator_overlay}" ]]; then
         operator_bundle="${repo_root}/example/kimi_k3_prefill_perf/wheels"
         operator_manifest="${operator_bundle}/SHA256SUMS"
         [[ -f "${operator_manifest}" ]] \
@@ -269,12 +244,9 @@ if true; then
         operator_marker="${operator_overlay}/.kimi-k3-operators-installed"
         if [[ ! -f "${operator_marker}" ]]; then
             mkdir -p "${operator_overlay}"
-            operator_wheels=()
-            if true; then
-                operator_wheels+=(
-                    "${operator_bundle}/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl"
-                )
-            fi
+            operator_wheels=(
+                "${operator_bundle}/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl"
+            )
             [[ "${#operator_wheels[@]}" -gt 0 ]] \
                 || die "operator overlay requested without a selected operator wheel"
             "${python_bin}" -m pip install \
@@ -283,15 +255,11 @@ if true; then
                 "${operator_wheels[@]}"
             touch "${operator_marker}"
         fi
-        export KIMI_K3_OPERATOR_PYTHONPATH="${operator_overlay}"
-    fi
-    # 调用方自带 overlay 时也要进 PYTHONPATH。原先这一步靠 runtime_pythonpath
-    # 拼接,它同时服务 DeepEP 和算子 overlay 两条路径;DeepEP 那条删掉之后只剩这一条。
-    export PYTHONPATH="${KIMI_K3_OPERATOR_PYTHONPATH}${PYTHONPATH:+:${PYTHONPATH}}"
 fi
+# 调用方自带 overlay 时也要进 PYTHONPATH。
+export PYTHONPATH="${operator_overlay}${PYTHONPATH:+:${PYTHONPATH}}"
 
 for flag_name in \
-    batched_kda_decode \
     reuse_cache \
     enable_cuda_graph \
     enable_cuda_graph_debug_mode; do
@@ -368,15 +336,8 @@ export TOKENIZER_PATH="${tokenizer_path}"
 export LOAD_METHOD="${LOAD_METHOD:-fastsafetensors}"
 export REMOTE_RPC_SERVER_IP="${remote_endpoint}"
 export MODEL_SERVICE_CONFIG="${model_service_config}"
-export KIMI_K3_FUSED_AG_GEMM="${fused_ag_gemm}"
-export KIMI_K3_BATCHED_KDA_DECODE="${batched_kda_decode}"
-[[ "${KIMI_K3_FUSED_AG_GEMM}" =~ ^(auto|off|force)$ ]] \
-    || die "KIMI_K3_FUSED_AG_GEMM must be auto, off, or force"
 # MegaMoE 自己做 dispatch/combine,框架侧的 DeepEP MoE 恒不启用。
 use_deepep_moe=0
-if false; then
-    use_deepep_moe=1
-fi
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 # Bazel's CUDA toolchain may export absolute compiler paths that are valid
 # only inside an action sandbox.  FlashInfer reads CC/CXX directly when it
@@ -396,10 +357,8 @@ if [[ ! -x "${CUDAHOSTCXX:-}" ]]; then
     CUDAHOSTCXX="${CXX}"
     export CUDAHOSTCXX
 fi
-deepgemm_jit_compiler=none
-if true; then
-    deepgemm_jit_compiler="${KIMI_K3_DEEPGEMM_JIT_COMPILER:-auto}"
-    case "${deepgemm_jit_compiler}" in
+deepgemm_jit_compiler="${KIMI_K3_DEEPGEMM_JIT_COMPILER:-auto}"
+case "${deepgemm_jit_compiler}" in
         auto)
             deepgemm_host_cxx=
             if [[ "${NVCC_PREPEND_FLAGS:-}" =~ -ccbin=([^[:space:]]+) ]]; then
@@ -425,26 +384,15 @@ if true; then
         *)
             die "KIMI_K3_DEEPGEMM_JIT_COMPILER must be auto, nvcc or nvrtc"
             ;;
-    esac
-    if [[ "${deepgemm_jit_compiler}" == "nvrtc" ]]; then
-        export DG_JIT_USE_NVRTC=1
-    else
-        export DG_JIT_USE_NVRTC=0
-    fi
-    export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK="${KIMI_K3_MEGA_MAX_TOKENS_PER_RANK:-8192}"
-    export OPS_OVERLAY="${KIMI_K3_OPERATOR_PYTHONPATH}"
+esac
+if [[ "${deepgemm_jit_compiler}" == "nvrtc" ]]; then
+    export DG_JIT_USE_NVRTC=1
 else
-    unset DG_JIT_USE_NVRTC
-    unset OPS_OVERLAY
+    export DG_JIT_USE_NVRTC=0
 fi
+export OPS_OVERLAY="${operator_overlay}"
+export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK="${KIMI_K3_MEGA_MAX_TOKENS_PER_RANK:-8192}"
 
-
-if [[ "${role}" == "DECODE" ]]; then
-    if [[ "${execution_mode}" == "accuracy" ]]; then
-        export ACCL_DISPATCH_NUM_WARP_GROUPS="${ACCL_DISPATCH_NUM_WARP_GROUPS:-2}"
-        export ACCL_COMBINE_NUM_WARP_GROUPS="${ACCL_COMBINE_NUM_WARP_GROUPS:-2}"
-    fi
-fi
 
 mkdir -p "${LOG_PATH}" "${run_root}/work/${role,,}" "${TMPDIR}"
 
@@ -458,10 +406,7 @@ if [[ "${role}" == "DECODE" ]]; then
     echo "  decode topology: ${decode_topology}"
 fi
 echo "  load method:     ${LOAD_METHOD}"
-echo "  execution mode:  ${execution_mode}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
-echo "  fused AG/GEMM:   ${fused_ag_gemm}"
-echo "  batched KDA:     ${batched_kda_decode}"
 echo "  concurrency:     generate=${concurrency_limit}, context=${max_context_batch_size}"
 if [[ -n "${max_batch_tokens_size}" ]]; then
     echo "  batch tokens:    ${max_batch_tokens_size}"

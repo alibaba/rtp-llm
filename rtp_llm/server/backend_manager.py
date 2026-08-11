@@ -12,7 +12,6 @@ from rtp_llm.distribute.distributed_server import DistributedServer, get_world_i
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
-from rtp_llm.ops import RoleType
 from rtp_llm.utils.concurrency_controller import get_global_controller
 
 if TYPE_CHECKING:
@@ -86,35 +85,19 @@ class BackendManager(object):
             model_config=model_config,
         )
 
-        # Kimi K3 TP Decode can fit the final GPU-resident weights, but the
-        # fastsafetensors source staging and TP split clones temporarily use
-        # almost all device memory.  Defer the DeepEP buffer until immediately
-        # after model loading so that its runtime allocation does not overlap
-        # the checkpoint-loading peak.
         deepep_enabled = (
             engine_config.moe_config.use_deepep_moe
             and model_config.expert_num > 0
             and engine_config.parallelism_config.world_size > 1
             and not engine_config.moe_config.use_all_gather
         )
-        defer_deepep_init = (
-            deepep_enabled
-            and model_config.model_type == "kimi_k3"
-            and engine_config.parallelism_config.role_type == RoleType.DECODE
-            and engine_config.parallelism_config.tp_size > 1
-        )
 
         # Initialize DeepEP wrapper if MOE model and DeepEP is enabled.
-        if deepep_enabled and not defer_deepep_init:
+        if deepep_enabled:
             from rtp_llm.models_py.distributed.deepep_wrapper import init_deepep_wrapper
 
             logging.info("initialize deepep wrapper")
             init_deepep_wrapper(engine_config, model_config)
-        elif defer_deepep_init:
-            logging.info(
-                "defer Kimi K3 Decode DeepEP initialization until model weights "
-                "finish loading"
-            )
 
         # Optional propose model config
         propose_model_config = ModelFactory.create_propose_model_config(
@@ -131,7 +114,6 @@ class BackendManager(object):
             vit_config=self.py_env_configs.vit_config,
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
-            defer_deepep_init=defer_deepep_init,
         )
         logging.info(
             "engine created successfully: self.engine.task_type=%s",

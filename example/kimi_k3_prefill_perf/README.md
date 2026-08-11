@@ -13,8 +13,6 @@ This directory contains the launcher for the K3 performance-only path:
 - RTP native MLA.
 - Sequence Parallel Attention/MoE using Attention-side AllGather +
   ReduceScatter; MegaMoE owns expert dispatch/combine.
-- Accuracy/reference/trace-comparison paths are rejected by
-  `KIMI_K3_PERF_MODE=1`.
 
 The checked-in auxiliary operator bundle contains only FlashKDA and DeepGEMM.
 It is validated for CPython 3.10, PyTorch 2.11.0+cu130, CUDA 13.0 and
@@ -28,7 +26,6 @@ Run inside the CUDA13 `lhc_GPU` container as `luohaocheng.lhc`:
 ```bash
 cd /path/to/RTP-LLM
 CHECKPOINT_PATH=/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight \
-KIMI_K3_KDA_COMM_BACKEND=rs_ag \
   ./example/kimi_k3_prefill_perf/run_64k_timeline.sh
 ```
 
@@ -79,11 +76,7 @@ builder creates and removes only its own unique child directory.
 
 ## Scope
 
-This launcher enables timeline-only validation and output shortcuts through
-`KIMI_K3_PERF_MODE=1`. The same optimized modeling path is available to the
-PD launcher through `KIMI_K3_EXECUTION_MODE=optimized`, but PD keeps
-`KIMI_K3_PERF_MODE=0` so profiling-only output shortcuts cannot change
-serving math.
+This launcher exercises the same production modeling path as the PD launcher.
 
 Sequence Parallel ReduceScatter, cuLA/FlashKDA and FP8-activation MXFP4
 MegaMoE change accumulation order and datatype behavior relative to the
