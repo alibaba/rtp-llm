@@ -2,8 +2,6 @@ import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
-from torch import Tensor
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.model_desc.block_map import (
@@ -90,28 +88,6 @@ class GptModelBase(RtpModule):
             )
         return True
 
-    ## for cuda graph attn kernel params' fill
-    def fill_params(
-        self,
-        sequence_lengths: Tensor,
-        input_lengths: Tensor,
-        kv_cache_block_id_host: Tensor,
-        replay_batch_size: int,
-        capture_batch_size: int,
-        seq_size_per_block: int,
-    ) -> None:
-        if capture_batch_size not in self.params_dict:
-            raise ValueError(f"No captured FMHA params for batch {capture_batch_size}")
-        params = self.params_dict[capture_batch_size]
-        if params is None:
-            raise RuntimeError("Captured FMHA params cannot be None")
-        params.fillParams(
-            sequence_lengths,
-            input_lengths,
-            kv_cache_block_id_host,
-            replay_batch_size,
-            seq_size_per_block,
-        )
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> AttentionImpl | dict[str, AttentionImpl]:

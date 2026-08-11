@@ -135,7 +135,7 @@ class HybridKVCacheSpecTest(TestCase):
         with self.assertRaisesRegex(ValueError, "exactly 3 T/H/W sections"):
             Qwen35Moe._parse_rope_config({"rope_parameters": rope_parameters}, config)
 
-    def test_qwen3_vl_defaults_to_interleaved_mrope_sections(self):
+    def test_qwen3_vl_parses_explicit_mrope_sections(self):
         config = ModelConfig()
         QWen3_VL._from_config_json(
             config,
@@ -150,12 +150,16 @@ class HybridKVCacheSpecTest(TestCase):
                     "hidden_size": 256,
                     "num_hidden_layers": 2,
                     "vocab_size": 1024,
+                    "rope_scaling": {
+                        "mrope_section": [16, 24, 24],
+                        "mrope_interleaved": False,
+                    },
                 },
             },
         )
 
         rope_config = config.attn_config.rope_config
-        self.assertTrue(rope_config.mrope_interleaved)
+        self.assertFalse(rope_config.mrope_interleaved)
         self.assertEqual(rope_config.index_factor, 3)
         self.assertEqual(
             [
@@ -163,7 +167,7 @@ class HybridKVCacheSpecTest(TestCase):
                 rope_config.mrope_dim2,
                 rope_config.mrope_dim3,
             ],
-            [24, 20, 20],
+            [16, 24, 24],
         )
         self.assertEqual(
             rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3,
@@ -172,7 +176,7 @@ class HybridKVCacheSpecTest(TestCase):
 
     def test_qwen3_vl_rejects_non_three_axis_mrope_section(self):
         config = ModelConfig()
-        with self.assertRaisesRegex(ValueError, "exactly 3 T/H/W sections"):
+        with self.assertRaisesRegex(ValueError, "three positive integers"):
             QWen3_VL._from_config_json(
                 config,
                 {
