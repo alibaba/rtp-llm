@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kimi K3 P/D Operations"
+  short_description: "Start, validate, and debug Kimi K3 P/D serving"
+  default_prompt: "Use $kimi-k3-pd-operations to start and validate the Kimi K3 Prefill/Decode deployment."
