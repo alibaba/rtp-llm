@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointOperationLease;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
@@ -391,6 +392,13 @@ public class PriorityAdmissionScheduler {
                                                     InflightRegistrar registrar) {
         PriorityRequestEnvelope envelope = plan.envelope();
         BatchItem item = plan.item();
+        var operationLease = EndpointOperationLease.acquire(plan.prefillEp(), plan.decodeEp());
+        if (operationLease.isEmpty()) {
+            Logger.info("[auto-tpm] eviction commit skipped: endpoint generation retiring, request_id={}",
+                    envelope.requestId());
+            return EvictionOutcome.CONFLICT;
+        }
+        try (EndpointOperationLease ignored = operationLease.get()) {
         PrefillQueueManager queueManager = plan.prefillEp().getBatcher().queueManager();
 
         PrefillQueueSnapshot queueSnapshot = queueManager.snapshot();
@@ -496,6 +504,7 @@ public class PriorityAdmissionScheduler {
                 envelope.requestId(), envelope.priority(), evictionPlan.proposal().victims().size(),
                 proposal.netCost(), proposal.endpointId());
         return EvictionOutcome.COMMITTED;
+        }
     }
 
     /** Per-endpoint prefill queue depth gauge (design doc 19.2). */
@@ -925,7 +934,8 @@ public class PriorityAdmissionScheduler {
             return DecodeEvictionOutcome.FAILED;
         }
         PrefillEndpoint prefillEp = endpointRegistry.getPrefill(
-                prefill.getServerIp() + ":" + prefill.getHttpPort());
+                prefill.getServerIp() + ":" + prefill.getHttpPort(),
+                prefill.getEndpointGeneration());
         if (prefillEp == null) {
             decodeEp.release(ctx.getRequestId());
             completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER,
@@ -1016,6 +1026,7 @@ public class PriorityAdmissionScheduler {
         status.setDpRank(decodeEp.getStatus().getDpRank());
         status.setGroup(decodeEp.getStatus().getGroup());
         status.setRequestId(ctx.getRequestId());
+        status.setEndpointGeneration(decodeEp.getEndpointId().generation());
         return status;
     }
 
@@ -1063,7 +1074,8 @@ public class PriorityAdmissionScheduler {
         }
 
         String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-        PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
+        PrefillEndpoint prefillEp = endpointRegistry.getPrefill(
+                prefillIpPort, prefill.getEndpointGeneration());
         if (prefillEp == null) {
             rollbackRoute(routeResponse);
             return PlacementOutcome.infeasible(null);
@@ -1071,7 +1083,13 @@ public class PriorityAdmissionScheduler {
 
         DecodeEndpoint decodeEp = null;
         if (decode != null) {
-            decodeEp = endpointRegistry.getDecode(decode.getServerIp() + ":" + decode.getHttpPort());
+            decodeEp = endpointRegistry.getDecode(
+                    decode.getServerIp() + ":" + decode.getHttpPort(),
+                    decode.getEndpointGeneration());
+            if (decodeEp == null) {
+                rollbackRoute(routeResponse);
+                return PlacementOutcome.infeasible(null);
+            }
         }
 
         PriorityRequestEnvelope envelope = buildEnvelope(ctx, prefill, prefillEp, decodeEp);
@@ -1149,14 +1167,23 @@ public class PriorityAdmissionScheduler {
         AdmissionLease lease = new AdmissionLease(
                 plan.item(), plan.decodeEp(), prefillQueue, registrar,
                 softTimeoutMs, activeLeaseCount::decrementAndGet);
-        // Fix C: increment after construction, before bindTo. If bindTo
-        // synchronously triggers close() (future already completed), the
-        // callback's decrementAndGet sees the counter already incremented.
+        // Increment before publishing the lease to the scheduler entry. An
+        // endpoint retirement may close the lease immediately after that
+        // publication; its close callback must never observe a zero count.
         activeLeaseCount.incrementAndGet();
+        if (!registrar.bindAdmissionLease(plan.item(), lease)) {
+            // The scheduler entry disappeared before ownership was bound.
+            // close() releases the still-UNSET admission and owns the single
+            // activeLeaseCount decrement through its callback.
+            lease.close();
+            return;
+        }
         try {
             lease.bindTo(plan.item().future());
         } catch (RuntimeException e) {
-            activeLeaseCount.decrementAndGet();
+            // close() owns the callback/decrement and is safe even when the
+            // future callback raced us to a terminal state.
+            lease.close();
             throw e;
         }
     }
@@ -1253,7 +1280,8 @@ public class PriorityAdmissionScheduler {
         for (ServerStatus serverStatus : routeResponse.getServerStatus()) {
             if (serverStatus != null && serverStatus.getRole() == RoleType.DECODE) {
                 DecodeEndpoint ep = endpointRegistry.getDecode(
-                        serverStatus.getServerIp() + ":" + serverStatus.getHttpPort());
+                        serverStatus.getServerIp() + ":" + serverStatus.getHttpPort(),
+                        serverStatus.getEndpointGeneration());
                 if (ep != null) {
                     ep.release(serverStatus.getRequestId());
                 }

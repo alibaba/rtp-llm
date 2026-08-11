@@ -1,11 +1,13 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointId;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -205,7 +207,7 @@ class SloBudgetBatcherAlgorithmTest {
         // Case 1: remainingBudgetMs(200) < estimatedPrefillMs(250) → drop
         {
             FlexlbConfig config = autoTpmOnConfig();
-            PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+            PrefillEndpoint endpoint = readyEndpointMock();
             PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
             when(endpoint.getPredictor()).thenReturn(predictor);
             when(endpoint.getInflightBatchCount()).thenReturn(0);
@@ -229,7 +231,7 @@ class SloBudgetBatcherAlgorithmTest {
         // Case 2: remainingBudgetMs(300) >= estimatedPrefillMs(250) → pass (deadline_guard)
         {
             FlexlbConfig config = autoTpmOnConfig();
-            PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+            PrefillEndpoint endpoint = readyEndpointMock();
             PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
             when(endpoint.getPredictor()).thenReturn(predictor);
             when(endpoint.getInflightBatchCount()).thenReturn(0);
@@ -268,13 +270,21 @@ class SloBudgetBatcherAlgorithmTest {
     }
 
     private static PrefillEndpoint endpoint(int inflightBatchCount) {
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
         when(endpoint.getInflightBatchCount()).thenReturn(inflightBatchCount);
         when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(0L);
         when(predictor.predictBatchMs(anyList())).thenReturn(0.0);
         when(predictor.predictBatchMsUncached(anyList())).thenReturn(0.0);
+        return endpoint;
+    }
+
+    private static PrefillEndpoint readyEndpointMock() {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getEndpointId()).thenReturn(
+                new EndpointId(RoleType.PREFILL, "127.0.0.1:61000", 1));
+        when(endpoint.isReady()).thenReturn(true);
         return endpoint;
     }
 

@@ -256,6 +256,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             result.setDpRank(optimalEndpoint.getStatus().getDpRank());
             result.setGroup(optimalEndpoint.getStatus().getGroup());
             result.setRequestId(requestId);
+            result.setEndpointGeneration(optimalEndpoint.getEndpointId().generation());
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);
             result.setSuccess(false);

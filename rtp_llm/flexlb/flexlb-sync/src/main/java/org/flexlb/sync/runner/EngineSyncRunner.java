@@ -1,6 +1,7 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointRetireCause;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.cache.service.CacheAwareService;
@@ -8,10 +9,10 @@ import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.CommonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
@@ -101,7 +102,8 @@ public class EngineSyncRunner implements Runnable {
                         modelName, roleType, cachedWorkerStatuses.size(), latestEngineWorkerList.size());
             }
 
-            // Remove if not in latest engine list
+            // Retire workers that have disappeared from service discovery. Discovery
+            // freshness is intentionally separate from the successful status heartbeat.
             Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
                     .map(WorkerHost::getIpPort)
                     .collect(Collectors.toSet());
@@ -110,17 +112,14 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = entry.getValue();
                 String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
-                    long lastTime = workerStatus.getStatusLastUpdateTime().get();
-                    long actualIntervalUs = workerStatus.getStatusUpdateIntervalUs().get();
+                    long lastTime = workerStatus.getDiscoveryLastSeenTime().get();
+                    long actualIntervalUs = workerStatus.getDiscoveryUpdateIntervalUs().get();
                     // Use max(3 * actual sync interval, 1s) as removal threshold to tolerate transient service discovery flaps
                     long removalThresholdUs = Math.max(3 * actualIntervalUs, 1_000_000L);
-                    if (System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
-                        workerStatus.setAlive(false);
-                        boolean statusRemoved = cachedWorkerStatuses.remove(ipPort, workerStatus);
-                        boolean endpointRemoved = endpointRegistry != null
-                                && endpointRegistry.remove(roleType, ipPort, workerStatus);
-                        logger.info("[remove] engine ip changes, model={}, role={}, ipPort={}, statusRemoved={}, endpointRemoved={}",
-                                modelName, roleType, ipPort, statusRemoved, endpointRemoved);
+                    if (lastTime > 0L && System.nanoTime() / 1000 - lastTime > removalThresholdUs) {
+                        retireWorkerGeneration(
+                                cachedWorkerStatuses, ipPort, workerStatus,
+                                lastTime, "discovery-missing");
                     }
                 }
             }
@@ -137,6 +136,13 @@ public class EngineSyncRunner implements Runnable {
                 String site = host.getSite();
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
+                workerStatus.recordDiscoverySeen(System.nanoTime() / 1000);
+
+                if (!workerStatus.isProbeable()) {
+                    logger.debug("Skip retired worker generation: {}, state={}",
+                            workerIpPort, workerStatus.getLifecycleState());
+                    continue;
+                }
 
                 if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
                     try {
@@ -154,12 +160,18 @@ public class EngineSyncRunner implements Runnable {
                     logger.info("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
-                if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
+                // Cache data is generation-scoped scheduling input. Do not populate it
+                // before the status channel has validated and published this generation.
+                if (!workerStatus.isReady()) {
+                    logger.debug("Skip cache check for non-ready worker generation: {}, state={}",
+                            workerIpPort, workerStatus.getLifecycleState());
+                } else if (workerStatus.getCacheCheckInProgress().compareAndSet(false, true)) {
                     try {
                         logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
                         GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
-                                workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                                workerStatus, cachedWorkerStatuses,
+                                engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
                     } catch (RejectedExecutionException e) {
@@ -218,46 +230,67 @@ public class EngineSyncRunner implements Runnable {
     }
 
     private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
-        WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
-        if (workerStatus == null) {
-            workerStatus = new WorkerStatus();
+        WorkerStatus workerStatus = workerStatuses.computeIfAbsent(workerIpPort, ignored -> {
+            WorkerStatus created = new WorkerStatus();
             String[] split = workerIpPort.split(":");
-            workerStatus.setIp(split[0]);
-            workerStatus.setPort(Integer.parseInt(split[1]));
-            workerStatus.setRole(roleType);
-            workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
-            workerStatuses.put(workerIpPort, workerStatus);
+            created.setIp(split[0]);
+            created.setPort(Integer.parseInt(split[1]));
+            created.setGrpcPort(CommonUtils.toGrpcPort(created.getPort()));
+            created.setRole(roleType);
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
-        }
-        // Cache and worker status checks run independently. Publish the role known
-        // from service discovery before either callback can observe this object.
+            return created;
+        });
+        // Publish topology metadata known from discovery before a status probe
+        // callback can observe this persistent PROBING object.
         if (workerStatus.getRole() == null) {
             workerStatus.setRole(roleType);
-        }
-        if (endpointRegistry != null) {
-            if (!workerStatus.isAlive()) {
-                workerStatus.setAlive(true);
-            }
-            ensureEndpoint(workerIpPort, workerStatus);
         }
         return workerStatus;
     }
 
-    private void ensureEndpoint(String ipPort, WorkerStatus workerStatus) {
-        int httpPort = workerStatus.getPort();
-        int grpcPort = CommonUtils.toGrpcPort(httpPort);
-        workerStatus.setGrpcPort(grpcPort);
+    /**
+     * Fence and retire exactly the generation that disappeared through the
+     * registry's identity-conditional retirement barrier.
+     */
+    private void retireWorkerGeneration(Map<String, WorkerStatus> statuses,
+                                        String ipPort,
+                                        WorkerStatus expected,
+                                        long observedDiscoveryTimeUs,
+                                        String cause) {
+        boolean retirementStarted = false;
+        expected.lock.lock();
+        try {
+            if (statuses.get(ipPort) != expected || !expected.isProbeable()) {
+                return;
+            }
+            long currentDiscoveryTimeUs = expected.getDiscoveryLastSeenTime().get();
+            long currentIntervalUs = expected.getDiscoveryUpdateIntervalUs().get();
+            long removalThresholdUs = Math.max(3 * currentIntervalUs, 1_000_000L);
+            long nowUs = System.nanoTime() / 1000;
+            if (currentDiscoveryTimeUs != observedDiscoveryTimeUs
+                    || currentDiscoveryTimeUs <= 0L
+                    || nowUs - currentDiscoveryTimeUs <= removalThresholdUs
+                    || !expected.tryBeginRetirement()) {
+                return;
+            }
+            retirementStarted = true;
+        } finally {
+            expected.lock.unlock();
+        }
 
-        if (roleType == RoleType.PREFILL || roleType == RoleType.PDFUSION) {
-            long dpSize = workerStatus.getDpSize();
-            if (dpSize > 1) {
-                String message = String.format(
-                        "%s DP group endpoint not yet supported: model=%s, ipPort=%s, dp_size=%d",
-                        roleType, modelName, ipPort, dpSize);
-                logger.error(message);
-                throw new UnsupportedOperationException(message);
+        boolean endpointRemoved = false;
+        boolean statusRemoved = false;
+        try {
+            endpointRemoved = endpointRegistry != null
+                    && endpointRegistry.retire(roleType, ipPort, expected,
+                    EndpointRetireCause.DISCOVERY_REMOVED);
+        } finally {
+            statusRemoved = statuses.remove(ipPort, expected);
+            if (retirementStarted) {
+                expected.markClosed();
             }
         }
-        endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
+        logger.info("[retire] engine generation, model={}, role={}, ipPort={}, cause={}, statusRemoved={}, endpointRemoved={}",
+                modelName, roleType, ipPort, cause, statusRemoved, endpointRemoved);
     }
 }

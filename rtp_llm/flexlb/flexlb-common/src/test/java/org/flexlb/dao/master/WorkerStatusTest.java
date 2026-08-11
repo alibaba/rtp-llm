@@ -334,4 +334,59 @@ class WorkerStatusTest {
         }
     }
 
+    @Nested
+    @DisplayName("Worker generation lifecycle")
+    class WorkerGenerationLifecycleTests {
+
+        @Test
+        void discovered_generation_starts_probing_and_not_alive() {
+            assertEquals(WorkerLifecycleState.PROBING, workerStatus.getLifecycleState());
+            assertFalse(workerStatus.isAlive());
+            assertTrue(workerStatus.isProbeable());
+        }
+
+        @Test
+        void valid_status_resets_failures_and_updates_success_heartbeat() {
+            workerStatus.recordStatusFailure();
+            workerStatus.recordStatusFailure();
+
+            workerStatus.recordStatusSuccess();
+
+            assertEquals(0L, workerStatus.getConsecutiveFailures().get());
+            assertTrue(workerStatus.getStatusLastUpdateTime().get() > 0L);
+        }
+
+        @Test
+        void failure_does_not_update_success_heartbeat() {
+            long before = workerStatus.getStatusLastUpdateTime().get();
+
+            workerStatus.recordStatusFailure();
+
+            assertEquals(before, workerStatus.getStatusLastUpdateTime().get());
+            assertEquals(1L, workerStatus.getConsecutiveFailures().get());
+        }
+
+        @Test
+        void retired_generation_cannot_become_ready_again() {
+            assertTrue(workerStatus.tryMarkReady());
+            assertTrue(workerStatus.tryBeginRetirement());
+            assertTrue(workerStatus.markClosed());
+
+            assertFalse(workerStatus.tryMarkReady());
+            assertEquals(WorkerLifecycleState.CLOSED, workerStatus.getLifecycleState());
+            assertFalse(workerStatus.isAlive());
+        }
+
+        @Test
+        void discovery_heartbeat_is_independent_from_status_success() {
+            long nowUs = System.nanoTime() / 1000;
+
+            workerStatus.recordDiscoverySeen(nowUs);
+
+            assertEquals(nowUs, workerStatus.getDiscoveryLastSeenTime().get());
+            assertEquals(-1L, workerStatus.getStatusLastUpdateTime().get());
+            assertEquals(WorkerLifecycleState.PROBING, workerStatus.getLifecycleState());
+        }
+    }
+
 }

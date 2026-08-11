@@ -1,9 +1,13 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointOperationLease;
+import org.flexlb.balance.endpoint.EndpointRetireCause;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.priority.AdmissionLease;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
@@ -28,6 +32,7 @@ import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -160,7 +165,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             }
 
             String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-            PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
+            PrefillEndpoint prefillEp = endpointRegistry.getPrefill(
+                    prefillIpPort, prefill.getEndpointGeneration());
             if (prefillEp == null) {
                 rollback(routeResponse);
                 completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
@@ -170,31 +176,50 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             DecodeEndpoint decodeEp = null;
             if (decode != null) {
                 String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
-                decodeEp = endpointRegistry.getDecode(decodeIpPort);
+                decodeEp = endpointRegistry.getDecode(decodeIpPort, decode.getEndpointGeneration());
+                // A route carrying a decode status is a local placement that
+                // may have reserved decode accounting. Its exact generation
+                // is mandatory even while retirement has temporarily removed
+                // the old generation from the READY map.
+                if (decodeEp == null) {
+                    rollback(routeResponse);
+                    completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER,
+                            "selected decode endpoint generation is unavailable");
+                    return future;
+                }
             }
 
             BatchItem item = new BatchItem(ctx, future, routeResponse, copyOf(prefill), copyOf(decode),
                     prefillEp, decodeEp, System.currentTimeMillis());
-            InflightEntry entry = new InflightEntry(item);
-            InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
-            if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
-                if (existing == null) {
-                    inflight.remove(ctx.getRequestId(), entry);
-                }
+            var operationLease = EndpointOperationLease.acquire(prefillEp, decodeEp);
+            if (operationLease.isEmpty()) {
                 rollback(item);
-                completeError(future, StrategyErrorType.INVALID_REQUEST,
-                        "duplicate request_id: " + ctx.getRequestId());
+                completeError(future, StrategyErrorType.NO_AVAILABLE_WORKER,
+                        "selected endpoint generation is retiring");
                 return future;
             }
-            WorkerBatcher batcher = prefillEp.getBatcher();
-            ctx.setRouteSubmittedNanos(System.nanoTime());
-            batcher.offer(item);
+            try (EndpointOperationLease ignored = operationLease.get()) {
+                InflightEntry entry = new InflightEntry(item);
+                InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
+                if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
+                    if (existing == null) {
+                        inflight.remove(ctx.getRequestId(), entry);
+                    }
+                    rollback(item);
+                    completeError(future, StrategyErrorType.INVALID_REQUEST,
+                            "duplicate request_id: " + ctx.getRequestId());
+                    return future;
+                }
+                WorkerBatcher batcher = prefillEp.getBatcher();
+                ctx.setRouteSubmittedNanos(System.nanoTime());
+                batcher.offer(item);
 
-            // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
-            reporter.reportRouteSubmitTimeMs(
-                    RoleType.PREFILL.name(),
-                    prefillEp.getIp(),
-                    System.currentTimeMillis() - ctx.getStartTime());
+                // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
+                reporter.reportRouteSubmitTimeMs(
+                        RoleType.PREFILL.name(),
+                        prefillEp.getIp(),
+                        System.currentTimeMillis() - ctx.getStartTime());
+            }
         } catch (Throwable t) {
             if (ctx != null) {
                 inflight.remove(ctx.getRequestId());
@@ -239,12 +264,26 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
      */
     @Override
     public boolean registerInflight(BatchItem item) {
+        if (!endpointsReady(item)) {
+            return false;
+        }
         InflightEntry entry = new InflightEntry(item);
         InflightEntry existing = inflight.putIfAbsent(item.requestId(), entry);
         if (existing != null || terminalStates.containsKey(item.requestId())) {
             if (existing == null) {
                 inflight.remove(item.requestId(), entry);
             }
+            return false;
+        }
+        // Endpoint retirement is allowed to race admission.  The second check
+        // closes the window between the first readiness check and publication
+        // in the scheduler inflight map:
+        //
+        // * retirement wins first -> remove this just-published entry here;
+        // * registration wins first -> the retirement scan observes the entry
+        //   and settles it through retireEndpoint().
+        if (!endpointsReady(item)) {
+            inflight.remove(item.requestId(), entry);
             return false;
         }
         return true;
@@ -255,6 +294,25 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         InflightEntry entry = inflight.get(item.requestId());
         if (entry != null && entry.item == item) {
             inflight.remove(item.requestId(), entry);
+        }
+    }
+
+    @Override
+    public boolean bindAdmissionLease(BatchItem item, AdmissionLease lease) {
+        if (item == null || lease == null) {
+            return false;
+        }
+        InflightEntry entry = entryFor(item);
+        if (entry == null) {
+            return false;
+        }
+        synchronized (entry) {
+            if (inflight.get(item.requestId()) != entry
+                    || entry.retirementPending || entry.lifecycle.isTerminal()) {
+                return false;
+            }
+            entry.admissionLease = lease;
+            return true;
         }
     }
 
@@ -335,6 +393,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         InflightEntry entry = entryFor(victim);
         if (entry != null) {
             synchronized (entry) {
+                if (entry.retirementPending) {
+                    return;
+                }
                 rollbackOnce(entry);
                 RequestLifecycleSnapshot terminal = entry.lifecycle.fail(detail);
                 completeError(victim.future(), errorType, detail);
@@ -389,6 +450,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             if (entry != null) {
                 RequestLifecycleSnapshot terminal;
                 synchronized (entry) {
+                    if (entry.retirementPending) {
+                        continue;
+                    }
                     RequestLifecycleSnapshot current = entry.lifecycle.snapshot();
                     // Decode workers have no prefill batch concept and report without a valid
                     // batchId; do NOT gate completion on batchId or legitimate decode
@@ -431,6 +495,176 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
             }
         }
+    }
+
+    /**
+     * Settle every scheduler request owned by a retiring endpoint generation.
+     *
+     * <p>The registry invokes this only after the endpoint has been atomically
+     * removed from routing and its operation barrier has quiesced.  Matching by
+     * endpoint object identity is intentional: a replacement at the same
+     * {@code ip:port} is a different generation and must never be touched by a
+     * late retirement from the old generation.
+     *
+     * <p>All terminal side effects reuse the normal idempotent lifecycle chain:
+     * decode rollback, prefill batch repack, future completion, tombstone
+     * publication, and inflight removal.  Dispatcher/status callbacks arriving
+     * later see no matching {@link InflightEntry} and are therefore harmless.
+     *
+     * @return number of inflight entries owned and settled by this generation
+     */
+    public int retireEndpoint(WorkerEndpoint endpoint, EndpointRetireCause cause) {
+        return retireEndpoint(endpoint, cause, List.of());
+    }
+
+    /**
+     * Retirement variant that also settles items atomically drained from the
+     * endpoint queue.  Registered items are found by the inflight scan; the
+     * explicit drained list is the safety net for a partially committed legacy
+     * item that reached the queue without a scheduler entry.
+     */
+    public int retireEndpoint(WorkerEndpoint endpoint,
+                              EndpointRetireCause cause,
+                              List<BatchItem> drainedItems) {
+        if (endpoint == null) {
+            return 0;
+        }
+        int settled = 0;
+        Throwable failure = null;
+        Set<Long> attempted = new HashSet<>();
+        String detail = "endpoint retired: " + endpoint.getEndpointId() + ", cause=" + cause;
+        for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
+            InflightEntry entry = candidate.getValue();
+            if (!referencesEndpoint(entry.item, endpoint)) {
+                continue;
+            }
+            synchronized (entry) {
+                if (inflight.get(candidate.getKey()) != entry
+                        || !referencesEndpoint(entry.item, endpoint)) {
+                    continue;
+                }
+                attempted.add(entry.item.requestId());
+                Throwable entryFailure = settleRetiredEntry(entry, detail);
+                if (entryFailure == null) {
+                    settled++;
+                } else {
+                    failure = addRetirementFailure(failure, entryFailure);
+                }
+            }
+        }
+        if (drainedItems != null) {
+            for (BatchItem drained : drainedItems) {
+                InflightEntry entry = entryFor(drained);
+                if (entry != null) {
+                    synchronized (entry) {
+                        if (inflight.get(drained.requestId()) == entry
+                                && attempted.add(drained.requestId())) {
+                            Throwable entryFailure = settleRetiredEntry(entry, detail);
+                            if (entryFailure == null) {
+                                settled++;
+                            } else {
+                                failure = addRetirementFailure(failure, entryFailure);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if (!terminalStates.containsKey(drained.requestId())) {
+                    // A queued item without an inflight owner can only be a
+                    // partial admission artifact.  Release the Decode shadow
+                    // reservation and tombstone it so the same id cannot be
+                    // revived by a late callback or resubmission.
+                    Throwable orphanFailure = settleRetiredOrphan(drained, detail);
+                    if (orphanFailure == null) {
+                        settled++;
+                    } else {
+                        failure = addRetirementFailure(failure, orphanFailure);
+                    }
+                }
+            }
+        }
+        Logger.warn("Endpoint generation retired: endpoint={} cause={} settled_requests={}",
+                endpoint.getEndpointId(), cause, settled);
+        if (failure != null) {
+            throw new IllegalStateException("Endpoint retirement settlement incomplete: "
+                    + endpoint.getEndpointId(), failure);
+        }
+        return settled;
+    }
+
+    /**
+     * Settle one item without allowing a broken side effect to hide any later
+     * cleanup.  If any master-owned cleanup cannot be confirmed, retain the
+     * entry as retirementPending so the registry reconciliation pass can retry
+     * it; do not publish its terminal tombstone/removal prematurely.
+     */
+    private Throwable settleRetiredEntry(InflightEntry entry, String detail) {
+        entry.retirementPending = true;
+        Throwable failure = null;
+        AdmissionLease lease = entry.admissionLease;
+        if (lease != null) {
+            failure = runRetirementStep(failure, "close admission lease",
+                    lease::closeForEndpointRetirement);
+        }
+        failure = runRetirementStep(failure, "rollback decode reservation",
+                () -> rollbackOnce(entry));
+        failure = runRetirementStep(failure, "remove counterpart prefill queue item",
+                () -> removeFromPrefillQueue(entry));
+        failure = runRetirementStep(failure, "repack prefill batch",
+                () -> removeFromPrefillBatch(entry));
+        if (failure != null) {
+            Logger.error("Endpoint retirement item settlement incomplete: request_id={}",
+                    entry.item.requestId(), failure);
+            return failure;
+        }
+
+        try {
+            RequestLifecycleSnapshot terminal = entry.lifecycle.fail(detail);
+            completeError(entry.item.future(), StrategyErrorType.BATCH_DISPATCH_FAILED, detail);
+            finishEntry(entry, terminal);
+            entry.admissionLease = null;
+            return null;
+        } catch (Throwable t) {
+            Logger.error("Endpoint retirement terminalization failed: request_id={}",
+                    entry.item.requestId(), t);
+            return t;
+        }
+    }
+
+    private Throwable settleRetiredOrphan(BatchItem drained, String detail) {
+        Throwable failure = runRetirementStep(null, "rollback orphan decode reservation",
+                () -> rollback(drained));
+        if (failure != null) {
+            return failure;
+        }
+        try {
+            completeError(drained.future(), StrategyErrorType.BATCH_DISPATCH_FAILED, detail);
+            RequestLifecycle orphanLifecycle = new RequestLifecycle(drained.requestId());
+            terminalStates.putIfAbsent(drained.requestId(), orphanLifecycle.fail(detail));
+            return null;
+        } catch (Throwable t) {
+            return t;
+        }
+    }
+
+    private static Throwable runRetirementStep(Throwable aggregate,
+                                                String step,
+                                                Runnable operation) {
+        try {
+            operation.run();
+        } catch (Throwable t) {
+            Logger.error("Endpoint retirement settlement step failed: step={}", step, t);
+            return addRetirementFailure(aggregate, t);
+        }
+        return aggregate;
+    }
+
+    private static Throwable addRetirementFailure(Throwable aggregate, Throwable failure) {
+        if (aggregate == null) {
+            return failure;
+        }
+        aggregate.addSuppressed(failure);
+        return aggregate;
     }
 
     public int getInflightSize() {
@@ -485,6 +719,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 if (inflight.get(candidate.getKey()) != entry) {
                     continue;
                 }
+                if (entry.retirementPending) {
+                    continue;
+                }
                 timeoutEntry(entry, "inflight TTL expired");
             }
         }
@@ -519,6 +756,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         InflightEntry entry = entryFor(head);
         if (entry != null) {
             synchronized (entry) {
+                if (entry.retirementPending) {
+                    return;
+                }
                 timeoutEntry(entry, "batch SLO expired before dispatch");
             }
         } else if (!head.future().isDone() && !terminalStates.containsKey(head.requestId())) {
@@ -541,6 +781,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         InflightEntry entry = entryFor(item);
         if (entry != null) {
             synchronized (entry) {
+                if (entry.retirementPending) {
+                    return;
+                }
                 rollbackOnce(entry);
                 RequestLifecycleSnapshot terminal = entry.lifecycle.fail(
                         "batcher offer failed: " + error.getMessage());
@@ -586,7 +829,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 continue;
             }
             synchronized (entry) {
-                if (entry.lifecycle.isTerminal()) {
+                if (entry.retirementPending || entry.lifecycle.isTerminal()) {
                     continue;
                 }
                 entry.lifecycle.startDispatch(batchId);
@@ -645,6 +888,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
 
         synchronized (entry) {
+            if (entry.retirementPending) {
+                return;
+            }
             long assignedBatchId = entry.lifecycle.snapshot().batchId();
             if (batchId != assignedBatchId) {
                 Logger.warn("Ignoring stale EnqueueBatch ACK request_id={} batch_id={}",
@@ -691,6 +937,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         InflightEntry entry = entryFor(item);
         if (entry != null) {
             synchronized (entry) {
+                if (entry.retirementPending) {
+                    return;
+                }
                 rollbackOnce(entry);
                 removeFromPrefillBatch(entry);
                 RequestLifecycleSnapshot terminal = entry.lifecycle.fail(error.getMessage());
@@ -712,6 +961,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return;
         }
         synchronized (entry) {
+            if (entry.retirementPending) {
+                return;
+            }
             timeoutEntry(entry, "EnqueueBatch deadline exceeded: " + error.getMessage());
         }
     }
@@ -720,7 +972,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     private void rollbackOnce(InflightEntry entry) {
         if (entry.rolledBack.compareAndSet(false, true)) {
-            rollback(entry.item);
+            try {
+                rollback(entry.item);
+            } catch (Throwable t) {
+                // A failed release has not established the rollback invariant.
+                // Restore the retry bit so endpoint-retirement reconciliation
+                // can retry this exact item instead of terminalizing it with a
+                // still-held Decode reservation.
+                entry.rolledBack.set(false);
+                throw t;
+            }
         }
     }
 
@@ -751,7 +1012,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
         if (serverStatus.getRole() == RoleType.DECODE) {
             String ipPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
+            DecodeEndpoint ep = endpointRegistry.getDecode(ipPort, serverStatus.getEndpointGeneration());
             if (ep != null) {
                 ep.release(serverStatus.getRequestId());
             }
@@ -763,6 +1024,19 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
     private InflightEntry entryFor(BatchItem item) {
         InflightEntry entry = inflight.get(item.requestId());
         return entry != null && entry.item == item ? entry : null;
+    }
+
+    private static boolean endpointsReady(BatchItem item) {
+        if (item == null || item.prefillEp() == null
+                || !item.prefillEp().isReadyForCurrentOperation()) {
+            return false;
+        }
+        return item.decodeEp() == null || item.decodeEp().isReadyForCurrentOperation();
+    }
+
+    private static boolean referencesEndpoint(BatchItem item, WorkerEndpoint endpoint) {
+        return item != null
+                && (item.prefillEp() == endpoint || item.decodeEp() == endpoint);
     }
 
     /**
@@ -785,6 +1059,24 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             prefillEp.repackBatch(batchId, Set.of(entry.item.requestId()));
             Logger.info("FlexLB remove from prefill batch: request_id={} batch_id={} engine={}",
                     entry.item.requestId(), batchId, prefillEp.getIp());
+        }
+    }
+
+    /**
+     * Remove a not-yet-dispatched request from its counterpart Prefill queue.
+     *
+     * <p>This is required when the retired generation is Decode: the queued
+     * item is physically owned by a still-live Prefill batcher but carries a
+     * lease on the retired Decode endpoint. Leaving it queued would make every
+     * later dispatch lease acquisition fail and permanently strand queue depth.
+     * The removal is version-agnostic and idempotent; Prefill retirement has
+     * already drained the same item, and dispatched items are already absent.
+     */
+    private void removeFromPrefillQueue(InflightEntry entry) {
+        PrefillEndpoint prefillEp = entry.item.prefillEp();
+        if (prefillEp != null) {
+            prefillEp.getBatcher().queueManager().tryRemove(
+                    entry.item.requestId(), "endpoint-retirement");
         }
     }
 
@@ -879,6 +1171,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         status.setSuccess(src.isSuccess());
         status.setCode(src.getCode());
         status.setMessage(src.getMessage());
+        status.setEndpointGeneration(src.getEndpointGeneration());
         return status;
     }
 
@@ -931,6 +1224,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         final BatchItem item;
         final RequestLifecycle lifecycle;
         final AtomicBoolean rolledBack = new AtomicBoolean(false);
+        volatile AdmissionLease admissionLease;
+        volatile boolean retirementPending;
 
         InflightEntry(BatchItem item) {
             this.item = Objects.requireNonNull(item);

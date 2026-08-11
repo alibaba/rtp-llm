@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 
 /**
  * Endpoint for roles that only need status-based routing and no local
@@ -9,7 +10,12 @@ import org.flexlb.dao.master.WorkerStatus;
 public class SimpleWorkerEndpoint extends WorkerEndpoint {
 
     public SimpleWorkerEndpoint(WorkerStatus status) {
-        super(status);
+        this(new EndpointId(status.getRole() == null ? RoleType.VIT : status.getRole(),
+                status.getIpPort(), 0), status);
+    }
+
+    public SimpleWorkerEndpoint(EndpointId endpointId, WorkerStatus status) {
+        super(endpointId, status);
     }
 
     @Override

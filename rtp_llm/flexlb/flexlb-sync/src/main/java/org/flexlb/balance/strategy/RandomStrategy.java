@@ -100,6 +100,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
             result.setRole(roleType);
             result.setGroup(ep.getStatus().getGroup());
             result.setRequestId(requestId);
+            result.setEndpointGeneration(ep.getEndpointId().generation());
         } catch (Exception e) {
             Logger.error("buildServerStatus error", e);
             result.setSuccess(false);

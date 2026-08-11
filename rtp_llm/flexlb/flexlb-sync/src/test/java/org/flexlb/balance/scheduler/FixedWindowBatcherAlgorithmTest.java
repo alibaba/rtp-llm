@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointId;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
@@ -7,6 +8,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -57,7 +59,7 @@ class FixedWindowBatcherAlgorithmTest {
     @Test
     void sloCaseDispatchesWhenPredictionReachesThreshold() throws InterruptedException {
         FlexlbConfig config = sloCaseConfig();
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
@@ -83,7 +85,7 @@ class FixedWindowBatcherAlgorithmTest {
     @Test
     void sloCaseDispatchesAtFixedWindowWhenPredictionIsBelowThreshold() throws InterruptedException {
         FlexlbConfig config = sloCaseConfig();
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
@@ -102,7 +104,7 @@ class FixedWindowBatcherAlgorithmTest {
     @Test
     void sloCaseDispatchesWhenBatchReachesMaxSize() throws InterruptedException {
         FlexlbConfig config = sloCaseConfig();
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
@@ -133,7 +135,7 @@ class FixedWindowBatcherAlgorithmTest {
         WorkerStatus status = new WorkerStatus();
         status.setMaxSeqLen(200);
         status.setMaxBatchTokensSize(100);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
@@ -169,7 +171,7 @@ class FixedWindowBatcherAlgorithmTest {
         WorkerStatus status = new WorkerStatus();
         status.setMaxSeqLen(engineBatchTokenLimit);
         status.setMaxBatchTokensSize(engineBatchTokenLimit);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
@@ -203,7 +205,7 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxBatchTokensSize(1_000);
         status.getTotalKvCacheTokens().set(100);
         status.getAvailableKvCacheTokens().set(70);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
@@ -240,7 +242,7 @@ class FixedWindowBatcherAlgorithmTest {
         WorkerStatus status = new WorkerStatus();
         status.setMaxSeqLen(131_072L);
         status.setMaxBatchTokensSize(engineBatchTokenLimit);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
@@ -282,7 +284,7 @@ class FixedWindowBatcherAlgorithmTest {
 
         WorkerStatus status = new WorkerStatus();
         status.setMaxSeqLen(100);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
@@ -310,7 +312,7 @@ class FixedWindowBatcherAlgorithmTest {
 
         WorkerStatus status = new WorkerStatus();
         status.setMaxBatchTokensSize(100);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getStatus()).thenReturn(status);
 
         BatchItem item = enqueuedItem(1, 1, 100);
@@ -336,7 +338,7 @@ class FixedWindowBatcherAlgorithmTest {
         // dispatched instead of dropped.
         FlexlbConfig config = sloCaseConfig();
         config.setAutoTpmEnabled(true);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
@@ -357,7 +359,7 @@ class FixedWindowBatcherAlgorithmTest {
     void autoTpmOnPriorityHeadPastQueueDeadlineIsNotDropped() throws InterruptedException {
         FlexlbConfig config = sloCaseConfig();
         config.setAutoTpmEnabled(true);
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        PrefillEndpoint endpoint = readyEndpointMock();
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
@@ -417,6 +419,14 @@ class FixedWindowBatcherAlgorithmTest {
         config.setFlexlbBatchFixedMaxInflightBatches(0);
         config.setFlexlbBatchEnqueueDeadlineMs(10_000);
         return config;
+    }
+
+    private static PrefillEndpoint readyEndpointMock() {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getEndpointId()).thenReturn(
+                new EndpointId(RoleType.PREFILL, "127.0.0.1:61000", 1));
+        when(endpoint.isReady()).thenReturn(true);
+        return endpoint;
     }
 
     private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs) {

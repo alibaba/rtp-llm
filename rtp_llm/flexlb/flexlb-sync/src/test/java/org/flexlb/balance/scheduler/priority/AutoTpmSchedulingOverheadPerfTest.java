@@ -412,6 +412,7 @@ class AutoTpmSchedulingOverheadPerfTest {
             status.setDpRank(0);
             status.setGroup("perf-group");
             status.setRequestId(requestId);
+            status.setEndpointGeneration(1);
             return status;
         }
     }

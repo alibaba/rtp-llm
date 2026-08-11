@@ -15,6 +15,7 @@ import org.flexlb.util.IdUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -31,6 +32,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final String site;
     private final RoleType roleType;
     private final WorkerStatus workerStatus;
+    private final Map<String, WorkerStatus> workerStatusMap;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService cacheAwareService;
@@ -53,6 +55,21 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       LongAdder syncCount,
                                       Long syncEngineStatusInterval,
                                       Executor callbackExecutor) {
+        this(modelName, ipPort, site, roleType, workerStatus, null,
+                engineHealthReporter, engineGrpcService, cacheAwareService,
+                requestTimeoutMs, syncCount, syncEngineStatusInterval, callbackExecutor);
+    }
+
+    public GrpcCacheStatusCheckRunner(String modelName, String ipPort, String site, RoleType roleType,
+                                      WorkerStatus workerStatus,
+                                      Map<String, WorkerStatus> workerStatusMap,
+                                      EngineHealthReporter engineHealthReporter,
+                                      EngineGrpcService engineGrpcService,
+                                      CacheAwareService cacheAwareService,
+                                      long requestTimeoutMs,
+                                      LongAdder syncCount,
+                                      Long syncEngineStatusInterval,
+                                      Executor callbackExecutor) {
 
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
@@ -61,6 +78,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
         this.modelName = modelName;
         this.workerStatus = workerStatus;
+        this.workerStatusMap = workerStatusMap;
         this.site = site;
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
@@ -78,6 +96,11 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     public void run() {
         boolean asyncInitiated = false;
         try {
+            if (!isCurrentReadyGeneration()) {
+                logger.debug("Skip cache status check for stale/non-ready generation: {}, state={}",
+                        ipPort, workerStatus.getLifecycleState());
+                return;
+            }
             logger.info("GrpcCacheStatusCheckRunner run for {}", ipPort);
             long prefillCacheStatusCheckInterval = DynamicCacheIntervalService.getCurrentIntervalMs();
             long roundInterval = prefillCacheStatusCheckInterval / syncEngineStatusInterval;
@@ -104,6 +127,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                     })
                     .whenCompleteAsync((cacheStatus, ex) -> {
                         try {
+                            if (!isCurrentReadyGeneration()) {
+                                logger.info("Ignore stale cache status callback for {}, role: {}", ipPort, roleType);
+                                return;
+                            }
                             if (ex != null) {
                                 Throwable throwable = ex instanceof CompletionException ? ex.getCause() : ex;
                                 handleException(throwable);
@@ -132,8 +159,12 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     }
 
     private void handleCacheStatusResponse(CacheStatus newCacheStatus, long startTime) {
-
+        workerStatus.lock.lock();
         try {
+            if (!isCurrentReadyGeneration()) {
+                logger.info("Ignore cache response after generation retirement for {}, role: {}", ipPort, roleType);
+                return;
+            }
             logger.info("gRPC Cache Status - handled for {}, role:{}", ipPort, roleType.name());
 
             if (newCacheStatus.getMessage() != null) {
@@ -158,7 +189,14 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
             engineHealthReporter.reportCacheStatusCheckerFail(
                     modelName, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE, roleType);
+        } finally {
+            workerStatus.lock.unlock();
         }
+    }
+
+    private boolean isCurrentReadyGeneration() {
+        return workerStatus.isReady()
+                && (workerStatusMap == null || workerStatusMap.get(ipPort) == workerStatus);
     }
 
     private boolean validateCacheStatusResponse(WorkerStatus workerStatus, CacheStatus newCacheStatus) {

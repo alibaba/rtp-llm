@@ -94,12 +94,18 @@ class EndpointRegistryRoleTest {
         WorkerEndpoint oldEndpoint = registry.ensureEndpoint(RoleType.VIT, ipPort, expired);
 
         WorkerStatus replacement = status(RoleType.VIT, 8080);
+        assertNull(registry.ensureEndpoint(RoleType.VIT, ipPort, replacement),
+                "a new generation must not replace a READY endpoint without retirement");
+
+        assertTrue(registry.remove(RoleType.VIT, ipPort, expired));
         WorkerEndpoint newEndpoint = registry.ensureEndpoint(RoleType.VIT, ipPort, replacement);
 
         assertNotSame(oldEndpoint, newEndpoint);
         assertFalse(registry.remove(RoleType.VIT, ipPort, expired));
         assertFalse(expired.isAlive());
         assertSame(newEndpoint, registry.get(RoleType.VIT, ipPort));
+        assertTrue(newEndpoint.getEndpointId().generation()
+                > oldEndpoint.getEndpointId().generation());
 
         assertTrue(registry.remove(RoleType.VIT, ipPort, replacement));
         assertNull(registry.get(RoleType.VIT, ipPort));

@@ -24,6 +24,19 @@ public interface InflightRegistrar {
     void unregisterInflight(BatchItem item);
 
     /**
+     * Attach the Auto-TPM lease to its scheduler-owned inflight entry.
+     * Endpoint retirement uses this ownership link to close a handed-over
+     * lease immediately instead of waiting for its soft timeout.  The default
+     * is fail-closed for registrars that do not persist lease ownership.
+     *
+     * @return false when the item already reached a terminal/removal path and
+     *         therefore cannot safely own a new lease
+     */
+    default boolean bindAdmissionLease(BatchItem item, AdmissionLease lease) {
+        return false;
+    }
+
+    /**
      * Drive an evicted victim to its terminal state (design doc 9.5/17.3):
      * release its decode reservation, complete its future with
      * {@code PRIORITY_PREEMPTED} and tombstone the request id. Reserved for
