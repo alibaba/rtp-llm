@@ -13,6 +13,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     fused_recurrent_kda,
     is_kimi_kda_short_conv_paged_decode_supported,
     kimi_kda_short_conv_paged_decode,
+    kimi_kda_short_conv_paged_target_verify,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
 from rtp_llm.utils.model_weight import W
@@ -216,97 +217,27 @@ class KimiK3KDADecode(nn.Module):
         q_steps = q_projected.reshape(batch, sequence_length, -1)
         k_steps = k_projected.reshape(batch, sequence_length, -1)
         v_steps = v_projected.reshape(batch, sequence_length, -1)
-        conv_steps: list[torch.Tensor] = []
-        for step in range(sequence_length):
-            reserve_base = torch.div(
-                cache.sequence_lengths_plus_one - 2,
-                cache.page_size,
-                rounding_mode="floor",
-            ).to(torch.long)
-            reserve_col = reserve_base + step
-            logical_col = torch.div(
-                cache.sequence_lengths_plus_one + step - 2,
-                cache.page_size,
-                rounding_mode="floor",
-            ).to(torch.long)
-            batch_idx = torch.arange(batch, device=cache.block_map.device)
-            dest_ids = cache.block_map[batch_idx, reserve_col].to(torch.long)
-            if step > 0:
-                src_ids = cache.block_map[batch_idx, reserve_col - 1].to(torch.long)
-                cache.conv[dest_ids] = cache.conv[src_ids]
-            step_block_map = cache.block_map.clone()
-            step_block_map[batch_idx, logical_col] = dest_ids.to(step_block_map.dtype)
-            q_step, k_step, v_step = kimi_kda_short_conv_paged_decode(
-                q_steps[:, step, :].contiguous(),
-                k_steps[:, step, :].contiguous(),
-                v_steps[:, step, :].contiguous(),
-                self.fused_conv,
-                cache.conv,
-                step_block_map,
-                cache.sequence_lengths_plus_one + step,
-                cache.page_size,
-            )
-            conv_steps.append(torch.cat((q_step, k_step, v_step), dim=-1))
-        conv_output = torch.stack(conv_steps, dim=1).reshape(token_count, -1)
-        q, k, v = torch.split(conv_output, self.projection_size, dim=-1)
-
-        if sequence_length == 1:
-            return self._recurrent(
-                q,
-                k,
-                v,
-                raw_gate,
-                raw_beta,
-                cu_seqlens,
-                cache.ssm,
-                cache.block_map,
-                cache.sequence_lengths_plus_one,
-                cache.page_size,
-            )
-
-        q_seq = q.reshape(batch, sequence_length, -1)
-        k_seq = k.reshape(batch, sequence_length, -1)
-        v_seq = v.reshape(batch, sequence_length, -1)
-        gate_seq = raw_gate.reshape(batch, sequence_length, -1)
-        beta_seq = raw_beta.reshape(batch, sequence_length, -1)
-        one_token_cu = torch.arange(
-            batch + 1, device=cu_seqlens.device, dtype=cu_seqlens.dtype
+        q, k, v = kimi_kda_short_conv_paged_target_verify(
+            q_steps,
+            k_steps,
+            v_steps,
+            self.fused_conv,
+            cache.conv,
+            cache.block_map,
+            cache.sequence_lengths_plus_one,
+            cache.page_size,
         )
-        output_steps: list[torch.Tensor] = []
-        for step in range(sequence_length):
-            reserve_base = torch.div(
-                cache.sequence_lengths_plus_one - 2,
-                cache.page_size,
-                rounding_mode="floor",
-            ).to(torch.long)
-            reserve_col = reserve_base + step
-            logical_col = torch.div(
-                cache.sequence_lengths_plus_one + step - 2,
-                cache.page_size,
-                rounding_mode="floor",
-            ).to(torch.long)
-            batch_idx = torch.arange(batch, device=cache.block_map.device)
-            dest_ids = cache.block_map[batch_idx, reserve_col].to(torch.long)
-            if step > 0:
-                src_ids = cache.block_map[batch_idx, reserve_col - 1].to(torch.long)
-                cache.ssm[dest_ids] = cache.ssm[src_ids]
-            step_block_map = cache.block_map.clone()
-            step_block_map[batch_idx, logical_col] = dest_ids.to(step_block_map.dtype)
-            step_output = self._recurrent(
-                q_seq[:, step, :].reshape(batch, -1),
-                k_seq[:, step, :].reshape(batch, -1),
-                v_seq[:, step, :].reshape(batch, -1),
-                gate_seq[:, step, :].reshape(batch, -1),
-                beta_seq[:, step, :].reshape(batch, -1),
-                one_token_cu,
-                cache.ssm,
-                step_block_map,
-                cache.sequence_lengths_plus_one + step,
-                cache.page_size,
-            )
-            output_steps.append(step_output.squeeze(0))
-        return torch.stack(output_steps, dim=1).reshape(
-            1, token_count, self.local_heads, self.head_dim
+        return self._recurrent(
+            q.reshape(token_count, self.projection_size),
+            k.reshape(token_count, self.projection_size),
+            v.reshape(token_count, self.projection_size),
+            raw_gate,
+            raw_beta,
+            cu_seqlens,
+            cache.ssm,
+            cache.block_map,
+            cache.sequence_lengths_plus_one,
+            cache.page_size,
         )
 
     def forward(

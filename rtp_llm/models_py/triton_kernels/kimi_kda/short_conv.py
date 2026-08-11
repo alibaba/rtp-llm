@@ -346,6 +346,205 @@ def _kimi_kda_short_conv_paged_decode_kernel(
     )
 
 
+@triton.jit
+def _kimi_kda_short_conv_paged_target_verify_kernel(
+    q,
+    k,
+    v,
+    weight,
+    conv_state,
+    block_map,
+    sequence_lengths_plus_one,
+    output,
+    stride_q_b,
+    stride_q_t,
+    stride_q_d,
+    stride_k_b,
+    stride_k_t,
+    stride_k_d,
+    stride_v_b,
+    stride_v_t,
+    stride_v_d,
+    stride_w_d,
+    stride_w_w,
+    stride_s_block,
+    stride_s_w,
+    stride_s_d,
+    stride_bm_b,
+    stride_bm_page,
+    stride_o_p,
+    stride_o_b,
+    stride_o_t,
+    stride_o_d,
+    max_block_count,
+    seq_size_per_block: tl.constexpr,
+    T: tl.constexpr,
+    D: tl.constexpr,
+    W: tl.constexpr,
+    BW: tl.constexpr,
+    BD: tl.constexpr,
+):
+    """Replay a target-verify sequence inside one Triton program.
+
+    This is numerically equivalent to invoking the paged one-token decode
+    kernel T times, but keeps the W-1 convolution history in registers and
+    removes Python dispatch, block-map clones and inter-step cache copies.
+    Each speculative position still publishes its physical checkpoint.
+    """
+
+    i_b = tl.program_id(0)
+    i_p = tl.program_id(1)
+    i_d = tl.program_id(2)
+    o_d = i_d * BD + tl.arange(0, BD)
+    o_w = tl.arange(0, BW)
+    m_d = o_d < D
+    m_w = o_w < W
+    packed_d = i_p * D + o_d
+
+    sequence_length_plus_one = tl.load(sequence_lengths_plus_one + i_b).to(tl.int64)
+    reserve_page_unclamped = (sequence_length_plus_one - 2) // seq_size_per_block
+    last_page = max_block_count - 1
+    reserve_page = tl.minimum(tl.maximum(reserve_page_unclamped, 0), last_page)
+    read_block_id = tl.load(
+        block_map + i_b * stride_bm_b + reserve_page * stride_bm_page,
+        mask=sequence_length_plus_one > 1,
+        other=0,
+    ).to(tl.int64)
+    read_valid = (sequence_length_plus_one > 1) & (read_block_id > 0)
+    b_weight = tl.load(
+        weight + packed_d[:, None] * stride_w_d + o_w[None, :] * stride_w_w,
+        mask=m_d[:, None] & m_w[None, :],
+        other=0,
+    )
+
+    for i_t in tl.range(0, T):
+        # Build this token's W-wide convolution window directly from the
+        # original checkpoint and the preceding verify inputs.  This avoids
+        # cross-program synchronization while preserving the one-token
+        # kernel's reduction order exactly.
+        source_t = i_t + o_w - (W - 1)
+        history_w = source_t + (W - 1)
+        b_history = tl.load(
+            conv_state
+            + read_block_id * stride_s_block
+            + history_w[None, :] * stride_s_w
+            + packed_d[:, None] * stride_s_d,
+            mask=read_valid
+            & m_d[:, None]
+            & (source_t[None, :] < 0)
+            & (history_w[None, :] < W - 1),
+            other=0,
+        ).to(tl.float32)
+        b_q = tl.load(
+            q
+            + i_b * stride_q_b
+            + source_t[None, :] * stride_q_t
+            + o_d[:, None] * stride_q_d,
+            mask=m_d[:, None] & (source_t[None, :] >= 0) & (i_p == 0),
+            other=0,
+        ).to(tl.float32)
+        b_k = tl.load(
+            k
+            + i_b * stride_k_b
+            + source_t[None, :] * stride_k_t
+            + o_d[:, None] * stride_k_d,
+            mask=m_d[:, None] & (source_t[None, :] >= 0) & (i_p == 1),
+            other=0,
+        ).to(tl.float32)
+        b_v = tl.load(
+            v
+            + i_b * stride_v_b
+            + source_t[None, :] * stride_v_t
+            + o_d[:, None] * stride_v_d,
+            mask=m_d[:, None] & (source_t[None, :] >= 0) & (i_p == 2),
+            other=0,
+        ).to(tl.float32)
+        b_cache = tl.where(source_t[None, :] < 0, b_history, b_q + b_k + b_v)
+        b_y = tl.sum(b_cache * b_weight, 1)
+        b_y = b_y * tl.sigmoid(b_y)
+        tl.store(
+            output
+            + i_p * stride_o_p
+            + i_b * stride_o_b
+            + i_t * stride_o_t
+            + o_d * stride_o_d,
+            tl.cast(b_y, dtype=output.dtype.element_ty, fp_downcast_rounding="rtne"),
+            mask=m_d,
+        )
+
+    # Publish checkpoints newest-to-oldest so the final write to the source
+    # page cannot change the original history used by earlier checkpoints.
+    for reverse_offset in tl.range(0, T):
+        i_t = T - 1 - reverse_offset
+        state_source_t = i_t + o_w - (W - 2)
+        state_history_w = state_source_t + (W - 1)
+        state_history = tl.load(
+            conv_state
+            + read_block_id * stride_s_block
+            + state_history_w[None, :] * stride_s_w
+            + packed_d[:, None] * stride_s_d,
+            mask=read_valid
+            & m_d[:, None]
+            & (o_w[None, :] < W - 1)
+            & (state_source_t[None, :] < 0)
+            & (state_history_w[None, :] < W - 1),
+            other=0,
+        ).to(tl.float32)
+        state_q = tl.load(
+            q
+            + i_b * stride_q_b
+            + state_source_t[None, :] * stride_q_t
+            + o_d[:, None] * stride_q_d,
+            mask=m_d[:, None]
+            & (o_w[None, :] < W - 1)
+            & (state_source_t[None, :] >= 0)
+            & (i_p == 0),
+            other=0,
+        ).to(tl.float32)
+        state_k = tl.load(
+            k
+            + i_b * stride_k_b
+            + state_source_t[None, :] * stride_k_t
+            + o_d[:, None] * stride_k_d,
+            mask=m_d[:, None]
+            & (o_w[None, :] < W - 1)
+            & (state_source_t[None, :] >= 0)
+            & (i_p == 1),
+            other=0,
+        ).to(tl.float32)
+        state_v = tl.load(
+            v
+            + i_b * stride_v_b
+            + state_source_t[None, :] * stride_v_t
+            + o_d[:, None] * stride_v_d,
+            mask=m_d[:, None]
+            & (o_w[None, :] < W - 1)
+            & (state_source_t[None, :] >= 0)
+            & (i_p == 2),
+            other=0,
+        ).to(tl.float32)
+        history = tl.where(
+            state_source_t[None, :] < 0,
+            state_history,
+            state_q + state_k + state_v,
+        )
+
+        write_page = tl.minimum(reserve_page + i_t, last_page)
+        write_block_id = tl.load(
+            block_map + i_b * stride_bm_b + write_page * stride_bm_page
+        ).to(tl.int64)
+        tl.store(
+            conv_state
+            + write_block_id * stride_s_block
+            + o_w[None, :] * stride_s_w
+            + packed_d[:, None] * stride_s_d,
+            history,
+            mask=(write_block_id > 0)
+            & m_d[:, None]
+            & (o_w[None, :] < W - 1),
+        )
+
+
 @torch.compiler.disable
 def kimi_kda_short_conv_prefill(
     x: torch.Tensor,
@@ -622,6 +821,89 @@ def kimi_kda_short_conv_paged_decode(
         output.stride(2),
         block_map.shape[1],
         seq_size_per_block=seq_size_per_block,
+        D=projection_size,
+        W=kernel_size,
+        BW=triton.next_power_of_2(kernel_size),
+        BD=block_d,
+        num_warps=4,
+    )
+    return output[0], output[1], output[2]
+
+
+@torch.compiler.disable
+def kimi_kda_short_conv_paged_target_verify(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state: torch.Tensor,
+    block_map: torch.Tensor,
+    sequence_lengths_plus_one: torch.Tensor,
+    seq_size_per_block: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run a complete multi-token target-verify short convolution.
+
+    Inputs use ``[batch, verify_length, projection]``.  The implementation
+    produces and checkpoints every speculative position in one Triton launch.
+    """
+
+    if q.ndim != 3 or k.shape != q.shape or v.shape != q.shape:
+        raise ValueError("KDA target verify expects matching Q/K/V [batch,seq,dim]")
+    batch, sequence_length, projection_size = q.shape
+    if sequence_length <= 0:
+        raise ValueError("KDA target verify sequence must not be empty")
+    if not is_kimi_kda_short_conv_paged_decode_supported(
+        q[:, 0, :],
+        k[:, 0, :],
+        v[:, 0, :],
+        weight,
+        conv_state,
+        block_map,
+        sequence_lengths_plus_one,
+        seq_size_per_block,
+    ):
+        raise ValueError("unsupported KDA paged target-verify short-conv inputs")
+
+    kernel_size = int(weight.shape[1])
+    output = torch.empty(
+        (3, batch, sequence_length, projection_size),
+        dtype=q.dtype,
+        device=q.device,
+    )
+    block_d = 64
+    grid = (batch, 3, triton.cdiv(projection_size, block_d))
+    _kimi_kda_short_conv_paged_target_verify_kernel[grid](
+        q,
+        k,
+        v,
+        weight,
+        conv_state,
+        block_map,
+        sequence_lengths_plus_one,
+        output,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        k.stride(0),
+        k.stride(1),
+        k.stride(2),
+        v.stride(0),
+        v.stride(1),
+        v.stride(2),
+        weight.stride(0),
+        weight.stride(1),
+        conv_state.stride(0),
+        conv_state.stride(1),
+        conv_state.stride(2),
+        block_map.stride(0),
+        block_map.stride(1),
+        output.stride(0),
+        output.stride(1),
+        output.stride(2),
+        output.stride(3),
+        block_map.shape[1],
+        seq_size_per_block=seq_size_per_block,
+        T=sequence_length,
         D=projection_size,
         W=kernel_size,
         BW=triton.next_power_of_2(kernel_size),

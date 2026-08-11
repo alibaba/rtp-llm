@@ -17,6 +17,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.short_conv import (
     is_kimi_kda_short_conv_paged_decode_supported,
     kimi_kda_short_conv_decode,
     kimi_kda_short_conv_paged_decode,
+    kimi_kda_short_conv_paged_target_verify,
     kimi_kda_short_conv_prefill,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "is_kimi_kda_short_conv_paged_decode_supported",
     "kimi_kda_short_conv_decode",
     "kimi_kda_short_conv_paged_decode",
+    "kimi_kda_short_conv_paged_target_verify",
     "kimi_kda_short_conv_prefill",
 ]
