@@ -100,3 +100,10 @@ cc_test(
     deps = test_deps,
     env = {},
 )
+
+cc_test(
+    name = "transfer_batch_async_context_test",
+    srcs = ["TransferBatchAsyncContextTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)

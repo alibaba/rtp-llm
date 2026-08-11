@@ -57,6 +57,11 @@ ControlledPerRankBlockTransferEngine::ControlledPerRankBlockTransferEngine(const
     PerRankBlockTransferEngine(groups), action_(action), barrier_(std::move(barrier)) {}
 
 std::shared_ptr<AsyncContext> ControlledPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
+    return submit(std::vector<TransferDescriptor>{descriptor});
+}
+
+std::shared_ptr<AsyncContext>
+ControlledPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
     submit_count_.fetch_add(1);
     if (barrier_ != nullptr) {
         barrier_->enterAndWait();
@@ -68,7 +73,7 @@ std::shared_ptr<AsyncContext> ControlledPerRankBlockTransferEngine::submit(const
         return std::make_shared<CompletedAsyncContext>(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
     }
-    return PerRankBlockTransferEngine::submit(descriptor);
+    return PerRankBlockTransferEngine::submit(descriptors);
 }
 
 size_t ControlledPerRankBlockTransferEngine::submitCount() const {
@@ -593,6 +598,24 @@ std::shared_ptr<AsyncContext> ScriptedPerRankBlockTransferEngine::submit(const T
     }
     if (success) {
         return PerRankBlockTransferEngine::submit(descriptor);
+    }
+    return std::make_shared<CompletedAsyncContext>(
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
+}
+
+std::shared_ptr<AsyncContext>
+ScriptedPerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
+    bool success = true;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
+        if (!results_.empty()) {
+            success = results_.front();
+            results_.pop_front();
+        }
+    }
+    if (success) {
+        return PerRankBlockTransferEngine::submit(descriptors);
     }
     return std::make_shared<CompletedAsyncContext>(
         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));

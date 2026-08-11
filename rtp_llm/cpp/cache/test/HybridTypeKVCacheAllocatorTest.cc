@@ -45,6 +45,17 @@ public:
         return PerRankBlockTransferEngine::submit(descriptor);
     }
 
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ++submit_count_;
+            entered_ = true;
+            cv_.notify_all();
+            cv_.wait(lock, [this] { return released_; });
+        }
+        return PerRankBlockTransferEngine::submit(descriptors);
+    }
+
     bool waitUntilEnteredFor(std::chrono::milliseconds timeout) {
         std::unique_lock<std::mutex> lock(mutex_);
         return cv_.wait_for(lock, timeout, [this] { return entered_; });
@@ -769,7 +780,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     second_context->waitDone();
     ASSERT_TRUE(first_context->success());
     ASSERT_TRUE(second_context->success());
-    EXPECT_EQ(transfer_engine->submitCount(), expected_submit_count);
+    EXPECT_EQ(transfer_engine->submitCount(), 1u);
 
     for (const TransferDescriptor& desc : first_context->loadDescs()) {
         const GroupSetPtr& group_set = cache->groupSets()[desc.group_set_id];

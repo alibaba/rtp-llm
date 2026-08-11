@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -1025,6 +1026,83 @@ static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& ma
     const TransferDescriptor descriptor = TransferDescriptor::deviceToHost(/*group_id=*/0, {1}, /*host_block=*/1);
     ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
         *request.mutable_mem_request(), {descriptor}, manager->blockTreeCache()->groupSets()));
+}
+
+class CountingBatchPerRankEngine final: public PerRankBlockTransferEngine {
+public:
+    explicit CountingBatchPerRankEngine(const std::vector<GroupSetPtr>& groups): PerRankBlockTransferEngine(groups) {}
+
+    std::shared_ptr<AsyncContext> submit(const TransferDescriptor&) override {
+        ++single_submit_count_;
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+    }
+
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        ++batch_submit_count_;
+        last_batch_size_ = descriptors.size();
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+    }
+
+    size_t singleSubmitCount() const {
+        return single_submit_count_;
+    }
+
+    size_t batchSubmitCount() const {
+        return batch_submit_count_;
+    }
+
+    size_t lastBatchSize() const {
+        return last_batch_size_;
+    }
+
+private:
+    size_t single_submit_count_{0};
+    size_t batch_submit_count_{0};
+    size_t last_batch_size_{0};
+};
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesThenSubmitsAllItemsOnce) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_host_cache  = true;
+    kv_cache_config.host_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+
+    auto counting_engine = std::make_shared<CountingBatchPerRankEngine>(manager->blockTreeCache()->groupSets());
+    manager->blockTreeCache()->transfer_dispatcher_->per_rank_engine_ = counting_engine;
+
+    FunctionRequestPB request;
+    appendValidGroupedTransfer(manager, request);
+    appendValidGroupedTransfer(manager, request);
+    FunctionResponsePB response;
+    EXPECT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::OK);
+    EXPECT_EQ(counting_engine->singleSubmitCount(), 0u);
+    EXPECT_EQ(counting_engine->batchSubmitCount(), 1u);
+    EXPECT_EQ(counting_engine->lastBatchSize(), 2u);
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionInvalidLaterItemSubmitsNothing) {
+    auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_host_cache  = true;
+    kv_cache_config.host_cache_size_mb = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(manager->init());
+
+    auto counting_engine = std::make_shared<CountingBatchPerRankEngine>(manager->blockTreeCache()->groupSets());
+    manager->blockTreeCache()->transfer_dispatcher_->per_rank_engine_ = counting_engine;
+
+    FunctionRequestPB request;
+    appendValidGroupedTransfer(manager, request);
+    appendValidGroupedTransfer(manager, request);
+    request.mutable_mem_request()->mutable_copy_items(1)->clear_group_blocks();
+    FunctionResponsePB response;
+    EXPECT_TRUE(manager->executeFunction(request, response));
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::FAILED);
+    EXPECT_EQ(counting_engine->singleSubmitCount(), 0u);
+    EXPECT_EQ(counting_engine->batchSubmitCount(), 0u);
 }
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTieredBlockTree) {

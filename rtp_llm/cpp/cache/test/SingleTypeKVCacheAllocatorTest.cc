@@ -44,6 +44,11 @@ public:
         return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
     }
 
+    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+        submit_count_ += descriptors.size();
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+    }
+
     size_t submitCount() const {
         return submit_count_;
     }

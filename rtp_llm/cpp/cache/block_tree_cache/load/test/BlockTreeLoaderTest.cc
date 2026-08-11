@@ -58,7 +58,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     std::shared_ptr<AsyncContext> context = load_context;
     context->waitDone();
     ASSERT_TRUE(context->done());
-    EXPECT_TRUE(context->success());
+    EXPECT_TRUE(context->success()) << context->errorInfo().ToString();
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     environment->expectPayloads();
 

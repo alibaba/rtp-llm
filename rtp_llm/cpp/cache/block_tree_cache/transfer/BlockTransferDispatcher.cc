@@ -24,20 +24,23 @@ bool BlockTransferDispatcher::executePerRank(const TransferDescriptor& descripto
     return true;
 }
 
-bool BlockTransferDispatcher::executeMultiRank(const std::vector<TransferDescriptor>& descriptors,
-                                               int                                    timeout_ms) const {
+std::shared_ptr<AsyncContext>
+BlockTransferDispatcher::executePerRank(const std::vector<TransferDescriptor>& descriptors) const {
     if (descriptors.empty()) {
-        return true;
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+    }
+    return per_rank_engine_->submit(descriptors);
+}
+
+std::shared_ptr<AsyncContext>
+BlockTransferDispatcher::executeMultiRank(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const {
+    if (descriptors.empty()) {
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
     }
     if (multi_rank_engine_ != nullptr) {
         return multi_rank_engine_->execute(descriptors, timeout_ms);
     }
-    for (const TransferDescriptor& descriptor : descriptors) {
-        if (!executePerRank(descriptor)) {
-            return false;
-        }
-    }
-    return true;
+    return executePerRank(descriptors);
 }
 
 bool BlockTransferDispatcher::hasMultiRankEngine() const {

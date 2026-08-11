@@ -624,11 +624,9 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         return true;
     }
 
-    for (const TransferDescriptor& descriptor : descriptors) {
-        if (!block_tree_cache_->executeTransfer(descriptor)) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
-            return true;
-        }
+    if (!block_tree_cache_->executeTransfer(descriptors)) {
+        RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
+        return true;
     }
     memory_response->set_code(MemoryOperationResponsePB::OK);
     return true;

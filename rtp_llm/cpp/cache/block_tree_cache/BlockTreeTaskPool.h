@@ -24,10 +24,12 @@ public:
 
     bool start();
     bool submit(std::function<void()> task);
+    bool trySubmit(std::function<void()> task);
     void waitForIdle();
     void shutdown();
 
 private:
+    bool submitImpl(std::function<void()> task, bool block_if_full);
     void taskStarted();
     void taskFinished();
 
