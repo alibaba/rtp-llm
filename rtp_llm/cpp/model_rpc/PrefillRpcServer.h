@@ -22,7 +22,7 @@ public:
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
 private:
-    ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
+    ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream, grpc::ServerContext* server_context);
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     void         getRpcConnection(PrefillGenerateContext& prefill_context);
     void         multimodalProcess(PrefillGenerateContext& prefill_context);

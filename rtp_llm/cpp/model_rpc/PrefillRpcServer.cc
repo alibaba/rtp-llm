@@ -1,4 +1,5 @@
 #include "autil/TimeUtility.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRunWaiter.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/SamplerGeneratorState.h"
@@ -6,10 +7,9 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <algorithm>
 #include <cstring>
 #include <memory>
-#include <unistd.h>
-#include <limits.h>
 #include <c10/core/InferenceMode.h>
 
 using namespace std;
@@ -89,23 +89,56 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
     return grpc::Status::OK;
 }
 
-ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream) {
-    static int max_wait_timeout_us = maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms * 1000;
-    auto       begin_time_us       = currentTimeUs();
-    while (!stream->hasError() && stream->getStatus() == StreamState::WAITING) {
-        usleep(100);
-        auto current_time_us = currentTimeUs();
-        auto cost_time_us    = current_time_us - begin_time_us;
-        if (cost_time_us > max_wait_timeout_us) {
-            string new_error_msg = "wait to run timeout, timeout is " + std::to_string(max_wait_timeout_us) + " us";
-            stream->reportEvent(StreamEvents::Error, ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
-            return ErrorInfo(ErrorCode::WAIT_TO_RUN_TIMEOUT, new_error_msg);
-        }
-    }
-    if (stream->hasError()) {
+ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream,
+                                                grpc::ServerContext*            server_context) {
+    const auto steady_now      = PrefillRunSteadyClock::now();
+    const auto system_now      = PrefillRunSystemClock::now();
+    const auto server_deadline = server_context == nullptr ? PrefillRunSystemClock::time_point::max() :
+                                                             server_context->deadline();
+    const auto configured_timeout = std::chrono::milliseconds(
+        std::max<int64_t>(0, maga_init_params_.pd_sep_config.prefill_max_wait_timeout_ms));
+    const auto deadline =
+        makePrefillRunDeadline(steady_now, configured_timeout, system_now, server_deadline);
+    auto wait_result = waitForPrefillRun(
+        [&stream]() { return stream->statusInfo().hasError(); },
+        [&stream]() {
+            const auto status = stream->getStatus();
+            return status == StreamState::RUNNING || status == StreamState::FINISHED;
+        },
+        [server_context]() { return server_context != nullptr && server_context->IsCancelled(); },
+        deadline.value);
+
+    if (wait_result == PrefillRunWaitResult::StreamError) {
         return stream->statusInfo();
     }
-    return ErrorInfo::OkStatus();
+    if (wait_result == PrefillRunWaitResult::Ready) {
+        if (stream->statusInfo().hasError()) {
+            return stream->statusInfo();
+        }
+        if (PrefillRunSteadyClock::now() >= deadline.value) {
+            wait_result = PrefillRunWaitResult::DeadlineExceeded;
+        } else if (server_context != nullptr && server_context->IsCancelled()) {
+            wait_result = PrefillRunWaitResult::Cancelled;
+        } else {
+            return ErrorInfo::OkStatus();
+        }
+    }
+
+    ErrorCode   error_code;
+    std::string error_msg;
+    if (wait_result == PrefillRunWaitResult::Cancelled) {
+        error_code = ErrorCode::CANCELLED;
+        error_msg  = "request cancelled while waiting for prefill stream to run";
+    } else if (deadline.limited_by_server_context) {
+        error_code = ErrorCode::GENERATE_TIMEOUT;
+        error_msg  = "request deadline exceeded while waiting for prefill stream to run";
+    } else {
+        error_code = ErrorCode::WAIT_TO_RUN_TIMEOUT;
+        error_msg  = "prefill stream wait deadline exceeded after "
+                    + std::to_string(configured_timeout.count()) + " ms";
+    }
+    stream->reportError(error_code, error_msg);
+    return stream->statusInfo();
 }
 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
@@ -229,7 +262,8 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
+    prefill_context.error_info =
+        waitStreamBeforeRun(prefill_context.getStream(), prefill_context.server_context);
     if (prefill_context.error_info.hasError()) {
         prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;

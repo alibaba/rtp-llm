@@ -52,6 +52,17 @@ cc_test(
 )
 
 cc_test(
+    name = "prefill_run_waiter_test",
+    srcs = ["PrefillRunWaiterTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:prefill_run_waiter",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "cache_transfer_block_selector_test",
     srcs = ["CacheTransferBlockSelectorTest.cc"],
     copts = test_copts,

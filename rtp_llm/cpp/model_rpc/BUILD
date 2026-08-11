@@ -49,6 +49,12 @@ cc_library(
 )
 
 cc_library(
+    name = "prefill_run_waiter",
+    hdrs = ["PrefillRunWaiter.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cache_transfer_block_selector",
     hdrs = ["CacheTransferBlockSelector.h"],
     visibility = ["//visibility:public"],
@@ -85,6 +91,7 @@ cc_library(
         ["*.h"],
         exclude = [
             "PrefillPeerSelector.h",
+            "PrefillRunWaiter.h",
             "CacheTransferBlockSelector.h",
             "RPCPool.h",
             "SamplerGeneratorState.h",
@@ -96,6 +103,7 @@ cc_library(
         ":cache_transfer_block_selector",
         ":model_rpc_pool",
         ":prefill_peer_selector",
+        ":prefill_run_waiter",
         ":rpc_error_code",
         ":sampler_generator_state",
         ":tensor_pb_convert",
