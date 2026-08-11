@@ -6,6 +6,7 @@
 #include "aios/network/anet/iserveradapter.h"
 #include "autil/Log.h"
 #include "http_server/HttpError.h"
+#include "http_server/HttpRequestAdmission.h"
 
 namespace autil {
 class LockFreeThreadPool;
@@ -17,7 +18,10 @@ class HttpRouter;
 
 class HttpServerAdapter: public anet::IServerAdapter {
 public:
-    HttpServerAdapter(const std::shared_ptr<HttpRouter>& router, size_t threadNum, size_t queueSize);
+    HttpServerAdapter(const std::shared_ptr<HttpRouter>& router,
+                      size_t                             threadNum,
+                      size_t                             queueSize,
+                      RequestAdmissionHandler            requestAdmissionHandler = {});
     ~HttpServerAdapter() override;
 
 public:
@@ -32,6 +36,7 @@ private:
 private:
     std::shared_ptr<HttpRouter>                _router;
     std::shared_ptr<autil::LockFreeThreadPool> _threadPool;
+    RequestAdmissionHandler                    _requestAdmissionHandler;
 
     AUTIL_LOG_DECLARE();
 };

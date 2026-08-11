@@ -18,6 +18,9 @@ public:
     static HttpError InternalError(const std::string& message) {
         return {500, message};
     }
+    static HttpError ServiceUnavailable(const std::string& message) {
+        return {503, message};
+    }
 
     bool IsOK() const {
         return code == 0;

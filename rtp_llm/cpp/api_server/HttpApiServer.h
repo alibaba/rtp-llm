@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <mutex>
 #include <string>
 
 #include "autil/AtomicCounter.h"
@@ -17,6 +19,8 @@
 #include "rtp_llm/cpp/api_server/InferenceService.h"
 #include "rtp_llm/cpp/api_server/EmbeddingService.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/utils/RequestAdmissionGate.h"
 
 namespace rtp_llm {
 
@@ -37,13 +41,13 @@ public:
         engine_(engine),
         mm_processor_(mm_processor),
         addr_(address),
-        params_(params),
+        model_config_(params.model_config_),
         token_processor_(new TokenProcessor(token_processor)),
         metrics_reporter_(params.metrics_reporter) {
         is_embedding_ = false;
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
-        init_controller(params_.concurrency_config, params_.parallelism_config);
+        init_controller(params.concurrency_config, params.parallelism_config);
     }
 
     // embedding engine
@@ -51,12 +55,12 @@ public:
                   std::shared_ptr<MultimodalProcessor> mm_processor,
                   const EngineInitParams&              params,
                   py::object                           custom_module):
-        params_(params), metrics_reporter_(params.metrics_reporter) {
+        model_config_(params.model_config_), metrics_reporter_(params.metrics_reporter) {
         is_embedding_       = true;
         embedding_endpoint_ = std::make_shared<EmbeddingEndpoint>(embedding_engine, mm_processor, custom_module);
         active_request_count_.reset(new autil::AtomicCounter());
         request_counter_.reset(new autil::AtomicCounter());
-        init_controller(params_.concurrency_config, params_.parallelism_config);
+        init_controller(params.concurrency_config, params.parallelism_config);
     }
 
     ~HttpApiServer() = default;
@@ -65,6 +69,10 @@ public:
     bool        start();
     bool        start(const std::string& address);
     bool        start(py::object model_weights_loader, py::object world_info, py::object tokenizer, py::object render);
+    void        beginDrain();
+    bool        waitForDrain(std::chrono::steady_clock::time_point deadline) const;
+    bool        finishStop();
+    void        forceStopTransport();
     void        stop();
     bool        isStoped() const;
     std::string getListenAddr() const {
@@ -84,10 +92,10 @@ private:
     bool registerChatService();
     bool registerInferenceService();
     bool registerEmbedingService();
-
 private:
     bool                                  is_embedding_;
     std::atomic_bool                      is_stopped_{true};
+    std::shared_ptr<RequestAdmissionGate> request_admission_gate_{std::make_shared<RequestAdmissionGate>()};
     std::shared_ptr<autil::AtomicCounter> active_request_count_;
     std::shared_ptr<autil::AtomicCounter> request_counter_;
 
@@ -95,7 +103,7 @@ private:
     std::shared_ptr<MultimodalProcessor> mm_processor_;
     std::string                          addr_;
 
-    const EngineInitParams&                params_;
+    ModelConfig                            model_config_;
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
 
@@ -114,6 +122,9 @@ private:
     std::shared_ptr<ChatService>             chat_service_;
     std::shared_ptr<InferenceService>        inference_service_;
     std::shared_ptr<EmbeddingService>        embedding_service_;
+
+    mutable std::mutex stop_mutex_;
+    bool               transport_stopped_{false};
 };
 
 class CounterGuard {

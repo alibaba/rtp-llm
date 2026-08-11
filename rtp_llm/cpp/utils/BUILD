@@ -15,6 +15,25 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "request_admission_gate",
+    hdrs = [
+        "RequestAdmissionGate.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "gil_scoped_thread_args",
+    hdrs = [
+        "GilScopedThreadArgs.h",
+    ],
+    copts = copts(),
+    deps = torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
 # New modular targets
 cc_library(
     name = "core_utils",

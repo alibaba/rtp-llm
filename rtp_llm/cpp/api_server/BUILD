@@ -63,6 +63,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/stream:stream",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        "//rtp_llm/cpp/utils:request_admission_gate",
         ":http_server",
         ":http_client",
         ":embedding_arpc_deps",

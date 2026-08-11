@@ -72,3 +72,21 @@ cc_test(
         "TEST_USING_DEVICE": "CUDA",
     },
 )
+
+cc_test(
+    name = "request_admission_gate_test",
+    srcs = [
+        "RequestAdmissionGateTest.cc",
+    ],
+    copts = test_copts,
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:request_admission_gate"],
+)
+
+cc_test(
+    name = "gil_scoped_thread_args_test",
+    srcs = [
+        "GilScopedThreadArgsTest.cc",
+    ],
+    copts = test_copts,
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:gil_scoped_thread_args"],
+)

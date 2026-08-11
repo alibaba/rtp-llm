@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <chrono>
 #include <memory>
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServiceImpl.h"
@@ -18,12 +20,14 @@ public:
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        if (!prefill_server_) {
-            auto error_msg = "server not implement GenerateStreamCall";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-        }
-        return prefill_server_->GenerateStreamCall(context, request, writer);
+        return withRequestAdmission([&]() {
+            if (!prefill_server_) {
+                auto error_msg = "server not implement GenerateStreamCall";
+                RTP_LLM_LOG_ERROR(error_msg);
+                return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+            }
+            return prefill_server_->GenerateStreamCall(context, request, writer);
+        });
     }
 
     grpc::Status
@@ -39,6 +43,10 @@ public:
     grpc::Status RemoteLoad(grpc::ServerContext*          context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response) override {
+        auto permit = remote_load_admission_gate_.tryAcquire();
+        if (!permit) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "server is quiescing remote loads");
+        }
         if (!decode_server_) {
             auto error_msg = "server not implement RemoteLoad";
             RTP_LLM_LOG_ERROR(error_msg);
@@ -59,12 +67,14 @@ public:
     }
 
     grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* stream) override {
-        if (!decode_server_) {
-            auto error_msg = "server not implement RemoteGenerate";
-            RTP_LLM_LOG_ERROR(error_msg);
-            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
-        }
-        return decode_server_->RemoteGenerate(context, stream);
+        return withRequestAdmission([&]() {
+            if (!decode_server_) {
+                auto error_msg = "server not implement RemoteGenerate";
+                RTP_LLM_LOG_ERROR(error_msg);
+                return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+            }
+            return decode_server_->RemoteGenerate(context, stream);
+        });
     }
 
     grpc::Status RemoteGenerateNew(grpc::ServerContext*              context,
@@ -91,16 +101,52 @@ public:
     }
 
     void stop() override {
+        RTP_LLM_CHECK_WITH_INFO(prepareStop(std::chrono::milliseconds::max()),
+                                "remote load leases failed to quiesce before service stop");
         if (prefill_server_) {
             prefill_server_->stop();
-        } else {
+        } else if (decode_server_) {
             decode_server_->stop();
         }
+    }
+
+    void beginDrain() override {
+        LocalRpcServiceImpl::beginDrain();
+        remote_load_admission_gate_.close();
+    }
+
+    bool prepareStop(std::chrono::milliseconds grace) override {
+        const auto deadline = grace == std::chrono::milliseconds::max() ?
+                                  std::chrono::steady_clock::time_point::max() :
+                                  std::chrono::steady_clock::now() + std::max(grace, std::chrono::milliseconds::zero());
+        remote_load_admission_gate_.close();
+        if (!remote_load_admission_gate_.waitUntil(deadline)) {
+            return false;
+        }
+
+        std::chrono::milliseconds remaining = std::chrono::milliseconds::max();
+        if (deadline != std::chrono::steady_clock::time_point::max()) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                remaining = std::chrono::milliseconds::zero();
+            } else {
+                remaining = std::max(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now),
+                                     std::chrono::milliseconds(1));
+            }
+        }
+        if (prefill_server_) {
+            return prefill_server_->drainRemoteLoads(remaining);
+        }
+        if (decode_server_) {
+            return decode_server_->drainRemoteLoads(remaining);
+        }
+        return true;
     }
 
 private:
     std::shared_ptr<PrefillRpcServer> prefill_server_;
     std::shared_ptr<DecodeRpcServer>  decode_server_;
+    RequestAdmissionGate             remote_load_admission_gate_;
 };
 
 }  // namespace rtp_llm

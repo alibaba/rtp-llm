@@ -1,5 +1,7 @@
 #include "http_server/HttpServerAdapter.h"
 
+#include <utility>
+
 #include "autil/LockFreeThreadPool.h"
 #include "http_server/HttpRequestWorkItem.h"
 #include "http_server/HttpResponse.h"
@@ -9,8 +11,11 @@ namespace http_server {
 
 AUTIL_LOG_SETUP(http_server, HttpServerAdapter);
 
-HttpServerAdapter::HttpServerAdapter(const std::shared_ptr<HttpRouter>& router, size_t threadNum, size_t queueSize):
-    _router(router) {
+HttpServerAdapter::HttpServerAdapter(const std::shared_ptr<HttpRouter>& router,
+                                     size_t                             threadNum,
+                                     size_t                             queueSize,
+                                     RequestAdmissionHandler            requestAdmissionHandler):
+    _router(router), _requestAdmissionHandler(std::move(requestAdmissionHandler)) {
     _threadPool = std::make_shared<autil::LockFreeThreadPool>(threadNum, queueSize, nullptr, "HttpRequestThreadPool");
     _threadPool->start();
 }
@@ -79,11 +84,20 @@ anet::IPacketHandler::HPRetCode HttpServerAdapter::handleRegularPacket(anet::Con
     }
     auto responseHandler = responseHandlerOpt.value();
 
+    RequestAdmissionToken admissionToken;
+    if (_requestAdmissionHandler) {
+        admissionToken = _requestAdmissionHandler();
+        if (!admissionToken) {
+            sendErrorResponse(connection, HttpError::ServiceUnavailable(R"({"detail":"server is draining"})"));
+            return anet::IPacketHandler::KEEP_CHANNEL;
+        }
+    }
+
     connection->addRef();
     auto connectionPtr =
         std::shared_ptr<::anet::Connection>(connection, [](anet::Connection* conn) { conn->subRef(); });
 
-    auto       workItem  = new HttpRequestWorkItem(responseHandler, connectionPtr, request);
+    auto       workItem  = new HttpRequestWorkItem(responseHandler, connectionPtr, request, std::move(admissionToken));
     const auto errorCode = _threadPool->pushWorkItem(workItem, false);
     if (errorCode != autil::ThreadPool::ERROR_NONE) {
         AUTIL_LOG(WARN,

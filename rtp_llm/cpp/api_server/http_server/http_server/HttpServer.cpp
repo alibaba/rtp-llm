@@ -1,5 +1,7 @@
 #include "http_server/HttpServer.h"
 
+#include <utility>
+
 #include "http_server/HttpRouter.h"
 #include "http_server/HttpServerAdapter.h"
 
@@ -7,9 +9,14 @@ namespace http_server {
 
 AUTIL_LOG_SETUP(http_server, HttpServer);
 
-HttpServer::HttpServer(anet::Transport* transport, size_t threadNum, size_t queueSize): _anetApp(transport) {
+HttpServer::HttpServer(anet::Transport*        transport,
+                       size_t                  threadNum,
+                       size_t                  queueSize,
+                       RequestAdmissionHandler requestAdmissionHandler):
+    _anetApp(transport) {
     _router        = std::make_shared<HttpRouter>();
-    _serverAdapter = std::make_shared<HttpServerAdapter>(_router, threadNum, queueSize);
+    _serverAdapter = std::make_shared<HttpServerAdapter>(
+        _router, threadNum, queueSize, std::move(requestAdmissionHandler));
 }
 
 HttpServer::~HttpServer() {

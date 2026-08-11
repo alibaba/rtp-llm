@@ -25,10 +25,24 @@ void HttpApiServer::init_controller(const ConcurrencyConfig& concurrency_config,
 }
 
 bool HttpApiServer::start(const std::string& address) {
+    if (request_admission_gate_->isClosed()) {
+        RTP_LLM_LOG_WARNING("HttpApiServer cannot restart after draining has begun.");
+        return false;
+    }
     // TODO: queueSize may interleave with controller :(
-    http_server_.reset(new http_server::HttpServer(/*transport=*/nullptr,
-                                                   /*threadNum=*/controller_->get_available_concurrency(),
-                                                   /*queueSize=*/controller_->get_available_concurrency() * 5));
+    auto gate = request_admission_gate_;
+    auto request_admission_handler = [gate]() -> http_server::RequestAdmissionToken {
+        auto permit = gate->tryAcquire();
+        if (!permit) {
+            return {};
+        }
+        return std::make_shared<RequestAdmissionGate::Permit>(std::move(permit));
+    };
+    http_server_.reset(new http_server::HttpServer(
+        /*transport=*/nullptr,
+        /*threadNum=*/controller_->get_available_concurrency(),
+        /*queueSize=*/controller_->get_available_concurrency() * 5,
+        std::move(request_admission_handler)));
     metric_reporter_.reset(new ApiServerMetricReporter());
     if (!metric_reporter_->init()) {
         RTP_LLM_LOG_WARNING("HttpApiServer start init metric reporter failed.");
@@ -201,8 +215,8 @@ bool HttpApiServer::registerChatService() {
         return true;
     }
 
-    chat_service_.reset(new ChatService(
-        engine_, mm_processor_, request_counter_, tokenizer_, render_, params_.model_config_, metric_reporter_));
+    chat_service_.reset(
+        new ChatService(engine_, mm_processor_, request_counter_, tokenizer_, render_, model_config_, metric_reporter_));
     auto chat_completions_callback = [active_request_count = active_request_count_,
                                       chat_service         = chat_service_,
                                       controller           = controller_,
@@ -263,7 +277,7 @@ bool HttpApiServer::registerInferenceService() {
                                                   request_counter_,
                                                   token_processor_,
                                                   controller_,
-                                                  params_.model_config_,
+                                                  model_config_,
                                                   metric_reporter_));
     auto inference_internal_callback =
         [active_request_count = active_request_count_, inference_service = inference_service_](
@@ -320,8 +334,8 @@ bool HttpApiServer::registerEmbedingService() {
            && http_server_->RegisterRoute("POST", "/", callback);
 }
 
-void HttpApiServer::stop() {
-    RTP_LLM_LOG_WARNING("http api server stopped");
+void HttpApiServer::beginDrain() {
+    request_admission_gate_->close();
     is_stopped_.store(true);
 
     if (health_service_) {
@@ -331,19 +345,37 @@ void HttpApiServer::stop() {
     if (worker_status_service_) {
         worker_status_service_->stop();
     }
+}
 
-    // wait all active request finished
-    if (active_request_count_) {
-        while (active_request_count_->getValue() > 0) {
-            RTP_LLM_LOG_DEBUG("wait active request processed. active request count: %d",
-                              active_request_count_->getValue());
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+bool HttpApiServer::waitForDrain(std::chrono::steady_clock::time_point deadline) const {
+    return request_admission_gate_->waitUntil(deadline);
+}
+
+bool HttpApiServer::finishStop() {
+    if (!request_admission_gate_->waitFor(std::chrono::milliseconds::zero())) {
+        RTP_LLM_LOG_WARNING("http api server still has active requests");
+        return false;
     }
 
-    if (http_server_) {
+    forceStopTransport();
+    return true;
+}
+
+void HttpApiServer::forceStopTransport() {
+    beginDrain();
+
+    std::lock_guard<std::mutex> lock(stop_mutex_);
+    if (!transport_stopped_ && http_server_) {
         http_server_->Stop();
     }
+    transport_stopped_ = true;
+}
+
+void HttpApiServer::stop() {
+    RTP_LLM_LOG_WARNING("http api server stopped");
+    beginDrain();
+    request_admission_gate_->wait();
+    (void)finishStop();
 }
 
 bool HttpApiServer::isStoped() const {

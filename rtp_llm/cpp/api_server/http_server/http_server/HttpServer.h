@@ -6,8 +6,8 @@
 #include "aios/network/anet/transport.h"
 #include "autil/Log.h"
 #include "http_server/ANetApp.h"
-#include <functional>
 #include "http_server/HttpRequest.h"
+#include "http_server/HttpRequestAdmission.h"
 #include "http_server/HttpResponseWriter.h"
 
 namespace http_server {
@@ -27,7 +27,10 @@ const int LISTEN_BACKLOG = 256;
 
 class HttpServer {
 public:
-    HttpServer(anet::Transport* transport = nullptr, size_t threadNum = 2, size_t queueSize = 50);
+    HttpServer(anet::Transport*       transport               = nullptr,
+               size_t                threadNum               = 2,
+               size_t                queueSize               = 50,
+               RequestAdmissionHandler requestAdmissionHandler = {});
     ~HttpServer();
 
 public:

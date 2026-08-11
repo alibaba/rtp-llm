@@ -1,13 +1,16 @@
 #pragma once
 
+#include <chrono>
+#include <iostream>
 #include <memory>
 #include <string>
-#include <iostream>
+#include <utility>
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/utils/RequestAdmissionGate.h"
 
 namespace rtp_llm {
 
@@ -32,69 +35,82 @@ public:
     grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
-        return local_server_->GenerateStreamCall(context, request, writer);
+        return withRequestAdmission(
+            [&]() { return local_server_->GenerateStreamCall(context, request, writer); });
     }
 
     grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
                                    const BatchGenerateInputPB* request,
                                    BatchGenerateOutputsPB*     response) override {
-        return local_server_->BatchGenerateCall(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->BatchGenerateCall(context, request, response); });
     }
 
     ::grpc::Status
     GetWorkerStatus(::grpc::ServerContext* context, const StatusVersionPB* request, WorkerStatusPB* response) override {
-        return local_server_->GetWorkerStatus(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->GetWorkerStatus(context, request, response); });
     }
 
     ::grpc::Status
     UpdateWeights(::grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response) override {
-        return local_server_->UpdateWeights(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->UpdateWeights(context, request, response); });
     }
 
     ::grpc::Status
     GetCacheStatus(::grpc::ServerContext* context, const CacheVersionPB* request, CacheStatusPB* response) override {
-        return local_server_->GetCacheStatus(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->GetCacheStatus(context, request, response); });
     }
 
     ::grpc::Status UpdateSchedulerInfo(::grpc::ServerContext*              context,
                                        const UpdateSchedulerInfoRequestPB* request,
                                        EmptyPB*                            response) override {
-        return local_server_->UpdateSchedulerInfo(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->UpdateSchedulerInfo(context, request, response); });
     }
 
     ::grpc::Status
     SetLogLevel(::grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response) override {
-        return local_server_->SetLogLevel(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->SetLogLevel(context, request, response); });
     }
 
     ::grpc::Status
     StartProfile(::grpc::ServerContext* context, const StartProfileRequestPB* request, EmptyPB* response) override {
-        return local_server_->StartProfile(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->StartProfile(context, request, response); });
     }
 
     ::grpc::Status StartProfileInternal(::grpc::ServerContext*               context,
                                         const StartProfileInternalRequestPB* request,
                                         EmptyPB*                             response) override {
-        return local_server_->StartProfileInternal(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->StartProfileInternal(context, request, response); });
     }
 
     ::grpc::Status
     CheckHealth(::grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) override {
-        return local_server_->CheckHealth(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->CheckHealth(context, request, response); });
     }
 
     ::grpc::Status UpdateEplbConfig(::grpc::ServerContext*           context,
                                     const UpdateEplbConfigRequestPB* request,
                                     EmptyPB*                         response) override {
-        return local_server_->UpdateEplbConfig(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->UpdateEplbConfig(context, request, response); });
     }
 
     ::grpc::Status SetPause(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
-        return local_server_->SetPause(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->SetPause(context, request, response); });
     }
 
     ::grpc::Status SetRestart(::grpc::ServerContext* context, const EmptyPB* request, EmptyPB* response) override {
-        return local_server_->SetRestart(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->SetRestart(context, request, response); });
     }
 
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version) {
@@ -121,6 +137,18 @@ public:
         return local_server_->onflightRequestNum();
     }
 
+    virtual void beginDrain() {
+        request_admission_gate_.close();
+    }
+
+    bool waitForRequestDrain(std::chrono::steady_clock::time_point deadline) const {
+        return request_admission_gate_.waitUntil(deadline);
+    }
+
+    virtual bool prepareStop(std::chrono::milliseconds) {
+        return true;
+    }
+
     virtual void stop() {
         if (local_server_) {
             local_server_->stop();
@@ -130,11 +158,22 @@ public:
     ::grpc::Status ExecuteFunction(::grpc::ServerContext*     context,
                                    const ::FunctionRequestPB* request,
                                    ::FunctionResponsePB*      response) override {
-        return local_server_->ExecuteFunction(context, request, response);
+        return withRequestAdmission(
+            [&]() { return local_server_->ExecuteFunction(context, request, response); });
     }
 
 protected:
+    template<typename Delegate>
+    grpc::Status withRequestAdmission(Delegate&& delegate) {
+        auto permit = request_admission_gate_.tryAcquire();
+        if (!permit) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "server is draining");
+        }
+        return std::forward<Delegate>(delegate)();
+    }
+
     std::shared_ptr<LocalRpcServer> local_server_;
+    RequestAdmissionGate           request_admission_gate_;
 };
 
 typedef LocalRpcServiceImpl RpcServiceImpl;

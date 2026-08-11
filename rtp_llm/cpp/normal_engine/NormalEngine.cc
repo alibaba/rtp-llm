@@ -375,10 +375,18 @@ absl::Status NormalEngine::startLoop() {
 }
 
 absl::Status NormalEngine::stop() {
+    std::lock_guard<std::mutex> lock(stop_mutex_);
+    if (stopped_) {
+        return absl::OkStatus();
+    }
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
-    loop_thread_->join();
+    if (loop_thread_) {
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
+    stopped_ = true;
     return absl::OkStatus();
 }
 

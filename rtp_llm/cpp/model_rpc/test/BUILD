@@ -222,6 +222,13 @@ cc_test(
 )
 
 cc_test(
+    name = "request_admission_service_test",
+    srcs = ["RequestAdmissionServiceTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)
+
+cc_test(
     name = "local_rpc_output_cancellation_test",
     srcs = ["LocalRpcOutputCancellationTest.cc"],
     copts = test_copts,

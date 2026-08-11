@@ -1,8 +1,21 @@
+#include <atomic>
+#include <chrono>
+#include <future>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/api_server/common/HealthService.h"
 #include "rtp_llm/cpp/api_server/http_server/http_server/HttpRouter.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockChatRender.h"
+
+#include "rtp_llm/cpp/api_server/http_server/http_client/SimpleHttpClient.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpRequestWorkItem.h"
+#include "rtp_llm/cpp/api_server/http_server/http_server/HttpServerAdapter.h"
 #include "autil/NetUtil.h"
 
 namespace rtp_llm {
@@ -76,21 +89,115 @@ TEST(HttpApiServerRendererTest, ConfiguredRendererExposesChatRoutes) {
     server.stop();
 }
 
+TEST(HttpApiServerLifetimeTest, OwnsModelConfigAfterInitParamsLifetimeEnds) {
+    std::unique_ptr<HttpApiServer> server;
+    {
+        EngineInitParams params;
+        params.model_config_.max_seq_len = 4096;
+        server = std::make_unique<HttpApiServer>(nullptr, nullptr, "", params, py::none());
+    }
+
+    EXPECT_EQ(server->model_config_.max_seq_len, 4096);
+}
+
 TEST_F(HttpApiServerTest, testApiServerStop) {
     const auto        port = autil::NetUtil::randomPort();
     const std::string addr = "tcp:0.0.0.0:" + std::to_string(port);
     EngineInitParams  params;
     auto              server = std::make_shared<HttpApiServer>(nullptr, nullptr, addr, params, py::none());
     EXPECT_TRUE(server->start());
-    server->active_request_count_->inc();
-    auto runnable = [server]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        server->active_request_count_->dec();
-    };
-    std::thread t(runnable);
-    server->stop();
+    auto permit = server->request_admission_gate_->tryAcquire();
+    ASSERT_TRUE(permit);
+    server->beginDrain();
+    EXPECT_FALSE(server->waitForDrain(std::chrono::steady_clock::now()));
+
+    std::thread releaser([permit = std::move(permit)]() mutable {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        permit.reset();
+    });
+    EXPECT_TRUE(server->waitForDrain(std::chrono::steady_clock::now() + std::chrono::seconds(1)));
+    EXPECT_TRUE(server->finishStop());
     EXPECT_TRUE(server->isStoped());
-    t.join();
+    releaser.join();
+}
+
+TEST_F(HttpApiServerTest, ForceStopTransportDoesNotWaitForActiveRequest) {
+    const auto        port = autil::NetUtil::randomPort();
+    const std::string addr = "tcp:0.0.0.0:" + std::to_string(port);
+    EngineInitParams  params;
+    auto              server = std::make_shared<HttpApiServer>(nullptr, nullptr, addr, params, py::none());
+    ASSERT_TRUE(server->start());
+
+    auto permit = server->request_admission_gate_->tryAcquire();
+    ASSERT_TRUE(permit);
+    auto stopped = std::async(std::launch::async, [&server]() { server->forceStopTransport(); });
+
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    stopped.get();
+    EXPECT_TRUE(server->isStoped());
+    EXPECT_FALSE(server->waitForDrain(std::chrono::steady_clock::now()));
+
+    permit.reset();
+    EXPECT_TRUE(server->waitForDrain(std::chrono::steady_clock::now()));
+}
+
+TEST_F(HttpApiServerTest, QueuedAdmissionCoversHandlerExecution) {
+    ASSERT_TRUE(server_->http_server_->_serverAdapter->_requestAdmissionHandler);
+    auto admission_token = server_->http_server_->_serverAdapter->_requestAdmissionHandler();
+    ASSERT_NE(admission_token, nullptr);
+
+    std::atomic<size_t> calls{0};
+    auto request = std::make_shared<http_server::HttpRequest>();
+    http_server::ResponseHandler handler = [this, &calls](std::unique_ptr<http_server::HttpResponseWriter>,
+                                                          const http_server::HttpRequest&) {
+        EXPECT_FALSE(server_->waitForDrain(std::chrono::steady_clock::now()));
+        ++calls;
+    };
+    http_server::HttpRequestWorkItem queued_work(handler, nullptr, std::move(request), std::move(admission_token));
+
+    server_->beginDrain();
+    EXPECT_FALSE(server_->waitForDrain(std::chrono::steady_clock::now()));
+    queued_work.process();
+    EXPECT_EQ(calls.load(), 1);
+    EXPECT_TRUE(server_->waitForDrain(std::chrono::steady_clock::now()));
+    EXPECT_TRUE(server_->finishStop());
+}
+
+TEST_F(HttpApiServerTest, HandlerExceptionReleasesQueuedAdmission) {
+    auto admission_token = server_->http_server_->_serverAdapter->_requestAdmissionHandler();
+    ASSERT_NE(admission_token, nullptr);
+
+    auto request = std::make_shared<http_server::HttpRequest>();
+    http_server::ResponseHandler handler = [](std::unique_ptr<http_server::HttpResponseWriter>,
+                                              const http_server::HttpRequest&) {
+        throw std::runtime_error("handler failed");
+    };
+    http_server::HttpRequestWorkItem queued_work(handler, nullptr, std::move(request), std::move(admission_token));
+
+    server_->beginDrain();
+    EXPECT_FALSE(server_->waitForDrain(std::chrono::steady_clock::now()));
+    EXPECT_THROW(queued_work.process(), std::runtime_error);
+    EXPECT_TRUE(server_->waitForDrain(std::chrono::steady_clock::now()));
+    EXPECT_TRUE(server_->finishStop());
+}
+
+TEST_F(HttpApiServerTest, DrainingRequestIsRejectedBeforeEnteringTheWorkerQueue) {
+    server_->beginDrain();
+
+    auto response = std::make_shared<std::promise<std::pair<bool, std::string>>>();
+    auto future   = response->get_future();
+    http_server::HttpCallBack callback = [response](bool ok, const std::string& body) {
+        response->set_value({ok, body});
+    };
+
+    http_server::SimpleHttpClient client;
+    ASSERT_TRUE(client.post(server_->getListenAddr(), "/tokenizer/encode", "{}", std::move(callback)));
+    ASSERT_EQ(future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto [ok, body] = future.get();
+    EXPECT_FALSE(ok);
+    EXPECT_EQ(body, R"({"detail":"server is draining"})");
+    EXPECT_TRUE(server_->waitForDrain(std::chrono::steady_clock::now()));
+    EXPECT_TRUE(server_->finishStop());
 }
 
 TEST_F(HttpApiServerTest, IsEmbedding_InferenceService) {

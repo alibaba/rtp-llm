@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load(
     "@arch_config//:arch_select.bzl",
     "no_block_copy_link_deps",
@@ -21,6 +21,20 @@ cc_library(
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+)
+
+cc_test_wrapper(
+    name = "rtp_llm_op_shutdown_test",
+    srcs = ["RtpLLMOpShutdownTest.cc"],
+    copts = ["-fno-access-control"] + copts(),
+    data = ["//:rtp_compute_ops"],
+    deps = [
+        ":th_compute_lib",
+        ":th_transformer_lib",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    timeout = "short",
 )
 
 cc_library(
@@ -92,6 +106,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:signal_utils",
+        "//rtp_llm/cpp/utils:gil_scoped_thread_args",
         "//:rtp_compute_ops",
     ] + torch_deps() + select({
         "//:using_cuda": [

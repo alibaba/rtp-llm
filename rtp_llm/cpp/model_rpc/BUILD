@@ -202,6 +202,7 @@ cc_library(
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:request_admission_gate",
     ],
 )
 

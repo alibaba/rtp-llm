@@ -99,6 +99,7 @@ cc_library(
         "TestMain.cc",
     ],
     deps = test_deps + [
+        "//rtp_llm/cpp/api_server:http_client",
         "//rtp_llm/cpp/api_server:http_api_server",
     ],
     copts = test_copts,
