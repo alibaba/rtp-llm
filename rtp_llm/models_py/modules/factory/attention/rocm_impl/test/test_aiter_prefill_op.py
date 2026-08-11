@@ -21,30 +21,38 @@ on the rest of the fleet.
 import math
 import unittest
 from typing import List, Optional, Sequence
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 
-# Both imports may fail outside the ROCm runtime; we want a clean skip rather
-# than a collection-time error so the rest of the test suite is unaffected.
+_IS_ROCM_BUILD = torch.version.hip is not None
+
 try:
     import aiter  # noqa: F401
 
     _AITER_AVAILABLE = True
 except ImportError:
+    if _IS_ROCM_BUILD:
+        raise
     _AITER_AVAILABLE = False
 
 try:
+    from rtp_llm.models_py.modules.factory.attention import attn_factory
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
+        AiterDecodeAttnOpBase,
+        AiterDecodeImplNonAsm,
         AiterPrefillAttnOp,
         AiterPrefillAttnOpPaged,
         AiterPrefillImplAsm,
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
         FMHAParams,
+        validate_v_layout,
     )
     from rtp_llm.ops import (
         AttentionConfigs,
+        FMHAConfig,
         KvCacheDataType,
         PyAttentionInputs,
         RopeConfig,
@@ -61,6 +69,8 @@ try:
 
     _OPS_IMPORTABLE = True
 except ImportError:
+    if _IS_ROCM_BUILD:
+        raise
     _OPS_IMPORTABLE = False
 
 
@@ -1792,6 +1802,75 @@ class TestAiterPrefillImplMropePositionIds(unittest.TestCase):
 
     def test_nonasm_mrope_matches_reference(self):
         self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
+
+
+@unittest.skipUnless(_is_rocm() and _OPS_IMPORTABLE, "Requires ROCm attention wrappers")
+class TestVLayoutContract(unittest.TestCase):
+    def _make_case(self, head_dim: int, page: int):
+        config = _make_attn_configs(8, 2, head_dim, page)
+        config.need_rope_kv_cache = True
+        config.dtype = torch.bfloat16
+        inputs = PyAttentionInputs()
+        inputs.is_prefill = True
+        return config, inputs
+
+    def _decode_flags(self, aiter: bool, asm: bool, triton: bool) -> FMHAConfig:
+        flags = FMHAConfig()
+        flags.use_aiter_pa, flags.use_asm_pa, flags.use_triton_pa = aiter, asm, triton
+        return flags
+
+    def test_geometry_rejects_head_dim_not_multiple_of_width(self):
+        config, inputs = self._make_case(100, 32)
+        with self.assertRaisesRegex(ValueError, "V geometry"):
+            validate_v_layout(config, inputs, FMHAConfig())
+
+    def test_vector_width_follows_kv_cache_dtype(self):
+        # 2-byte cache -> width 8, so page=8 is aligned; FP8 widens it to 16.
+        config, inputs = self._make_case(128, 8)
+        validate_v_layout(config, inputs, FMHAConfig())
+
+        config.kv_cache_dtype = KvCacheDataType.FP8
+        with self.assertRaisesRegex(ValueError, "width=16"):
+            validate_v_layout(config, inputs, FMHAConfig())
+
+    def test_layout_mismatch_rejected_before_impl_construction(self):
+        # ASM prefill writes vectorized V, but head_dim=256 has no ASM decode
+        # kernel, so decode falls back to the linear non-ASM reader.
+        config, inputs = self._make_case(256, 16)
+        inputs.is_prefill = False
+        flags = self._decode_flags(aiter=True, asm=True, triton=False)
+        with patch.object(
+            AiterDecodeImplNonAsm, "__init__"
+        ) as init, self.assertRaisesRegex(ValueError, "layout mismatch"):
+            attn_factory.get_fmha_impl(config, None, inputs, fmha_config=flags)
+        init.assert_not_called()
+
+    def test_layout_mismatch_accepted_when_page_equals_width(self):
+        # At page == width both formulas address the same bytes.
+        config, inputs = self._make_case(256, 8)
+        inputs.is_prefill = False
+        validate_v_layout(
+            config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
+        )
+
+    def test_linear_v_allows_unaligned_page_and_defers_partition_check(self):
+        # Both phases use the linear layout. Validation must not apply the
+        # vectorized page alignment or the 256-token partition constraint here;
+        # the latter is checked by the non-ASM kernel only when that path runs.
+        config, inputs = self._make_case(128, 12)
+        inputs.is_prefill = False
+        validate_v_layout(
+            config, inputs, self._decode_flags(aiter=True, asm=False, triton=False)
+        )
+
+    def test_reshape_kv_cache_unpacks_hybrid_2d_buffer(self):
+        config, _ = self._make_case(128, 16)
+        op = AiterDecodeAttnOpBase(config)
+        elems = 2 * 2 * 16 * 128
+        packed = torch.zeros(2, elems + 4)
+        unpacked = op.reshape_kv_cache(packed)
+        self.assertEqual(unpacked.shape, (2, 2, 2, 16, 128))
+        self.assertEqual(unpacked.data_ptr(), packed.data_ptr())
 
 
 if __name__ == "__main__":

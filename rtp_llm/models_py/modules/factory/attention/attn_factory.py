@@ -25,6 +25,12 @@ DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
+# Backend hook raising when attn_configs and fmha_config select a KV-cache layout
+# no prefill/decode pair can serve. Installed by rocm_impl; unset elsewhere.
+VALIDATE_FMHA_CONFIG: Optional[
+    Callable[[AttentionConfigs, PyAttentionInputs, Optional[FMHAConfig]], None]
+] = None
+
 FLASHINFER_TRTLLM_GEN_IMPLS = {
     "FlashInferTRTLLMPrefillImpl",
     "FlashInferTRTLLMSpecDecodeImpl",
@@ -159,6 +165,8 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    if VALIDATE_FMHA_CONFIG is not None:
+        VALIDATE_FMHA_CONFIG(attn_configs, attn_inputs, fmha_config)
 
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
@@ -176,12 +184,15 @@ def get_fmha_impl(
         if not impl.support_parallelism_config(parallelism_config):
             continue
         try:
-            instance = impl(attn_configs, attn_inputs, parallelism_config)
+            instance = impl.create(
+                attn_configs, attn_inputs, parallelism_config, fmha_config
+            )
             if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
 
         except Exception as e:
-            # If instantiation fails, continue to next impl
+            if VALIDATE_FMHA_CONFIG is not None:
+                raise
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
             continue
     if (

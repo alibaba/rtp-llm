@@ -51,6 +51,6 @@ py_test(
         "//rtp_llm:testlib",
     ],
     timeout = "eternal",
-    tags = ["manual", "rocm"],
+    tags = ["rocm"],
     exec_properties = {"gpu": "MI308X-ROCM7"},
 )

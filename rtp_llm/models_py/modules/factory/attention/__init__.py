@@ -20,6 +20,7 @@ __all__ = [
 # ============================================================================
 # Device-specific Attention implementation registration
 # ============================================================================
+from rtp_llm.models_py.modules.factory.attention import attn_factory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     DECODE_MHA_IMPS,
     DECODE_MLA_IMPS,
@@ -37,7 +38,10 @@ if device_type == DeviceType.ROCm:
         AiterPrefillImplAsm,
         AiterPrefillImplNonAsm,
         AiterPrefillImplPaged,
+        validate_v_layout,
     )
+
+    attn_factory.VALIDATE_FMHA_CONFIG = validate_v_layout
 
     PREFILL_MHA_IMPS.append(AiterPrefillImplPaged)
     PREFILL_MHA_IMPS.append(AiterPrefillImplAsm)
