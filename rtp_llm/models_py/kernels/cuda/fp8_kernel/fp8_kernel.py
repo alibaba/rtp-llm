@@ -1,7 +1,6 @@
 import functools
 import json
 import logging
-import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -391,8 +390,9 @@ def per_block_cast_to_fp8(
     x_view = x_padded.view(-1, 128, x_padded.size(1) // 128, 128)
     x_amax = x_view.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
     sf = x_amax / 448.0
-    sf = ceil_to_ue8m0(sf) if use_ue8m0 else sf
-    x_scaled = (x_view * (1.0 / sf)).to(torch.float8_e4m3fn)
+    if use_ue8m0:
+        sf = ceil_to_ue8m0(sf)
+    x_scaled = (x_view * (1.0 / sf)).clamp(fp8_min, fp8_max).to(fp8_dtype)
     return x_scaled.view_as(x_padded)[:m, :n].contiguous(), sf.view(
         x_view.size(0), x_view.size(2)
     )
@@ -403,14 +403,19 @@ def quant_weight_ue8m0(
     weight_block_size: List[int],
 ):
     assert weight_block_size == [128, 128]
-    assert (
-        weight_dequant.dtype == torch.bfloat16
+    assert weight_dequant.dtype in (
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
     ), f"{weight_dequant.dtype=} {weight_dequant.shape=}"
 
     *batch_dims, n, k = weight_dequant.shape
 
     weight_dequant_flat = weight_dequant.view((-1, k))
-    out_w_flat, out_s_flat = per_block_cast_to_fp8(weight_dequant_flat, use_ue8m0=True)
+    out_w_flat, out_s_flat = per_block_cast_to_fp8(
+        weight_dequant_flat,
+        use_ue8m0=True,
+    )
 
     out_w = out_w_flat.view((*batch_dims, n, k))
     out_s = out_s_flat.view(
@@ -422,6 +427,41 @@ def quant_weight_ue8m0(
     )
 
     return out_w, out_s
+
+
+def quant_weight_ue8m0_packed(
+    weight_dequant: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Quantize source weights once to FP8 with packed UE8M0 scales.
+
+    This is the native SM100/SM120 DeepGEMM representation.  Keeping the
+    original floating-point tensor until this operation avoids the lossy
+    float-scale FP8 -> BF16 -> UE8M0 FP8 requantization path.
+    """
+    if weight_dequant.dim() != 2:
+        raise ValueError(
+            "Direct packed UE8M0 weight quantization requires a 2D tensor, "
+            f"got shape {tuple(weight_dequant.shape)}"
+        )
+
+    # Limit floating-point temporaries during online loading.  Quantizing the
+    # complete matrix in one call materializes both a padded source and a
+    # scaled floating-point tensor in addition to the master weight.  Chunking
+    # on a 128-row boundary preserves exactly the same quantization blocks.
+    row_chunk_size = 1024
+    n, k = weight_dequant.shape
+    out_w = torch.empty((n, k), dtype=fp8_dtype, device=weight_dequant.device)
+    scale_chunks = []
+    for row_start in range(0, n, row_chunk_size):
+        row_end = min(row_start + row_chunk_size, n)
+        chunk_w, chunk_s = per_block_cast_to_fp8(
+            weight_dequant[row_start:row_end], use_ue8m0=True
+        )
+        out_w[row_start:row_end].copy_(chunk_w)
+        scale_chunks.append(chunk_s)
+
+    out_s = torch.cat(scale_chunks, dim=0)
+    return out_w, _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
 
 
 def requant_weight_ue8m0(
