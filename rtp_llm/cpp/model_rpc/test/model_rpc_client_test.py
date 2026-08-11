@@ -204,6 +204,45 @@ class ModelRpcClientTest(TestCase):
 
         self.assertEqual(input_pb.generate_config.unique_key, "reuse-session-a")
 
+    def test_trans_input_preserves_random_seed_presence(self):
+        for random_seed, expected_presence in (
+            (None, False),
+            ([], False),
+            (0, True),
+            (17, True),
+        ):
+            with self.subTest(random_seed=random_seed):
+                generate_config = GenerateConfig(random_seed=random_seed)
+                input = GenerateInput(
+                    token_ids=torch.tensor([1, 2, 3]),
+                    generate_config=generate_config,
+                    request_id=123,
+                    mm_inputs=[],
+                )
+
+                input_pb = trans_input(input)
+
+                self.assertEqual(
+                    input_pb.generate_config.HasField("random_seed"), expected_presence
+                )
+                if expected_presence:
+                    self.assertEqual(
+                        input_pb.generate_config.random_seed.value, random_seed
+                    )
+
+    def test_trans_input_keeps_empty_optional_lists_unset(self):
+        generate_config = GenerateConfig(adapter_name=[])
+        input = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=generate_config,
+            request_id=123,
+            mm_inputs=[],
+        )
+
+        input_pb = trans_input(input)
+
+        self.assertFalse(input_pb.generate_config.HasField("adapter_name"))
+
 if __name__ == "__main__":
     setup_logging()
     main()

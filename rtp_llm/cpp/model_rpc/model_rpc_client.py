@@ -95,7 +95,9 @@ def trans_input(input_py: GenerateInput):
     generate_config_pb.frequency_penalty = input_py.generate_config.frequency_penalty
     generate_config_pb.do_sample = input_py.generate_config.do_sample
     trans_option(generate_config_pb, input_py.generate_config, "no_repeat_ngram_size")
-    trans_option(generate_config_pb, input_py.generate_config, "random_seed")
+    random_seed = input_py.generate_config.random_seed
+    if random_seed is not None and random_seed != []:
+        generate_config_pb.random_seed.value = random_seed
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
