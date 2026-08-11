@@ -13,7 +13,8 @@ deployments:
    ``OnlineMegaMoeFp4FromFp8Weight`` — FP8 per-block → BF16 → FP4.
    Both run at load time so the BF16/FP8 tensor is released before
    ``MegaMoeWrapper.__init__``. Triggered by ``MOE_STRATEGY=mega_moe`` or
-   ``MOE_STRATEGY=mega_moe_fused`` env var via ``apply_mega_moe_fp4_wrappers`` in
+   ``MOE_STRATEGY=mega_moe_se`` / ``mega_moe_fused`` env var via
+   ``apply_mega_moe_fp4_wrappers`` in
    ``model_weight_info.py``.
 
 3. Hybrid FP8_PER_BLOCK for non-MoE weights when MODELOPT_FP4 hybrid mode is
@@ -743,14 +744,18 @@ def is_mega_moe_strategy() -> bool:
     """Return True when a MegaMoE strategy is set in the env."""
     import os
 
-    return os.environ.get("MOE_STRATEGY") in {"mega_moe", "mega_moe_fused"}
+    return os.environ.get("MOE_STRATEGY") in {
+        "mega_moe",
+        "mega_moe_se",
+        "mega_moe_fused",
+    }
 
 
 def is_mega_moe_fused_strategy() -> bool:
-    """Return True when MOE_STRATEGY=mega_moe_fused is set in the env."""
+    """Return True when the selected FP8xFP4 kernel consumes shared weights."""
     import os
 
-    return os.environ.get("MOE_STRATEGY") == "mega_moe_fused"
+    return os.environ.get("MOE_STRATEGY") in {"mega_moe_se", "mega_moe_fused"}
 
 
 def is_online_fp4gemm_enabled() -> bool:

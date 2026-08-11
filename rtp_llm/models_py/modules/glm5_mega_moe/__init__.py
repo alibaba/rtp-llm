@@ -37,9 +37,11 @@ from .mega_moe import GLM5MegaMoE
 from .mega_moe_fp8 import GLM5MegaMoEFP8
 from .mega_moe_fp8_se import GLM5MegaMoEFP8SE
 from .mega_moe_fused import GLM5MegaMoEFused
+from .mega_moe_se import GLM5MegaMoESE
 
 __all__ = [
     "GLM5MegaMoE",
+    "GLM5MegaMoESE",
     "GLM5MegaMoEFP8",
     "GLM5MegaMoEFP8SE",
     "GLM5MegaMoEFused",

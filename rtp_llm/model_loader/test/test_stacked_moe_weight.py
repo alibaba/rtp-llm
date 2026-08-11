@@ -192,6 +192,23 @@ class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
             ["model.layers.{i}.mlp.experts.0.gate_proj.weight_scale"],
         )
 
+    def test_shared_expert_split_keeps_full_ue8m0_tensor_on_ep_ranks(self):
+        ffn = self._make_shared_ffn()
+        offline = OfflineMegaMoeFp8SharedExpertWeight(
+            ffn.w13, scale_dtype=torch.float8_e8m0fnu
+        )
+        kernel = torch.empty((16, 8), dtype=torch.float8_e4m3fn)
+        scale = torch.zeros((2, 1), dtype=torch.uint8).view(torch.float8_e8m0fnu)
+        load_config = MagicMock(tp_size=1, ffn_tp_size=1, ep_size=4, dp_size=1)
+
+        split = offline._split(
+            {offline.kernel.name: kernel, offline.scale.name: scale}, load_config
+        )
+
+        self.assertIs(split[offline.kernel.name], kernel)
+        self.assertIs(split[offline.scale.name], scale)
+        self.assertEqual(split[offline.scale.name].dtype, torch.float8_e8m0fnu)
+
 
 class TestStackSplitTensorSource(unittest.TestCase):
     def _make_stacked(self, num_experts: int, expert_dim: int):
