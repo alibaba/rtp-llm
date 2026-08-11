@@ -19,6 +19,7 @@ class CudaFp8GEMMLinear(LinearBase):
 
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
     supports_deferred_bias = True
+    supports_fused_bias_gelu_quant = True
 
     @classmethod
     def can_handle(
@@ -151,3 +152,20 @@ class CudaFp8GEMMLinear(LinearBase):
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear.forward_with_bias_gelu(input)
         return self._flashinfer_linear.forward_with_bias_gelu(input)
+
+    def forward_with_bias_gelu_quantized(
+        self, input: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if self._should_use_flashinfer(input):
+            return None
+        return self._deepgemm_linear.forward_with_bias_gelu_quantized(input)
+
+    def forward_quantized(
+        self,
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        return self._deepgemm_linear.forward_quantized(
+            input, input_scales, apply_bias=apply_bias
+        )

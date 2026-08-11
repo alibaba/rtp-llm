@@ -3,6 +3,10 @@ import unittest
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    create_per_token_group_quant_fp8_output_scale,
+    sgl_per_token_group_quant_fp8,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -58,6 +62,33 @@ class FusedBiasGeluTest(unittest.TestCase):
         static.copy_(value)
         graph.replay()
         torch.testing.assert_close(static, F.gelu(value + bias), rtol=2e-2, atol=2e-2)
+
+    def test_fused_quant_matches_separate_path(self):
+        torch.manual_seed(20260812)
+        value = torch.randn((17, 3072), device="cuda", dtype=torch.bfloat16)
+        bias = torch.randn(3072, device="cuda", dtype=torch.bfloat16)
+        activated = value.clone()
+        rtp_llm_ops.fused_bias_gelu(activated, bias)
+        expected_q, expected_s = sgl_per_token_group_quant_fp8(
+            activated,
+            group_size=128,
+            eps=1e-4,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        actual_q = torch.empty_like(value, dtype=torch.float8_e4m3fn)
+        actual_s = create_per_token_group_quant_fp8_output_scale(
+            value.shape,
+            value.device,
+            group_size=128,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        rtp_llm_ops.fused_bias_gelu_quant_fp8(value, bias, actual_q, actual_s)
+        torch.testing.assert_close(actual_q.float(), expected_q.float(), rtol=0, atol=0)
+        torch.testing.assert_close(actual_s, expected_s, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
