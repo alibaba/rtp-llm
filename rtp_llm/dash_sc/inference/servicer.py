@@ -1013,7 +1013,8 @@ async def iter_real_model_stream_infer(
             error_spec = DASH_ERROR_CAPACITY
         status_message = str(e)
         # autoTPM 429 响应规范：有 qos header 时按 priority 区分 status_name，
-        # 统一 status_message 为 "Too many requests."；无 qos header 保持历史逻辑。
+        # 统一 status_message 为 "Too many requests."；无 qos header 的容量拒绝
+        # 返回 503 ServiceUnavailable / "Service unavailable."（塘主规范）。
         if error_spec.status_code == 429:
             qos_priority = (
                 getattr(locals().get("generate_config"), "qos_priority", 0) or 0
@@ -1030,6 +1031,12 @@ async def iter_real_model_stream_infer(
                         status_name="Throttling.ResourceExhausted"
                     )
                 status_message = "Too many requests."
+            else:
+                error_spec = error_spec._replace(
+                    status_code=503,
+                    status_name="ServiceUnavailable",
+                )
+                status_message = "Service unavailable."
         if error_spec.status_code == 500:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
         elif error_spec.status_code == 499:
@@ -1062,7 +1069,8 @@ async def iter_real_model_stream_infer(
             error_spec = DASH_ERROR_CAPACITY
         fallback_status_message = f"{type(e).__name__}: {e}"
         # autoTPM 429 响应规范：有 qos header 时按 priority 区分 status_name，
-        # 统一 status_message 为 "Too many requests."；无 qos header 保持历史逻辑。
+        # 统一 status_message 为 "Too many requests."；无 qos header 的容量拒绝
+        # 返回 503 ServiceUnavailable / "Service unavailable."（塘主规范）。
         if error_spec.status_code == 429:
             qos_priority = (
                 getattr(locals().get("generate_config"), "qos_priority", 0) or 0
@@ -1079,6 +1087,12 @@ async def iter_real_model_stream_infer(
                         status_name="Throttling.ResourceExhausted"
                     )
                 fallback_status_message = "Too many requests."
+            else:
+                error_spec = error_spec._replace(
+                    status_code=503,
+                    status_name="ServiceUnavailable",
+                )
+                fallback_status_message = "Service unavailable."
         response = build_dash_error_response(
             str(request.id),
             request.model_name,

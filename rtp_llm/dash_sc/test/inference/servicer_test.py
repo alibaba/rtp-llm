@@ -537,8 +537,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_no_qos_capacity_keeps_legacy_too_many_requests(self) -> None:
-        """无 qos header 的 CAPACITY 拒绝：历史逻辑不变，
-        status_name 保持 TooManyRequests，status_message=str(e)。"""
+        """无 qos header 的 CAPACITY 拒绝：返回 503 ServiceUnavailable，
+        status_message="Service unavailable."（塘主规范）。"""
         req = self._minimal_request()
 
         class _CapacityVisitor:
@@ -561,9 +561,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chunks), 1)
         self.assertFalse(chunks[0].error_message)
         error_no, payload = _dash_error_payload(chunks[0])
-        self.assertEqual(payload["status_code"], 429)
-        self.assertEqual(payload["status_name"], "TooManyRequests")
-        self.assertEqual(payload["status_message"], "traffic limit exceeded")
+        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_name"], "ServiceUnavailable")
+        self.assertEqual(payload["status_message"], "Service unavailable.")
         self.assertEqual(
             _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
         )
