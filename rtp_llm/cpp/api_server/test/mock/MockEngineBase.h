@@ -20,6 +20,7 @@ public:
     MOCK_METHOD0(stop, absl::Status());
     MOCK_METHOD2(preRun, absl::StatusOr<GenerateStreamPtr>(const std::shared_ptr<GenerateInput>&, preRunMode));
     MOCK_METHOD(KVCacheInfo, getCacheStatusInfo, (int64_t, bool), (override));
+    MOCK_METHOD0(isMTPEagle, bool());
 };
 
 }  // namespace rtp_llm

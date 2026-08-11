@@ -107,6 +107,60 @@ protected:
     std::vector<int>                                     data_;
 };
 
+TEST_F(ChatServiceTest, FillGenerateInputRejectsLogprobsForMtpEagle) {
+    auto generate_config              = std::make_shared<GenerateConfig>();
+    generate_config->return_all_probs = ReturnAllProbsMode::DEFAULT;
+    EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config).WillOnce(Return(generate_config));
+    EXPECT_CALL(*mock_engine_, isMTPEagle()).WillOnce(Return(true));
+    EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric).Times(0);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric).Times(0);
+
+    ChatCompletionRequest chat_request;
+    RenderedInputs         rendered_input{{1, 2, 3}, {}, "prompt"};
+
+    try {
+        chat_service_->fillGenerateInput(10086, chat_request, rendered_input);
+        FAIL() << "expected speculative logprobs request to be rejected";
+    } catch (const HttpApiServerException& e) {
+        EXPECT_EQ(e.getType(), HttpApiServerException::UNSUPPORTED_OPERATION);
+        EXPECT_EQ(e.getMessage(), "speculative decoding does not support return_all_probs");
+    }
+}
+
+TEST_F(ChatServiceTest, FillGenerateInputAllowsLogprobsWithoutSpeculativeDecoding) {
+    auto generate_config              = std::make_shared<GenerateConfig>();
+    generate_config->return_all_probs = ReturnAllProbsMode::DEFAULT;
+    EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config).WillOnce(Return(generate_config));
+    EXPECT_CALL(*mock_engine_, isMTPEagle()).WillOnce(Return(false));
+    EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric).Times(1);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric).Times(1);
+
+    ChatCompletionRequest chat_request;
+    RenderedInputs         rendered_input{{1, 2, 3}, {}, "prompt"};
+    auto input = chat_service_->fillGenerateInput(10086, chat_request, rendered_input);
+
+    ASSERT_NE(input, nullptr);
+    EXPECT_EQ(input->generate_config, generate_config);
+    EXPECT_TRUE(torch::equal(input->input_ids, torch::tensor({1, 2, 3}, torch::kInt32)));
+}
+
+TEST_F(ChatServiceTest, FillGenerateInputSkipsMtpEagleCheckWithoutLogprobs) {
+    auto generate_config              = std::make_shared<GenerateConfig>();
+    generate_config->return_all_probs = ReturnAllProbsMode::NONE;
+    EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config).WillOnce(Return(generate_config));
+    EXPECT_CALL(*mock_engine_, isMTPEagle()).Times(0);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTInputTokenLengthMetric).Times(1);
+    EXPECT_CALL(*mock_metric_reporter_, reportFTNumBeansMetric).Times(1);
+
+    ChatCompletionRequest chat_request;
+    RenderedInputs         rendered_input{{1, 2, 3}, {}, "prompt"};
+    auto input = chat_service_->fillGenerateInput(10086, chat_request, rendered_input);
+
+    ASSERT_NE(input, nullptr);
+    EXPECT_EQ(input->generate_config, generate_config);
+    EXPECT_TRUE(torch::equal(input->input_ids, torch::tensor({1, 2, 3}, torch::kInt32)));
+}
+
 TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
     http_server::HttpRequest request;
     const std::string        body = R"del({
