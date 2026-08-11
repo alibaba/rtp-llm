@@ -3,8 +3,6 @@
 #include <atomic>
 #include <list>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -50,12 +48,10 @@ private:
     using StreamGroupQueue = std::list<StreamGroup>;
 
     struct ScheduleRuntime {
-        bool    batch_type_selected                       = false;
         size_t  admitted_running_stream_count             = 0;
         size_t  admitted_prefill_token_size_with_cache    = 0;
         size_t  admitted_prefill_token_size_without_cache = 0;
         size_t  newly_inited_kv_streams                   = 0;
-        int64_t force_batch_group_id                      = -1;
     };
 
     int64_t lastScheduleTime() override;
@@ -106,7 +102,6 @@ protected:
     int64_t                         last_admitted_context_batch_size_ = 0;
     int64_t                         last_admitted_context_token_size_ = 0;
     int64_t                         last_waiting_oldest_age_us_       = 0;
-    std::unordered_set<int64_t>     partially_admitted_force_batch_group_ids_;
     std::atomic<int64_t>            pending_group_fallback_count_     = 0;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;

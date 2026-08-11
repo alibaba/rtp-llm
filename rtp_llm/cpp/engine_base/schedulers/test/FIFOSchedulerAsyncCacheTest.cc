@@ -1,4 +1,5 @@
 
+#include <algorithm>
 #include <memory>
 #include <unistd.h>
 #include "torch/all.h"
@@ -28,6 +29,16 @@ using testing::NiceMock;
 using testing::_;
 
 namespace rtp_llm {
+
+namespace {
+
+bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
+    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
+        return scheduler.enqueue(stream).ok();
+    });
+}
+
+}  // namespace
 
 class FIFOSchedulerAsyncCacheTest: public DeviceTestBase {
 protected:
@@ -332,9 +343,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testWithoutCacheQuotaStopsAfterLoadingStream
     auto stream1 = createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     auto stream2 = createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     auto stream3 = createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    for (const auto& stream : std::vector<GenerateStreamPtr>{stream1, stream2, stream3}) {
-        ASSERT_TRUE(scheduler->enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(*scheduler, {stream1, stream2, stream3}));
 
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());

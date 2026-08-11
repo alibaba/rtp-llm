@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <memory>
 #include "torch/all.h"
 #include "gmock/gmock-actions.h"
@@ -13,6 +14,16 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+bool enqueueIndividually(FIFOScheduler& scheduler, const vector<GenerateStreamPtr>& streams) {
+    return std::all_of(streams.begin(), streams.end(), [&scheduler](const auto& stream) {
+        return scheduler.enqueue(stream).ok();
+    });
+}
+
+}  // namespace
 
 class FIFOSchedulerTest: public DeviceTestBase {
 public:
@@ -461,9 +472,7 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageDoesNotConsumeBatchTokenBudget) {
 
     auto blocked_front_1 = make_stream({1, 2, 3, 4});
     auto blocked_front_2 = make_stream({5, 6, 7, 8});
-    for (const auto& stream : std::vector<GenerateStreamPtr>{blocked_front_1, blocked_front_2, kv_holder}) {
-        ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, {blocked_front_1, blocked_front_2, kv_holder}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -511,9 +520,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaIncludesPostAllocationPrefixLength) {
 
     auto new_stream = make_stream(8);
     ASSERT_EQ(new_stream->prefixLength(), 0);
-    for (const auto& stream : std::vector<GenerateStreamPtr>{cached_stream, new_stream}) {
-        ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, {cached_stream, new_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -562,10 +569,8 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     auto tail_stream               = make_stream(1);
     auto errored_tail_stream       = make_stream(1);
     errored_tail_stream->reportError(ErrorCode::CANCELLED, "cancelled before admission");
-    for (const auto& stream : std::vector<GenerateStreamPtr>{
-             cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}) {
-        ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(
+        scheduler, {cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -618,9 +623,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) 
     auto first_stream  = make_stream(5);
     auto second_stream = make_stream(1);
     auto tail_stream   = make_stream(1);
-    for (const auto& stream : std::vector<GenerateStreamPtr>{first_stream, second_stream, tail_stream}) {
-        ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, {first_stream, second_stream, tail_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -693,9 +696,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
 
     auto batched_stream = make_stream(2);
     auto single_stream  = make_stream(1);
-    for (const auto& stream : std::vector<GenerateStreamPtr>{batched_stream, single_stream}) {
-        ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, {batched_stream, single_stream}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -705,7 +706,7 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
 }
 
-TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsForceBatchResidualToProgress) {
+TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsMetadataResidualToProgress) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -719,7 +720,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsForceBatchResidualToProgress) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                              = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 1;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 2;
     PDSepConfig         pd_sep_config;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -740,9 +741,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsForceBatchResidualToProgress) {
     auto first_stream    = make_group_stream(3);
     auto crossing_stream = make_group_stream(3);
     auto residual_stream = make_group_stream(3);
-    for (const auto& stream : std::vector<GenerateStreamPtr>{first_stream, crossing_stream, residual_stream}) {
-        ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, {first_stream, crossing_stream, residual_stream}));
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
@@ -759,16 +758,17 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsForceBatchResidualToProgress) {
     EXPECT_EQ(residual_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 
-    auto new_incomplete_group = make_group_stream(2);
-    ASSERT_TRUE(scheduler.enqueue(new_incomplete_group).ok());
+    auto metadata_stream = make_group_stream(2);
+    ASSERT_TRUE(scheduler.enqueue(metadata_stream).ok());
     residual_stream->reportEvent(StreamEvents::GenerateDone);
     auto third_result = scheduler.schedule();
     ASSERT_TRUE(third_result.ok());
-    EXPECT_TRUE(third_result->empty());
-    EXPECT_EQ(new_incomplete_group->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(third_result->size(), 1);
+    EXPECT_EQ(metadata_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
-TEST_F(FIFOSchedulerTest, retryableForceBatchDoesNotBlockFollowingNormalStream) {
+TEST_F(FIFOSchedulerTest, retryableMetadataStreamDoesNotBlockFollowingNormalStream) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 5, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -809,9 +809,7 @@ TEST_F(FIFOSchedulerTest, retryableForceBatchDoesNotBlockFollowingNormalStream) 
 
     auto blocked_group_1 = make_stream({1, 2, 3, 4}, true);
     auto blocked_group_2 = make_stream({5, 6, 7, 8}, true);
-    for (const auto& stream : std::vector<GenerateStreamPtr>{blocked_group_1, blocked_group_2, kv_holder}) {
-        ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, {blocked_group_1, blocked_group_2, kv_holder}));
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -822,7 +820,7 @@ TEST_F(FIFOSchedulerTest, retryableForceBatchDoesNotBlockFollowingNormalStream) 
     EXPECT_EQ(kv_holder->getStatus(), StreamState::RUNNING);
 }
 
-TEST_F(FIFOSchedulerTest, retryableForceBatchResidualPrecedesFollowingGroup) {
+TEST_F(FIFOSchedulerTest, explicitGroupResidualPrecedesFollowingExplicitGroup) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -858,9 +856,9 @@ TEST_F(FIFOSchedulerTest, retryableForceBatchResidualPrecedesFollowingGroup) {
         make_group_stream({1}, 1001, 4),
         make_group_stream({1, 2}, 1001, 4),
     };
-    auto following_group = make_group_stream({1}, 1002, 1);
+    vector<GenerateStreamPtr> following_group = {make_group_stream({1}, 1002, 1)};
     ASSERT_EQ(scheduler.enqueueGroup(first_group).first.size(), first_group.size());
-    ASSERT_TRUE(scheduler.enqueue(following_group).ok());
+    ASSERT_EQ(scheduler.enqueueGroup(following_group).first.size(), following_group.size());
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
@@ -869,7 +867,7 @@ TEST_F(FIFOSchedulerTest, retryableForceBatchResidualPrecedesFollowingGroup) {
     EXPECT_EQ(first_group[1]->getStatus(), StreamState::WAITING);
     EXPECT_EQ(first_group[2]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(first_group[3]->getStatus(), StreamState::WAITING);
-    EXPECT_EQ(following_group->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(following_group[0]->getStatus(), StreamState::WAITING);
 
     first_group[0]->reportEvent(StreamEvents::GenerateDone);
     first_group[2]->reportEvent(StreamEvents::GenerateDone);
@@ -878,14 +876,14 @@ TEST_F(FIFOSchedulerTest, retryableForceBatchResidualPrecedesFollowingGroup) {
     ASSERT_EQ(second_result.value().size(), 2);
     EXPECT_EQ(first_group[1]->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(first_group[3]->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(following_group->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(following_group[0]->getStatus(), StreamState::WAITING);
 
     first_group[1]->reportEvent(StreamEvents::GenerateDone);
     first_group[3]->reportEvent(StreamEvents::GenerateDone);
     auto third_result = scheduler.schedule();
     ASSERT_TRUE(third_result.ok());
     ASSERT_EQ(third_result.value().size(), 1);
-    EXPECT_EQ(following_group->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(following_group[0]->getStatus(), StreamState::RUNNING);
 }
 
 TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
@@ -2188,9 +2186,7 @@ TEST_F(FIFOSchedulerTest, testCpPrefillBatchesMultipleStreams) {
         streams.push_back(
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr));
     }
-    for (const auto& stream : streams) {
-        ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    }
+    ASSERT_TRUE(enqueueIndividually(scheduler, streams));
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 2);
@@ -2218,7 +2214,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotDelayWaitingStreams) {
         std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
         query->input_ids                      = torch::tensor({1}, torch::kInt32);
         query->generate_config                = make_shared<GenerateConfig>();
-        query->generate_config->group_timeout = 10;
+        query->generate_config->group_timeout = 60000;
         query->group_id                       = 100;
         query->group_size                     = 3;
         query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -2415,7 +2411,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotIsolateWaitingStreams) {
         std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
         query->input_ids                      = torch::tensor({1}, torch::kInt32);
         query->generate_config                = make_shared<GenerateConfig>();
-        query->generate_config->group_timeout = 10;
+        query->generate_config->group_timeout = 60000;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
         query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -2427,7 +2423,7 @@ TEST_F(FIFOSchedulerTest, testGroupMetadataDoesNotIsolateWaitingStreams) {
         std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
         query->input_ids                      = torch::tensor({1}, torch::kInt32);
         query->generate_config                = make_shared<GenerateConfig>();
-        query->generate_config->group_timeout = 10;
+        query->generate_config->group_timeout = 60000;
         query->group_id                       = group_id;
         query->group_size                     = group_size;
         query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -2470,7 +2466,7 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
         std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
         query->input_ids                      = torch::tensor({1}, torch::kInt32);
         query->generate_config                = make_shared<GenerateConfig>();
-        query->generate_config->group_timeout = 10;
+        query->generate_config->group_timeout = 60000;
         query->group_id                       = group_id_a;
         query->group_size                     = group_size;
         query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -2481,7 +2477,7 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
         std::shared_ptr<GenerateInput> query  = make_shared<GenerateInput>();
         query->input_ids                      = torch::tensor({1}, torch::kInt32);
         query->generate_config                = make_shared<GenerateConfig>();
-        query->generate_config->group_timeout = 10;
+        query->generate_config->group_timeout = 60000;
         query->group_id                       = group_id_b;
         query->group_size                     = group_size;
         query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
