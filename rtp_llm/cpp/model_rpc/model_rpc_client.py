@@ -1,5 +1,6 @@
 import functools
 import logging
+import math
 from typing import AsyncGenerator, Optional
 
 import grpc
@@ -10,6 +11,7 @@ from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
+    ErrorCodePB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
@@ -23,6 +25,9 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
     RoleAddr,
+    current_monotonic_time_s,
+    current_unix_time_ms,
+    initialize_request_deadlines,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 from rtp_llm.utils.grpc_util import (
@@ -40,6 +45,14 @@ class StreamState:
         self.cached_logits_dict = {}
 
 
+def batch_error_exception_type(error_code: int) -> ExceptionType:
+    if error_code == ErrorCodePB.GENERATE_TIMEOUT:
+        return ExceptionType.GENERATE_TIMEOUT
+    if error_code == ErrorCodePB.CANCELLED:
+        return ExceptionType.CANCELLED_ERROR
+    return ExceptionType.UNKNOWN_ERROR
+
+
 def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
     if role_type == RoleType.PDFUSION:
         return RoleAddrPB.RoleType.PDFUSION
@@ -53,13 +66,18 @@ def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
         return RoleAddrPB.RoleType.FRONTEND
 
 
-def trans_input(input_py: GenerateInput):
+def trans_input(input_py: GenerateInput, *, timeout_ms: Optional[int] = None):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.batch_group_size = input_py.batch_group_size
     if hasattr(input_py, "batch_group_id") and input_py.batch_group_id != -1:
         input_pb.batch_group_id.value = input_py.batch_group_id
+    request_deadline_unix_ms = getattr(
+        input_py, "request_deadline_unix_ms", None
+    )
+    if request_deadline_unix_ms is not None and request_deadline_unix_ms > 0:
+        input_pb.request_deadline_unix_ms = request_deadline_unix_ms
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # check generate config is valid before enter into engine
@@ -125,7 +143,9 @@ def trans_input(input_py: GenerateInput):
         input_py.generate_config.normalized_hidden_states
     )
     generate_config_pb.is_streaming = input_py.generate_config.is_streaming
-    generate_config_pb.timeout_ms = input_py.generate_config.timeout_ms
+    generate_config_pb.timeout_ms = (
+        input_py.generate_config.timeout_ms if timeout_ms is None else timeout_ms
+    )
     if input_py.generate_config.sp_advice_prompt_token_ids:
         generate_config_pb.sp_advice_prompt_token_ids.extend(
             input_py.generate_config.sp_advice_prompt_token_ids
@@ -426,22 +446,53 @@ class ModelRpcClient(object):
         )
         logging.info(f"addresses: {self._addresses}")
 
-    def _compute_grpc_timeout(self, timeout_ms) -> float:
+    def _compute_grpc_timeout(
+        self,
+        timeout_ms,
+        request_deadline_monotonic_s: Optional[float] = None,
+        monotonic_now_s: Optional[float] = None,
+    ) -> float:
         rpc_timeout_ms = (
             self._max_rpc_timeout_ms
             if self._max_rpc_timeout_ms > 0
             else MAX_GRPC_TIMEOUT_SECONDS * 1000
         )
-        if timeout_ms is None or timeout_ms <= 0:
-            return rpc_timeout_ms / 1000
-        return timeout_ms / 1000
+        timeout_limits_ms = [float(rpc_timeout_ms)]
+        if timeout_ms is not None and timeout_ms > 0:
+            timeout_limits_ms.append(float(timeout_ms))
+        if request_deadline_monotonic_s is not None:
+            if monotonic_now_s is None:
+                monotonic_now_s = current_monotonic_time_s()
+            remaining_ms = (
+                request_deadline_monotonic_s - monotonic_now_s
+            ) * 1000.0
+            if remaining_ms <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT,
+                    "request deadline exhausted before backend RPC",
+                )
+            timeout_limits_ms.append(remaining_ms)
+        return min(timeout_limits_ms) / 1000.0
+
+    @staticmethod
+    def _wire_timeout_ms(grpc_timeout_seconds: float) -> int:
+        return max(1, math.ceil(grpc_timeout_seconds * 1000.0 - 1e-9))
 
     def _handle_grpc_error(self, e: grpc.RpcError, request_desc: str) -> None:
         error_details = ErrorDetailsPB()
-        metadata = e.trailing_metadata()
-        if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
+        metadata = e.trailing_metadata() or {}
+        has_error_details = "grpc-status-details-bin" in metadata and error_details.ParseFromString(
             metadata["grpc-status-details-bin"]
-        ):
+        )
+        if e.code() == StatusCode.DEADLINE_EXCEEDED:
+            message = (
+                error_details.error_message
+                if has_error_details and error_details.error_message
+                else e.details()
+            )
+            logging.error(f"{request_desc} RPC deadline exceeded: {message}")
+            raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, message)
+        if has_error_details:
             logging.error(
                 f"{request_desc} RPC failed: "
                 f"{e.code()}, {e.details()}, detail error code is "
@@ -455,9 +506,7 @@ class ModelRpcClient(object):
                 f"{request_desc} RPC failed: "
                 f"error code is {e.code()}, detail is {e.details()}"
             )
-            if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
-            elif e.code() == StatusCode.CANCELLED:
+            if e.code() == StatusCode.CANCELLED:
                 raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
             else:
                 raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
@@ -465,11 +514,15 @@ class ModelRpcClient(object):
     async def enqueue(
         self, input_py: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
-        grpc_timeout_seconds = self._compute_grpc_timeout(
-            input_py.generate_config.timeout_ms
+        initialize_request_deadlines(
+            input_py, current_monotonic_time_s(), current_unix_time_ms()
         )
-        input_py.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-        input_pb = trans_input(input_py)
+        request_deadline_s = getattr(
+            input_py, "request_deadline_monotonic_s", None
+        )
+        self._compute_grpc_timeout(
+            input_py.generate_config.timeout_ms, request_deadline_s
+        )
         response_iterator = None
         stream_state = StreamState()
 
@@ -491,8 +544,6 @@ class ModelRpcClient(object):
             f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
         )
 
-        input_pb = trans_input(input_py)
-
         try:
             # Select target address
             target_address = address_list[input_py.request_id % len(address_list)]
@@ -500,6 +551,20 @@ class ModelRpcClient(object):
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
+
+            grpc_timeout_seconds = self._compute_grpc_timeout(
+                input_py.generate_config.timeout_ms, request_deadline_s
+            )
+            input_pb = trans_input(
+                input_py,
+                timeout_ms=self._wire_timeout_ms(grpc_timeout_seconds),
+            )
+            grpc_timeout_seconds = self._compute_grpc_timeout(
+                input_py.generate_config.timeout_ms, request_deadline_s
+            )
+            input_pb.generate_config.timeout_ms = self._wire_timeout_ms(
+                grpc_timeout_seconds
+            )
 
             response_iterator = stub.GenerateStreamCall(
                 input_pb, timeout=grpc_timeout_seconds
@@ -510,7 +575,7 @@ class ModelRpcClient(object):
         except grpc.RpcError as e:
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]")
+            self._handle_grpc_error(e, f"request: [{input_py.request_id}]")
         except Exception as e:
             logging.error(f"rpc unknown error:{str(e)}")
             raise e
@@ -522,15 +587,18 @@ class ModelRpcClient(object):
         if not inputs:
             return []
 
-        max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
-        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
-
-        batch_input_pb = BatchGenerateInputPB()
+        monotonic_now_s = current_monotonic_time_s()
+        unix_now_ms = current_unix_time_ms()
         for inp in inputs:
-            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-            input_pb = trans_input(inp)
-            batch_input_pb.inputs.append(input_pb)
+            initialize_request_deadlines(inp, monotonic_now_s, unix_now_ms)
+            self._compute_grpc_timeout(
+                inp.generate_config.timeout_ms,
+                getattr(inp, "request_deadline_monotonic_s", None),
+                monotonic_now_s,
+            )
 
+        if not self._addresses:
+            raise ValueError("No address found for batch request")
         target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
@@ -539,6 +607,23 @@ class ModelRpcClient(object):
         try:
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
+
+            batch_input_pb = BatchGenerateInputPB()
+            for inp in inputs:
+                batch_input_pb.inputs.append(trans_input(inp))
+            final_now_s = current_monotonic_time_s()
+            final_item_timeouts = []
+            for inp, input_pb in zip(inputs, batch_input_pb.inputs):
+                item_timeout = self._compute_grpc_timeout(
+                    inp.generate_config.timeout_ms,
+                    getattr(inp, "request_deadline_monotonic_s", None),
+                    final_now_s,
+                )
+                input_pb.generate_config.timeout_ms = self._wire_timeout_ms(
+                    item_timeout
+                )
+                final_item_timeouts.append(item_timeout)
+            grpc_timeout_seconds = max(final_item_timeouts)
             response = await stub.BatchGenerateCall(
                 batch_input_pb, timeout=grpc_timeout_seconds
             )
@@ -550,7 +635,7 @@ class ModelRpcClient(object):
                     and result_pb.error_info.error_message
                 ):
                     raise FtRuntimeException(
-                        ExceptionType.UNKNOWN_ERROR,
+                        batch_error_exception_type(result_pb.error_info.error_code),
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()

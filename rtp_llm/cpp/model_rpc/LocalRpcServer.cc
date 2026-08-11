@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RequestDeadlineBudget.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
@@ -91,6 +92,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
         const auto result = stream->nextOutput([context]() { return context != nullptr && context->IsCancelled(); });
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
+                const auto stop_error = serverContextStopError(context, "waiting for stream output");
+                if (result.status().code() == ErrorCode::CANCELLED && stop_error.hasError()) {
+                    setWaitResult(RemoteGenerateWaitResult::Error);
+                    return serializeErrorMsg(request_key, stop_error);
+                }
                 setWaitResult(RemoteGenerateWaitResult::Error);
                 return serializeErrorMsg(request_key, result.status());
             } else {
@@ -105,11 +111,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
-        if (context->IsCancelled()) {
-            stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+        const auto stop_error = serverContextStopError(context, "writing stream output");
+        if (stop_error.hasError()) {
+            stream->reportError(stop_error.code(), stop_error.ToString());
             setWaitResult(RemoteGenerateWaitResult::Error);
-            RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+            RTP_LLM_LOG_WARNING("request [%s] stopped by client deadline or cancellation", request_key.c_str());
+            return serializeErrorMsg(request_key, stop_error);
         }
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
@@ -143,14 +150,31 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     return grpc::Status::OK;
 }
 
-ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
-    output = QueryConverter::transQuery(&input_pb);
+ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&           input_pb,
+                                       std::shared_ptr<GenerateInput>&   output,
+                                       grpc::ServerContext*             context,
+                                       int64_t authoritative_deadline_unix_us) {
+    if (authoritative_deadline_unix_us <= 0 && context != nullptr) {
+        authoritative_deadline_unix_us = requestDeadlineUnixUs(context->deadline());
+    }
+    const auto deadline_budget = makeRequestDeadlineBudget(input_pb.request_deadline_unix_ms(),
+                                                           input_pb.generate_config().timeout_ms(),
+                                                           currentTimeUs(),
+                                                           authoritative_deadline_unix_us);
+    if (deadline_budget.expired) {
+        return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline expired before engine admission");
+    }
+    output = QueryConverter::transQuery(&input_pb, &deadline_budget);
     if (mm_processor_ != nullptr && output->multimodal_inputs) {
         RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
         auto mm_res = mm_processor_->updateMultimodalFeatures(output);
         if (!mm_res.ok()) {
             return mm_res;
         }
+    }
+    if (requestDeadlineReached(deadline_budget, currentTimeUs())) {
+        output.reset();
+        return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline expired before engine admission");
     }
     return ErrorInfo::OkStatus();
 }
@@ -160,14 +184,19 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
     while (!stream->isFinished() || stream->hasOutput()) {
-        if (context->IsCancelled()) {
-            stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
-            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
+        const auto stop_error = serverContextStopError(context, "collecting batch output");
+        if (stop_error.hasError()) {
+            stream->reportError(stop_error.code(), stop_error.ToString());
+            return stop_error;
         }
         const auto output_result =
             stream->nextOutput([context]() { return context != nullptr && context->IsCancelled(); });
         if (!output_result.ok()) {
             if (output_result.status().code() != ErrorCode::FINISHED) {
+                const auto wait_stop_error = serverContextStopError(context, "waiting for batch output");
+                if (output_result.status().code() == ErrorCode::CANCELLED && wait_stop_error.hasError()) {
+                    return wait_stop_error;
+                }
                 return output_result.status();
             }
             break;
@@ -189,7 +218,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     std::shared_ptr<GenerateInput> input;
     {
-        auto mm_res = prepareInput(*request, input);
+        auto mm_res = prepareInput(*request, input, context);
         if (!mm_res.ok()) {
             generate_context.error_status = serializeErrorMsg(generate_context.request_key, mm_res);
         }
@@ -197,6 +226,14 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     CHECK_ERROR_STATUS(generate_context);
 
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
+    const auto admission_time_us = currentTimeUs();
+    auto       admission_error   =
+        requestDeadlineReached(input->begin_time_us, input->generate_config->timeout_ms, admission_time_us) ?
+            ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline expired before engine admission") :
+            serverContextStopError(context, "before engine admission", admission_time_us);
+    if (admission_error.hasError()) {
+        return serializeErrorMsg(generate_context.request_key, admission_error);
+    }
     {
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
         generate_context.setStream(engine_->enqueue(input));
@@ -225,24 +262,55 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
 
     std::vector<std::shared_ptr<GenerateInput>> inputs;
     inputs.reserve(batch_size);
+    auto abort_batch = [&](int failed_index, const ErrorInfo& error) {
+        for (int j = 0; j < batch_size; ++j) {
+            auto* result = response->add_results();
+            auto* err_pb = result->mutable_error_info();
+            err_pb->set_error_code(transErrorCodeToRPC(error.code()));
+            if (failed_index < 0) {
+                err_pb->set_error_message("batch aborted: " + error.ToString());
+            } else if (j == failed_index) {
+                err_pb->set_error_message("batch input failed: " + error.ToString());
+            } else {
+                err_pb->set_error_message("batch aborted due to input failure at index "
+                                          + std::to_string(failed_index));
+            }
+        }
+    };
+    const auto batch_deadline_unix_us = context == nullptr ? 0 : requestDeadlineUnixUs(context->deadline());
+    int64_t    batch_timeout_ms       = 0;
+    for (const auto& input_pb : request->inputs()) {
+        batch_timeout_ms = std::max<int64_t>(batch_timeout_ms, input_pb.generate_config().timeout_ms());
+    }
     for (int i = 0; i < batch_size; i++) {
         std::shared_ptr<GenerateInput> input;
-        auto                           err = prepareInput(request->inputs(i), input);
+        const auto&                    input_pb = request->inputs(i);
+        const bool                     has_item_deadline = input_pb.request_deadline_unix_ms() > 0;
+        const auto item_deadline_unix_us =
+            has_item_deadline ? deriveBatchItemDeadlineUnixUs(batch_deadline_unix_us,
+                                                              batch_timeout_ms,
+                                                              input_pb.generate_config().timeout_ms()) :
+                                0;
+        auto err = prepareInput(input_pb, input, has_item_deadline ? context : nullptr, item_deadline_unix_us);
         if (!err.ok()) {
-            // Fill error results for all requests (0..batch_size-1) to maintain 1:1 mapping
-            for (int j = 0; j < batch_size; j++) {
-                auto* result = response->add_results();
-                auto* err_pb = result->mutable_error_info();
-                err_pb->set_error_code(ErrorCodePB::UNKNOWN_ERROR);
-                if (j == i) {
-                    err_pb->set_error_message("multimodal processing failed: " + err.ToString());
-                } else {
-                    err_pb->set_error_message("batch aborted due to multimodal failure at index " + std::to_string(i));
-                }
-            }
+            abort_batch(i, err);
             return grpc::Status::OK;
         }
         inputs.push_back(input);
+    }
+
+    const auto admission_time_us = currentTimeUs();
+    const auto batch_stop_error  = serverContextStopError(context, "before batch admission", admission_time_us);
+    if (batch_stop_error.hasError()) {
+        abort_batch(-1, batch_stop_error);
+        return grpc::Status::OK;
+    }
+    for (int i = 0; i < batch_size; ++i) {
+        if (requestDeadlineReached(
+                inputs[i]->begin_time_us, inputs[i]->generate_config->timeout_ms, admission_time_us)) {
+            abort_batch(i, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline expired before batch admission"));
+            return grpc::Status::OK;
+        }
     }
 
     // batchEnqueue contract: returned vector is 1:1 with `inputs` (same size, same order).
@@ -260,8 +328,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
         auto            err = collectStreamOutput(context, streams[i], inputs[i], last_outputs);
         if (!err.ok()) {
             auto* err_pb = result->mutable_error_info();
-            err_pb->set_error_code(err.code() == ErrorCode::CANCELLED ? ErrorCodePB::CANCELLED :
-                                                                        ErrorCodePB::UNKNOWN_ERROR);
+            err_pb->set_error_code(transErrorCodeToRPC(err.code()));
             err_pb->set_error_message(err.ToString());
         } else {
             auto* output_pb = result->mutable_final_output();

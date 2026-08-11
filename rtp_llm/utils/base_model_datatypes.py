@@ -1,3 +1,5 @@
+import math
+import time
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Dict, List, NamedTuple, Optional
@@ -62,6 +64,15 @@ class GenerateInput:
     batch_group_id: int = (
         -1
     )  # Batch group ID for force batch grouping, -1 means not set
+    request_deadline_monotonic_s: Optional[float] = field(
+        default=None, repr=False, compare=False
+    )
+    request_deadline_unix_ms: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    ttft_deadline_monotonic_s: Optional[float] = field(
+        default=None, repr=False, compare=False
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -77,6 +88,92 @@ class GenerateInput:
     def update_prefix(self, prefix_tokens: torch.Tensor):
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
+
+
+def _positive_timeout_ms(value: Any) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        timeout_ms = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return timeout_ms if timeout_ms > 0 else None
+
+
+def current_monotonic_time_s() -> float:
+    return time.monotonic()
+
+
+def current_unix_time_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
+def initialize_request_deadlines(
+    generate_input: GenerateInput,
+    monotonic_now_s: Optional[float] = None,
+    unix_now_ms: Optional[int] = None,
+) -> None:
+    """Initialize one immutable total/TTFT budget at backend ingress."""
+    if monotonic_now_s is None:
+        monotonic_now_s = current_monotonic_time_s()
+
+    config = generate_input.generate_config
+    total_timeout_ms = _positive_timeout_ms(getattr(config, "timeout_ms", None))
+    request_deadline = getattr(
+        generate_input, "request_deadline_monotonic_s", None
+    )
+    request_deadline_unix_ms = getattr(
+        generate_input, "request_deadline_unix_ms", None
+    )
+
+    if total_timeout_ms is not None and request_deadline is None:
+        request_deadline = monotonic_now_s + total_timeout_ms / 1000.0
+        setattr(generate_input, "request_deadline_monotonic_s", request_deadline)
+
+    if total_timeout_ms is not None and request_deadline_unix_ms is None:
+        if unix_now_ms is None:
+            unix_now_ms = current_unix_time_ms()
+        if request_deadline is None:
+            remaining_ms = total_timeout_ms
+        else:
+            remaining_ms = remaining_deadline_ms(
+                request_deadline, monotonic_now_s
+            )
+        setattr(
+            generate_input,
+            "request_deadline_unix_ms",
+            unix_now_ms + (remaining_ms or 0),
+        )
+
+    if getattr(generate_input, "ttft_deadline_monotonic_s", None) is not None:
+        return
+
+    ttft_timeout_ms = _positive_timeout_ms(
+        getattr(config, "ttft_timeout_ms", None)
+    )
+    ttft_deadline = (
+        monotonic_now_s + ttft_timeout_ms / 1000.0
+        if ttft_timeout_ms is not None
+        else request_deadline
+    )
+    if ttft_deadline is not None and request_deadline is not None:
+        ttft_deadline = min(ttft_deadline, request_deadline)
+    if ttft_deadline is not None:
+        setattr(generate_input, "ttft_deadline_monotonic_s", ttft_deadline)
+
+
+def remaining_deadline_ms(
+    deadline_monotonic_s: Optional[float],
+    monotonic_now_s: Optional[float] = None,
+) -> Optional[int]:
+    if deadline_monotonic_s is None:
+        return None
+    if monotonic_now_s is None:
+        monotonic_now_s = current_monotonic_time_s()
+    remaining_ms = (deadline_monotonic_s - monotonic_now_s) * 1000.0
+    if remaining_ms <= 0:
+        return 0
+    return max(1, math.ceil(remaining_ms - 1e-9))
 
 
 @dataclass

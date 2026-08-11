@@ -1,17 +1,27 @@
 #pragma once
 
+#include <chrono>
+
 #include "grpc++/grpc++.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/LoadContext.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadFence.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadLeaseRetainer.h"
 
 namespace rtp_llm {
+
+struct RemoteLoadBudget;
 
 class DecodeRpcServer: public RemoteRpcServer {
 public:
     DecodeRpcServer() {}
     ~DecodeRpcServer();
+    bool drainRemoteLoads();
+    bool drainRemoteLoads(std::chrono::milliseconds grace);
+    void stop() override;
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine);
@@ -21,6 +31,9 @@ public:
     grpc::Status RemoteLoad(grpc::ServerContext*          server_context,
                             const BroadcastLoadRequestPB* request,
                             BroadcastLoadResponsePB*      response);
+    grpc::Status QuiesceRemoteLoad(grpc::ServerContext*                 server_context,
+                                   const RemoteLoadQuiesceRequestPB*  request,
+                                   RemoteLoadQuiesceResponsePB*       response);
 
     class LoadKVCacheContext {
     public:
@@ -33,6 +46,7 @@ public:
                            int64_t                          timeout_ms,
                            int                              partition_count,
                            int                              partition_id,
+                           CacheStoreLoadDeadline           steady_deadline,
                            grpc::ServerContext*             server_context):
             request_id(request_id),
             request_key(request_key),
@@ -43,6 +57,7 @@ public:
             timeout_ms(timeout_ms),
             partition_count(partition_count),
             partition_id(partition_id),
+            steady_deadline(steady_deadline),
             server_context(server_context) {}
         int64_t                          request_id;
         const std::string&               request_key;
@@ -53,6 +68,10 @@ public:
         int64_t                          timeout_ms;
         int                              partition_count;
         int                              partition_id;
+        std::string                      allocation_token;
+        int64_t                          load_deadline_unix_ms = 0;
+        CacheStoreLoadDeadline           steady_deadline;
+        RemoteLoadFenceRegistry::Operation operation;
 
         grpc::ServerContext* server_context;
     };
@@ -67,7 +86,9 @@ private:
 
     ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
     ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
-    ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
+    ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext&  decode_context,
+                                               LoadKVCacheContext&     load_context,
+                                               const RemoteLoadBudget& remote_load_budget);
     ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                       int                             index,
@@ -75,10 +96,19 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
+    bool quiesceRemoteLoadTargets(const std::string&              allocation_token,
+                                  int64_t                         load_deadline_unix_ms,
+                                  const std::vector<std::string>& worker_addrs,
+                                  std::chrono::milliseconds       attempt_timeout,
+                                  std::chrono::milliseconds       retention_timeout,
+                                  RemoteLoadFenceRegistry::UnseenTokenPolicy local_unseen_token_policy);
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
+    std::atomic<uint64_t>    allocation_token_counter_{0};
+    RemoteLoadFenceRegistry  remote_load_fences_;
+    RemoteLoadLeaseRetainer  remote_load_leases_;
     size_t                   model_id;
 };
 

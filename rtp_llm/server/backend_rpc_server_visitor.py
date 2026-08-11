@@ -19,7 +19,13 @@ from rtp_llm.ops import (
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
-from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    current_monotonic_time_s,
+    current_unix_time_ms,
+    initialize_request_deadlines,
+)
 from rtp_llm.utils.time_util import Timer
 
 route_logger = logging.getLogger("route_logger")
@@ -328,6 +334,7 @@ class BackendRPCServerVisitor:
     async def enqueue(
         self, input: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
+        initialize_request_deadlines(input)
         self._validate_input(input)
         self.check_sp_supported(input)
 
@@ -338,7 +345,10 @@ class BackendRPCServerVisitor:
 
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        monotonic_now_s = current_monotonic_time_s()
+        unix_now_ms = current_unix_time_ms()
         for input in inputs:
+            initialize_request_deadlines(input, monotonic_now_s, unix_now_ms)
             self._validate_input(input)
             self.check_sp_supported(input)
 

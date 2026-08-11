@@ -40,6 +40,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     generate_input_(input),
     max_seq_len_(model_config.max_seq_len),
     vocab_size_(model_config.vocab_size),
+    begin_time_us_(input->begin_time_us),
+    timeout_begin_time_us_(input->begin_time_us),
     stream_cache_resource_(std::make_shared<StreamCacheResource>(
         this, resource_context, input->need_release_resource, input->generate_config->adapter_name)),
     need_release_resource_(input->need_release_resource),
@@ -67,7 +69,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     // which has not been initialized yet
     const size_t init_batch_size = batchSize(0);
 
-    begin_time_us_ = input->begin_time_us;
     if (generate_input_->generate_config->calculate_loss && inputLength() > 1) {
         loss_ = torch::zeros({(int64_t)inputLength() - 1}, torch::kFloat32);
     }
@@ -493,7 +494,7 @@ int64_t GenerateStream::getTimeoutMs() const {
 }
 
 void GenerateStream::checkTimeout() {
-    auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+    auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - timeout_begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
         reportEvent(StreamEvents::Error,
@@ -1248,6 +1249,11 @@ PdSepCacheHoldResult GenerateStream::holdKVCacheForPDSep() {
 void GenerateStream::releaseKVCacheForPDSep() {
     std::lock_guard<std::mutex> lock(*mutex_);
     stream_cache_resource_->releaseKVCacheForPDSep();
+}
+
+std::shared_ptr<KVCacheResource> GenerateStream::takeKVCacheForPDSep() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return stream_cache_resource_->takeKVCacheForPDSep();
 }
 
 std::pair<std::string, uint32_t> GenerateStream::prefillAddr() const {

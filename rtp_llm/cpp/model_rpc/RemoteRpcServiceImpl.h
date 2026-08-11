@@ -47,6 +47,17 @@ public:
         return decode_server_->RemoteLoad(context, request, response);
     }
 
+    grpc::Status QuiesceRemoteLoad(grpc::ServerContext*                context,
+                                   const RemoteLoadQuiesceRequestPB* request,
+                                   RemoteLoadQuiesceResponsePB*      response) override {
+        if (!decode_server_) {
+            auto error_msg = "server not implement QuiesceRemoteLoad";
+            RTP_LLM_LOG_ERROR(error_msg);
+            return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        }
+        return decode_server_->QuiesceRemoteLoad(context, request, response);
+    }
+
     grpc::Status RemoteGenerate(grpc::ServerContext* context, ServerStream* stream) override {
         if (!decode_server_) {
             auto error_msg = "server not implement RemoteGenerate";

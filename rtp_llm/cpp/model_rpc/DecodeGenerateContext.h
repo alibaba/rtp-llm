@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadLeaseRetainer.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadTargetTracker.h"
 
 namespace rtp_llm {
 
@@ -67,6 +69,11 @@ public:
     DecodeRpcContext&        rpc_context;
     std::vector<std::string> peer_addrs;  // prefill worker addrs
     GenerateRequestPB        allocate_request;
+    std::string              allocation_token;
+    int64_t                  load_deadline_unix_ms = 0;
+    std::unique_ptr<RemoteLoadLeaseRetainer::Ticket> cache_lease_ticket;
+    std::shared_ptr<RemoteLoadTargetTracker>          remote_load_targets;
+    bool                     remote_load_quiesced = false;
     DecodeStatInfo           stat_info;
     int64_t                  loading_cache_requests = 0;
 

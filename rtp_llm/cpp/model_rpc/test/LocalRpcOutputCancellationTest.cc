@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
@@ -70,6 +71,12 @@ public:
                       GenerateOutputs&                 outputs) {
         auto input = makeGenerateInput();
         return collectStreamOutput(context, stream, input, outputs);
+    }
+
+    grpc::Status batch(grpc::ServerContext*        context,
+                       const BatchGenerateInputPB* request,
+                       BatchGenerateOutputsPB*     response) {
+        return BatchGenerateCall(context, request, response);
     }
 };
 
@@ -151,6 +158,49 @@ private:
     std::unique_ptr<grpc::Server> server_;
 };
 
+class BatchAdmissionCancellationService final: public RpcService::Service {
+public:
+    BatchAdmissionCancellationService():
+        entered_future_(entered_promise_.get_future()),
+        handler_status_future_(handler_status_promise_.get_future()),
+        handler_response_future_(handler_response_promise_.get_future()) {}
+
+    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                   const BatchGenerateInputPB* request,
+                                   BatchGenerateOutputsPB*     response) override {
+        entered_promise_.set_value();
+        const auto wait_deadline = std::chrono::steady_clock::now() + 2500ms;
+        while (!context->IsCancelled() && std::chrono::steady_clock::now() < wait_deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+        const auto status = harness_.batch(context, request, response);
+        handler_response_promise_.set_value(*response);
+        handler_status_promise_.set_value(status);
+        return status;
+    }
+
+    std::future<void>& enteredFuture() {
+        return entered_future_;
+    }
+
+    std::future<grpc::Status>& handlerStatusFuture() {
+        return handler_status_future_;
+    }
+
+    std::future<BatchGenerateOutputsPB>& handlerResponseFuture() {
+        return handler_response_future_;
+    }
+
+private:
+    LocalRpcServerHarness                 harness_;
+    std::promise<void>                    entered_promise_;
+    std::future<void>                     entered_future_;
+    std::promise<grpc::Status>            handler_status_promise_;
+    std::future<grpc::Status>             handler_status_future_;
+    std::promise<BatchGenerateOutputsPB>  handler_response_promise_;
+    std::future<BatchGenerateOutputsPB>   handler_response_future_;
+};
+
 TEST(LocalRpcOutputCancellationTest, StreamingCancelWhileWaitingReturnsFromServerHandler) {
     CancellationService service;
     LoopbackServer      server(&service);
@@ -220,6 +270,37 @@ TEST(LocalRpcOutputCancellationTest, BatchGenerateCancelWhileWaitingReturnsFromS
     ASSERT_EQ(handler_ready, std::future_status::ready);
     EXPECT_EQ(handler_result.get().error_code(), grpc::StatusCode::CANCELLED);
     EXPECT_EQ(service.stream()->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST(LocalRpcOutputCancellationTest, BatchCancelBeforeAdmissionNeverReachesEngine) {
+    BatchAdmissionCancellationService service;
+    LoopbackServer                    server(&service);
+    ASSERT_TRUE(server.started());
+    auto stub = RpcService::NewStub(server.channel());
+
+    BatchGenerateInputPB request;
+    auto*                input = request.add_inputs();
+    input->set_request_id(1);
+    input->add_token_ids(1);
+    input->mutable_generate_config()->set_timeout_ms(5000);
+
+    grpc::ClientContext    context;
+    BatchGenerateOutputsPB client_response;
+    context.set_deadline(std::chrono::system_clock::now() + 5s);
+    auto client_result = std::async(
+        std::launch::async, [&]() { return stub->BatchGenerateCall(&context, request, &client_response); });
+
+    ASSERT_EQ(service.enteredFuture().wait_for(2500ms), std::future_status::ready);
+    context.TryCancel();
+
+    ASSERT_EQ(client_result.wait_for(2500ms), std::future_status::ready);
+    EXPECT_EQ(client_result.get().error_code(), grpc::StatusCode::CANCELLED);
+    ASSERT_EQ(service.handlerStatusFuture().wait_for(2500ms), std::future_status::ready);
+    EXPECT_TRUE(service.handlerStatusFuture().get().ok());
+    ASSERT_EQ(service.handlerResponseFuture().wait_for(2500ms), std::future_status::ready);
+    const auto handler_response = service.handlerResponseFuture().get();
+    ASSERT_EQ(handler_response.results_size(), 1);
+    EXPECT_EQ(handler_response.results(0).error_info().error_code(), ErrorCodePB::CANCELLED);
 }
 
 }  // namespace

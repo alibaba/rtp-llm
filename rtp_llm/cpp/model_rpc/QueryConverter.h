@@ -6,12 +6,14 @@
 #include <memory>
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/model_rpc/RequestDeadlineBudget.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
 namespace rtp_llm {
 class QueryConverter {
 public:
-    static std::shared_ptr<GenerateInput> transQuery(const GenerateInputPB* input);
+    static std::shared_ptr<GenerateInput>
+    transQuery(const GenerateInputPB* input, const RequestDeadlineBudget* request_deadline_budget = nullptr);
 
     static void transResponse(GenerateOutputsPB*     outputs,
                               const GenerateOutputs* response,

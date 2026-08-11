@@ -85,7 +85,7 @@ public:
 
     virtual size_t onflightRequestNum();
 
-    void stop() {
+    virtual void stop() {
         (void)engine_->stop();
     }
 
@@ -110,7 +110,10 @@ protected:
                                   RemoteGenerateWaitResult*        remote_generate_result = nullptr);
 
     // Shared helpers for single and batch paths
-    ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
+    ErrorInfo prepareInput(const GenerateInputPB&           input_pb,
+                           std::shared_ptr<GenerateInput>&   output,
+                           grpc::ServerContext*             context = nullptr,
+                           int64_t authoritative_deadline_unix_us = 0);
     ErrorInfo collectStreamOutput(grpc::ServerContext*                  context,
                                   std::shared_ptr<GenerateStream>&      stream,
                                   const std::shared_ptr<GenerateInput>& input,

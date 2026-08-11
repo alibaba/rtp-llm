@@ -768,4 +768,8 @@ bool StreamCacheResource::hasKVCacheHoldForPDSep() const {
 void StreamCacheResource::releaseKVCacheForPDSep() {
     pd_kvcache_ref_.reset();
 }
+
+std::shared_ptr<KVCacheResource> StreamCacheResource::takeKVCacheForPDSep() {
+    return std::move(pd_kvcache_ref_);
+}
 }  // namespace rtp_llm

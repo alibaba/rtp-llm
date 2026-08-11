@@ -146,6 +146,8 @@ message GenerateInputPB {
     int64 start_time = 6;
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
+    // Absolute generation deadline. Zero means a legacy client with relative timeout only.
+    int64 request_deadline_unix_ms = 9;
 }
 
 message AuxInfoPB {
@@ -198,6 +200,8 @@ message GenerateOutputsPB {
     int64 begin_compute_time = 7;
     int64 compute_done_time = 8;
     RpcErrorPB error_info = 9;
+    string allocation_token = 10;
+    bool remote_load_quiesced = 11;
 }
 
 // return to python client
@@ -233,6 +237,7 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+    GENERATE_TIMEOUT = 26;
 }
 
 // transfer between prefill and decode
@@ -261,6 +266,8 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    string allocation_token = 12;
+    int64 load_deadline_unix_ms = 13;
     // Opaque state captured after prefill sampling for seeded requests.
     bytes sampler_generator_state = 14;
     uint32 sampler_generator_state_version = 15;
@@ -280,12 +287,27 @@ message BroadcastLoadRequestPB {
     int32 partition_count = 10;
     int32 partition_id = 11;
     repeated IntVector group_block_ids = 12;
-
+    string allocation_token = 13;
+    int64 load_deadline_unix_ms = 14;
 }
 
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
+    bool quiesced = 3;
+}
+
+message RemoteLoadQuiesceRequestPB {
+    string allocation_token = 1;
+    int64 load_deadline_unix_ms = 2;
+    bool local_only = 3;
+    // Relative lifetime for an unseen-token tombstone on the receiving host.
+    int64 retention_timeout_ms = 4;
+}
+
+message RemoteLoadQuiesceResponsePB {
+    RpcErrorPB error_info = 1;
+    bool quiesced = 2;
 }
 
 message RemoteFinishRequestPB {
@@ -610,6 +632,7 @@ service RpcService {
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
     rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
+    rpc QuiesceRemoteLoad(RemoteLoadQuiesceRequestPB) returns (RemoteLoadQuiesceResponsePB);
     rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
     rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
     rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);

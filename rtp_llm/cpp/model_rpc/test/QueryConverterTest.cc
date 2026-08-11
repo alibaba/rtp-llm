@@ -3,9 +3,12 @@
 #include <memory>
 #include <optional>
 
+#include "grpcpp/impl/codegen/time.h"
 #define private public
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -15,6 +18,11 @@ using namespace std;
 namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
+
+class TestableLocalRpcServer: public LocalRpcServer {
+public:
+    using LocalRpcServer::prepareInput;
+};
 
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
@@ -69,6 +77,100 @@ TEST_F(QueryConverterTest, testTransInput) {
     vector<int> stop_words_2{3, 4, 5};
     ASSERT_EQ(generate_config->stop_words_list[0], stop_words_1);
     ASSERT_EQ(generate_config->stop_words_list[1], stop_words_2);
+}
+
+TEST_F(QueryConverterTest, TransQueryPreservesLegacyRelativeTimeout) {
+    GenerateInputPB input;
+    input.add_token_ids(1);
+    input.mutable_generate_config()->set_timeout_ms(500);
+    input.set_start_time(1);
+
+    const auto before = currentTimeUs();
+    const auto query  = QueryConverter::transQuery(&input);
+    const auto after  = currentTimeUs();
+
+    EXPECT_GE(query->begin_time_us, before);
+    EXPECT_LE(query->begin_time_us, after);
+    EXPECT_EQ(query->generate_config->timeout_ms, 500);
+}
+
+TEST_F(QueryConverterTest, TransQueryAnchorsTimeoutToAbsoluteDeadline) {
+    GenerateInputPB input;
+    input.add_token_ids(1);
+    input.mutable_generate_config()->set_timeout_ms(500);
+    const auto now_us      = currentTimeUs();
+    const auto deadline_ms = now_us / 1000 + 300;
+    input.set_request_deadline_unix_ms(deadline_ms);
+
+    const auto query = QueryConverter::transQuery(&input);
+
+    EXPECT_EQ(query->generate_config->timeout_ms, 500);
+    EXPECT_NEAR(query->begin_time_us, deadline_ms * 1000 - 500 * 1000, 1000);
+}
+
+TEST_F(QueryConverterTest, ExpiredDeadlineIsRejectedBeforeEngineAdmission) {
+    GenerateInputPB input;
+    input.add_token_ids(1);
+    input.mutable_generate_config()->set_timeout_ms(500);
+    input.set_request_deadline_unix_ms(currentTimeUs() / 1000 - 1);
+    std::shared_ptr<GenerateInput> query;
+    TestableLocalRpcServer         server;
+
+    const auto error = server.prepareInput(input, query);
+
+    EXPECT_EQ(error.code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(query, nullptr);
+}
+
+TEST_F(QueryConverterTest, PrefillToDecodeHandoffPreservesRequestDeadline) {
+    GenerateInputPB input;
+    input.set_request_id(17);
+    input.set_request_deadline_unix_ms(21'000);
+    input.mutable_generate_config()->set_timeout_ms(500);
+
+    GenerateRequestPB handoff;
+    handoff.set_stage(RemoteStage::ALLOCATE);
+    handoff.mutable_input()->CopyFrom(input);
+
+    EXPECT_EQ(handoff.input().request_id(), 17);
+    EXPECT_EQ(handoff.input().request_deadline_unix_ms(), 21'000);
+    EXPECT_EQ(handoff.input().generate_config().timeout_ms(), 500);
+}
+
+TEST_F(QueryConverterTest, ExpiredPrefillRequestDoesNotReachEngineOrRouting) {
+    grpc::ServerContext server_context;
+    grpc::Timepoint2Timespec(std::chrono::system_clock::time_point(std::chrono::microseconds(10'000'000)),
+                             &server_context.deadline_);
+    GenerateInputPB            request;
+    request.set_request_id(17);
+    request.mutable_generate_config()->set_timeout_ms(500);
+    RPCContext                   rpc_context{&request, nullptr};
+    RemoteServerResource         resource;
+    kmonitor::MetricsReporterPtr metrics;
+    PrefillGenerateContext       context(&resource, rpc_context, 500, &server_context, metrics, nullptr);
+    PrefillRpcServer             server;
+
+    server.getRpcConnection(context);
+
+    EXPECT_EQ(context.error_info.code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(context.generate_input, nullptr);
+}
+
+TEST_F(QueryConverterTest, ExpiredDecodeRequestDoesNotReachEngineOrCacheAllocation) {
+    grpc::ServerContext server_context;
+    grpc::Timepoint2Timespec(std::chrono::system_clock::time_point(std::chrono::microseconds(10'000'000)),
+                             &server_context.deadline_);
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr metrics;
+    DecodeGenerateContext        context(rpc_context, 500, &server_context, metrics, nullptr);
+    DecodeRpcServer              server;
+
+    server.allocateResource(context);
+
+    EXPECT_EQ(context.error_info.code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(context.getStream(), nullptr);
 }
 
 TEST_F(QueryConverterTest, testTransOutput) {

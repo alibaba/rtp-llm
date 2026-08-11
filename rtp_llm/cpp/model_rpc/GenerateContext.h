@@ -5,11 +5,30 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/model_rpc/RequestDeadlineBudget.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 
 namespace rtp_llm {
 
 const int64_t MAX_GRPC_TIMEOUT_MS = 3600 * 1000;
+
+inline ErrorInfo serverContextStopError(grpc::ServerContext* context,
+                                        const std::string&   operation,
+                                        int64_t              now_unix_us = currentTimeUs()) {
+    if (context == nullptr) {
+        return ErrorInfo::OkStatus();
+    }
+    const auto prefix           = operation.empty() ? std::string() : operation + ": ";
+    const auto deadline_unix_us = requestDeadlineUnixUs(context->deadline());
+    if (deadline_unix_us > 0 && now_unix_us >= deadline_unix_us) {
+        return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, prefix + "request deadline expired");
+    }
+    if (context->IsCancelled()) {
+        return ErrorInfo(ErrorCode::CANCELLED, prefix + "request cancelled");
+    }
+    return ErrorInfo::OkStatus();
+}
 
 class GenerateContext {
 public:
@@ -84,10 +103,13 @@ protected:
     }
 
 #define CHECK_REQUEST_CANCELLED(generate_context)                                                                      \
-    if (generate_context.server_context->IsCancelled()) {                                                              \
-        generate_context.error_info   = ErrorInfo(ErrorCode::CANCELLED, "request is cancelled");                       \
-        generate_context.error_status = serializeErrorMsg(generate_context.request_key, generate_context.error_info);  \
-        return generate_context.error_status;                                                                          \
+    {                                                                                                                  \
+        const auto stop_error = serverContextStopError(generate_context.server_context, "request");                   \
+        if (stop_error.hasError()) {                                                                                   \
+            generate_context.error_info   = stop_error;                                                                \
+            generate_context.error_status = serializeErrorMsg(generate_context.request_key, stop_error);              \
+            return generate_context.error_status;                                                                      \
+        }                                                                                                              \
     }
 
 #define EXECUTE_STAGE_FUNC(func, generate_context)                                                                     \
@@ -106,6 +128,10 @@ protected:
         generate_context.retry_times++;                                                                                \
         func(generate_context);                                                                                        \
         if (generate_context.ok()) {                                                                                   \
+            break;                                                                                                     \
+        }                                                                                                              \
+        if (!shouldRetryGenerateFailure(generate_context.error_info.code(),                                           \
+                                        generate_context.error_status.error_code())) {                                \
             break;                                                                                                     \
         }                                                                                                              \
         auto cost_time_us                   = currentTimeUs() - begin_time_us;                                         \

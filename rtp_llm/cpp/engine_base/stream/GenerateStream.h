@@ -362,6 +362,7 @@ public:
     RemoteGenerateWaitResult resolveRemoteLoadFailure(ErrorCode error_code, const std::string& error_msg);
     PdSepCacheHoldResult holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
+    std::shared_ptr<KVCacheResource> takeKVCacheForPDSep();
 
     std::vector<int> getLatestTokens(size_t token_num);
 
@@ -524,7 +525,7 @@ public:
     }
 
     int64_t deadlineMs() const {
-        auto deadline_ms = generate_input_->generate_config->timeout_ms + begin_time_us_ / 1000;
+        auto deadline_ms = generate_input_->generate_config->timeout_ms + timeout_begin_time_us_ / 1000;
         return deadline_ms;
     }
 
@@ -571,6 +572,7 @@ protected:
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
+    int64_t                               timeout_begin_time_us_;
     int64_t                               wait_time_us_ = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;

@@ -41,6 +41,7 @@ void DecodeStatInfo::nextStage() {
 }
 
 DecodeGenerateContext::~DecodeGenerateContext() {
+    cache_lease_ticket.reset();
     reportTime();
 }
 

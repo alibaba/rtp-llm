@@ -1,9 +1,12 @@
 #pragma once
 
+#include <chrono>
+
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadLeaseRetainer.h"
 
 namespace rtp_llm {
 
@@ -11,6 +14,9 @@ class PrefillRpcServer: public RemoteRpcServer {
 public:
     PrefillRpcServer() {}
     ~PrefillRpcServer() {}
+    bool drainRemoteLoads();
+    bool drainRemoteLoads(std::chrono::milliseconds grace);
+    void stop() override;
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine) override;
@@ -36,6 +42,7 @@ private:
 
 private:
     std::string decode_cluster_name_;
+    RemoteLoadLeaseRetainer remote_load_leases_;
 };
 
 }  // namespace rtp_llm

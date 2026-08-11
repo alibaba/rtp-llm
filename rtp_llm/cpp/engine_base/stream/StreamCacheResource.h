@@ -109,6 +109,7 @@ public:
     bool holdKVCacheForPDSep();
     bool hasKVCacheHoldForPDSep() const;
     void releaseKVCacheForPDSep();
+    std::shared_ptr<KVCacheResource> takeKVCacheForPDSep();
 
     std::string debugString() const {
         std::stringstream debug_string;

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
+#include "rtp_llm/cpp/model_rpc/RequestDeadlineBudget.h"
 
 #include <numeric>
 
@@ -121,12 +122,23 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     return generate_config;
 }
 
-std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB* input) {
+std::shared_ptr<GenerateInput>
+QueryConverter::transQuery(const GenerateInputPB* input, const RequestDeadlineBudget* request_deadline_budget) {
     std::shared_ptr<GenerateInput> generate_input = std::make_shared<GenerateInput>();
-    generate_input->request_id                    = input->request_id();
-    generate_input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
+    generate_input->request_id = input->request_id();
     if (input->has_generate_config()) {
         generate_input->generate_config = transGenerateConfig(&(input->generate_config()));
+    }
+    const auto now_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    const auto relative_timeout_ms =
+        generate_input->generate_config == nullptr ? 0 : generate_input->generate_config->timeout_ms;
+    const auto deadline_budget = request_deadline_budget == nullptr ?
+                                     makeRequestDeadlineBudget(
+                                         input->request_deadline_unix_ms(), relative_timeout_ms, now_us) :
+                                     *request_deadline_budget;
+    generate_input->begin_time_us = deadline_budget.begin_time_us;
+    if (generate_input->generate_config != nullptr) {
+        generate_input->generate_config->timeout_ms = deadline_budget.timeout_ms;
     }
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)

@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import torch
 
@@ -95,6 +96,76 @@ class BackendRPCServerVisitorTest(unittest.TestCase):
             context.exception.exception_type,
             ExceptionType.UNSUPPORTED_OPERATION,
         )
+
+
+    def test_enqueue_initializes_total_and_ttft_deadlines_once_before_route(self):
+        visitor = self._visitor(sp_type=SpeculativeType.NONE)
+        visitor.host_service = SimpleNamespace(service_available=True)
+        visitor.route_ips = AsyncMock()
+        visitor.model_rpc_client = MagicMock()
+        visitor.model_rpc_client.enqueue.return_value = object()
+        request = self._input(prompt_length=2)
+        request.request_id = 17
+        request.generate_config.timeout_ms = 1000
+        request.generate_config.ttft_timeout_ms = 250
+
+        with patch(
+            "rtp_llm.utils.base_model_datatypes.current_monotonic_time_s",
+            return_value=10.0,
+        ), patch(
+            "rtp_llm.utils.base_model_datatypes.current_unix_time_ms",
+            return_value=20_000,
+        ):
+            result = __import__("asyncio").run(visitor.enqueue(request))
+
+        self.assertIs(result, visitor.model_rpc_client.enqueue.return_value)
+        self.assertEqual(request.request_deadline_monotonic_s, 11.0)
+        self.assertEqual(request.request_deadline_unix_ms, 21_000)
+        self.assertEqual(request.ttft_deadline_monotonic_s, 10.25)
+        visitor.route_ips.assert_awaited_once_with(request)
+
+        # A retry/re-entry must retain the original budget rather than start again.
+        with patch(
+            "rtp_llm.utils.base_model_datatypes.current_monotonic_time_s",
+            return_value=10.5,
+        ), patch(
+            "rtp_llm.utils.base_model_datatypes.current_unix_time_ms",
+            return_value=20_500,
+        ):
+            __import__("asyncio").run(visitor.enqueue(request))
+        self.assertEqual(request.request_deadline_monotonic_s, 11.0)
+        self.assertEqual(request.request_deadline_unix_ms, 21_000)
+        self.assertEqual(request.ttft_deadline_monotonic_s, 10.25)
+
+    def test_batch_deadlines_share_the_same_ingress_time(self):
+        visitor = self._visitor(sp_type=SpeculativeType.NONE)
+        visitor.host_service = SimpleNamespace(service_available=False)
+        visitor.model_rpc_client = MagicMock()
+        visitor.model_rpc_client.batch_enqueue = AsyncMock(return_value=[])
+        requests = [self._input(prompt_length=2), self._input(prompt_length=2)]
+        for index, request in enumerate(requests):
+            request.request_id = index
+            request.generate_config.timeout_ms = 1000
+            request.generate_config.ttft_timeout_ms = -1
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.current_monotonic_time_s",
+            return_value=30.0,
+        ), patch(
+            "rtp_llm.server.backend_rpc_server_visitor.current_unix_time_ms",
+            return_value=40_000,
+        ):
+            __import__("asyncio").run(visitor.batch_enqueue(requests))
+
+        self.assertEqual(
+            [request.request_deadline_monotonic_s for request in requests],
+            [31.0, 31.0],
+        )
+        self.assertEqual(
+            [request.request_deadline_unix_ms for request in requests],
+            [41_000, 41_000],
+        )
+
 
 
 if __name__ == "__main__":

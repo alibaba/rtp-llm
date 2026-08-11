@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadLeaseRetainer.h"
 
 namespace rtp_llm {
 
@@ -90,10 +91,13 @@ public:
     std::shared_ptr<RpcService::Stub>    stub;
     std::shared_ptr<grpc::ClientContext> client_context;
     std::shared_ptr<ClientStream>        client_stream;
+    std::string                          allocation_token;
+    int64_t                              load_deadline_unix_ms = 0;
+    std::unique_ptr<RemoteLoadLeaseRetainer::Ticket> cache_lease_ticket;
+    RemoteLoadLeaseRetainer::Quiesce                 remote_load_quiesce;
     bool                                 grpc_stream_closed             = false;
     grpc::Status                         last_grpc_stream_closed_status = grpc::Status::OK;
     bool                                 remote_load_cache_started      = false;
-    bool                                 remote_kv_cache_held           = false;
     bool                                 local_generate_done            = false;
     grpc::Status                         deferred_local_status          = grpc::Status::OK;
     PrefillStatInfo                      stat_info;

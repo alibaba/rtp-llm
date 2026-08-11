@@ -20,20 +20,28 @@ sys.modules["rtp_llm.ops.comm.nccl_op"] = mock_nccl_op
 import logging
 import os
 import unittest
+from types import SimpleNamespace
 from typing import AsyncGenerator
 from unittest import TestCase, main
+from unittest.mock import AsyncMock, patch
 
+import grpc
 import torch
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
     StreamState,
+    batch_error_exception_type,
     trans_input,
     trans_output,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    ErrorCodePB,
+    ErrorDetailsPB,
     GenerateInputPB,
     GenerateOutputsPB,
     TensorPB,
@@ -242,6 +250,231 @@ class ModelRpcClientTest(TestCase):
         input_pb = trans_input(input)
 
         self.assertFalse(input_pb.generate_config.HasField("adapter_name"))
+
+    def test_compute_grpc_timeout_uses_remaining_budget_and_server_cap(self):
+        client = ModelRpcClient([], {}, 100, False)
+
+        self.assertAlmostEqual(client._compute_grpc_timeout(1000), 0.1, places=6)
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.current_monotonic_time_s",
+            return_value=10.8,
+        ):
+            timeout = client._compute_grpc_timeout(1000, 11.0)
+
+        self.assertAlmostEqual(timeout, 0.1, places=6)
+
+    def test_compute_grpc_timeout_rejects_expired_budget(self):
+        client = ModelRpcClient([], {}, 0, False)
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.current_monotonic_time_s",
+            return_value=11.0,
+        ):
+            with self.assertRaises(FtRuntimeException) as context:
+                client._compute_grpc_timeout(1000, 11.0)
+
+        self.assertEqual(
+            context.exception.exception_type, ExceptionType.GENERATE_TIMEOUT
+        )
+
+    def test_canonical_deadline_wins_over_conflicting_cancel_details(self):
+        class DeadlineRpcError(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.DEADLINE_EXCEEDED
+
+            def details(self):
+                return "transport deadline"
+
+            def trailing_metadata(self):
+                details = ErrorDetailsPB(
+                    error_code=int(ExceptionType.CANCELLED),
+                    error_message="server observed cancellation after deadline",
+                )
+                return {"grpc-status-details-bin": details.SerializeToString()}
+
+        client = ModelRpcClient([], {}, 0, False)
+
+        with self.assertRaises(FtRuntimeException) as context:
+            client._handle_grpc_error(DeadlineRpcError(), "request: [7]")
+
+        self.assertEqual(
+            context.exception.exception_type, ExceptionType.GENERATE_TIMEOUT
+        )
+        self.assertEqual(
+            context.exception.message, "server observed cancellation after deadline"
+        )
+
+    def test_trans_input_carries_absolute_deadline_and_timeout_override(self):
+        input = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(timeout_ms=1000),
+            request_id=123,
+            mm_inputs=[],
+        )
+        input.request_deadline_monotonic_s = 11.0
+        input.request_deadline_unix_ms = 21_000
+
+        input_pb = trans_input(input, timeout_ms=200)
+
+        self.assertEqual(input_pb.generate_config.timeout_ms, 200)
+        self.assertEqual(input_pb.request_deadline_unix_ms, 21_000)
+        self.assertEqual(input.generate_config.timeout_ms, 1000)
+
+    def test_enqueue_recomputes_remaining_budget_after_channel_and_serialization(self):
+        class EmptyStream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+            def cancel(self):
+                return None
+
+        class CapturingStub:
+            def __init__(self):
+                self.input_pb = None
+                self.timeout = None
+
+            def GenerateStreamCall(self, input_pb, timeout=None):
+                self.input_pb = input_pb
+                self.timeout = timeout
+                return EmptyStream()
+
+        client = ModelRpcClient(["backend:1234"], {}, 0, False)
+        client._channel_pool = SimpleNamespace(get=AsyncMock(return_value=object()))
+        stub = CapturingStub()
+        request = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(timeout_ms=1000),
+            request_id=123,
+            mm_inputs=[],
+        )
+        request.request_deadline_monotonic_s = 11.0
+        request.request_deadline_unix_ms = 21_000
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.current_monotonic_time_s",
+            side_effect=[10.0, 10.0, 10.7, 10.8],
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.current_unix_time_ms",
+            return_value=20_000,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            asyncio.run(self._run(client, request))
+
+        self.assertEqual(stub.input_pb.generate_config.timeout_ms, 200)
+        self.assertEqual(stub.input_pb.request_deadline_unix_ms, 21_000)
+        self.assertAlmostEqual(stub.timeout, 0.2, places=6)
+        self.assertEqual(request.generate_config.timeout_ms, 1000)
+
+    def test_batch_preserves_each_item_budget_without_mutating_config(self):
+        class CapturingStub:
+            def __init__(self):
+                self.input_pb = None
+                self.timeout = None
+
+            async def BatchGenerateCall(self, input_pb, timeout=None):
+                self.input_pb = input_pb
+                self.timeout = timeout
+                return SimpleNamespace(results=[])
+
+        client = ModelRpcClient(["backend:1234"], {}, 0, False)
+        client._channel_pool = SimpleNamespace(get=AsyncMock(return_value=object()))
+        stub = CapturingStub()
+        requests = []
+        for index, (deadline, unix_deadline) in enumerate(
+            ((11.0, 21_000), (12.0, 22_000))
+        ):
+            request = GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=GenerateConfig(timeout_ms=1000),
+                request_id=index,
+                mm_inputs=[],
+            )
+            request.request_deadline_monotonic_s = deadline
+            request.request_deadline_unix_ms = unix_deadline
+            requests.append(request)
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.current_monotonic_time_s",
+            side_effect=[10.0, 10.5],
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.current_unix_time_ms",
+            return_value=20_000,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            result = asyncio.run(client.batch_enqueue(requests))
+
+        self.assertEqual(result, [])
+        self.assertEqual(
+            [item.generate_config.timeout_ms for item in stub.input_pb.inputs],
+            [500, 1000],
+        )
+        self.assertAlmostEqual(stub.timeout, 1.0, places=6)
+        self.assertEqual(
+            [request.generate_config.timeout_ms for request in requests],
+            [1000, 1000],
+        )
+
+    def test_batch_error_codes_preserve_timeout_and_cancel(self):
+        self.assertEqual(
+            batch_error_exception_type(ErrorCodePB.GENERATE_TIMEOUT),
+            ExceptionType.GENERATE_TIMEOUT,
+        )
+        self.assertEqual(
+            batch_error_exception_type(ErrorCodePB.CANCELLED),
+            ExceptionType.CANCELLED_ERROR,
+        )
+
+    def test_generate_input_deadline_field_preserves_unknown_wire_field(self):
+        file_proto = descriptor_pb2.FileDescriptorProto(
+            name="legacy_generate_input.proto", syntax="proto3"
+        )
+        message = file_proto.message_type.add(name="LegacyGenerateInputPB")
+        request_id = message.field.add(
+            name="request_id",
+            number=1,
+            type=descriptor_pb2.FieldDescriptorProto.TYPE_INT64,
+        )
+        request_id.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+        generate_config = message.field.add(
+            name="generate_config",
+            number=4,
+            type=descriptor_pb2.FieldDescriptorProto.TYPE_BYTES,
+        )
+        generate_config.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+        pool = descriptor_pool.DescriptorPool()
+        descriptor = pool.Add(file_proto).message_types_by_name[
+            "LegacyGenerateInputPB"
+        ]
+        if hasattr(message_factory, "GetMessageClass"):
+            legacy_type = message_factory.GetMessageClass(descriptor)
+        else:
+            legacy_type = message_factory.MessageFactory(pool).GetPrototype(descriptor)
+
+        current = GenerateInputPB(request_id=7, request_deadline_unix_ms=21_000)
+        current.generate_config.timeout_ms = 500
+        legacy = legacy_type()
+        legacy.ParseFromString(current.SerializeToString())
+        self.assertEqual(legacy.request_id, 7)
+        self.assertTrue(legacy.generate_config)
+
+        current_roundtrip = GenerateInputPB()
+        current_roundtrip.ParseFromString(legacy.SerializeToString())
+        self.assertEqual(current_roundtrip.request_deadline_unix_ms, 21_000)
+
+        legacy_only = legacy_type(request_id=9, generate_config=legacy.generate_config)
+        parsed_by_current = GenerateInputPB()
+        parsed_by_current.ParseFromString(legacy_only.SerializeToString())
+        self.assertEqual(parsed_by_current.request_id, 9)
+        self.assertEqual(parsed_by_current.generate_config.timeout_ms, 500)
+        self.assertEqual(parsed_by_current.request_deadline_unix_ms, 0)
 
 if __name__ == "__main__":
     setup_logging()

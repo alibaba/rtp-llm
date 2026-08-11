@@ -2,6 +2,10 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRunWaiter.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PropagatedClientContext.h"
+#include "rtp_llm/cpp/model_rpc/RequestDeadlineBudget.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadBudget.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadFence.h"
 #include "rtp_llm/cpp/model_rpc/SamplerGeneratorState.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -19,6 +23,31 @@ using grpc::Status;
 using grpc::ClientContext;
 
 namespace rtp_llm {
+
+namespace {
+
+constexpr int kRemoteLoadQuiesceTimeoutMs = 5000;
+
+bool quiesceRemoteLoad(const std::shared_ptr<RpcService::Stub>& stub,
+                       const std::string&                       allocation_token,
+                       int64_t                                  load_deadline_unix_ms) {
+    if (stub == nullptr) {
+        return false;
+    }
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now()
+                         + std::chrono::milliseconds(kRemoteLoadQuiesceTimeoutMs));
+    RemoteLoadQuiesceRequestPB request;
+    request.set_allocation_token(allocation_token);
+    request.set_load_deadline_unix_ms(load_deadline_unix_ms);
+    request.set_local_only(false);
+    RemoteLoadQuiesceResponsePB response;
+    const auto                  status = stub->QuiesceRemoteLoad(&context, request, &response);
+    return status.ok() && response.quiesced()
+           && response.error_info().error_code() == ErrorCodePB::NONE_ERROR;
+}
+
+}  // namespace
 
 #define CLIENT_GRPC_RET_IF_ERROR(prefill_context, state, error_code_value)                                             \
     if (!(state)) {                                                                                                    \
@@ -38,6 +67,12 @@ namespace rtp_llm {
                 new_error_msg += "stream wait time is " + std::to_string(wait_time_ms) + "ms, ";                       \
             }                                                                                                          \
         }                                                                                                              \
+        if (prefill_context.cache_lease_ticket != nullptr) {                                                           \
+            prefill_context.cache_lease_ticket.reset();                                                                \
+        }                                                                                                              \
+        if (prefill_context.remote_load_cache_started && prefill_context.client_context != nullptr) {                  \
+            prefill_context.client_context->TryCancel();                                                               \
+        }                                                                                                              \
         auto status = prefill_context.closeGrpcStream();                                                               \
         if (!status.ok()) {                                                                                            \
             const auto& error_msg = status.error_message();                                                            \
@@ -53,17 +88,13 @@ namespace rtp_llm {
             } else if (error_msg.find("Connection timed out") != std::string::npos) {                                  \
                 new_error_code = ErrorCode::CONNECT_TIMEOUT;                                                           \
                 prefill_context.closeGrpcConnection();                                                                 \
-            } else if (error_msg.find("Deadline Exceeded") != std::string::npos) {                                     \
-                new_error_code = ErrorCode::DEADLINE_EXCEEDED;                                                         \
-                prefill_context.closeGrpcConnection();                                                                 \
             } else if (error_msg.find("keepalive watchdog timeout") != std::string::npos) {                            \
                 new_error_code = ErrorCode::KEEP_ALIVE_TIMEOUT;                                                        \
                 prefill_context.closeGrpcConnection();                                                                 \
             }                                                                                                          \
-            new_error_msg += error_msg;                                                                                \
-            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {                                         \
-                new_error_code = ErrorCode::DECODE_MALLOC_FAILED;                                                      \
-            }                                                                                                          \
+            const auto remote_error = transGrpcStatusToErrorInfo(status, new_error_code);                              \
+            new_error_code         = remote_error.code();                                                              \
+            new_error_msg += remote_error.ToString();                                                                  \
         } else {                                                                                                       \
             if (prefill_context.client_stream) {                                                                       \
                 new_error_msg += "server disconnected with status::ok";                                                \
@@ -87,6 +118,19 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
         return ret;
     }
     return grpc::Status::OK;
+}
+
+bool PrefillRpcServer::drainRemoteLoads() {
+    return drainRemoteLoads(std::chrono::milliseconds(kRemoteLoadQuiesceTimeoutMs));
+}
+
+bool PrefillRpcServer::drainRemoteLoads(std::chrono::milliseconds grace) {
+    return remote_load_leases_.stop(grace);
+}
+
+void PrefillRpcServer::stop() {
+    RTP_LLM_CHECK_WITH_INFO(drainRemoteLoads(), "remote load leases failed to quiesce before prefill stop");
+    LocalRpcServer::stop();
 }
 
 ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream,
@@ -144,7 +188,20 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    auto input                            = QueryConverter::transQuery(prefill_context.rpc_context.request);
+    const auto deadline_budget =
+        makeRequestDeadlineBudget(prefill_context.rpc_context.request->request_deadline_unix_ms(),
+                                  prefill_context.rpc_context.request->generate_config().timeout_ms(),
+                                  currentTimeUs(),
+                                  prefill_context.server_context == nullptr ?
+                                      0 :
+                                      requestDeadlineUnixUs(prefill_context.server_context->deadline()));
+    if (deadline_budget.expired) {
+        prefill_context.error_info =
+            ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline expired before prefill admission");
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
+    auto input = QueryConverter::transQuery(prefill_context.rpc_context.request, &deadline_budget);
     input->generate_config->pd_separation = true;
     if (engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = false;
@@ -220,14 +277,37 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
-    prefill_context.client_context.reset(new ClientContext());
     auto request_timeout_ms = prefill_context.request_timeout_ms;
     auto max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     auto final_timeout_ms   = max_rpc_timeout_ms > 0 ? max_rpc_timeout_ms : MAX_GRPC_TIMEOUT_MS;
-    final_timeout_ms        = request_timeout_ms > 0 ? request_timeout_ms : final_timeout_ms;
+    final_timeout_ms = request_timeout_ms > 0 ? std::min(request_timeout_ms, final_timeout_ms) : final_timeout_ms;
 
-    auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-    prefill_context.client_context->set_deadline(deadline);
+    const auto system_now = RemoteLoadSystemClock::now();
+    const auto steady_now = RemoteLoadSteadyClock::now();
+    const auto request_start_unix_ms = prefill_context.generate_input == nullptr ?
+                                           prefill_context.request_begin_time_us / 1000 :
+                                           prefill_context.generate_input->begin_time_us / 1000;
+    const auto request_deadline_unix_ms = saturatingDeadlineUnixMs(request_start_unix_ms, final_timeout_ms);
+    const auto parent_deadline = prefill_context.server_context == nullptr ?
+                                     RemoteLoadSystemClock::time_point::max() :
+                                     prefill_context.server_context->deadline();
+    const auto request_budget =
+        makeRemoteLoadBudget(request_deadline_unix_ms, parent_deadline, system_now, steady_now);
+    if (request_budget.expired()) {
+        prefill_context.error_info =
+            ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline expired before remote allocation");
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
+    const auto stop_error = serverContextStopError(prefill_context.server_context, "before remote decode allocation");
+    if (stop_error.hasError()) {
+        prefill_context.error_info   = stop_error;
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, stop_error);
+        return;
+    }
+
+    prefill_context.client_context =
+        makePropagatedClientContext(prefill_context.server_context, request_budget.system_deadline);
     prefill_context.client_stream =
         std::move(prefill_context.grpc_connection.stub->RemoteGenerate(prefill_context.client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
@@ -247,6 +327,17 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     GenerateOutputsPB allocate_response;
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Read(&allocate_response), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context,
+                             allocate_response.error_info().error_code() == ErrorCodePB::NONE_ERROR,
+                             transRPCErrorCode(allocate_response.error_info().error_code()));
+    CLIENT_GRPC_RET_IF_ERROR(prefill_context,
+                             !allocate_response.allocation_token().empty(),
+                             ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    auto load_deadline = remoteLoadAllocationDeadline(allocate_response.allocation_token());
+    CLIENT_GRPC_RET_IF_ERROR(
+        prefill_context, load_deadline.ok(), ErrorCode::REMOTE_ALLOCATE_RESOURCE_READ_FAILED);
+    prefill_context.allocation_token      = allocate_response.allocation_token();
+    prefill_context.load_deadline_unix_ms = *load_deadline;
     RTP_LLM_LOG_DEBUG("request [%ld] remote allocate resource done", prefill_context.request_id);
 }
 
@@ -269,7 +360,7 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
         return;
     }
     auto stream = prefill_context.getStream();
-    AtomicGuard       request_guard(loading_cache_requests_);
+    AtomicGuard request_guard(loading_cache_requests_);
     const auto hold_result = stream->holdKVCacheForPDSep();
     if (hold_result == PdSepCacheHoldResult::AlreadyLocalTerminal) {
         return;
@@ -287,11 +378,70 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
             serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
-    prefill_context.remote_kv_cache_held = true;
+    auto source_lease = stream->takeKVCacheForPDSep();
+    if (source_lease == nullptr) {
+        const auto hold_error =
+            ErrorInfo(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "failed to take KV cache lease before remote load");
+        const auto local_outcome = stream->resolveRemoteLoadFailure(hold_error.code(), hold_error.ToString());
+        if (local_outcome == RemoteGenerateWaitResult::LocalDone) {
+            prefill_context.local_generate_done = true;
+            return;
+        }
+        prefill_context.error_info   = stream->statusInfo();
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
+
+    const auto stub                  = prefill_context.grpc_connection.stub;
+    const auto allocation_token      = prefill_context.allocation_token;
+    const auto load_deadline_unix_ms = prefill_context.load_deadline_unix_ms;
+    auto       quiesce               = prefill_context.remote_load_quiesce;
+    if (!quiesce) {
+        quiesce = [stub, allocation_token, load_deadline_unix_ms]() {
+            return quiesceRemoteLoad(stub, allocation_token, load_deadline_unix_ms);
+        };
+    }
+    auto       ticket                = remote_load_leases_.reserve(
+        allocation_token,
+        std::move(source_lease),
+        std::move(quiesce));
+    if (!ticket.ok()) {
+        const auto load_error =
+            ErrorInfo(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "failed to retain KV cache for remote load");
+        const auto local_outcome = stream->resolveRemoteLoadFailure(load_error.code(), load_error.ToString());
+        if (local_outcome == RemoteGenerateWaitResult::LocalDone) {
+            prefill_context.local_generate_done = true;
+            return;
+        }
+        prefill_context.error_info   = stream->statusInfo();
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
+    prefill_context.cache_lease_ticket = std::move(*ticket);
+
     GenerateRequestPB load_request;
+    load_request.set_stage(RemoteStage::LOAD);
     load_request.set_client_id(process_id_);
     load_request.set_request_id(prefill_context.request_id);
     load_request.set_start_time(currentTimeUs());
+    load_request.set_allocation_token(allocation_token);
+    load_request.set_load_deadline_unix_ms(load_deadline_unix_ms);
+
+    if (!prefill_context.cache_lease_ticket->markStarted()) {
+        const auto load_error =
+            ErrorInfo(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "failed to start retained remote load");
+        const auto local_outcome = stream->resolveRemoteLoadFailure(load_error.code(), load_error.ToString());
+        prefill_context.cleanupRemoteLoadCache();
+        if (local_outcome == RemoteGenerateWaitResult::LocalDone) {
+            prefill_context.local_generate_done = true;
+            return;
+        }
+        prefill_context.error_info   = stream->statusInfo();
+        prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        return;
+    }
+    prefill_context.remote_load_cache_started = true;
+
     bool        write_ok = false;
     std::string write_error_message = "remote load request write failed";
     try {
@@ -314,7 +464,6 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
             serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
         return;
     }
-    prefill_context.remote_load_cache_started = true;
 }
 
 void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) {
@@ -360,6 +509,22 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
         return;
     }
     auto stream = prefill_context.getStream();
+    auto fail_remote_load = [&](const ErrorInfo& load_error) {
+        if (!prefill_context.local_generate_done && prefill_context.deferred_local_status.ok()) {
+            stream->resolveRemoteLoadFailure(load_error.code(), load_error.ToString());
+        }
+        prefill_context.cleanupRemoteLoadCache();
+        if (prefill_context.local_generate_done) {
+            prefill_context.finished = true;
+        } else if (!prefill_context.deferred_local_status.ok()) {
+            prefill_context.error_status = prefill_context.deferred_local_status;
+        } else {
+            prefill_context.error_info   = stream->statusInfo();
+            prefill_context.error_status =
+                serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
+        }
+    };
+
     GenerateOutputsPB load_response;
     bool              read_ok = false;
     std::string       read_error_message = "remote load response failed";
@@ -370,47 +535,31 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     } catch (...) {
         read_error_message += ": unknown exception";
     }
-    const auto error_code = read_ok ? transRPCErrorCode(load_response.error_info().error_code())
-                                    : ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED;
-
     if (!read_ok) {
-        const auto load_error = ErrorInfo(error_code, read_error_message);
-        if (!prefill_context.local_generate_done && prefill_context.deferred_local_status.ok()) {
-            stream->resolveRemoteLoadFailure(load_error.code(), load_error.ToString());
-        }
-        prefill_context.cleanupRemoteLoadCache();
-        if (prefill_context.local_generate_done) {
-            prefill_context.finished = true;
-        } else if (!prefill_context.deferred_local_status.ok()) {
-            prefill_context.error_status = prefill_context.deferred_local_status;
-        } else {
-            prefill_context.error_info   = stream->statusInfo();
-            prefill_context.error_status =
-                serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
-        }
+        fail_remote_load(ErrorInfo(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, read_error_message));
         return;
     }
+
+    const auto error_code = transRPCErrorCode(load_response.error_info().error_code());
     if (error_code != ErrorCode::NONE_ERROR) {
-        const auto load_error = ErrorInfo(error_code, "remote load response failed");
-        if (!prefill_context.local_generate_done && prefill_context.deferred_local_status.ok()) {
-            stream->resolveRemoteLoadFailure(load_error.code(), load_error.ToString());
-        }
-        prefill_context.cleanupRemoteLoadCache();
-        if (prefill_context.local_generate_done) {
-            prefill_context.finished = true;
-        } else if (!prefill_context.deferred_local_status.ok()) {
-            prefill_context.error_status = prefill_context.deferred_local_status;
-        } else {
-            prefill_context.error_info   = stream->statusInfo();
-            prefill_context.error_status =
-                serializeErrorMsg(prefill_context.request_key, prefill_context.error_info);
-        }
+        const auto& response_message = load_response.error_info().error_message();
+        fail_remote_load(ErrorInfo(error_code,
+                                   response_message.empty() ? "remote load response failed" : response_message));
         return;
     }
-    if (prefill_context.remote_kv_cache_held) {
-        stream->releaseKVCacheForPDSep();
-        prefill_context.remote_kv_cache_held = false;
+
+    if (!load_response.remote_load_quiesced()) {
+        fail_remote_load(
+            ErrorInfo(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "remote load completed without quiescing workers"));
+        return;
     }
+    if (prefill_context.cache_lease_ticket == nullptr || !prefill_context.cache_lease_ticket->complete()) {
+        fail_remote_load(
+            ErrorInfo(ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED, "failed to complete retained remote load"));
+        return;
+    }
+
+    stream->releaseKVCacheForPDSep();
     prefill_context.remote_load_cache_started = false;
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
     if (!prefill_context.deferred_local_status.ok()) {
@@ -492,9 +641,12 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
-        if (prefill_context.server_context->IsCancelled()) {
-            RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
-            prefill_context.error_status = grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
+        const auto stop_error =
+            serverContextStopError(prefill_context.server_context, "forwarding remote decode output");
+        if (stop_error.hasError()) {
+            RTP_LLM_LOG_WARNING("request [%ld] stopped by deadline or cancellation", request_id);
+            prefill_context.error_info   = stop_error;
+            prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, stop_error);
             return;
         }
         if (response.flatten_output().aux_info_size() == 0) {
@@ -537,7 +689,15 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);
-            prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+            const auto write_stop_error =
+                serverContextStopError(prefill_context.server_context, "writing remote decode output");
+            if (write_stop_error.hasError()) {
+                prefill_context.error_info   = write_stop_error;
+                prefill_context.error_status = serializeErrorMsg(prefill_context.request_key, write_stop_error);
+            } else {
+                prefill_context.error_status =
+                    grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
+            }
             return;
         }
     }

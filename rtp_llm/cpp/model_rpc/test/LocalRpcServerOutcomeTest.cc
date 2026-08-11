@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RemoteLoadFence.h"
 #define private public
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #undef private
@@ -11,6 +12,7 @@
 
 #include <functional>
 #include <stdexcept>
+#include <thread>
 
 namespace rtp_llm {
 
@@ -57,6 +59,7 @@ protected:
             }
             if (read_ok) {
                 output->mutable_error_info()->set_error_code(response_error);
+                output->set_remote_load_quiesced(remote_load_quiesced);
             }
             return read_ok;
         }
@@ -79,6 +82,7 @@ protected:
         bool                  read_ok       = true;
         bool                  throw_on_write = false;
         bool                  throw_on_read = false;
+        bool                  remote_load_quiesced = true;
         ErrorCodePB           response_error = ErrorCodePB::NONE_ERROR;
         int                   write_count   = 0;
         int                   read_count    = 0;
@@ -97,6 +101,27 @@ protected:
         }
         void loadEnd(PrefillGenerateContext& context) {
             remoteLoadCacheEnd(context);
+        }
+        size_t activeLeaseCount() const {
+            return remote_load_leases_.activeJobsForTest();
+        }
+        bool waitForNoActiveLeases() const {
+            for (int attempt = 0; attempt < 2000; ++attempt) {
+                if (activeLeaseCount() == 0) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
+        }
+        bool waitForLeaseRelease(const std::weak_ptr<KVCacheResource>& lease) const {
+            for (int attempt = 0; attempt < 2000; ++attempt) {
+                if (lease.expired()) {
+                    return true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return false;
         }
     };
 
@@ -145,6 +170,13 @@ protected:
         return stream->streamCacheResource().pd_kvcache_ref_.get();
     }
 
+    std::weak_ptr<KVCacheResource> observeLeaseBeforeTransfer(const std::shared_ptr<GenerateStream>& stream) {
+        EXPECT_EQ(stream->holdKVCacheForPDSep(), PdSepCacheHoldResult::Held);
+        auto lease = stream->streamCacheResource().pd_kvcache_ref_;
+        EXPECT_NE(lease, nullptr);
+        return lease;
+    }
+
     PrefillGenerateContext& createPrefillContext(const std::shared_ptr<GenerateStream>& stream,
                                                  CountingWriter&                        writer,
                                                  const std::shared_ptr<FakeClientStream>& client_stream) {
@@ -157,6 +189,12 @@ protected:
         prefill_context_->setStream(stream);
         prefill_context_->client_context = std::make_shared<grpc::ClientContext>();
         prefill_context_->client_stream  = client_stream;
+        prefill_context_->load_deadline_unix_ms = currentTimeUs() / 1000 + 30'000;
+        auto allocation_token = makeRemoteLoadAllocationToken(
+            "test-owner", "test-allocation", prefill_context_->load_deadline_unix_ms);
+        EXPECT_TRUE(allocation_token.ok());
+        prefill_context_->allocation_token = allocation_token.ok() ? *allocation_token : std::string();
+        prefill_context_->remote_load_quiesce = []() { return true; };
         return *prefill_context_;
     }
 
@@ -166,6 +204,7 @@ protected:
             prefill_context_->getStream().reset();
             prefill_context_.reset();
         }
+        EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
         DeviceTestBase::TearDown();
     }
 
@@ -224,18 +263,19 @@ TEST_F(LocalRpcServerOutcomeTest, LocalDoneWaitsForRemoteLoadEndBeforeFinishing)
 
     prefill_server_.loadStart(context);
     ASSERT_TRUE(context.remote_load_cache_started);
-    ASSERT_TRUE(context.remote_kv_cache_held);
-    ASSERT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    ASSERT_NE(context.cache_lease_ticket, nullptr);
+    ASSERT_EQ(prefill_server_.activeLeaseCount(), 1);
+    ASSERT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
 
     update(stream, 15, true);
     prefill_server_.pollLocal(context);
     EXPECT_TRUE(context.local_generate_done);
     EXPECT_FALSE(context.finished);
-    EXPECT_TRUE(context.remote_kv_cache_held);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
 
     prefill_server_.loadEnd(context);
     EXPECT_TRUE(context.finished);
-    EXPECT_FALSE(context.remote_kv_cache_held);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 0);
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->read_count, 1);
 }
@@ -251,12 +291,12 @@ TEST_F(LocalRpcServerOutcomeTest, ErrorWaitsForRemoteLoadEndAndPreservesError) {
     prefill_server_.pollLocal(context);
     EXPECT_TRUE(context.error_status.ok());
     EXPECT_FALSE(context.deferred_local_status.ok());
-    EXPECT_TRUE(context.remote_kv_cache_held);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
 
     prefill_server_.loadEnd(context);
     EXPECT_FALSE(context.error_status.ok());
     EXPECT_NE(context.error_status.error_message().find("stage failure"), std::string::npos);
-    EXPECT_FALSE(context.remote_kv_cache_held);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 0);
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
 }
 
@@ -277,10 +317,12 @@ TEST_F(LocalRpcServerOutcomeTest, HandoffBeforeLoadStartKeepsOneIdempotentLease)
     prefill_server_.loadStart(context);
 
     EXPECT_TRUE(context.remote_load_cache_started);
-    EXPECT_TRUE(context.remote_kv_cache_held);
-    EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
-    EXPECT_EQ(pdLeaseIdentity(stream), lease);
+    EXPECT_NE(context.cache_lease_ticket, nullptr);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    EXPECT_EQ(pdLeaseIdentity(stream), nullptr);
     prefill_server_.loadEnd(context);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 0);
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(pdLeaseIdentity(stream), nullptr);
 }
@@ -292,16 +334,16 @@ TEST_F(LocalRpcServerOutcomeTest, LoadStartBeforeHandoffUsesTheSameLease) {
     auto& context = createPrefillContext(stream, writer, client_stream);
 
     prefill_server_.loadStart(context);
-    ASSERT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
-    const auto* lease = pdLeaseIdentity(stream);
-    ASSERT_NE(lease, nullptr);
+    ASSERT_EQ(prefill_server_.activeLeaseCount(), 1);
+    ASSERT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     update(stream, 2, true);
     EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
-    EXPECT_EQ(pdLeaseIdentity(stream), lease);
+    EXPECT_NE(pdLeaseIdentity(stream), nullptr);
 
     prefill_server_.pollLocal(context);
     EXPECT_FALSE(context.finished);
     prefill_server_.loadEnd(context);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 0);
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(pdLeaseIdentity(stream), nullptr);
 }
@@ -312,13 +354,14 @@ TEST_F(LocalRpcServerOutcomeTest, ContextCleanupCancelsLoadAndReleasesLease) {
     CountingWriter writer;
     auto& context = createPrefillContext(stream, writer, client_stream);
     prefill_server_.loadStart(context);
-    ASSERT_TRUE(context.remote_kv_cache_held);
-    client_stream->on_finish = [stream]() {
-        EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    ASSERT_EQ(prefill_server_.activeLeaseCount(), 1);
+    client_stream->on_finish = [this, stream]() {
+        EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
+        EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     };
 
     context.cleanupRemoteLoadCache();
-    EXPECT_FALSE(context.remote_kv_cache_held);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(context.remote_load_cache_started);
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
@@ -330,8 +373,9 @@ TEST_F(LocalRpcServerOutcomeTest, WriteFailureReportsLoadErrorAndReleasesAfterQu
     client_stream->write_ok = false;
     CountingWriter writer;
     auto& context = createPrefillContext(stream, writer, client_stream);
-    client_stream->on_finish = [stream]() {
-        EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    client_stream->on_finish = [this, stream]() {
+        EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
+        EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     };
 
     prefill_server_.loadStart(context);
@@ -339,6 +383,7 @@ TEST_F(LocalRpcServerOutcomeTest, WriteFailureReportsLoadErrorAndReleasesAfterQu
     EXPECT_EQ(context.error_info.code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     EXPECT_FALSE(context.error_status.ok());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_FALSE(context.remote_load_cache_started);
     EXPECT_EQ(client_stream->write_count, 1);
@@ -355,6 +400,7 @@ TEST_F(LocalRpcServerOutcomeTest, WriteExceptionUsesTheSameFailureAndCleanupPath
     EXPECT_NO_THROW(prefill_server_.loadStart(context));
     EXPECT_EQ(context.error_info.code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     EXPECT_NE(context.error_info.ToString().find("injected write failure"), std::string::npos);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
 }
@@ -375,6 +421,7 @@ TEST_F(LocalRpcServerOutcomeTest, LocalDoneRacingWriteFailureWins) {
     EXPECT_FALSE(context.finished);
     EXPECT_TRUE(context.error_status.ok());
     EXPECT_FALSE(stream->hasError());
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(writer.write_count, 0);
 
@@ -399,6 +446,7 @@ TEST_F(LocalRpcServerOutcomeTest, LocalErrorRacingWriteFailureWins) {
     EXPECT_EQ(context.error_info.code(), ErrorCode::MALLOC_FAILED);
     EXPECT_NE(context.error_status.error_message().find("stage failure"), std::string::npos);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
 }
 
@@ -417,6 +465,7 @@ TEST_F(LocalRpcServerOutcomeTest, PublishedHandoffRacingWriteFailureBecomesLoadE
     EXPECT_EQ(context.error_info.code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     EXPECT_FALSE(context.error_status.ok());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
 }
@@ -446,7 +495,7 @@ TEST_F(LocalRpcServerOutcomeTest, CleanupReleasesFastPublishedLeaseWithoutContex
     auto client_stream = std::make_shared<FakeClientStream>();
     CountingWriter writer;
     auto& context = createPrefillContext(stream, writer, client_stream);
-    ASSERT_FALSE(context.remote_kv_cache_held);
+    ASSERT_EQ(prefill_server_.activeLeaseCount(), 0);
     client_stream->on_finish = [stream]() {
         EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     };
@@ -465,7 +514,8 @@ TEST_F(LocalRpcServerOutcomeTest, ReadFailureReportsLoadErrorAndReleasesAfterQui
     prefill_server_.loadStart(context);
     update(stream, 2, true);
     prefill_server_.pollLocal(context);
-    client_stream->on_finish = [stream]() {
+    client_stream->on_finish = [this, stream]() {
+        EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
         EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     };
 
@@ -473,6 +523,7 @@ TEST_F(LocalRpcServerOutcomeTest, ReadFailureReportsLoadErrorAndReleasesAfterQui
 
     EXPECT_EQ(context.error_info.code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
 }
@@ -490,6 +541,7 @@ TEST_F(LocalRpcServerOutcomeTest, ReadExceptionUsesTheSameFailureAndCleanupPath)
     EXPECT_NO_THROW(prefill_server_.loadEnd(context));
     EXPECT_EQ(context.error_info.code(), ErrorCode::REMOTE_LOAD_KV_CACHE_FAILED);
     EXPECT_NE(context.error_info.ToString().find("injected read failure"), std::string::npos);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
 }
@@ -503,7 +555,8 @@ TEST_F(LocalRpcServerOutcomeTest, RemoteLoadResponseErrorReportsFailureAndReleas
     prefill_server_.loadStart(context);
     update(stream, 2, true);
     prefill_server_.pollLocal(context);
-    client_stream->on_finish = [stream]() {
+    client_stream->on_finish = [this, stream]() {
+        EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
         EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     };
 
@@ -512,21 +565,28 @@ TEST_F(LocalRpcServerOutcomeTest, RemoteLoadResponseErrorReportsFailureAndReleas
     EXPECT_EQ(context.error_info.code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::UNKNOWN_ERROR);
     EXPECT_FALSE(context.error_status.ok());
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
 }
 
 TEST_F(LocalRpcServerOutcomeTest, LocalDoneWinsOverRemoteLoadReadFailure) {
     auto stream        = createStream();
+    auto source_lease  = observeLeaseBeforeTransfer(stream);
     auto client_stream = std::make_shared<FakeClientStream>();
     client_stream->read_ok = false;
     CountingWriter writer;
     auto& context = createPrefillContext(stream, writer, client_stream);
     prefill_server_.loadStart(context);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    EXPECT_FALSE(source_lease.expired());
     update(stream, 15, true);
     prefill_server_.pollLocal(context);
-    client_stream->on_finish = [stream]() {
-        EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    client_stream->on_finish = [this, stream, source_lease]() {
+        EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
+        EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+        EXPECT_FALSE(source_lease.expired());
     };
 
     prefill_server_.loadEnd(context);
@@ -534,6 +594,8 @@ TEST_F(LocalRpcServerOutcomeTest, LocalDoneWinsOverRemoteLoadReadFailure) {
     EXPECT_TRUE(context.finished);
     EXPECT_TRUE(context.error_status.ok());
     EXPECT_FALSE(stream->hasError());
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
+    EXPECT_TRUE(prefill_server_.waitForLeaseRelease(source_lease));
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
 }
@@ -547,8 +609,9 @@ TEST_F(LocalRpcServerOutcomeTest, LocalErrorWinsOverRemoteLoadResponseError) {
     prefill_server_.loadStart(context);
     stream->reportError(ErrorCode::MALLOC_FAILED, "stage failure");
     prefill_server_.pollLocal(context);
-    client_stream->on_finish = [stream]() {
-        EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    client_stream->on_finish = [this, stream]() {
+        EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
+        EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     };
 
     prefill_server_.loadEnd(context);
@@ -557,21 +620,28 @@ TEST_F(LocalRpcServerOutcomeTest, LocalErrorWinsOverRemoteLoadResponseError) {
     EXPECT_NE(context.error_status.error_message().find("stage failure"), std::string::npos);
     EXPECT_EQ(context.error_status.error_message().find("remote load response failed"), std::string::npos);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
 }
 
 TEST_F(LocalRpcServerOutcomeTest, LocalDoneWinsOverRemoteLoadResponseError) {
     auto stream        = createStream();
+    auto source_lease  = observeLeaseBeforeTransfer(stream);
     auto client_stream = std::make_shared<FakeClientStream>();
     client_stream->response_error = ErrorCodePB::UNKNOWN_ERROR;
     CountingWriter writer;
     auto& context = createPrefillContext(stream, writer, client_stream);
     prefill_server_.loadStart(context);
+    EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
+    EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    EXPECT_FALSE(source_lease.expired());
     update(stream, 15, true);
     prefill_server_.pollLocal(context);
-    client_stream->on_finish = [stream]() {
-        EXPECT_TRUE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+    client_stream->on_finish = [this, stream, source_lease]() {
+        EXPECT_EQ(prefill_server_.activeLeaseCount(), 1);
+        EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
+        EXPECT_FALSE(source_lease.expired());
     };
 
     prefill_server_.loadEnd(context);
@@ -579,6 +649,8 @@ TEST_F(LocalRpcServerOutcomeTest, LocalDoneWinsOverRemoteLoadResponseError) {
     EXPECT_TRUE(context.finished);
     EXPECT_TRUE(context.error_status.ok());
     EXPECT_FALSE(stream->hasError());
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
+    EXPECT_TRUE(prefill_server_.waitForLeaseRelease(source_lease));
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
     EXPECT_EQ(client_stream->finish_count, 1);
 }
@@ -599,6 +671,7 @@ TEST_F(LocalRpcServerOutcomeTest, LocalErrorWinsOverRemoteLoadReadFailure) {
     EXPECT_NE(context.error_status.error_message().find("stage failure"), std::string::npos);
     EXPECT_EQ(context.error_status.error_message().find("remote load response failed"), std::string::npos);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_TRUE(prefill_server_.waitForNoActiveLeases());
     EXPECT_FALSE(stream->streamCacheResource().hasKVCacheHoldForPDSep());
 }
 

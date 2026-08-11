@@ -13,7 +13,13 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.worker_status import ScheduleMeta
-from rtp_llm.utils.base_model_datatypes import GenerateInput
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    current_monotonic_time_s,
+    current_unix_time_ms,
+    initialize_request_deadlines,
+    remaining_deadline_ms,
+)
 
 route_logger = logging.getLogger("route_logger")
 
@@ -224,6 +230,11 @@ class MasterClient:
         request_id is frontend-generated and only used for logging.
         Only connection_failed triggers slave retry and domain fallback.
         """
+        monotonic_now_s = current_monotonic_time_s()
+        initialize_request_deadlines(
+            input, monotonic_now_s, current_unix_time_ms()
+        )
+
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
             return FlexlbResponse.connection_failed_response()
@@ -232,35 +243,53 @@ class MasterClient:
         if self.host_service:
             slave_addr = getattr(self.host_service, "get_slave_addr", lambda: None)()
 
-        ttft_timeout_ms = getattr(
-            input.generate_config, "ttft_timeout_ms", None
-        ) or getattr(input.generate_config, "timeout_ms", None)
-        if not ttft_timeout_ms or ttft_timeout_ms <= 0:
-            ttft_timeout_ms = (
-                self.master_config.master_default_timeout_ms
-                if self.master_config
-                else 3600000
+        schedule_deadline_s = getattr(input, "ttft_deadline_monotonic_s", None)
+        if schedule_deadline_s is None:
+            ttft_timeout_ms = getattr(input.generate_config, "ttft_timeout_ms", None)
+            if not ttft_timeout_ms or ttft_timeout_ms <= 0:
+                ttft_timeout_ms = getattr(input.generate_config, "timeout_ms", None)
+            if not ttft_timeout_ms or ttft_timeout_ms <= 0:
+                ttft_timeout_ms = (
+                    self.master_config.master_default_timeout_ms
+                    if self.master_config
+                    else 3600000
+                )
+            schedule_deadline_s = monotonic_now_s + ttft_timeout_ms / 1000.0
+            request_deadline_s = getattr(
+                input, "request_deadline_monotonic_s", None
             )
+            if request_deadline_s is not None:
+                schedule_deadline_s = min(schedule_deadline_s, request_deadline_s)
+            input.ttft_deadline_monotonic_s = schedule_deadline_s
+
+        def get_remaining_schedule_timeout_ms(now_s: float) -> int:
+            remaining_ms = remaining_deadline_ms(schedule_deadline_s, now_s)
+            if remaining_ms is None or remaining_ms <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT,
+                    f"request_id={request_id} exhausted routing deadline",
+                )
+            return remaining_ms
+
         request_priority = getattr(
             input.generate_config,
             "traffic_reject_priority",
             DEFAULT_REQUEST_PRIORITY,
         )
-        start = time.time()
-
-        payload: Dict[str, Any] = {
+        base_payload: Dict[str, Any] = {
             "model": "engine_service",
             "block_cache_keys": block_cache_keys,
             "seq_len": input.prompt_length,
             "debug": False,
             "request_priority": request_priority,
-            "generate_timeout": ttft_timeout_ms,
             "request_id": request_id,
-            "request_time_ms": int(start * 1000),
+            "request_time_ms": current_unix_time_ms(),
         }
 
+        master_timeout_ms = get_remaining_schedule_timeout_ms(monotonic_now_s)
+        master_payload = dict(base_payload, generate_timeout=master_timeout_ms)
         resp = await self._send_schedule_request(
-            master_addr, payload, ttft_timeout_ms, request_id
+            master_addr, master_payload, master_timeout_ms, request_id
         )
 
         if resp.connection_failed and slave_addr:
@@ -269,9 +298,16 @@ class MasterClient:
                 slave_addr,
                 request_id,
             )
-            resp = await self._send_schedule_request(
-                slave_addr, payload, ttft_timeout_ms, request_id
+            slave_timeout_ms = get_remaining_schedule_timeout_ms(
+                current_monotonic_time_s()
             )
+            slave_payload = dict(base_payload, generate_timeout=slave_timeout_ms)
+            resp = await self._send_schedule_request(
+                slave_addr, slave_payload, slave_timeout_ms, request_id
+            )
+
+        if resp.connection_failed:
+            get_remaining_schedule_timeout_ms(current_monotonic_time_s())
 
         if resp.result is None:
             return FlexlbResponse(
