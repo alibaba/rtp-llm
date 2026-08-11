@@ -56,12 +56,7 @@ bool StoreTaskRunner::runTransfer(Task&                          task,
     };
 
     try {
-        const std::shared_ptr<AsyncContext> context = transfer_dispatcher.executeMultiRank(task.descriptors, timeout_ms);
-        context->waitDone();
-        copy_success = context->success();
-        if (!copy_success) {
-            RTP_LLM_LOG_WARNING("store transfer batch failed: %s", context->errorInfo().ToString().c_str());
-        }
+        copy_success = transfer_dispatcher.executeMultiRank(task.descriptors, timeout_ms);
         if (copy_success) {
             metrics_reporter.accumulateTransferBytes(task.descriptors, group_sets_, transfer_bytes);
         }

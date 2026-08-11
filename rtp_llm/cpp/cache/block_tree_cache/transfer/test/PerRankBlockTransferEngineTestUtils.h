@@ -1,10 +1,7 @@
 #pragma once
 
-#include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,7 +41,7 @@ public:
     explicit TempDirGuard(const char* name);
     ~TempDirGuard();
 
-    TempDirGuard(const TempDirGuard&) = delete;
+    TempDirGuard(const TempDirGuard&)            = delete;
     TempDirGuard& operator=(const TempDirGuard&) = delete;
 
     std::string path;
@@ -88,24 +85,17 @@ public:
     void              close() override;
     std::string       debugString() const override;
 
-    size_t              lastReadBytes() const;
-    size_t              lastWriteBytes() const;
-    bool                bufferedIo() const;
-    std::vector<size_t> readBatchSizes() const;
-    bool                waitForReadBatchCount(size_t count, std::chrono::milliseconds timeout) const;
-    void                failReadBatch(size_t one_based_batch_index);
+    size_t lastReadBytes() const;
+    size_t lastWriteBytes() const;
+    bool   bufferedIo() const;
 
 private:
     static bool aligned(uint64_t offset, const void* buffer, size_t bytes);
 
-    std::vector<char>               data_;
-    size_t                          last_read_bytes_{0};
-    size_t                          last_write_bytes_{0};
-    bool                            buffered_io_{true};
-    mutable std::mutex              read_batch_mutex_;
-    mutable std::condition_variable read_batch_cv_;
-    std::vector<size_t>             read_batch_sizes_;
-    size_t                          fail_read_batch_{0};
+    std::vector<char> data_;
+    size_t            last_read_bytes_{0};
+    size_t            last_write_bytes_{0};
+    bool              buffered_io_{true};
 };
 
 BlockIdxType poolMalloc(IBlockPool& pool);

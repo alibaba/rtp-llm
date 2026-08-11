@@ -52,14 +52,6 @@ bool BlockTreeTaskPool::start() {
 }
 
 bool BlockTreeTaskPool::submit(std::function<void()> task) {
-    return submitImpl(std::move(task), true);
-}
-
-bool BlockTreeTaskPool::trySubmit(std::function<void()> task) {
-    return submitImpl(std::move(task), false);
-}
-
-bool BlockTreeTaskPool::submitImpl(std::function<void()> task, bool block_if_full) {
     if (!task) {
         return false;
     }
@@ -77,7 +69,7 @@ bool BlockTreeTaskPool::submitImpl(std::function<void()> task, bool block_if_ful
     });
 
     taskStarted();
-    const autil::ThreadPool::ERROR_TYPE error = thread_pool_->pushWorkItem(work_item, block_if_full);
+    const autil::ThreadPool::ERROR_TYPE error = thread_pool_->pushWorkItem(work_item);
     if (error != autil::ThreadPool::ERROR_NONE) {
         work_item->destroy();
         taskFinished();

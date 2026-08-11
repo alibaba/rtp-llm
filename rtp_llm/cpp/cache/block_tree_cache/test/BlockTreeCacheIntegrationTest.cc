@@ -76,31 +76,6 @@ public:
         return PerRankBlockTransferEngine::submit(descriptor);
     }
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
-        size_t submit_index = 0;
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            if (!pause_enabled_) {
-                lock.unlock();
-                return PerRankBlockTransferEngine::submit(descriptors);
-            }
-            ++submit_count_;
-            submit_index = submit_count_;
-            descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
-            entered_ = true;
-            cv_.notify_all();
-            cv_.wait(lock, [this] { return released_; });
-        }
-        if (submit_index == throw_on_submit_) {
-            throw std::runtime_error("injected transfer failure");
-        }
-        if (!succeed_) {
-            return std::make_shared<CompletedAsyncContext>(
-                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
-        }
-        return PerRankBlockTransferEngine::submit(descriptors);
-    }
-
     void enablePause() {
         std::lock_guard<std::mutex> lock(mutex_);
         ASSERT_FALSE(pause_enabled_);
@@ -179,13 +154,6 @@ public:
     std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
         if (!throw_enabled_) {
             return PerRankBlockTransferEngine::submit(descriptor);
-        }
-        throw std::runtime_error("injected load copy failure");
-    }
-
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
-        if (!throw_enabled_) {
-            return PerRankBlockTransferEngine::submit(descriptors);
         }
         throw std::runtime_error("injected load copy failure");
     }
@@ -2229,8 +2197,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
         EXPECT_EQ(descriptor.source_tier, Tier::HOST);
         EXPECT_EQ(descriptor.target_tier, Tier::DEVICE);
     }
-    EXPECT_EQ(pausable_per_rank_transfer_engine->descriptors().size(), 2u);
-    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 1u);
+    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 2u);
 
     EXPECT_EQ(environment->cache->evictForGroup(0, 2), 2);
     for (const auto& [pool, block] : device_sources) {

@@ -550,12 +550,12 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
-    EXPECT_TRUE(cache->executeTransfer(
-        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)}));
+    EXPECT_TRUE(
+        cache->executeTransfer(TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)));
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
-    EXPECT_TRUE(cache->executeTransfer(
-        {TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})}));
+    EXPECT_TRUE(
+        cache->executeTransfer(TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})));
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -1435,9 +1435,9 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
         EXPECT_TRUE(factory_cache->executeTransfer(
-            {TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)}));
+            TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)));
         EXPECT_TRUE(factory_cache->executeTransfer(
-            {TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)}));
+            TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)));
 
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks, BlockRefType::REQUEST);
         group->releaseSingleBlock(Tier::HOST, host_block, BlockRefType::REQUEST);

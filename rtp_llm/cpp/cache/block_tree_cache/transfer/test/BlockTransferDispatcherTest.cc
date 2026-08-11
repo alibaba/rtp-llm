@@ -9,6 +9,7 @@
 #include <thread>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
@@ -32,26 +33,6 @@ public:
 
     std::shared_ptr<AsyncContext> submit(const TransferDescriptor&) override {
         ++submit_count_;
-        last_batch_size_ = 1;
-        return nextContext();
-    }
-
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
-        ++submit_count_;
-        last_batch_size_ = descriptors.size();
-        return nextContext();
-    }
-
-    size_t submitCount() const {
-        return submit_count_;
-    }
-
-    size_t lastBatchSize() const {
-        return last_batch_size_;
-    }
-
-private:
-    std::shared_ptr<AsyncContext> nextContext() {
         if (contexts_.empty()) {
             return okContext();
         }
@@ -60,9 +41,13 @@ private:
         return context;
     }
 
+    size_t submitCount() const {
+        return submit_count_;
+    }
+
+private:
     std::deque<std::shared_ptr<AsyncContext>> contexts_;
     size_t                                    submit_count_{0};
-    size_t                                    last_batch_size_{0};
 };
 
 // Stays pending until complete(); records entry into waitDone() so tests can synchronize on it.
@@ -124,14 +109,19 @@ void runPendingCase(bool succeed) {
     auto engine  = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{pending});
     BlockTransferDispatcher dispatcher(engine);
 
-    const auto context = dispatcher.executeMultiRank({descriptor(0)}, 100);
-    ASSERT_EQ(context, pending);
-    EXPECT_FALSE(context->done());
-    EXPECT_EQ(engine->submitCount(), 1u);
+    std::atomic<bool> result{!succeed};
+    std::thread       worker(
+        [&] { result.store(dispatcher.executeMultiRank({descriptor(0)}, 100), std::memory_order_release); });
 
+    const bool wait_entered = pending->waitUntilWaitEnteredFor(std::chrono::seconds(5));
+    if (wait_entered) {
+        EXPECT_FALSE(pending->done());
+    }
+    // Always complete and join before asserting so a timeout cannot leave a joinable thread.
     pending->complete(succeed);
-    context->waitDone();
-    EXPECT_EQ(context->success(), succeed);
+    worker.join();
+    ASSERT_TRUE(wait_entered) << "dispatcher returned without entering waitDone()";
+    EXPECT_EQ(result.load(std::memory_order_acquire), succeed);
 }
 
 TEST(BlockTransferDispatcherTest, TransferDescriptorUsesPerRankEntry) {
@@ -144,22 +134,29 @@ TEST(BlockTransferDispatcherTest, TransferDescriptorUsesPerRankEntry) {
 
 TEST(BlockTransferDispatcherTest, EmptyBatchSucceedsWithoutAnEngine) {
     BlockTransferDispatcher dispatcher(nullptr);
-    const auto              context = dispatcher.executeMultiRank({}, 0);
-    ASSERT_NE(context, nullptr);
-    EXPECT_TRUE(context->done());
-    EXPECT_TRUE(context->success());
+    EXPECT_TRUE(dispatcher.executeMultiRank({}, 0));
 }
 
-TEST(BlockTransferDispatcherTest, PerRankFallbackSubmitsWholeBatchOnce) {
-    auto engine = std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<AsyncContext>>{failedContext()});
+TEST(BlockTransferDispatcherTest, PerRankBatchStopsAtFirstFailure) {
+    auto engine = std::make_shared<ScriptedPerRankEngine>(
+        std::deque<std::shared_ptr<AsyncContext>>{okContext(), failedContext(), okContext()});
     BlockTransferDispatcher dispatcher(engine);
 
-    const auto context = dispatcher.executeMultiRank({descriptor(0), descriptor(1), descriptor(2)}, 100);
-    ASSERT_NE(context, nullptr);
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_EQ(engine->submitCount(), 1u);
-    EXPECT_EQ(engine->lastBatchSize(), 3u);
+    EXPECT_FALSE(dispatcher.executeMultiRank({descriptor(0), descriptor(1), descriptor(2)}, 100));
+    EXPECT_EQ(engine->submitCount(), 2u);
+}
+
+TEST(BlockTransferDispatcherTest, MultiRankFailureDoesNotFallbackToPerRank) {
+    auto per_rank_engine = std::make_shared<ScriptedPerRankEngine>(
+        std::deque<std::shared_ptr<AsyncContext>>{okContext()});
+    auto group_set = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, nullptr, nullptr);
+    auto multi_rank_engine =
+        std::make_shared<MultiRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set}, nullptr);
+    BlockTransferDispatcher dispatcher(per_rank_engine, multi_rank_engine);
+
+    const TransferDescriptor unsupported;
+    EXPECT_FALSE(dispatcher.executeMultiRank({unsupported}, 100));
+    EXPECT_EQ(per_rank_engine->submitCount(), 0u);
 }
 
 TEST(BlockTransferDispatcherTest, PerRankWaitsForPendingContextThenSucceeds) {

@@ -13,6 +13,8 @@ namespace rtp_llm {
 
 struct StagedMemoryCopyScratch;
 
+// --- Copy Plan types ---
+
 struct DeviceHostCopyTile {
     void*  host_addr{nullptr};
     void*  device_addr{nullptr};
@@ -25,7 +27,6 @@ struct DeviceHostCopyTile {
 
 struct DeviceHostCopyPlan {
     bool                            device_to_host{false};
-    bool                            single_device{true};
     size_t                          group_set_id{0};
     HostBufferView                  host;
     std::vector<DeviceHostCopyTile> copy_tiles;

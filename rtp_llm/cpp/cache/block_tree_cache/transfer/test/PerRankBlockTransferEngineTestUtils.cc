@@ -255,16 +255,6 @@ DiskBlockIOStatus DirectAlignmentDiskBlockIO::write(uint64_t offset, const void*
 }
 
 DiskBlockIOStatus DirectAlignmentDiskBlockIO::read(const std::vector<DiskRead>& reads) {
-    size_t batch_index = 0;
-    {
-        std::lock_guard<std::mutex> lock(read_batch_mutex_);
-        read_batch_sizes_.push_back(reads.size());
-        batch_index = read_batch_sizes_.size();
-    }
-    read_batch_cv_.notify_all();
-    if (batch_index == fail_read_batch_) {
-        return DiskBlockIOStatus::IO_ERROR;
-    }
     for (const DiskRead& item : reads) {
         const DiskBlockIOStatus status = read(item.offset, item.buffer, item.bytes);
         if (status != DiskBlockIOStatus::OK) {
@@ -300,21 +290,6 @@ size_t DirectAlignmentDiskBlockIO::lastWriteBytes() const {
 
 bool DirectAlignmentDiskBlockIO::bufferedIo() const {
     return buffered_io_;
-}
-
-std::vector<size_t> DirectAlignmentDiskBlockIO::readBatchSizes() const {
-    std::lock_guard<std::mutex> lock(read_batch_mutex_);
-    return read_batch_sizes_;
-}
-
-bool DirectAlignmentDiskBlockIO::waitForReadBatchCount(size_t count, std::chrono::milliseconds timeout) const {
-    std::unique_lock<std::mutex> lock(read_batch_mutex_);
-    return read_batch_cv_.wait_for(lock, timeout, [this, count] { return read_batch_sizes_.size() >= count; });
-}
-
-void DirectAlignmentDiskBlockIO::failReadBatch(size_t one_based_batch_index) {
-    std::lock_guard<std::mutex> lock(read_batch_mutex_);
-    fail_read_batch_ = one_based_batch_index;
 }
 
 bool DirectAlignmentDiskBlockIO::aligned(uint64_t offset, const void* buffer, size_t bytes) {
