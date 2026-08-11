@@ -6,29 +6,9 @@
 
 #include <chrono>
 #include <cstring>
-#include <limits>
+#include <utility>
 
 namespace rtp_llm {
-
-bool NormalCacheStore::getRemainingTimeoutMs(LoadDeadline deadline,
-                                             LoadDeadline now,
-                                             uint32_t&    remaining_timeout_ms) {
-    const auto remaining = deadline - now;
-    if (remaining <= LoadClock::duration::zero()) {
-        remaining_timeout_ms = 0;
-        return false;
-    }
-
-    auto rounded_ms = std::chrono::duration_cast<std::chrono::milliseconds>(remaining);
-    if (std::chrono::duration_cast<LoadClock::duration>(rounded_ms) < remaining) {
-        ++rounded_ms;
-    }
-    constexpr auto kMaxTimeoutMs = static_cast<int64_t>(std::numeric_limits<uint32_t>::max());
-    remaining_timeout_ms = rounded_ms.count() >= kMaxTimeoutMs ?
-                               std::numeric_limits<uint32_t>::max() :
-                               static_cast<uint32_t>(rounded_ms.count());
-    return true;
-}
 
 NormalCacheStore::~NormalCacheStore() {
     if (thread_pool_) {
@@ -184,7 +164,24 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                             uint32_t                                   timeout_ms,
                             int                                        partition_count,
                             int                                        partition_id) {
-    const auto deadline = LoadClock::now() + std::chrono::milliseconds(timeout_ms);
+    loadUntil(request_block_buffer,
+              std::move(callback),
+              ip,
+              port,
+              rdma_port,
+              makeCacheStoreLoadDeadline(timeout_ms),
+              partition_count,
+              partition_id);
+}
+
+void NormalCacheStore::loadUntil(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
+                                 CacheStoreLoadDoneCallback                 callback,
+                                 const std::string&                         ip,
+                                 uint32_t                                   port,
+                                 uint32_t                                   rdma_port,
+                                 CacheStoreLoadDeadline                     deadline,
+                                 int                                        partition_count,
+                                 int                                        partition_id) {
     if (request_block_buffer == nullptr || !request_block_buffer->isValid() || ip.empty()) {
         RTP_LLM_LOG_WARNING("normal cache store run load failed, invalid params");
         callback(false, CacheStoreErrorCode::InvalidParams);
@@ -198,7 +195,8 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
     }
 
     uint32_t remaining_timeout_ms = 0;
-    if (!getRemainingTimeoutMs(deadline, LoadClock::now(), remaining_timeout_ms)) {
+    if (!getCacheStoreLoadRemainingTimeoutMs(
+            deadline, CacheStoreLoadClock::now(), remaining_timeout_ms)) {
         RTP_LLM_LOG_WARNING("normal cache store load deadline expired before admission for request id [%s]",
                             request_block_buffer->getRequestId().c_str());
         auto collector = std::make_shared<CacheStoreClientLoadMetricsCollector>(
@@ -244,13 +242,14 @@ void NormalCacheStore::runLoadTask(const std::shared_ptr<RequestBlockBuffer>&   
                                    const std::string&                                           ip,
                                    uint32_t                                                     port,
                                    uint32_t                                                     rdma_port,
-                                   std::chrono::steady_clock::time_point                        deadline,
+                                   CacheStoreLoadDeadline                                      deadline,
                                    const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector,
                                    int                                                          partition_count,
                                    int                                                          partition_id) {
     collector->markTaskRun();
-    uint32_t remaining_timeout_ms = 0;
-    if (!getRemainingTimeoutMs(deadline, LoadClock::now(), remaining_timeout_ms)) {
+    const auto now = CacheStoreLoadClock::now();
+    uint32_t   remaining_timeout_ms = 0;
+    if (!getCacheStoreLoadRemainingTimeoutMs(deadline, now, remaining_timeout_ms)) {
         RTP_LLM_LOG_WARNING("normal cache store load task timed out in queue for request id [%s]",
                             request_block_buffer->getRequestId().c_str());
         collector->markEnd(false);
@@ -272,13 +271,32 @@ NormalCacheStore::loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuff
                               LoadContext::CheckCancelFunc                            check_cancel_func,
                               int                                                     partition_count,
                               int                                                     partition_id) {
+    return loadBuffersUntil(request_block_buffers,
+                            ip,
+                            port,
+                            rdma_port,
+                            makeCacheStoreLoadDeadline(timeout_ms),
+                            std::move(check_cancel_func),
+                            partition_count,
+                            partition_id);
+}
+
+std::shared_ptr<LoadContext>
+NormalCacheStore::loadBuffersUntil(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                                   const std::string&                                      ip,
+                                   uint32_t                                                port,
+                                   uint32_t                                                rdma_port,
+                                   CacheStoreLoadDeadline                                  deadline,
+                                   LoadContext::CheckCancelFunc                            check_cancel_func,
+                                   int                                                     partition_count,
+                                   int                                                     partition_id) {
     if (request_block_buffers.empty() || ip.empty()) {
         return nullptr;
     }
 
     auto load_context = std::make_shared<LoadContext>(shared_from_this(), memory_util_->isRdmaMode());
     load_context->load(
-        request_block_buffers, ip, port, rdma_port, timeout_ms, check_cancel_func, partition_count, partition_id);
+        request_block_buffers, ip, port, rdma_port, deadline, std::move(check_cancel_func), partition_count, partition_id);
     return load_context;
 }
 

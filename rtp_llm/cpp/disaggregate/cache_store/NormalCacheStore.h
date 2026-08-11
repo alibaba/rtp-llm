@@ -33,7 +33,6 @@ public:
               uint32_t                                   timeout_ms      = 1000,
               int                                        partition_count = 1,
               int                                        partition_id    = 0) override;
-
     std::shared_ptr<LoadContext>
     loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                 const std::string&                                      ip,
@@ -59,14 +58,28 @@ public:
 
     void debugInfo() override;
 
+    void loadUntil(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
+                   CacheStoreLoadDoneCallback                 callback,
+                   const std::string&                         ip,
+                   uint32_t                                   port,
+                   uint32_t                                   rdma_port,
+                   CacheStoreLoadDeadline                     deadline,
+                   int                                        partition_count = 1,
+                   int                                        partition_id    = 0) override;
+
+    std::shared_ptr<LoadContext>
+    loadBuffersUntil(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                     const std::string&                                      ip,
+                     uint32_t                                                port,
+                     uint32_t                                                rdma_port,
+                     CacheStoreLoadDeadline                                  deadline,
+                     LoadContext::CheckCancelFunc                            check_cancel_func,
+                     int                                                     partition_count,
+                     int                                                     partition_id) override;
+
     const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override;
 
 private:
-    using LoadClock    = std::chrono::steady_clock;
-    using LoadDeadline = LoadClock::time_point;
-
-    static bool getRemainingTimeoutMs(LoadDeadline deadline, LoadDeadline now, uint32_t& remaining_timeout_ms);
-
     bool init(const CacheStoreInitParams& params);
     void runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              value,
                       CacheStoreStoreDoneCallback                             callback,
@@ -77,7 +90,7 @@ private:
                      const std::string&                                           ip,
                      uint32_t                                                     port,
                      uint32_t                                                     rdma_port,
-                     LoadDeadline                                                 deadline,
+                     CacheStoreLoadDeadline                                      deadline,
                      const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collelctor,
                      int                                                          partition_count,
                      int                                                          partition_id);

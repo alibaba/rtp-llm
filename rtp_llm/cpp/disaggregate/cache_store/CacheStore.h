@@ -8,6 +8,7 @@
 
 
 #include <memory>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -28,7 +29,6 @@ public:
                       uint32_t                                   timeout_ms      = 1000,
                       int                                        partition_count = 1,
                       int                                        partition_id    = 0) = 0;
-
     virtual std::shared_ptr<LoadContext>
     loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
                 const std::string&                                      ip,
@@ -38,7 +38,6 @@ public:
                 LoadContext::CheckCancelFunc                            check_cancel_func,
                 int                                                     partition_count = 1,
                 int                                                     partition_id    = 0) = 0;
-
     virtual std::shared_ptr<StoreContext>
     storeBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers, int64_t timeout_ms) = 0;
 
@@ -54,6 +53,54 @@ public:
     virtual const std::shared_ptr<MemoryUtil>& getMemoryUtil() const = 0;
 
     virtual void debugInfo() = 0;
+
+    virtual void loadUntil(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer,
+                           CacheStoreLoadDoneCallback                 callback,
+                           const std::string&                         ip,
+                           uint32_t                                   port,
+                           uint32_t                                   rdma_port,
+                           CacheStoreLoadDeadline                     deadline,
+                           int                                        partition_count = 1,
+                           int                                        partition_id    = 0) {
+        uint32_t remaining_timeout_ms = 0;
+        if (!getCacheStoreLoadRemainingTimeoutMs(
+                deadline, CacheStoreLoadClock::now(), remaining_timeout_ms)) {
+            callback(false, CacheStoreErrorCode::LoadBufferTimeout);
+            return;
+        }
+        load(request_block_buffer,
+             std::move(callback),
+             ip,
+             port,
+             rdma_port,
+             remaining_timeout_ms,
+             partition_count,
+             partition_id);
+    }
+
+    virtual std::shared_ptr<LoadContext>
+    loadBuffersUntil(const std::vector<std::shared_ptr<RequestBlockBuffer>>& request_block_buffers,
+                     const std::string&                                      ip,
+                     uint32_t                                                port,
+                     uint32_t                                                rdma_port,
+                     CacheStoreLoadDeadline                                  deadline,
+                     LoadContext::CheckCancelFunc                            check_cancel_func,
+                     int                                                     partition_count = 1,
+                     int                                                     partition_id    = 0) {
+        uint32_t remaining_timeout_ms = 0;
+        if (!getCacheStoreLoadRemainingTimeoutMs(
+                deadline, CacheStoreLoadClock::now(), remaining_timeout_ms)) {
+            return nullptr;
+        }
+        return loadBuffers(request_block_buffers,
+                           ip,
+                           port,
+                           rdma_port,
+                           remaining_timeout_ms,
+                           std::move(check_cancel_func),
+                           partition_count,
+                           partition_id);
+    }
 };
 
 }  // namespace rtp_llm
