@@ -24,7 +24,17 @@ rows = []
 for f in sorted(glob.glob("load_client/shard_*/per_request.jsonl")):
     for line in open(f):
         rows.append(json.loads(line))
-epoch0 = min(d.get("send_start_epoch_ms", 0) for d in rows)
+if rows:
+    epoch0 = min(d.get("send_start_epoch_ms", 0) for d in rows)
+else:
+    # Missing or empty per_request.jsonl (e.g. aborted run): keep aggregating
+    # the other sections with an empty per_second instead of crashing on min().
+    print(
+        "WARNING: no per_request rows under load_client/shard_*/;"
+        " per_second will be empty",
+        file=sys.stderr,
+    )
+    epoch0 = 0
 per_sec = defaultdict(
     lambda: {
         "arrivals": 0,

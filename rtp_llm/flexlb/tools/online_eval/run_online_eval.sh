@@ -76,6 +76,27 @@ SEND_MODE="${SEND_MODE:-}"
 SEND_MODE_QPS="${SEND_MODE_QPS:-}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
+# Load client implementation switch (single env, no multi-layer override):
+# python (default) keeps the historical flexlb_load_client.py path untouched;
+# java starts JavaLoadClient via run_java_load_client so SEND_MODE and
+# SEND_MODE_QPS are effective end to end.
+LOAD_CLIENT_IMPL="${LOAD_CLIENT_IMPL:-python}"
+if [[ "${LOAD_CLIENT_IMPL}" != "python" && "${LOAD_CLIENT_IMPL}" != "java" ]]; then
+  echo "Unsupported LOAD_CLIENT_IMPL=${LOAD_CLIENT_IMPL}; expected python or java" >&2
+  exit 1
+fi
+# Fail fast instead of silently ignoring: flexlb_load_client.py has no send
+# mode support, so anything but trace replay requires the Java client.
+if [[ "${LOAD_CLIENT_IMPL}" == "python" ]]; then
+  if [[ -n "${SEND_MODE}" && "${SEND_MODE}" != "replay" ]]; then
+    echo "SEND_MODE=${SEND_MODE} requires LOAD_CLIENT_IMPL=java (flexlb_load_client.py only supports trace replay)" >&2
+    exit 1
+  fi
+  if [[ -n "${SEND_MODE_QPS}" ]]; then
+    echo "SEND_MODE_QPS is only consumed by JavaLoadClient; set LOAD_CLIENT_IMPL=java" >&2
+    exit 1
+  fi
+fi
 LOAD_CLIENT_START_DELAY_SECONDS="${LOAD_CLIENT_START_DELAY_SECONDS:-10}"
 # Warm up FlexLB before applying load so JIT/connections are hot and not
 # counted in stats. Overridable via env; 0 disables warmup.
@@ -673,6 +694,7 @@ print(int(time.time() * 1000 + float(sys.argv[1]) * 1000))
 PY
 )"
 echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
+echo "Load client impl: ${LOAD_CLIENT_IMPL}"
 echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
 
 # Capture the master arrival/completion counter time series for the whole load
@@ -714,22 +736,79 @@ if [[ "${GRADIENT}" == "1" ]]; then
   CLIENT_ARGS+=(--gradient --gradient-max-speed "${GRADIENT_MAX_SPEED}" --gradient-start-speed "${GRADIENT_START_SPEED}")
 fi
 
+# LOAD_CLIENT_IMPL=java: the same semantics as CLIENT_ARGS above, expressed as
+# the env vars JavaLoadClient.Config.fromEnv() consumes (the full list lives in
+# JAVA_LOAD_CLIENT_ENV_VARS in lib_load_client.sh). Empty values fall back to
+# the JavaLoadClient built-in default, which matches the Python default for
+# every mapped variable. N_CHANNELS mirrors FLEXLB_N_CHANNELS because the
+# Python client reads that env as its --n-channels default.
+if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
+  # Build the fat jar once up front so concurrent shard launches never race
+  # inside run_java_load_client's on-demand build.
+  ensure_java_mock_engine_jar
+  JAVA_CLIENT_COMMON_ENV=(
+    "TRACE_FILE=${TRACE_FILE}"
+    "TARGET_ADDR=${FLEXLB_HTTP_ADDR}"
+    "REPLAY_SPEED=${REPLAY_SPEED}"
+    "DURATION_S=${DURATION_S}"
+    "LIMIT=${LIMIT}"
+    "TIMEOUT_MS=${TIMEOUT_MS}"
+    "SLA_TTFT_MS=${SLA_TTFT_MS}"
+    "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}"
+    "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}"
+    "SCHEDULE_ONLY=${SCHEDULE_ONLY}"
+    "LOOP=${LOOP}"
+    "RESPONSE_TIMEOUT=${RESPONSE_TIMEOUT:-}"
+    "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}"
+    "MAX_INPUT_LEN=${MAX_INPUT_LEN}"
+    "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}"
+    "GRADIENT=${GRADIENT}"
+    "GRADIENT_START_SPEED=${GRADIENT_START_SPEED}"
+    "GRADIENT_MAX_SPEED=${GRADIENT_MAX_SPEED}"
+    "N_CHANNELS=${FLEXLB_N_CHANNELS}"
+    "SEND_MODE=${SEND_MODE}"
+    "SEND_MODE_QPS=${SEND_MODE_QPS}"
+  )
+fi
+
 if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
-  PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
+  if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
+    run_java_load_client \
+      "${JAVA_CLIENT_COMMON_ENV[@]}" \
+      "OUTPUT_DIR=${RUN_DIR}/load_client" \
+      "MAX_CONCURRENCY=${MAX_CONCURRENCY}" \
+      | tee "${RUN_DIR}/client.stdout"
+  else
+    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
+  fi
 else
   mkdir -p "${RUN_DIR}/load_client"
   curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null
   SHARD_MAX_CONCURRENCY=$(( (MAX_CONCURRENCY + LOAD_CLIENT_WORKERS - 1) / LOAD_CLIENT_WORKERS ))
   for ((shard = 0; shard < LOAD_CLIENT_WORKERS; shard++)); do
     shard_dir="${RUN_DIR}/load_client/shard_${shard}"
-    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" \
-      "${CLIENT_ARGS[@]}" \
-      --output-dir "${shard_dir}" \
-      --num-shards "${LOAD_CLIENT_WORKERS}" \
-      --shard-index "${shard}" \
-      --max-concurrency "${SHARD_MAX_CONCURRENCY}" \
-      --skip-server-latency \
-      >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
+    if [[ "${LOAD_CLIENT_IMPL}" == "java" ]]; then
+      # Same shard directory layout as the Python path; the shared aggregation
+      # below reads shard_N/summary.json and shard_N/per_request.jsonl, both of
+      # which JavaLoadClient writes with the identical field names.
+      run_java_load_client \
+        "${JAVA_CLIENT_COMMON_ENV[@]}" \
+        "OUTPUT_DIR=${shard_dir}" \
+        "NUM_SHARDS=${LOAD_CLIENT_WORKERS}" \
+        "SHARD_INDEX=${shard}" \
+        "MAX_CONCURRENCY=${SHARD_MAX_CONCURRENCY}" \
+        "SKIP_SERVER_LATENCY=1" \
+        >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
+    else
+      PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" \
+        "${CLIENT_ARGS[@]}" \
+        --output-dir "${shard_dir}" \
+        --num-shards "${LOAD_CLIENT_WORKERS}" \
+        --shard-index "${shard}" \
+        --max-concurrency "${SHARD_MAX_CONCURRENCY}" \
+        --skip-server-latency \
+        >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
+    fi
     CLIENT_PIDS+=("$!")
   done
 
