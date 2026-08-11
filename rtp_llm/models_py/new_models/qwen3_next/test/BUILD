@@ -1,5 +1,6 @@
 py_test(
     name = "test_qwen3_next_load",
+    exec_properties = {"gpu": "H20"},
     srcs = ["test_qwen3_next_load.py"],
     deps = [
         "//rtp_llm:config",

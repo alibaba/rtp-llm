@@ -349,7 +349,9 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         fmha_impl = types.SimpleNamespace(fmha_params=None)
 
         with mock.patch(
-            "rtp_llm.models_py.new_models.qwen3_vl.model." "select_block_map_for_layer"
+            "rtp_llm.models_py.new_models.qwen3_vl.model."
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
         ):
             outputs = model(inputs, fmha_impl)
 
@@ -421,8 +423,10 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
             "reshape_extra_input_to_deepstack",
             return_value=deepstack,
         ), mock.patch(
-            "rtp_llm.models_py.new_models.qwen3_vl.model." "select_block_map_for_layer"
-        ) as select_block_map:
+            "rtp_llm.models_py.new_models.qwen3_vl.model."
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
+        ) as select_fmha:
             outputs = model(inputs, fmha_impl)
 
         torch.testing.assert_close(
@@ -432,7 +436,7 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         expected[1] = mm_feature + deepstack[0] + deepstack[1]
         torch.testing.assert_close(outputs.hidden_states, expected)
         self.assertEqual(deepstack_injector.calls, [((1,), 0), ((1,), 1)])
-        self.assertEqual(select_block_map.call_count, 2)
+        self.assertEqual(select_fmha.call_count, 2)
 
     def test_vision_loader_matches_independent_cpu_reference(self):
         torch.manual_seed(7)
