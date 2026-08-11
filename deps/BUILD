@@ -81,6 +81,15 @@ compile_pip_requirements(
 )
 
 compile_pip_requirements(
+    name = "requirements_cuda13_arm",
+    src = "requirements_cuda13_arm.txt",
+    extra_args = PIP_EXTRA_ARGS,
+    extra_data = [":requirements_base.txt"],
+    requirements_txt = "requirements_lock_cuda13_arm.txt",
+    tags = ["manual"],
+)
+
+compile_pip_requirements(
     name = "requirements_rocm",
     src = "requirements_rocm.txt",
     extra_args = PIP_EXTRA_ARGS,

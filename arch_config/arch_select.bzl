@@ -4,6 +4,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13="requirement")
+load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
@@ -11,15 +12,43 @@ def copy_all_so():
     copy_so("@rtp_llm//:th_transformer")
     copy_so("@rtp_llm//:th_transformer_config")
     copy_so("@rtp_llm//:rtp_compute_ops")
+    for target in [
+        "flashinfer_batch_paged_prefill",
+        "flashinfer_batch_paged_prefill_256",
+        "flashinfer_batch_paged_decode",
+        "flashinfer_batch_paged_decode_256",
+        "flashinfer_batch_ragged_prefill",
+        "flashinfer_batch_ragged_prefill_256",
+        "flashinfer_single_decode",
+        "flashinfer_single_decode_256",
+        "flashinfer_single_prefill",
+        "flashinfer_single_prefill_256",
+        "flashinfer_sm90",
+    ]:
+        copy_so("@flashinfer_cpp_cu13//:" + target)
 
 def requirement(names):
     for name in names:
+        cuda13_arm_deps = [] if name in [
+            "aiter",
+            "amdsmi",
+            "av",
+            "deep_ep",
+            "fast-hadamard-transform",
+            "flash-attn-3",
+            "flashinfer-cubin",
+            "flashinfer-jit-cache",
+            "flash_attn",
+            "pyrsmi",
+            "triton-kernels",
+        ] else [requirement_cuda13_arm(name)]
         native.py_library(
             name = name,
             deps = select({
                 "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@rtp_llm//:using_cuda13_x86": [requirement_gpu_cuda13(name)],
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+                "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
                 "//conditions:default": [requirement_cpu(name)],
@@ -50,12 +79,23 @@ def whl_deps():
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
-            "deep_gemm@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/4af4ac732eae77acb57ab3ac59e3ceb796b797b5/deep_gemm-2.5.0%2Blocal-cp310-cp310-linux_x86_64.whl",
+            "deep_gemm@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/4af4ac732eae77acb57ab3ac59e3ceb796b797b5/deep_gemm-2.5.0%2Blocal-cp310-cp310-linux_x86_64.whl",
             "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
             "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl",
             "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
             "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
             "tilelang==0.1.9",
+        ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "torch@https://download.pytorch.org/whl/cu130/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "torchvision@https://download.pytorch.org/whl/cu130/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "deep-gemm@git+https://github.com/deepseek-ai/DeepGEMM.git@61ca7f1378038898f76b859b4c50541f27dbf891",
+            "flash-mla@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl",
+            "rtp-kernel@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0608/arm_pkg/rtp_kernel-0.1.0%2Bcu13.fb4b4ab-cp310-cp310-linux_aarch64.whl",
+            "fast-safetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
+            "fastsafetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
+            "tilelang==0.1.9",
+            "apache-tvm-ffi==0.1.7",
         ],
         "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
         "@rtp_llm//:using_rocm": [
@@ -71,6 +111,7 @@ def whl_deps():
 def platform_deps():
     return select({
         "@rtp_llm//:using_arm": [],
+        "@rtp_llm//:using_cuda13_arm": [],
         "@rtp_llm//:using_cuda12_arm": [],
         "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0", "av==16.1.0"],
         "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
@@ -103,6 +144,11 @@ def torch_deps():
             "@torch_2.8_py310_cuda//:torch",
             "@torch_2.8_py310_cuda//:torch_libs",
         ],
+        "@rtp_llm//:using_cuda13_arm": [
+            "@torch_2.11_py310_cuda-aarch64//:torch_api",
+            "@torch_2.11_py310_cuda-aarch64//:torch",
+            "@torch_2.11_py310_cuda-aarch64//:torch_libs",
+        ],
         "//conditions:default": [
             "@torch_2.1_py310_cpu//:torch_api",
             "@torch_2.1_py310_cpu//:torch",
@@ -115,6 +161,7 @@ def flashinfer_deps():
     native.alias(
         name = "flashinfer",
         actual = select({
+            "@rtp_llm//:using_cuda13_arm": "@flashinfer_cpp_cu13//:flashinfer",
             "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
             "//conditions:default": "@flashinfer_cpp//:flashinfer",
         })

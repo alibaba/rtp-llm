@@ -41,13 +41,14 @@ config_setting(
     values = {"define": "using_cuda12_arm=true"},
 )
 
-# using_cuda13_arm is a stricter subset of using_cuda12_arm (the config_setting
-# above still matches so existing selects that route ARM → pip_cuda12_arm_torch
-# keep working); additionally enables code paths that need to differentiate
-# CUDA 13 from CUDA 12 (e.g. the flashinfer_cpp_cu13 repo).
 config_setting(
     name = "using_cuda13_arm",
-    values = {"define": "using_cuda13_arm=true"},
+    define_values = {
+        "using_cuda": "true",
+        "using_cuda12": "true",
+        "using_cuda13_arm": "true",
+        "using_cuda12_arm": "true",
+    },
 )
 
 # x86_64 counterpart of using_cuda13_arm — same CUDA-13-vs-12 differentiation,
