@@ -489,7 +489,8 @@ concat_and_cache_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_tokens, 
                             const int    kv_lora_rank,                 //
                             const int    pe_dim,                       //
                             const int    block_size,                   //
-                            const float* scale                         //
+                            const float* scale,                        //
+                            const bool   clear_page_on_boundary        //
 ) {
     const int64_t token_idx = blockIdx.x;
     const int64_t slot_idx  = slot_mapping[token_idx];
@@ -499,6 +500,15 @@ concat_and_cache_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_tokens, 
     }
     const int64_t block_idx    = slot_idx / block_size;
     const int64_t block_offset = slot_idx % block_size;
+
+    if (clear_page_on_boundary && block_offset == 0) {
+        const int64_t page_start = block_idx * block_stride;
+        const int64_t page_size  = static_cast<int64_t>(block_size) * entry_stride;
+        for (int64_t i = threadIdx.x; i < page_size; i += blockDim.x) {
+            kv_cache[page_start + i] = cache_t{};
+        }
+        __syncthreads();
+    }
 
     auto copy = [&](const scalar_t* __restrict__ src,
                     cache_t* __restrict__ dst,
@@ -752,7 +762,8 @@ concat_and_cache_ds_model1_kernel(const scalar_t* __restrict__ kv_c,  // [num_to
                                      kv_lora_rank,                                                                     \
                                      pe_dim,                                                                           \
                                      block_size,                                                                       \
-                                     reinterpret_cast<const float*>(scale.data_ptr()));
+                                     reinterpret_cast<const float*>(scale.data_ptr()),                                 \
+                                     clear_page_on_boundary);
 
 #define CALL_CONCAT_AND_CACHE_DS_MLA(KV_T, CACHE_T, KV_DTYPE)                                                          \
     concat_and_cache_ds_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                                                            \
@@ -848,7 +859,8 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
                           torch::Tensor&     kv_cache,      // [num_blocks, block_size, (kv_lora_rank + pe_dim)]
                           torch::Tensor&     slot_mapping,  // [num_tokens] or [num_actual_tokens]
                           const std::string& kv_cache_dtype,
-                          torch::Tensor&     scale) {
+                          torch::Tensor&     scale,
+                          bool               clear_page_on_boundary) {
     // NOTE: In vLLM V1, key.size(0) can be different from slot_mapping.size(0) because of padding
     // for CUDA graphs. We use slot_mapping.size(0) as the number of tokens for compatibility.
     int num_tokens   = slot_mapping.size(0);

@@ -193,6 +193,74 @@ class TestConcatAndCacheMLA(unittest.TestCase):
 
         print("✓ Padding test passed")
 
+    def test_clear_page_on_boundary(self):
+        block_size = 8
+        kv_lora_rank = 512
+        qk_rope_head_dim = 64
+        entry_size = kv_lora_rank + qk_rope_head_dim
+        kv_c = torch.randn(1, kv_lora_rank, dtype=torch.bfloat16, device=self.device)
+        k_pe = torch.randn(
+            1, qk_rope_head_dim, dtype=torch.bfloat16, device=self.device
+        )
+        scale = torch.tensor(1.0, dtype=torch.float32, device=self.device)
+        kv_cache = torch.full(
+            (2, block_size, entry_size),
+            7.0,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        untouched_page = kv_cache[0].clone()
+        slot_mapping = torch.tensor([block_size], dtype=torch.long, device=self.device)
+
+        compute_ops.concat_and_cache_mla(
+            kv_c,
+            k_pe,
+            kv_cache,
+            slot_mapping,
+            "auto",
+            scale,
+            True,
+        )
+
+        torch.testing.assert_close(kv_cache[0], untouched_page)
+        torch.testing.assert_close(kv_cache[1, 0, :kv_lora_rank], kv_c[0])
+        torch.testing.assert_close(kv_cache[1, 0, kv_lora_rank:], k_pe[0])
+        torch.testing.assert_close(kv_cache[1, 1:], torch.zeros_like(kv_cache[1, 1:]))
+
+    def test_clear_page_flag_does_not_clear_non_boundary_write(self):
+        block_size = 8
+        kv_lora_rank = 512
+        qk_rope_head_dim = 64
+        entry_size = kv_lora_rank + qk_rope_head_dim
+        kv_c = torch.randn(1, kv_lora_rank, dtype=torch.bfloat16, device=self.device)
+        k_pe = torch.randn(
+            1, qk_rope_head_dim, dtype=torch.bfloat16, device=self.device
+        )
+        scale = torch.tensor(1.0, dtype=torch.float32, device=self.device)
+        kv_cache = torch.full(
+            (1, block_size, entry_size),
+            7.0,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        slot_offset = 3
+        slot_mapping = torch.tensor([slot_offset], dtype=torch.long, device=self.device)
+
+        compute_ops.concat_and_cache_mla(
+            kv_c,
+            k_pe,
+            kv_cache,
+            slot_mapping,
+            "auto",
+            scale,
+            True,
+        )
+
+        expected = torch.full_like(kv_cache, 7.0)
+        expected[0, slot_offset, :kv_lora_rank] = kv_c[0]
+        expected[0, slot_offset, kv_lora_rank:] = k_pe[0]
+        torch.testing.assert_close(kv_cache, expected)
+
     def test_concat_and_cache_mla_zero_rope_dim(self):
         """Test concat_and_cache_mla with qk_rope_head_dim=64 nope_dim=448(model1 format)"""
         self._run_concat_and_cache_mla(

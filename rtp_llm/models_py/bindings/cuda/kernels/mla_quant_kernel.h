@@ -30,7 +30,8 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
                           torch::Tensor&     kv_cache,      // [num_blocks, block_size, (kv_lora_rank + pe_dim)]
                           torch::Tensor&     slot_mapping,  // [num_tokens] or [num_actual_tokens]
                           const std::string& kv_cache_dtype,
-                          torch::Tensor&     scale);
+                          torch::Tensor&     scale,
+                          bool               clear_page_on_boundary);
 
 // Gather and upconvert FP8 KV cache to BF16 workspace (MLA DeepSeek V3 layout)
 // src_cache: [num_blocks, block_size, 656] uint8 (512 fp8 + 16 scale + 128 rope bf16)
