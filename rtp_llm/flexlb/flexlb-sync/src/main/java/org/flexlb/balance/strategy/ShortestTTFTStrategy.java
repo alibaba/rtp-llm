@@ -341,6 +341,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
         result.setDpRank(ep.getStatus().getDpRank());
         result.setDebugInfo(debugInfo);
+        result.setEndpointGeneration(ep.getEndpointId().generation());
         return result;
     }
 

@@ -406,7 +406,7 @@ class DefaultRouterTest {
         when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
 
         // Ensure endpoint registry returns a non-null endpoint so rollback proceeds
-        lenient().when(endpointRegistry.get(RoleType.DECODE, "192.168.1.2:8081"))
+        lenient().when(endpointRegistry.get(RoleType.DECODE, "192.168.1.2:8081", -1))
                 .thenReturn(org.mockito.Mockito.mock(WorkerEndpoint.class));
 
         // Execute

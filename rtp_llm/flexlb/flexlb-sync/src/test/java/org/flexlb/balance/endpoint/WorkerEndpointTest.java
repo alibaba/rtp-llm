@@ -205,7 +205,8 @@ class WorkerEndpointTest {
         status.updateFromResponse(resp);
 
         assertEquals(RoleType.DECODE, status.getRole());
-        assertTrue(status.isAlive());
+        assertTrue(!status.isAlive(),
+                "engine payload must not promote master-local health state");
         assertEquals(8L, (long) status.getAvailableConcurrency());
         assertEquals(25.0, status.getStepLatencyMs(), 0.001);
         assertEquals(100L, status.getIterateCount());
@@ -235,7 +236,7 @@ class WorkerEndpointTest {
     // ==================== onWorkerStatusUpdate ====================
 
     @Test
-    void onWorkerStatusUpdate_replaces_status_reference() {
+    void onWorkerStatusUpdate_rejects_foreign_status_generation() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
         WorkerStatus newStatus = new WorkerStatus();
         newStatus.setSite("site-a");
@@ -244,11 +245,9 @@ class WorkerEndpointTest {
 
         assertNotSame(newStatus, endpoint.getStatus());
 
-        endpoint.onWorkerStatusUpdate(newStatus, resp);
+        assertTrue(!endpoint.tryOnWorkerStatusUpdate(newStatus, resp));
 
-        assertSame(newStatus, endpoint.getStatus());
-        assertEquals("site-a", endpoint.getStatus().getSite());
-        assertEquals("group-b", endpoint.getStatus().getGroup());
+        assertSame(status, endpoint.getStatus());
     }
 
     @Test
@@ -262,15 +261,14 @@ class WorkerEndpointTest {
     }
 
     @Test
-    void onWorkerStatusUpdate_preserves_engine_state_from_ws() {
+    void onWorkerStatusUpdate_preserves_same_generation_status_identity() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
-        WorkerStatus ws = new WorkerStatus();
-        ws.setSite("site-x");
-        ws.setGroup("group-x");
-        ws.setDpRank(5);
-        ws.setAlive(true);
+        status.setSite("site-x");
+        status.setGroup("group-x");
+        status.setDpRank(5);
+        status.setAlive(true);
 
-        endpoint.onWorkerStatusUpdate(ws, resp);
+        assertTrue(endpoint.tryOnWorkerStatusUpdate(status, resp));
 
         assertEquals("site-x", endpoint.getStatus().getSite());
         assertEquals("group-x", endpoint.getStatus().getGroup());

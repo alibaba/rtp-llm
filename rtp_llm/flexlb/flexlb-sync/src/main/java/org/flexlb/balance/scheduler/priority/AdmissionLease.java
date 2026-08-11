@@ -220,6 +220,44 @@ public final class AdmissionLease implements AutoCloseable {
     }
 
     /**
+     * Endpoint-retirement terminal path.  This differs deliberately from the
+     * post-success soft timeout: retirement must stop the timer and release
+     * master-owned reservations for an unaccepted request, but it must never
+     * issue the timeout retry/cancel signal.  The scheduler still owns the
+     * final future/tombstone transition, so this method also must not remove
+     * the inflight entry itself.
+     *
+     * <p>When Decode already accepted the request, engine ownership is
+     * preserved and only the lease backpressure counter/timer are closed.
+     */
+    public void closeForEndpointRetirement() {
+        int state = leaseState.get();
+        while (state != STATE_CLOSED) {
+            if (leaseState.compareAndSet(state, STATE_CLOSED)) {
+                try {
+                    cancelSoftTimeout();
+                    boolean decodeAccepted = decodeEp != null
+                            && decodeEp.isConfirmedTracked(item.requestId());
+                    if (!decodeAccepted) {
+                        releaseResources(false);
+                    }
+                    Logger.info("[auto-tpm] admission lease closed for endpoint retirement: "
+                                    + "request_id={} decode_accepted={}",
+                            item.requestId(), decodeAccepted);
+                } catch (Exception e) {
+                    Logger.error("[auto-tpm] admission lease endpoint-retirement close error: "
+                                    + "request_id={} error={}",
+                            item.requestId(), e.getMessage(), e);
+                } finally {
+                    notifyCloseCallback();
+                }
+                return;
+            }
+            state = leaseState.get();
+        }
+    }
+
+    /**
      * Decode-accepted path: CAS HANDED_OVER→CLOSED. Called when the decode
      * endpoint has accepted the request within the soft timeout window.
      * Only decrements the backpressure counter (via {@code notifyCloseCallback});
@@ -269,6 +307,15 @@ public final class AdmissionLease implements AutoCloseable {
      * Release all resources held by the admission. Each step is idempotent.
      */
     private void releaseResources() {
+        releaseResources(true);
+    }
+
+    /**
+     * Release master-owned reservation state.  Endpoint retirement leaves
+     * scheduler inflight removal to its atomic terminal/tombstone sequence,
+     * avoiding a transient window in which the same request ID could revive.
+     */
+    private void releaseResources(boolean unregisterInflight) {
         // 1. Remove from prefill queue (no-op if already dispatched/removed).
         if (prefillQueue != null) {
             prefillQueue.tryRemove(item.requestId(), "LEASE_RELEASE");
@@ -278,7 +325,9 @@ public final class AdmissionLease implements AutoCloseable {
             decodeEp.release(item.decode().getRequestId());
         }
         // 3. Unregister from inflight (no-op if already removed/tombstoned).
-        registrar.unregisterInflight(item);
+        if (unregisterInflight) {
+            registrar.unregisterInflight(item);
+        }
     }
 
     /**
@@ -361,5 +410,15 @@ public final class AdmissionLease implements AutoCloseable {
      */
     int leaseState() {
         return leaseState.get();
+    }
+
+    /** Whether this lease has completed its one-way terminal transition. */
+    public boolean isClosed() {
+        return leaseState.get() == STATE_CLOSED;
+    }
+
+    /** Whether this lease still owns a post-success soft-timeout registration. */
+    public boolean hasSoftTimeoutRegistration() {
+        return softTimeoutFuture != null;
     }
 }

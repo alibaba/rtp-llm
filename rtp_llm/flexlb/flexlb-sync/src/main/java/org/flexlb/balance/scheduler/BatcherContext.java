@@ -1,6 +1,8 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointOperationLease;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -206,10 +208,16 @@ public class BatcherContext {
     }
 
     void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
-        if (remove(item)) {
-            handler.onOfferFailure(item, new BatchTokenCapacityExceededException(
-                    "request seq_len=" + item.seqLen()
-                            + " cannot fit strict padded batch token capacity=" + capacity));
+        var lease = EndpointOperationLease.acquire(prefillEp, item.decodeEp());
+        if (lease.isEmpty()) {
+            return;
+        }
+        try (EndpointOperationLease ignored = lease.get()) {
+            if (remove(item)) {
+                handler.onOfferFailure(item, new BatchTokenCapacityExceededException(
+                        "request seq_len=" + item.seqLen()
+                                + " cannot fit strict padded batch token capacity=" + capacity));
+            }
         }
     }
 
@@ -225,16 +233,47 @@ public class BatcherContext {
      * (e.g. {@code lastParkByRequest.remove()}) before calling this.
      */
     void dispatch(List<BatchItem> items, DispatchMeta meta) {
-        // The dispatch-interval EMA only feeds the Auto-TPM queue-wait
-        // estimate (PrefillQueueManager.estimateWaitMs); skip the synchronized
-        // bookkeeping entirely on the legacy path (task10 P2-9).
-        if (cfg.isAutoTpmEnabled()) {
-            recordDispatchInterval(now());
-        }
+        List<WorkerEndpoint> owners = new ArrayList<>(items.size() + 1);
+        owners.add(prefillEp);
         for (BatchItem item : items) {
-            remove(item);
+            owners.add(item.decodeEp());
         }
-        handler.onBatchReady(items, meta);
+
+        // Dispatch is a transaction across the Prefill generation and every
+        // Decode generation represented in the batch.  Retirement either wins
+        // before this lease (nothing is removed from the queue), or waits until
+        // queue removal, endpoint accounting, and async dispatch submission are
+        // complete.  Fixed EndpointId ordering inside the lease prevents
+        // deadlocks for mixed-decode batches.
+        var lease = EndpointOperationLease.acquire(owners);
+        if (lease.isEmpty()) {
+            return;
+        }
+        try (EndpointOperationLease ignored = lease.get()) {
+            List<BatchItem> removed = new ArrayList<>(items.size());
+            queueLock.lock();
+            try {
+                for (BatchItem item : items) {
+                    if (queue.remove(item)) {
+                        queueDepth.decrementAndGet();
+                        queueVersion.incrementAndGet();
+                        removed.add(item);
+                    }
+                }
+            } finally {
+                queueLock.unlock();
+            }
+            if (removed.isEmpty()) {
+                return;
+            }
+            // The dispatch-interval EMA only feeds the Auto-TPM queue-wait
+            // estimate (PrefillQueueManager.estimateWaitMs); skip the synchronized
+            // bookkeeping entirely on the legacy path (task10 P2-9).
+            if (cfg.isAutoTpmEnabled()) {
+                recordDispatchInterval(now());
+            }
+            handler.onBatchReady(removed, meta);
+        }
     }
 
     /**
@@ -243,8 +282,15 @@ public class BatcherContext {
      * Caller is responsible for algorithm-specific logging and state cleanup.
      */
     void dropHead(BatchItem head) {
-        remove(head);
-        handler.onExpired(head);
+        var lease = EndpointOperationLease.acquire(prefillEp, head.decodeEp());
+        if (lease.isEmpty()) {
+            return;
+        }
+        try (EndpointOperationLease ignored = lease.get()) {
+            if (remove(head)) {
+                handler.onExpired(head);
+            }
+        }
     }
 
     // ---- dispatch interval estimation (design doc 8.4) ----

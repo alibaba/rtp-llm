@@ -171,7 +171,8 @@ public class DefaultRouter implements Router {
             long requestId = balanceContext.getRequestId();
             RoleType role = serverStatus.getRole();
 
-            WorkerEndpoint ep = endpointRegistry.get(role, serverIpPort);
+            WorkerEndpoint ep = endpointRegistry.get(
+                    role, serverIpPort, serverStatus.getEndpointGeneration());
             if (ep == null) {
                 Logger.warn("DefaultRouter.rollBack: endpoint not found for ipPort={}", serverIpPort);
                 continue;

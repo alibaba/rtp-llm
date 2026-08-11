@@ -97,7 +97,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong admissionVersion = new AtomicLong();
 
     public DecodeEndpoint(WorkerStatus status) {
-        super(status);
+        this(new EndpointId(RoleType.DECODE, status.getIpPort(), 0), status);
+    }
+
+    public DecodeEndpoint(EndpointId endpointId, WorkerStatus status) {
+        super(endpointId, status);
         this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {
             inflightKvReservedTotal.addAndGet(-req.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
@@ -116,26 +120,29 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public void reserve(long requestId, long kvTokens, long expectedKvTokens,
                         int priority, long deadlineMs) {
-        admissionLock.lock();
-        try {
-            RequestInflight newRi = new RequestInflight(kvTokens, expectedKvTokens, priority, deadlineMs);
-            // A (re-)reserve puts the request back into the pre-queue state.
-            if (queuedPhase.remove(requestId)) {
-                queuedPhaseCount.decrementAndGet();
+        boolean reserved = runIfReady(() -> {
+            admissionLock.lock();
+            try {
+                RequestInflight newRi = new RequestInflight(
+                        kvTokens, expectedKvTokens, priority, deadlineMs);
+                // A (re-)reserve puts the request back into the pre-queue state.
+                if (queuedPhase.remove(requestId)) {
+                    queuedPhaseCount.decrementAndGet();
+                }
+                RequestInflight prev = inflightRequests.put(requestId, newRi);
+                if (prev != null) {
+                    inflightKvReservedTotal.addAndGet(-prev.kvTokens());
+                    inflightExpectedKvReservedTotal.addAndGet(-prev.expectedKvTokens());
+                }
+                inflightKvReservedTotal.addAndGet(kvTokens);
+                inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
+                admissionVersion.incrementAndGet();
+            } finally {
+                admissionLock.unlock();
             }
-            RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
-            if (prev != null) {
-                // requestId already exists — subtract the old kvTokens before overwriting,
-                // otherwise the old value is silently lost and the counter stays inflated.
-                inflightKvReservedTotal.addAndGet(-prev.kvTokens());
-                inflightExpectedKvReservedTotal.addAndGet(-prev.expectedKvTokens());
-                inflightRequests.put(requestId, newRi);
-            }
-            inflightKvReservedTotal.addAndGet(kvTokens);
-            inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
-            admissionVersion.incrementAndGet();
-        } finally {
-            admissionLock.unlock();
+        });
+        if (!reserved) {
+            throw new IllegalStateException("Decode endpoint is not READY: " + getEndpointId());
         }
     }
 
@@ -186,25 +193,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority, long deadlineMs,
             long expectedAdmissionVersion) {
-        admissionLock.lock();
-        try {
-            if (admissionVersion.get() != expectedAdmissionVersion) {
-                return ReleaseReserveResult.VERSION_MISMATCH;
-            }
-            for (Long victimId : victimIds) {
-                RequestInflight victim = inflightRequests.get(victimId);
-                if (victim == null || victim.phase() != DecodeTaskPhase.RESERVED_NOT_ACCEPTED) {
-                    return ReleaseReserveResult.VICTIM_GONE;
+        return supplyIfReady(() -> {
+            admissionLock.lock();
+            try {
+                if (admissionVersion.get() != expectedAdmissionVersion) {
+                    return ReleaseReserveResult.VERSION_MISMATCH;
                 }
+                for (Long victimId : victimIds) {
+                    RequestInflight victim = inflightRequests.get(victimId);
+                    if (victim == null || victim.phase() != DecodeTaskPhase.RESERVED_NOT_ACCEPTED) {
+                        return ReleaseReserveResult.VICTIM_GONE;
+                    }
+                }
+                for (Long victimId : victimIds) {
+                    release(victimId);
+                }
+                reserve(incomingRequestId, kvTokens, expectedKvTokens, priority, deadlineMs);
+                return ReleaseReserveResult.SUCCESS;
+            } finally {
+                admissionLock.unlock();
             }
-            for (Long victimId : victimIds) {
-                release(victimId);
-            }
-            reserve(incomingRequestId, kvTokens, expectedKvTokens, priority, deadlineMs);
-            return ReleaseReserveResult.SUCCESS;
-        } finally {
-            admissionLock.unlock();
-        }
+        }, ReleaseReserveResult.VICTIM_GONE);
     }
 
     /**
@@ -249,22 +258,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
             List<Long> victimIds,
             long incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority, long deadlineMs) {
-        admissionLock.lock();
-        try {
-            List<Long> freed = new ArrayList<>(victimIds.size());
-            for (Long victimId : victimIds) {
-                if (releaseIfHeld(victimId)) {
-                    freed.add(victimId);
+        return supplyIfReady(() -> {
+            admissionLock.lock();
+            try {
+                List<Long> freed = new ArrayList<>(victimIds.size());
+                for (Long victimId : victimIds) {
+                    if (releaseIfHeld(victimId)) {
+                        freed.add(victimId);
+                    }
                 }
+                if (freed.size() < victimIds.size()) {
+                    return new PresenceEvictionOutcome(false, List.copyOf(freed));
+                }
+                reserve(incomingRequestId, kvTokens, expectedKvTokens, priority, deadlineMs);
+                return new PresenceEvictionOutcome(true, List.copyOf(freed));
+            } finally {
+                admissionLock.unlock();
             }
-            if (freed.size() < victimIds.size()) {
-                return new PresenceEvictionOutcome(false, List.copyOf(freed));
-            }
-            reserve(incomingRequestId, kvTokens, expectedKvTokens, priority, deadlineMs);
-            return new PresenceEvictionOutcome(true, List.copyOf(freed));
-        } finally {
-            admissionLock.unlock();
-        }
+        }, new PresenceEvictionOutcome(false, List.of()));
     }
 
     /**
@@ -338,15 +349,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public ReleaseReserveResult tryBeginAcceptedEviction(List<Long> reservedVictimIds,
                                                          List<Long> acceptedVictimIds,
                                                          long expectedAdmissionVersion) {
-        admissionLock.lock();
-        try {
-            if (admissionVersion.get() != expectedAdmissionVersion) {
-                return ReleaseReserveResult.VERSION_MISMATCH;
+        return supplyIfReady(() -> {
+            admissionLock.lock();
+            try {
+                if (admissionVersion.get() != expectedAdmissionVersion) {
+                    return ReleaseReserveResult.VERSION_MISMATCH;
+                }
+                return beginAcceptedEvictionValidated(reservedVictimIds, acceptedVictimIds);
+            } finally {
+                admissionLock.unlock();
             }
-            return beginAcceptedEvictionValidated(reservedVictimIds, acceptedVictimIds);
-        } finally {
-            admissionLock.unlock();
-        }
+        }, ReleaseReserveResult.VICTIM_GONE);
     }
 
     /**
@@ -361,12 +374,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public ReleaseReserveResult tryBeginAcceptedEvictionPresent(List<Long> reservedVictimIds,
                                                                 List<Long> acceptedVictimIds) {
-        admissionLock.lock();
-        try {
-            return beginAcceptedEvictionValidated(reservedVictimIds, acceptedVictimIds);
-        } finally {
-            admissionLock.unlock();
-        }
+        return supplyIfReady(() -> {
+            admissionLock.lock();
+            try {
+                return beginAcceptedEvictionValidated(reservedVictimIds, acceptedVictimIds);
+            } finally {
+                admissionLock.unlock();
+            }
+        }, ReleaseReserveResult.VICTIM_GONE);
     }
 
     /** Validate-first accepted-eviction begin; caller holds {@link #admissionLock}. */
@@ -434,8 +449,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
-        super.onWorkerStatusUpdate(ws, resp);
+    protected void handleWorkerStatusUpdate(WorkerStatusResponse resp) {
+        if (resp == null) {
+            return;
+        }
         calibrate(resp.getRunningTaskInfo(), resp.getFinishedTaskInfo());
     }
 
@@ -673,29 +690,31 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * @return number of entries evicted
      */
     public int evictExpiredRequests(long ttlMs) {
-        admissionLock.lock();
-        try {
-            int evicted = requestEvictor.evictExpired(ttlMs);
-            // Drop stale queued ids one-by-one so the O(1) counter stays in
-            // sync (PR-C) — evictExpired may have removed inflight entries.
-            java.util.Iterator<Long> queuedEvictIt = queuedPhase.iterator();
-            while (queuedEvictIt.hasNext()) {
-                Long requestId = queuedEvictIt.next();
-                if (!inflightRequests.containsKey(requestId)) {
-                    queuedEvictIt.remove();
-                    queuedPhaseCount.decrementAndGet();
+        return supplyIfReady(() -> {
+            admissionLock.lock();
+            try {
+                int evicted = requestEvictor.evictExpired(ttlMs);
+                // Drop stale queued ids one-by-one so the O(1) counter stays in
+                // sync (PR-C) — evictExpired may have removed inflight entries.
+                java.util.Iterator<Long> queuedEvictIt = queuedPhase.iterator();
+                while (queuedEvictIt.hasNext()) {
+                    Long requestId = queuedEvictIt.next();
+                    if (!inflightRequests.containsKey(requestId)) {
+                        queuedEvictIt.remove();
+                        queuedPhaseCount.decrementAndGet();
+                    }
                 }
+                long cutoff = System.currentTimeMillis() - ttlMs;
+                boolean trackedPurged = trackedConfirmed.values()
+                        .removeIf(task -> task.lastSeenMs() < cutoff);
+                if (evicted > 0 || trackedPurged) {
+                    admissionVersion.incrementAndGet();
+                }
+                return evicted;
+            } finally {
+                admissionLock.unlock();
             }
-            long cutoff = System.currentTimeMillis() - ttlMs;
-            boolean trackedPurged = trackedConfirmed.values()
-                    .removeIf(task -> task.lastSeenMs() < cutoff);
-            if (evicted > 0 || trackedPurged) {
-                admissionVersion.incrementAndGet();
-            }
-            return evicted;
-        } finally {
-            admissionLock.unlock();
-        }
+        }, 0);
     }
 
     public int getTotalLoad() {
@@ -741,16 +760,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * no reservation (legacy paths never call this).
      */
     public void markQueuedPhase(long requestId) {
-        admissionLock.lock();
-        try {
-            if (inflightRequests.containsKey(requestId)) {
-                if (queuedPhase.add(requestId)) {
-                    queuedPhaseCount.incrementAndGet();
+        runIfReady(() -> {
+            admissionLock.lock();
+            try {
+                if (inflightRequests.containsKey(requestId)) {
+                    if (queuedPhase.add(requestId)) {
+                        queuedPhaseCount.incrementAndGet();
+                    }
                 }
+            } finally {
+                admissionLock.unlock();
             }
-        } finally {
-            admissionLock.unlock();
-        }
+        });
     }
 
     /**
@@ -759,8 +780,33 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * calibrate confirms it. Idempotent.
      */
     public void markDispatchedPhase(long requestId) {
-        if (queuedPhase.remove(requestId)) {
-            queuedPhaseCount.decrementAndGet();
+        runIfReady(() -> {
+            admissionLock.lock();
+            try {
+                if (queuedPhase.remove(requestId)) {
+                    queuedPhaseCount.decrementAndGet();
+                }
+            } finally {
+                admissionLock.unlock();
+            }
+        });
+    }
+
+    @Override
+    void clearLocalStateForRetirement() {
+        admissionLock.lock();
+        try {
+            inflightRequests.clear();
+            trackedConfirmed.clear();
+            queuedPhase.clear();
+            inflightKvReservedTotal.set(0);
+            inflightExpectedKvReservedTotal.set(0);
+            queuedPhaseCount.set(0);
+            confirmedRunningCount = 0;
+            reportedKvAvailable.set(0);
+            admissionVersion.incrementAndGet();
+        } finally {
+            admissionLock.unlock();
         }
     }
 

@@ -235,8 +235,10 @@ class CostBasedPrefillMultiNodeSelectionTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put(ip + ":8080", w);
         PrefillEndpoint ep = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, ip + ":8080", w);
-        createdEndpoints.add(ep);
-        if (estimatedWaitMs > 0) {
+        if (ep != null) {
+            createdEndpoints.add(ep);
+        }
+        if (ep != null && estimatedWaitMs > 0) {
             ep.commitBatch(900_000L + ip.hashCode(), estimatedWaitMs, List.of());
         }
     }

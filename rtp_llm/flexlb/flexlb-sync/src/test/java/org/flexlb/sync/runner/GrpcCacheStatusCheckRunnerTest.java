@@ -10,7 +10,10 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
+
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -18,6 +21,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 class GrpcCacheStatusCheckRunnerTest {
@@ -38,6 +42,7 @@ class GrpcCacheStatusCheckRunnerTest {
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setIp("127.0.0.1");
         workerStatus.setPort(8080);
+        workerStatus.setAlive(true);
 
         EngineRpcService.CacheStatusPB cacheStatusPB = EngineRpcService.CacheStatusPB.newBuilder()
                 .setVersion(1)
@@ -62,5 +67,42 @@ class GrpcCacheStatusCheckRunnerTest {
 
         // Assert
         verify(engineGrpcService).getCacheStatusAsync(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
+    }
+
+    @Test
+    void delayed_cache_callback_cannot_update_replaced_generation() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus old = new WorkerStatus();
+        old.setIp("127.0.0.1");
+        old.setPort(8080);
+        old.setRole(RoleType.PREFILL);
+        old.setAlive(true);
+        WorkerStatus replacement = new WorkerStatus();
+        replacement.setIp("127.0.0.1");
+        replacement.setPort(8080);
+        replacement.setRole(RoleType.PREFILL);
+        replacement.setAlive(true);
+        ConcurrentHashMap<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
+        statuses.put(ipPort, old);
+        CompletableFuture<EngineRpcService.CacheStatusPB> delayed = new CompletableFuture<>();
+        when(engineGrpcService.getCacheStatusAsync(anyString(), anyInt(), any(WorkerStatus.class),
+                anyLong(), anyLong(), eq(RoleType.PREFILL))).thenReturn(delayed);
+        LongAdder syncCount = new LongAdder();
+        GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
+                "test-model", ipPort, "test-site", RoleType.PREFILL, old, statuses,
+                engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                20L, syncCount, 50L, Runnable::run);
+        runner.run();
+
+        statuses.put(ipPort, replacement);
+        delayed.complete(EngineRpcService.CacheStatusPB.newBuilder()
+                .setVersion(1)
+                .setAvailableKvCache(1000)
+                .setTotalKvCache(2000)
+                .setBlockSize(128)
+                .build());
+
+        assertNull(old.getCacheStatus());
+        verify(localKvCacheAwareManager, never()).updateEngineBlockCache(old);
     }
 }

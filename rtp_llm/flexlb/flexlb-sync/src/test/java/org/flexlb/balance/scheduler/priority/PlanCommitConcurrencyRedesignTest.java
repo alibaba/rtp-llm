@@ -129,6 +129,7 @@ class PlanCommitConcurrencyRedesignTest {
         prefillWs.setIp("10.0.0.1");
         prefillWs.setPort(8080);
         prefillWs.setGrpcPort(8081);
+        prefillWs.setAlive(true);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefillWs);
 
         decodeWs = new WorkerStatus();
@@ -137,6 +138,7 @@ class PlanCommitConcurrencyRedesignTest {
         decodeWs.setGrpcPort(8082);
         decodeWs.setAvailableKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(1_000_000L));
         decodeWs.setTotalKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(2_000_000L));
+        decodeWs.setAlive(true);
         endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);
     }
 
@@ -596,6 +598,7 @@ class PlanCommitConcurrencyRedesignTest {
         status.setDpRank(0);
         status.setGroup("g1");
         status.setRequestId(requestId);
+        status.setEndpointGeneration(1);
         return status;
     }
 }

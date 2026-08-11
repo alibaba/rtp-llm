@@ -12,9 +12,11 @@ import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 
 /**
  * Per-worker request batcher that owns the queue and lifecycle, delegating
@@ -54,6 +56,7 @@ public class WorkerBatcher {
             Comparator.comparingLong(BatchItem::sortKey);
 
     private final String key;
+    private final PrefillEndpoint owner;
     private final FlexlbConfig cfg;
     private final BatchDecisionHandler handler;
     private final boolean autoTpm;
@@ -79,6 +82,7 @@ public class WorkerBatcher {
     private final ReentrantLock queueLock = new ReentrantLock();
     private final Thread workerThread;
     private volatile boolean stopped;
+    private final AtomicBoolean shutdownHookInvoked = new AtomicBoolean(false);
     private final BatcherAlgorithm algorithm;
     private final BatcherContext ctx;
     private final PrefillQueueManager queueManager;
@@ -87,6 +91,7 @@ public class WorkerBatcher {
                          BatchDecisionHandler handler,
                          BatchSchedulerReporter reporter) {
         this.key = key;
+        this.owner = prefillEp;
         this.cfg = cfg;
         this.handler = handler;
         this.autoTpm = cfg.isAutoTpmEnabled();
@@ -117,6 +122,14 @@ public class WorkerBatcher {
     }
 
     public void offer(BatchItem item) {
+        if (!runWithOwnerReady(() -> offerWhileLeased(item))) {
+            handler.onOfferFailure(item,
+                    new IllegalStateException("FlexLB endpoint is not READY: "
+                            + (owner == null ? "unmanaged" : owner.getEndpointId())));
+        }
+    }
+
+    private void offerWhileLeased(BatchItem item) {
         if (stopped) {
             handler.onOfferFailure(item, new IllegalStateException("FlexLB batcher stopped"));
             return;
@@ -127,7 +140,9 @@ public class WorkerBatcher {
                     new IllegalStateException("FlexLB batcher queue full, maxSize=" + maxSize));
             return;
         }
-        enqueue(item);
+        if (!enqueue(item)) {
+            handler.onOfferFailure(item, new IllegalStateException("FlexLB batcher stopped"));
+        }
     }
 
     /**
@@ -140,31 +155,40 @@ public class WorkerBatcher {
      *         stopped or the queue is full (item not enqueued)
      */
     public boolean tryOffer(BatchItem item) {
+        return supplyWithOwnerReady(() -> tryOfferWhileLeased(item), false);
+    }
+
+    private boolean tryOfferWhileLeased(BatchItem item) {
         if (stopped) {
             return false;
         }
         if (!reserveQueueSlot(cfg.getFlexlbBatchQueueMaxSize())) {
             return false;
         }
-        enqueue(item);
-        return true;
+        return enqueue(item);
     }
 
-    private void enqueue(BatchItem item) {
+    private boolean enqueue(BatchItem item) {
+        queueLock.lock();
         try {
+            // Re-check under the same lock used by shutdownAndDrain(). An offer
+            // that observed stopped=false before retirement must not enqueue
+            // after the retirement drain has completed.
+            if (stopped) {
+                queueDepth.decrementAndGet();
+                return false;
+            }
             long sortKey = algorithm.computeSortKey(ctx, item);
             item.setSortKey(sortKey);
             algorithm.onOffer(ctx, item, System.currentTimeMillis());
-            queueLock.lock();
-            try {
-                queue.add(item);
-                queueVersion.incrementAndGet();
-            } finally {
-                queueLock.unlock();
-            }
+            queue.add(item);
+            queueVersion.incrementAndGet();
+            return true;
         } catch (RuntimeException | Error e) {
             queueDepth.decrementAndGet();
             throw e;
+        } finally {
+            queueLock.unlock();
         }
     }
 
@@ -191,15 +215,46 @@ public class WorkerBatcher {
     }
 
     public void shutdown() {
-        stopped = true;
-        workerThread.interrupt();
-        algorithm.onShutdown(ctx);
-        List<BatchItem> remaining = new ArrayList<>();
-        ctx.drainTo(remaining);
+        List<BatchItem> remaining = shutdownAndDrain();
         for (BatchItem item : remaining) {
             handler.onOfferFailure(item,
                     new CancellationException("FlexLB batcher stopped: " + key));
         }
+    }
+
+    /**
+     * Stop accepting work and wake the batching thread. This is intentionally
+     * separate from draining so endpoint retirement can first wait for its
+     * READY-operation barrier.
+     */
+    public void beginShutdown() {
+        stopped = true;
+        workerThread.interrupt();
+    }
+
+    /**
+     * Atomically stop and drain the queue without invoking scheduler callbacks.
+     * Registry retirement settles every drained item through the scheduler's
+     * single endpoint-retirement path, avoiding callback/retirement double
+     * completion.
+     */
+    public List<BatchItem> shutdownAndDrain() {
+        beginShutdown();
+        List<BatchItem> remaining = new ArrayList<>();
+        queueLock.lock();
+        try {
+            if (shutdownHookInvoked.compareAndSet(false, true)) {
+                algorithm.onShutdown(ctx);
+            }
+            int drained = queue.drainTo(remaining);
+            if (drained > 0) {
+                queueDepth.addAndGet(-drained);
+                queueVersion.incrementAndGet();
+            }
+        } finally {
+            queueLock.unlock();
+        }
+        return List.copyOf(remaining);
     }
 
     // ==================== Auto-TPM queue operations (called via PrefillQueueManager) ====================
@@ -230,6 +285,12 @@ public class WorkerBatcher {
      * failure so the caller can map them to different outcomes.
      */
     public OfferAtVersionResult offerAtVersion(BatchItem item, long expectedVersion) {
+        return supplyWithOwnerReady(
+                () -> offerAtVersionWhileLeased(item, expectedVersion),
+                OfferAtVersionResult.OFFER_FAILED);
+    }
+
+    private OfferAtVersionResult offerAtVersionWhileLeased(BatchItem item, long expectedVersion) {
         if (stopped) {
             return OfferAtVersionResult.OFFER_FAILED;
         }
@@ -238,8 +299,9 @@ public class WorkerBatcher {
             if (queueVersion.get() != expectedVersion) {
                 return OfferAtVersionResult.VERSION_MISMATCH;
             }
-            // Re-entrant: tryOffer -> enqueue re-acquires queueLock safely.
-            return tryOffer(item) ? OfferAtVersionResult.SUCCESS : OfferAtVersionResult.OFFER_FAILED;
+            // Re-entrant queue lock and endpoint operation lease.
+            return tryOfferWhileLeased(item)
+                    ? OfferAtVersionResult.SUCCESS : OfferAtVersionResult.OFFER_FAILED;
         } finally {
             queueLock.unlock();
         }
@@ -282,6 +344,14 @@ public class WorkerBatcher {
      */
     PrefillQueueManager.ReplaceOutcome tryReplaceVictimsWithIncoming(
             List<Long> victimIds, BatchItem incoming, long expectedVersion) {
+        return supplyWithOwnerReady(
+                () -> tryReplaceVictimsWithIncomingWhileLeased(
+                        victimIds, incoming, expectedVersion),
+                PrefillQueueManager.ReplaceOutcome.versionMismatch());
+    }
+
+    private PrefillQueueManager.ReplaceOutcome tryReplaceVictimsWithIncomingWhileLeased(
+            List<Long> victimIds, BatchItem incoming, long expectedVersion) {
         queueLock.lock();
         try {
             if (stopped || queueVersion.get() != expectedVersion) {
@@ -297,7 +367,7 @@ public class WorkerBatcher {
                 }
                 removed.add(victim);
             }
-            if (!tryOffer(incoming)) {
+            if (!tryOfferWhileLeased(incoming)) {
                 return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
             }
             return PrefillQueueManager.ReplaceOutcome.success(removed);
@@ -359,6 +429,13 @@ public class WorkerBatcher {
      */
     PrefillQueueManager.ReplaceOutcome tryReplaceVictimsPresent(
             List<Long> victimIds, BatchItem incoming) {
+        return supplyWithOwnerReady(
+                () -> tryReplaceVictimsPresentWhileLeased(victimIds, incoming),
+                PrefillQueueManager.ReplaceOutcome.victimGone(List.copyOf(victimIds)));
+    }
+
+    private PrefillQueueManager.ReplaceOutcome tryReplaceVictimsPresentWhileLeased(
+            List<Long> victimIds, BatchItem incoming) {
         queueLock.lock();
         try {
             if (stopped) {
@@ -387,7 +464,7 @@ public class WorkerBatcher {
                 }
                 removed.add(victim);
             }
-            if (!tryOffer(incoming)) {
+            if (!tryOfferWhileLeased(incoming)) {
                 return PrefillQueueManager.ReplaceOutcome.partialFailure(removed);
             }
             return PrefillQueueManager.ReplaceOutcome.success(removed);
@@ -442,5 +519,23 @@ public class WorkerBatcher {
                 return true;
             }
         }
+    }
+
+    /**
+     * A WorkerBatcher created by a real PrefillEndpoint is generation-gated.
+     * The null-owner form is retained as an explicitly unmanaged component for
+     * queue/algorithm unit tests; production construction always supplies an
+     * owner through {@link PrefillEndpoint}.
+     */
+    private boolean runWithOwnerReady(Runnable operation) {
+        if (owner == null) {
+            operation.run();
+            return true;
+        }
+        return owner.runIfReady(operation);
+    }
+
+    private <T> T supplyWithOwnerReady(Supplier<T> operation, T unavailableValue) {
+        return owner == null ? operation.get() : owner.supplyIfReady(operation, unavailableValue);
     }
 }

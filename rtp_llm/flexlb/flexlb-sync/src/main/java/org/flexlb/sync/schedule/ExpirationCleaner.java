@@ -2,8 +2,10 @@ package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointRetireCause;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerLifecycleState;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -99,14 +101,67 @@ public class ExpirationCleaner {
             Map.Entry<String, WorkerStatus> item = it.next();
             WorkerStatus workerStatus = item.getValue();
 
-            long expirationTime = workerStatus.getStatusLastUpdateTime().get() + workerTimeoutUs;
             long currentTime = System.nanoTime() / 1000;
-            if (currentTime > expirationTime) {
-                logger.info("Removing expired worker: {}, role: {}", item.getKey(), role);
-                workerStatus.setAlive(false);
-                workerStatusMap.remove(item.getKey(), workerStatus);
-                endpointRegistry.remove(role, item.getKey(), workerStatus);
+            WorkerLifecycleState lifecycle = workerStatus.getLifecycleState();
+            long freshnessTime;
+            if (lifecycle == WorkerLifecycleState.READY) {
+                freshnessTime = workerStatus.getStatusLastUpdateTime().get();
+            } else if (lifecycle == WorkerLifecycleState.PROBING) {
+                // A discovered-but-not-yet-healthy worker has no successful status
+                // heartbeat by definition. Keep it while discovery remains fresh.
+                freshnessTime = workerStatus.getDiscoveryLastSeenTime().get();
+            } else {
+                continue;
+            }
+
+            if (freshnessTime > 0L && currentTime > freshnessTime + workerTimeoutUs) {
+                retireExpiredGeneration(workerStatusMap, role, item.getKey(), workerStatus);
             }
         }
+    }
+
+    private void retireExpiredGeneration(Map<String, WorkerStatus> workerStatusMap,
+                                         RoleType role,
+                                         String ipPort,
+                                         WorkerStatus expected) {
+        WorkerLifecycleState expiredState;
+        expected.lock.lock();
+        try {
+            if (workerStatusMap.get(ipPort) != expected) {
+                return;
+            }
+            expiredState = expected.getLifecycleState();
+            long freshnessTime;
+            if (expiredState == WorkerLifecycleState.READY) {
+                freshnessTime = expected.getStatusLastUpdateTime().get();
+            } else if (expiredState == WorkerLifecycleState.PROBING) {
+                freshnessTime = expected.getDiscoveryLastSeenTime().get();
+            } else {
+                return;
+            }
+            long currentTime = System.nanoTime() / 1000;
+            if (freshnessTime <= 0L
+                    || currentTime <= freshnessTime + workerTimeoutUs
+                    || !expected.tryBeginRetirement()) {
+                return;
+            }
+        } finally {
+            expected.lock.unlock();
+        }
+
+        logger.info("Retiring expired worker generation: {}, role: {}, previousState: {}",
+                ipPort, role, expiredState);
+        boolean endpointRemoved = false;
+        try {
+            EndpointRetireCause cause = expiredState == WorkerLifecycleState.PROBING
+                    ? EndpointRetireCause.DISCOVERY_REMOVED
+                    : EndpointRetireCause.STATUS_EXPIRED;
+            endpointRemoved = endpointRegistry.retire(role, ipPort, expected, cause);
+        } finally {
+            workerStatusMap.remove(ipPort, expected);
+            expected.markClosed();
+        }
+        logger.info("Retired expired worker generation: {}, role: {}, endpointRemoved: {}",
+                ipPort, role, endpointRemoved);
     }
 }

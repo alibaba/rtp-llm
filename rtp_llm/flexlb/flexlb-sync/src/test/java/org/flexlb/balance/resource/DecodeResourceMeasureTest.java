@@ -5,6 +5,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -95,6 +96,10 @@ class DecodeResourceMeasureTest {
 
     private WorkerStatus createAliveWorkerStatus() {
         WorkerStatus worker = new WorkerStatus();
+        worker.setIp("127.0.0.1");
+        worker.setPort(8080);
+        worker.setGrpcPort(8081);
+        worker.setRole(RoleType.DECODE);
         worker.setAlive(true);
         worker.getTotalKvCacheTokens().set(100);
         worker.getAvailableKvCacheTokens().set(100);

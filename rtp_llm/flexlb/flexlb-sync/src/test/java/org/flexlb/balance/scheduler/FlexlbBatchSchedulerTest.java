@@ -1,6 +1,14 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointId;
+import org.flexlb.balance.endpoint.EndpointOperationLease;
+import org.flexlb.balance.endpoint.EndpointRetireCause;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.priority.AdmissionLease;
+import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -28,10 +36,15 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -90,12 +103,17 @@ class FlexlbBatchSchedulerTest {
         ws.setIp("10.0.0.1");
         ws.setPort(8080);
         ws.setGrpcPort(8081);
+        ws.setRole(RoleType.PREFILL);
+        ws.tryMarkReady();
         ServerStatus prefill = new ServerStatus();
         prefill.setServerIp("10.0.0.1");
         prefill.setHttpPort(8080);
         prefill.setGrpcPort(8081);
         prefill.setRole(RoleType.PREFILL);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
+
+        WorkerStatus decodeStatus = readyStatus(RoleType.DECODE, "10.0.0.2", 8081, 8082);
+        endpointRegistry.ensureEndpoint(RoleType.DECODE, decodeStatus.getIpPort(), decodeStatus);
     }
 
     @AfterEach
@@ -314,6 +332,338 @@ class FlexlbBatchSchedulerTest {
         CompletableFuture<Response> second = scheduler.submit(context(52));
         Response response = second.get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
+    }
+
+    @Test
+    void retiring_prefill_generation_settles_queued_request_and_allows_new_generation()
+            throws Exception {
+        String ipPort = "10.0.0.1:8080";
+        PrefillEndpoint oldEndpoint = endpointRegistry.getPrefill(ipPort);
+        WorkerStatus oldStatus = oldEndpoint.getStatus();
+
+        CompletableFuture<Response> queued = scheduler.submit(context(53));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (oldEndpoint.getBatcher().queueSize() == 0 && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertEquals(1, oldEndpoint.getBatcher().queueSize());
+        assertEquals(1, scheduler.getInflightSize());
+
+        assertTrue(endpointRegistry.retire(RoleType.PREFILL, ipPort, oldStatus,
+                EndpointRetireCause.HEALTH_CHECK_FAILED));
+
+        Response retired = queued.get(1, TimeUnit.SECONDS);
+        assertFalse(retired.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), retired.getCode());
+        assertEquals(0, oldEndpoint.getBatcher().queueSize());
+        assertEquals(0, oldEndpoint.getInflightBatchCount());
+        assertEquals(0, scheduler.getInflightSize());
+
+        WorkerStatus replacement = readyStatus(RoleType.PREFILL, "10.0.0.1", 8080, 8081);
+        WorkerEndpoint newEndpoint = endpointRegistry.ensureEndpoint(
+                RoleType.PREFILL, ipPort, replacement);
+        assertNotNull(newEndpoint);
+        assertTrue(newEndpoint.getEndpointId().generation()
+                > oldEndpoint.getEndpointId().generation());
+
+        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
+            BalanceContext ctx = inv.getArgument(0);
+            Response route = successRoute(ctx.getRequestId());
+            FlexlbBatchScheduler.findServer(route, RoleType.PREFILL)
+                    .setEndpointGeneration(newEndpoint.getEndpointId().generation());
+            return route;
+        });
+
+        CompletableFuture<Response> first = scheduler.submit(context(54));
+        CompletableFuture<Response> second = scheduler.submit(context(55));
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
+    }
+
+    @Test
+    void stale_route_generation_is_never_rebound_to_replacement_endpoint() throws Exception {
+        String ipPort = "10.0.0.1:8080";
+        PrefillEndpoint oldEndpoint = endpointRegistry.getPrefill(ipPort);
+        WorkerStatus oldStatus = oldEndpoint.getStatus();
+        Response staleRoute = successRoute(59);
+        FlexlbBatchScheduler.findServer(staleRoute, RoleType.PREFILL)
+                .setEndpointGeneration(oldEndpoint.getEndpointId().generation());
+
+        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
+            assertTrue(endpointRegistry.retire(RoleType.PREFILL, ipPort, oldStatus,
+                    EndpointRetireCause.HEALTH_CHECK_FAILED));
+            WorkerEndpoint replacement = endpointRegistry.ensureEndpoint(
+                    RoleType.PREFILL, ipPort,
+                    readyStatus(RoleType.PREFILL, "10.0.0.1", 8080, 8081));
+            assertNotNull(replacement);
+            assertTrue(replacement.getEndpointId().generation()
+                    > oldEndpoint.getEndpointId().generation());
+            return staleRoute;
+        });
+
+        Response response = scheduler.submit(context(59)).get(1, TimeUnit.SECONDS);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
+        PrefillEndpoint replacement = endpointRegistry.getPrefill(ipPort);
+        assertEquals(0, replacement.getBatcher().queueSize());
+        assertTrue(sentBatches.isEmpty());
+    }
+
+    @Test
+    void route_during_decode_retirement_barrier_is_not_admitted_without_its_generation()
+            throws Exception {
+        DecodeEndpoint decode = endpointRegistry.getDecode("10.0.0.2:8081");
+        WorkerStatus decodeStatus = decode.getStatus();
+        EndpointOperationLease lease = EndpointOperationLease.acquire(decode).orElseThrow();
+        CompletableFuture<Boolean> retirement = CompletableFuture.supplyAsync(() ->
+                endpointRegistry.retire(RoleType.DECODE, decodeStatus.getIpPort(), decodeStatus,
+                        EndpointRetireCause.HEALTH_CHECK_FAILED));
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (endpointRegistry.getDecode(decodeStatus.getIpPort()) != null
+                && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertNull(endpointRegistry.getDecode(decodeStatus.getIpPort()));
+
+        Response response = scheduler.submit(context(60)).get(1, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(0, endpointRegistry.getPrefill("10.0.0.1:8080").getBatcher().queueSize());
+        assertTrue(sentBatches.isEmpty());
+
+        lease.close();
+        assertTrue(retirement.get(1, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void legacy_handoff_is_atomic_with_decode_retirement() throws Exception {
+        long requestId = 61L;
+        DecodeEndpoint decode = endpointRegistry.getDecode("10.0.0.2:8081");
+        WorkerStatus decodeStatus = decode.getStatus();
+        decode.reserve(requestId, 10L, 20L);
+        BlockingRouteSubmittedContext ctx = blockingContext(requestId);
+
+        CompletableFuture<CompletableFuture<Response>> submission =
+                CompletableFuture.supplyAsync(() -> scheduler.submit(ctx));
+        assertTrue(ctx.handoffReached.await(1, TimeUnit.SECONDS));
+        assertEquals(1, scheduler.getInflightSize());
+
+        CompletableFuture<Boolean> retirement = CompletableFuture.supplyAsync(() ->
+                endpointRegistry.retire(RoleType.DECODE, decodeStatus.getIpPort(), decodeStatus,
+                        EndpointRetireCause.HEALTH_CHECK_FAILED));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (endpointRegistry.getDecode(decodeStatus.getIpPort()) != null
+                && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertNull(endpointRegistry.getDecode(decodeStatus.getIpPort()));
+        assertFalse(retirement.isDone(),
+                "retirement must wait for the route-to-batcher generation lease");
+
+        ctx.releaseHandoff.countDown();
+        CompletableFuture<Response> scheduled = submission.get(1, TimeUnit.SECONDS);
+        assertTrue(retirement.get(1, TimeUnit.SECONDS));
+
+        Response retired = scheduled.get(1, TimeUnit.SECONDS);
+        assertFalse(retired.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), retired.getCode());
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, decode.getInflightCount());
+        assertEquals(0,
+                endpointRegistry.getPrefill("10.0.0.1:8080").getBatcher().queueSize());
+        assertTrue(sentBatches.isEmpty());
+    }
+
+    @Test
+    void retiring_decode_generation_removes_request_from_counterpart_prefill_queue()
+            throws Exception {
+        DecodeEndpoint decode = endpointRegistry.getDecode("10.0.0.2:8081");
+        WorkerStatus decodeStatus = decode.getStatus();
+        decode.reserve(58L, 10L, 20L);
+
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        CompletableFuture<Response> queued = scheduler.submit(context(58));
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (prefill.getBatcher().queueSize() == 0 && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertEquals(1, prefill.getBatcher().queueSize());
+        assertEquals(1, scheduler.getInflightSize());
+        assertEquals(1, decode.getInflightCount());
+
+        assertTrue(endpointRegistry.retire(RoleType.DECODE, decodeStatus.getIpPort(), decodeStatus,
+                EndpointRetireCause.HEALTH_CHECK_FAILED));
+
+        Response retired = queued.get(1, TimeUnit.SECONDS);
+        assertFalse(retired.isSuccess());
+        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), retired.getCode());
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, decode.getInflightCount());
+        assertEquals(0, prefill.getBatcher().queueSize());
+        assertEquals(0, prefill.getInflightBatchCount());
+    }
+
+    @Test
+    void retiring_decode_generation_settles_dispatched_scheduler_and_prefill_state()
+            throws Exception {
+        DecodeEndpoint decode = endpointRegistry.getDecode("10.0.0.2:8081");
+        WorkerStatus decodeStatus = decode.getStatus();
+        decode.reserve(56L, 10L, 20L);
+        decode.reserve(57L, 10L, 20L);
+
+        CompletableFuture<Response> first = scheduler.submit(context(56));
+        CompletableFuture<Response> second = scheduler.submit(context(57));
+        assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
+        assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
+        assertEquals(2, scheduler.getInflightSize());
+        assertEquals(2, decode.getInflightCount());
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        assertEquals(1, prefill.getInflightBatchCount());
+
+        assertTrue(endpointRegistry.retire(RoleType.DECODE, decodeStatus.getIpPort(), decodeStatus,
+                EndpointRetireCause.HEALTH_CHECK_FAILED));
+
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, decode.getInflightCount());
+        assertEquals(0, decode.getTotalLoad());
+        assertEquals(0, prefill.getInflightBatchCount());
+    }
+
+    @Test
+    void retirement_settles_other_entries_when_one_entry_cleanup_fails_then_retries() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        String ipPort = "10.0.0.1:8080";
+        PrefillEndpoint original = endpointRegistry.getPrefill(ipPort);
+        FailOnceRepackPrefillEndpoint failing = new FailOnceRepackPrefillEndpoint(
+                new EndpointId(RoleType.PREFILL, ipPort, 1L), original.getStatus(),
+                config, scheduler, reporter);
+        original.close();
+        endpointRegistry.getPrefillEndpoints().put(ipPort, failing);
+
+        Response accepted = scheduler.submit(context(59)).get(2, TimeUnit.SECONDS);
+        assertTrue(accepted.isSuccess());
+        assertEquals(1, scheduler.getInflightSize());
+
+        assertThrows(IllegalStateException.class, () -> scheduler.retireEndpoint(
+                failing, EndpointRetireCause.HEALTH_CHECK_FAILED));
+        // No terminal/tombstone is published until every cleanup step has
+        // succeeded, leaving this item available for the registry retry pass.
+        assertEquals(1, scheduler.getInflightSize());
+
+        failing.allowRepack();
+        assertEquals(1, scheduler.retireEndpoint(failing, EndpointRetireCause.HEALTH_CHECK_FAILED));
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(RequestLifecycleState.FAILED, scheduler.getRequestState(59L, 0).state());
+    }
+
+    @Test
+    void retirement_retries_decode_release_when_first_rollback_throws() throws Exception {
+        config.setFlexlbBatchSizeMax(1);
+        String decodeIpPort = "10.0.0.2:8081";
+        WorkerStatus status = readyStatus(RoleType.DECODE, "10.0.0.2", 8081, 8082);
+        FailOnceReleaseDecodeEndpoint failing = new FailOnceReleaseDecodeEndpoint(
+                new EndpointId(RoleType.DECODE, decodeIpPort, 1L), status);
+        endpointRegistry.getDecode(decodeIpPort).close();
+        endpointRegistry.getDecodeEndpoints().put(decodeIpPort, failing);
+        failing.reserve(63L, 10L, 20L);
+
+        assertTrue(scheduler.submit(context(63)).get(2, TimeUnit.SECONDS).isSuccess());
+        assertEquals(1, scheduler.getInflightSize());
+        assertThrows(IllegalStateException.class, () -> scheduler.retireEndpoint(
+                failing, EndpointRetireCause.HEALTH_CHECK_FAILED));
+        assertEquals(1, scheduler.getInflightSize());
+        assertEquals(1, failing.getInflightCount());
+
+        failing.allowRelease();
+        assertEquals(1, scheduler.retireEndpoint(failing, EndpointRetireCause.HEALTH_CHECK_FAILED));
+        assertEquals(0, scheduler.getInflightSize());
+        assertEquals(0, failing.getInflightCount());
+        assertEquals(RequestLifecycleState.FAILED, scheduler.getRequestState(63L, 0).state());
+    }
+
+    @Test
+    void decode_retirement_closes_handed_over_admission_lease_without_timeout_cancel() {
+        Response route = successRoute(64);
+        BatchItem item = new BatchItem(context(64), new CompletableFuture<>(), route,
+                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
+                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                endpointRegistry.getPrefill("10.0.0.1:8080"),
+                endpointRegistry.getDecode("10.0.0.2:8081"), System.currentTimeMillis());
+        assertTrue(scheduler.registerInflight(item));
+        AtomicInteger activeLeaseCount = new AtomicInteger(1);
+        AtomicInteger closeCallbacks = new AtomicInteger();
+        InflightRegistrar leaseRegistrar = mock(InflightRegistrar.class);
+        AdmissionLease lease = new AdmissionLease(item, item.decodeEp(),
+                item.prefillEp().getBatcher().queueManager(), leaseRegistrar,
+                10_000L, () -> {
+                    closeCallbacks.incrementAndGet();
+                    activeLeaseCount.decrementAndGet();
+                });
+        assertTrue(scheduler.bindAdmissionLease(item, lease));
+
+        // Model the post-ACK state directly: the test's purpose is the
+        // scheduler-owned lease handoff during endpoint retirement.
+        lease.handoverToEngine();
+        assertFalse(lease.isClosed());
+        assertTrue(lease.hasSoftTimeoutRegistration());
+
+        assertEquals(1, scheduler.retireEndpoint(item.decodeEp(),
+                EndpointRetireCause.HEALTH_CHECK_FAILED));
+        assertTrue(lease.isClosed());
+        assertFalse(lease.hasSoftTimeoutRegistration());
+        assertEquals(0, activeLeaseCount.get());
+        assertEquals(1, closeCallbacks.get());
+        verify(leaseRegistrar, never()).finishYieldedById(anyLong(), anyString());
+
+        assertEquals(0, scheduler.retireEndpoint(item.decodeEp(),
+                EndpointRetireCause.HEALTH_CHECK_FAILED));
+        assertEquals(1, closeCallbacks.get());
+    }
+
+    private static final class FailOnceRepackPrefillEndpoint extends PrefillEndpoint {
+        private final AtomicBoolean failRepack = new AtomicBoolean(true);
+
+        private FailOnceRepackPrefillEndpoint(EndpointId endpointId,
+                                              WorkerStatus status,
+                                              FlexlbConfig config,
+                                              BatchDecisionHandler handler,
+                                              BatchSchedulerReporter reporter) {
+            super(endpointId, status, config, handler, reporter);
+        }
+
+        @Override
+        public void repackBatch(long batchId, Set<Long> failedRequestIds) {
+            if (failRepack.compareAndSet(true, false)) {
+                throw new IllegalStateException("injected prefill repack failure");
+            }
+            super.repackBatch(batchId, failedRequestIds);
+        }
+
+        private void allowRepack() {
+            failRepack.set(false);
+        }
+    }
+
+    private static final class FailOnceReleaseDecodeEndpoint extends DecodeEndpoint {
+        private final AtomicBoolean failRelease = new AtomicBoolean(true);
+
+        private FailOnceReleaseDecodeEndpoint(EndpointId endpointId, WorkerStatus status) {
+            super(endpointId, status);
+        }
+
+        @Override
+        public void release(long requestId) {
+            if (failRelease.compareAndSet(true, false)) {
+                throw new IllegalStateException("injected decode release failure");
+            }
+            super.release(requestId);
+        }
+
+        private void allowRelease() {
+            failRelease.set(false);
+        }
     }
 
     // ============ onOfferFailure error-code mapping (task10 P1-1) ============
@@ -545,6 +895,40 @@ class FlexlbBatchSchedulerTest {
         return ctx;
     }
 
+    private static BlockingRouteSubmittedContext blockingContext(long requestId) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(128);
+        request.setMaxNewTokens(8);
+        request.setNumBeams(1);
+        request.setModel("test-model");
+
+        BlockingRouteSubmittedContext ctx = new BlockingRouteSubmittedContext();
+        ctx.setRequest(request);
+        ctx.setConfig(new FlexlbConfig());
+        ctx.setGenerateInputPbBytes(generateInputBytes(requestId));
+        return ctx;
+    }
+
+    private static final class BlockingRouteSubmittedContext extends BalanceContext {
+        private final CountDownLatch handoffReached = new CountDownLatch(1);
+        private final CountDownLatch releaseHandoff = new CountDownLatch(1);
+
+        @Override
+        public void setRouteSubmittedNanos(long routeSubmittedNanos) {
+            super.setRouteSubmittedNanos(routeSubmittedNanos);
+            handoffReached.countDown();
+            try {
+                if (!releaseHandoff.await(2, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("timed out waiting to release legacy handoff");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("legacy handoff interrupted", e);
+            }
+        }
+    }
+
     private static BalanceContext contextWithSeqLen(long requestId, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
@@ -622,6 +1006,19 @@ class FlexlbBatchSchedulerTest {
         return input.toByteArray();
     }
 
+    private static WorkerStatus readyStatus(RoleType role,
+                                            String ip,
+                                            int httpPort,
+                                            int grpcPort) {
+        WorkerStatus status = new WorkerStatus();
+        status.setRole(role);
+        status.setIp(ip);
+        status.setPort(httpPort);
+        status.setGrpcPort(grpcPort);
+        status.tryMarkReady();
+        return status;
+    }
+
     private static Response successRoute(long requestId) {
         return successRouteWithPrefillDp(requestId, 0);
     }
@@ -655,6 +1052,8 @@ class FlexlbBatchSchedulerTest {
         status.setDpRank(dpRank);
         status.setGroup("g1");
         status.setRequestId(requestId);
+        // The fixture endpoints are first-generation registry publications.
+        status.setEndpointGeneration(1);
         return status;
     }
 }

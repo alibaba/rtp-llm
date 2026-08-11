@@ -376,6 +376,7 @@ class PriorityEvictionSchedulerTest {
         status.setDpRank(0);
         status.setGroup("g1");
         status.setRequestId(requestId);
+        status.setEndpointGeneration(1);
         return status;
     }
 }

@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -295,7 +296,7 @@ class PrefillEndpointTest {
     // ---- WorkerEndpoint inherited behavior ----
 
     @Test
-    void onWorkerStatusUpdateUpdatesAliveStatus() {
+    void onWorkerStatusUpdateRejectsForeignStatusGeneration() {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         WorkerStatus status = new WorkerStatus();
@@ -303,9 +304,9 @@ class PrefillEndpointTest {
         status.setPort(8080);
         status.setAlive(true);
 
-        endpoint.onWorkerStatusUpdate(status, response);
+        assertFalse(endpoint.tryOnWorkerStatusUpdate(status, response));
 
-        assertTrue(endpoint.getStatus().isAlive());
+        assertFalse(endpoint.getStatus().isAlive());
     }
 
     // ---- close ----

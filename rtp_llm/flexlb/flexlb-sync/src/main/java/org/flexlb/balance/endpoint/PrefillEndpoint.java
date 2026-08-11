@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
 
 public class PrefillEndpoint extends WorkerEndpoint {
@@ -34,6 +35,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final PrefillTimePredictor predictor;
     private final ConcurrentHashMap<Long, BatchInflight> inflightBatches = new ConcurrentHashMap<>();
     private final AtomicInteger inflightRequestCount = new AtomicInteger(0);
+    private final ReentrantLock inflightLock = new ReentrantLock();
     private final WorkerBatcher batcher;
     private final InflightEvictor<Long, BatchInflight> batchEvictor;
     private final BatchSchedulerReporter reporter;
@@ -48,11 +50,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private static final long WAIT_TIME_CACHE_TTL_MS = 2;
     private volatile long cachedWaitTimeMs = 0;
     private volatile long cachedWaitTimeExpireAtMs = 0;
+    private volatile int drainedRequestCount;
 
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            BatchDecisionHandler handler,
                            BatchSchedulerReporter reporter) {
-        super(status);
+        this(new EndpointId(RoleType.PREFILL, status.getIpPort(), 0),
+                status, config, handler, reporter);
+    }
+
+    public PrefillEndpoint(EndpointId endpointId, WorkerStatus status, FlexlbConfig config,
+                           BatchDecisionHandler handler,
+                           BatchSchedulerReporter reporter) {
+        super(endpointId, status);
         this.reporter = reporter;
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler, reporter);
@@ -73,12 +83,33 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     @Override
-    public void close() {
+    void signalRetirement() {
+        batcher.beginShutdown();
+    }
+
+    @Override
+    List<BatchItem> drainForRetirement() {
+        List<BatchItem> drained = batcher.shutdownAndDrain();
+        drainedRequestCount = drained.size();
+        return drained;
+    }
+
+    @Override
+    void clearLocalStateForRetirement() {
+        inflightLock.lock();
         try {
-            batcher.shutdown();
+            inflightBatches.clear();
+            inflightRequestCount.set(0);
+            engineWaitingQueryLen = 0;
+            cachedWaitTimeMs = 0;
+            cachedWaitTimeExpireAtMs = 0;
         } finally {
-            super.close();
+            inflightLock.unlock();
         }
+    }
+
+    int getDrainedRequestCountForTest() {
+        return drainedRequestCount;
     }
 
     public long batcherWaitMs() {
@@ -101,23 +132,35 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
-        BatchInflight newBatch = new BatchInflight(predictMs, requests);
-        BatchInflight prev = inflightBatches.putIfAbsent(batchId, newBatch);
-        if (prev != null) {
-            // batchId already exists — subtract the old request count before overwriting,
-            // otherwise the old value is silently lost and the counter stays inflated.
-            inflightRequestCount.addAndGet(-prev.requests().size());
-            inflightBatches.put(batchId, newBatch);
+        boolean committed = runIfReady(() -> {
+            inflightLock.lock();
+            try {
+                BatchInflight newBatch = new BatchInflight(predictMs, requests);
+                BatchInflight prev = inflightBatches.put(batchId, newBatch);
+                if (prev != null) {
+                    inflightRequestCount.addAndGet(-prev.requests().size());
+                }
+                inflightRequestCount.addAndGet(requests.size());
+                cachedWaitTimeExpireAtMs = 0;
+            } finally {
+                inflightLock.unlock();
+            }
+        });
+        if (!committed) {
+            throw new IllegalStateException("Prefill endpoint is not READY: " + getEndpointId());
         }
-        inflightRequestCount.addAndGet(requests.size());
-        cachedWaitTimeExpireAtMs = 0;
     }
 
     public void releaseBatch(long batchId) {
-        BatchInflight removed = inflightBatches.remove(batchId);
-        if (removed != null) {
-            inflightRequestCount.addAndGet(-removed.requests().size());
-            cachedWaitTimeExpireAtMs = 0;
+        inflightLock.lock();
+        try {
+            BatchInflight removed = inflightBatches.remove(batchId);
+            if (removed != null) {
+                inflightRequestCount.addAndGet(-removed.requests().size());
+                cachedWaitTimeExpireAtMs = 0;
+            }
+        } finally {
+            inflightLock.unlock();
         }
     }
 
@@ -126,28 +169,40 @@ public class PrefillEndpoint extends WorkerEndpoint {
      *
      */
     public void repackBatch(long batchId, Set<Long> failedRequestIds) {
-        inflightBatches.computeIfPresent(batchId, (id, old) -> {
-            List<BatchItem> survivors = old.requests().stream()
-                    .filter(r -> !failedRequestIds.contains(r.requestId()))
-                    .toList();
-            if (survivors.isEmpty()) {
-                inflightRequestCount.addAndGet(-old.requests().size());
+        inflightLock.lock();
+        try {
+            inflightBatches.computeIfPresent(batchId, (id, old) -> {
+                List<BatchItem> survivors = old.requests().stream()
+                        .filter(r -> !failedRequestIds.contains(r.requestId()))
+                        .toList();
+                if (survivors.isEmpty()) {
+                    inflightRequestCount.addAndGet(-old.requests().size());
+                    cachedWaitTimeExpireAtMs = 0;
+                    return null;
+                }
+                long newPredMs = (long) predictor.predictBatchMs(survivors);
+                BatchInflight repacked = old.repack(newPredMs, survivors);
+                inflightRequestCount.addAndGet(-(old.requests().size() - survivors.size()));
                 cachedWaitTimeExpireAtMs = 0;
-                return null; // removes entry from map
-            }
-            long newPredMs = (long) predictor.predictBatchMs(survivors);
-            BatchInflight repacked = old.repack(newPredMs, survivors);
-            inflightRequestCount.addAndGet(-(old.requests().size() - survivors.size()));
-            cachedWaitTimeExpireAtMs = 0;
-            return repacked;
-        });
+                return repacked;
+            });
+        } finally {
+            inflightLock.unlock();
+        }
     }
 
     @Override
-    public void onWorkerStatusUpdate(WorkerStatus ws, WorkerStatusResponse resp) {
-        super.onWorkerStatusUpdate(ws, resp);
+    protected void handleWorkerStatusUpdate(WorkerStatusResponse resp) {
+        if (resp == null) {
+            return;
+        }
         engineWaitingQueryLen = resp.getWaitingQueryLen();
-        calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
+        inflightLock.lock();
+        try {
+            calibrate(resp.getFinishedTaskInfo(), resp.getRunningTaskInfo());
+        } finally {
+            inflightLock.unlock();
+        }
     }
 
     /**
@@ -341,7 +396,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * @return number of batches evicted
      */
     public int evictExpiredBatches(long ttlMs) {
-        return batchEvictor.evictExpired(ttlMs);
+        return supplyIfReady(() -> {
+            inflightLock.lock();
+            try {
+                return batchEvictor.evictExpired(ttlMs);
+            } finally {
+                inflightLock.unlock();
+            }
+        }, 0);
     }
 
     @Override

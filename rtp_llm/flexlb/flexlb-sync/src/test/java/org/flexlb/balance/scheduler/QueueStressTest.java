@@ -1,7 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -24,7 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -239,20 +236,13 @@ class QueueStressTest {
         int threadCount = 50;
 
         FlexlbConfig config = new FlexlbConfig();
-        config.setFlexlbBatchAlgorithm("slo_budget");
+        config.setFlexlbBatchAlgorithm("fixed_window");
         config.setFlexlbBatchQueueMaxSize(maxSize);
-
-        PrefillEndpoint prefillEp = mock(PrefillEndpoint.class);
-        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
-        when(prefillEp.getPredictor()).thenReturn(predictor);
-        when(prefillEp.realWaitTimeMs()).thenReturn(0L);
-        when(prefillEp.getInflightBatchCount()).thenReturn(0);
-        when(predictor.estimateMs(anyLong(), anyLong())).thenReturn(0L);
 
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
         BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
 
-        WorkerBatcher batcher = new WorkerBatcher("stress-test", prefillEp, config, handler, reporter);
+        WorkerBatcher batcher = new WorkerBatcher("stress-test", null, config, handler, reporter);
 
         CountDownLatch start = new CountDownLatch(1);
         AtomicInteger successCount = new AtomicInteger(0);
