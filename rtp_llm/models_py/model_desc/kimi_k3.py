@@ -86,6 +86,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     kimi_kda_rms_norm_sigmoid_gate,
     kimi_kda_short_conv_decode,
     kimi_kda_short_conv_paged_decode,
+    kimi_kda_short_conv_paged_target_verify,
     kimi_kda_short_conv_prefill,
 )
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
@@ -2711,53 +2712,25 @@ class KimiK3KDA(nn.Module):
                             f"divisible by batch {batch}"
                         )
                     sequence_length = token_count // batch
-                    # Verify must be numerically identical to repeated target
-                    # decode.  The generic multi-token causal_conv1d_update
-                    # is not equivalent to Kimi's paged single-token kernel
-                    # (including its physical state update).  Replay each
-                    # speculative position through the exact decode kernel.
+                    # Keep target verification equivalent to repeated decode,
+                    # but replay its short-conv dependency inside one Triton
+                    # launch, following qwen3-next's multi-token decode path.
                     q_steps = q_projected.reshape(batch, sequence_length, -1)
                     k_steps = k_projected.reshape(batch, sequence_length, -1)
                     v_steps = v_projected.reshape(batch, sequence_length, -1)
-                    conv_steps = []
-                    for step in range(sequence_length):
-                        reserve_base = torch.div(
-                            sequence_lengths_plus_one - 2,
-                            page_size,
-                            rounding_mode="floor",
-                        ).to(torch.long)
-                        reserve_col = reserve_base + step
-                        logical_col = torch.div(
-                            sequence_lengths_plus_one + step - 2,
-                            page_size,
-                            rounding_mode="floor",
-                        ).to(torch.long)
-                        batch_idx = torch.arange(batch, device=block_map.device)
-                        dest_ids = block_map[batch_idx, reserve_col].to(torch.long)
-                        if step > 0:
-                            src_ids = block_map[
-                                batch_idx, reserve_col - 1
-                            ].to(torch.long)
-                            conv_cache[dest_ids] = conv_cache[src_ids]
-                        step_block_map = block_map.clone()
-                        step_block_map[batch_idx, logical_col] = dest_ids.to(
-                            step_block_map.dtype
-                        )
-                        q_step, k_step, v_step = kimi_kda_short_conv_paged_decode(
-                            q_steps[:, step, :].contiguous(),
-                            k_steps[:, step, :].contiguous(),
-                            v_steps[:, step, :].contiguous(),
-                            self.kda_conv,
-                            conv_cache,
-                            step_block_map,
-                            sequence_lengths_plus_one + step,
-                            page_size,
-                        )
-                        conv_steps.append(torch.cat((q_step, k_step, v_step), dim=-1))
-                    conv_output = torch.stack(conv_steps, dim=1).reshape(
-                        token_count, -1
+                    q, k, v = kimi_kda_short_conv_paged_target_verify(
+                        q_steps,
+                        k_steps,
+                        v_steps,
+                        self.kda_conv,
+                        conv_cache,
+                        block_map,
+                        sequence_lengths_plus_one,
+                        page_size,
                     )
-                    q, k, v = torch.split(conv_output, self.projection_size, dim=-1)
+                    q = q.reshape(token_count, self.projection_size)
+                    k = k.reshape(token_count, self.projection_size)
+                    v = v.reshape(token_count, self.projection_size)
                 else:
                     if not is_kimi_kda_short_conv_paged_decode_supported(
                         q_projected,
@@ -2845,53 +2818,17 @@ class KimiK3KDA(nn.Module):
                 if is_target_verify and token_count > block_map.shape[0]:
                     batch = block_map.shape[0]
                     sequence_length = token_count // batch
-                    q_seq = q.reshape(batch, sequence_length, -1)
-                    k_seq = k.reshape(batch, sequence_length, -1)
-                    v_seq = v.reshape(batch, sequence_length, -1)
-                    gate_seq = raw_gate.reshape(batch, sequence_length, -1)
-                    beta_seq = raw_beta.reshape(batch, sequence_length, -1)
-                    one_token_cu = torch.arange(
-                        batch + 1, device=cu_seqlens.device, dtype=cu_seqlens.dtype
-                    )
-                    output_steps = []
-                    for step in range(sequence_length):
-                        reserve_base = torch.div(
-                            sequence_lengths_plus_one - 2,
-                            page_size,
-                            rounding_mode="floor",
-                        ).to(torch.long)
-                        reserve_col = reserve_base + step
-                        logical_col = torch.div(
-                            sequence_lengths_plus_one + step - 2,
-                            page_size,
-                            rounding_mode="floor",
-                        ).to(torch.long)
-                        batch_idx = torch.arange(batch, device=block_map.device)
-                        dest_ids = block_map[batch_idx, reserve_col].to(torch.long)
-                        if step > 0:
-                            src_ids = block_map[
-                                batch_idx, reserve_col - 1
-                            ].to(torch.long)
-                            ssm_cache[dest_ids] = ssm_cache[src_ids]
-                        step_block_map = block_map.clone()
-                        step_block_map[batch_idx, logical_col] = dest_ids.to(
-                            step_block_map.dtype
-                        )
-                        step_output = self._paged_decode_core(
-                            q_seq[:, step, :].reshape(batch, -1),
-                            k_seq[:, step, :].reshape(batch, -1),
-                            v_seq[:, step, :].reshape(batch, -1),
-                            gate_seq[:, step, :].reshape(batch, -1),
-                            beta_seq[:, step, :].reshape(batch, -1),
-                            one_token_cu,
-                            ssm_cache,
-                            step_block_map,
-                            sequence_lengths_plus_one + step,
-                            page_size,
-                        )
-                        output_steps.append(step_output.squeeze(0))
-                    output = torch.stack(output_steps, dim=1).reshape(
-                        1, token_count, self.local_heads, self.head_dim
+                    output = self._paged_decode_core(
+                        q,
+                        k,
+                        v,
+                        raw_gate,
+                        raw_beta,
+                        cu_seqlens,
+                        ssm_cache,
+                        block_map,
+                        sequence_lengths_plus_one,
+                        page_size,
                     )
                 else:
                     output = self._paged_decode_core(
