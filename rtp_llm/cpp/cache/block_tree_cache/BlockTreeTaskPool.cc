@@ -69,7 +69,7 @@ bool BlockTreeTaskPool::submit(std::function<void()> task) {
     });
 
     taskStarted();
-    const autil::ThreadPool::ERROR_TYPE error = thread_pool_->pushWorkItem(work_item);
+    const autil::ThreadPool::ERROR_TYPE error = thread_pool_->pushWorkItem(work_item, false);
     if (error != autil::ThreadPool::ERROR_NONE) {
         work_item->destroy();
         taskFinished();
