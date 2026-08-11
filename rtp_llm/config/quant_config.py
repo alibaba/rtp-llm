@@ -355,7 +355,12 @@ class QuantizationConfig(ABC):
                         "method": quant_method,
                         "group_size": group_size,
                         "is_quanted": True,
+<<<<<<< HEAD
                         "ignore_patterns": ignore_patterns,
+=======
+                        "ignored_layers": ignored_layers,
+                        "exclude_modules": exclude_modules,
+>>>>>>> 033ea3739 (fix(loader): resolve follow-up review findings)
                     }
                 )
             if quant_method == "compressed-tensors":
@@ -449,6 +454,10 @@ class QuantizationConfig(ABC):
                         "group_size": group_size,
                         "is_quanted": True,
                         "mixed_attention": mixed_attention,
+<<<<<<< HEAD
+=======
+                        "ignored_layers": ignored_layers,
+>>>>>>> 033ea3739 (fix(loader): resolve follow-up review findings)
                         "exclude_modules": exclude_modules,
                     }
                 )
@@ -770,7 +779,12 @@ class MXFp4QuarkQuantConfig(QuarkQuantConfig):
         is_quanted: bool = False,
         **kwargs: Any,
     ):
-        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            is_quanted=is_quanted,
+            **kwargs,
+        )
 
     @classmethod
     def get_method(cls) -> str:
@@ -916,9 +930,19 @@ class ModelOptFp4Config(QuantizationConfig):
     """Config class for FP4."""
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
+<<<<<<< HEAD
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.mixed_attention = kwargs.get('mixed_attention', False)
         self.exclude_modules = set(kwargs.get("exclude_modules", []))
+=======
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            is_quanted=is_quanted,
+            **kwargs,
+        )
+        self.mixed_attention = kwargs.get("mixed_attention", False)
+>>>>>>> 033ea3739 (fix(loader): resolve follow-up review findings)
 
     @classmethod
     def get_method(cls) -> str:
@@ -998,7 +1022,6 @@ class CompressedW4A8Int4PerChannelQuantConfig(QuantizationConfig):
             "weight_pack_suffix", self.DEFAULT_WEIGHT_PACK_SUFFIX
         )
         self._scale_suffix = kwargs.get("scale_suffix", self.DEFAULT_SCALE_SUFFIX)
-        self._ignore_patterns: List[str] = list(kwargs.get("ignore_patterns", []))
 
     @classmethod
     def get_method(cls) -> str:
@@ -1019,7 +1042,7 @@ class CompressedW4A8Int4PerChannelQuantConfig(QuantizationConfig):
 
     @property
     def ignore_patterns(self) -> List[str]:
-        return self._ignore_patterns
+        return self.ignored_layers
 
     def get_supported_compute_dtypes(self) -> List[torch.dtype]:
         return [torch.float16, torch.bfloat16]

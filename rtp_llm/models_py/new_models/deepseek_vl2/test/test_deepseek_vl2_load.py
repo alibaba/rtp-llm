@@ -163,6 +163,7 @@ def _model_config(
         moe_style=2,
         moe_layer_index=[],
         scoring_func=0,
+        activation_type="SiGLU",
         routed_scaling_factor=1.0,
         moe_n_group=1,
         moe_topk_group=1,
