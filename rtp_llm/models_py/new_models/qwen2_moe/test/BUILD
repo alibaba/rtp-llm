@@ -1,5 +1,6 @@
 py_test(
     name = "test_qwen2_moe_load",
+    exec_properties = {"gpu": "H20"},
     srcs = ["test_qwen2_moe_load.py"],
     deps = [
         "//rtp_llm:config",

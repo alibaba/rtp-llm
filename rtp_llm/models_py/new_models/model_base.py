@@ -1,30 +1,4 @@
-from typing import Optional
-
 from rtp_llm.models_py.model_desc.module_base import required_config_value
-from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 
-
-def select_block_map_for_layer(
-    attention_inputs: PyAttentionInputs, layer_idx: int
-) -> Optional[int]:
-    if attention_inputs.kv_cache_kernel_block_id_device_by_group is None:
-        return
-
-    gid = 0
-    if attention_inputs.kv_cache_layer_to_group is not None:
-        gid = int(attention_inputs.kv_cache_layer_to_group[layer_idx].item())
-
-    if attention_inputs.kv_cache_kernel_block_id_device_by_group is not None and len(
-        attention_inputs.kv_cache_kernel_block_id_device_by_group
-    ):
-        attention_inputs.kv_cache_kernel_block_id_device = (
-            attention_inputs.kv_cache_kernel_block_id_device_by_group[gid]
-        )
-
-    if attention_inputs.kv_cache_kernel_block_id_by_group is not None and len(
-        attention_inputs.kv_cache_kernel_block_id_by_group
-    ):
-        attention_inputs.kv_cache_kernel_block_id = (
-            attention_inputs.kv_cache_kernel_block_id_by_group[gid]
-        )
-    return gid
+__all__ = ["required_config_value", "select_fmha_impl_for_layer"]
