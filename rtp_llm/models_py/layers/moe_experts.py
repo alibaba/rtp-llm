@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+from rtp_llm.ops import ActivationType
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,16 @@ class BaseMoEExperts(RtpModule):
                     f"{name} must satisfy 0 <= {name} < {size_name}, "
                     f"got rank={rank!r}, size={size}"
                 )
+
+        activation_type = model_config.activation_type
+        if activation_type not in ("SiGLU", ActivationType.Swiglu):
+            raise ValueError(
+                "NewLoader fused MoE currently supports activation_type='SiGLU' "
+                f"only, got {activation_type!r}"
+            )
+        # The fused executor API accepts its canonical string spelling.  Model
+        # configs may carry the equivalent enum, so normalize at construction.
+        self.activation_type = "SiGLU"
 
         # Resolve quant family from quant_config. Ignored layers must use the
         # unquantized method and must not require quantization auxiliary tensors.
@@ -972,5 +983,5 @@ class BaseMoEExperts(RtpModule):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            activation="SiGLU",
+            activation=self.activation_type,
         )
