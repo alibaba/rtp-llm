@@ -1003,4 +1003,4 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)

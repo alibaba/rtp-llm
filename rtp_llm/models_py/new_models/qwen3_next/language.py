@@ -1948,7 +1948,7 @@ class Qwen3NextForCausalLM(GptModelBase):
                 attn_meta=attn_meta,
             )
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)
 
 
 class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
@@ -2054,7 +2054,7 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
                 attn_meta=attn_meta,
             )
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)
 
 
 class Qwen35MoeMTPForCausalLM(Qwen3NextMTPForCausalLM):
