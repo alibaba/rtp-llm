@@ -429,6 +429,10 @@ public:
 
         EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
         params.sp_config        = sp_config;
+        params.model_config_.hidden_size = 2;
+        params.model_config_.data_type   = DataType::TYPE_FP32;
+        model_config.hidden_size         = 2;
+        model_config.data_type           = DataType::TYPE_FP32;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
