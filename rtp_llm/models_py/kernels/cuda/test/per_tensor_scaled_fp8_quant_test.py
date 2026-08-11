@@ -7,6 +7,9 @@ from torch import dtype as _dtype
 
 import rtp_llm.ops  # isort:skip
 from rtp_llm.ops.compute_ops import per_tensor_quant_fp8  # isort:skip
+from rtp_llm.models_py.kernels.cuda.fp8_quant import (  # isort:skip
+    scaled_fp8_per_tensor_quant,
+)
 
 
 class PerTensorFp8QuantTest(TestCase):
@@ -101,6 +104,19 @@ class PerTensorFp8QuantTest(TestCase):
             ):
                 self._run_per_tensor_fp8_quant_test(*params)
             self._run_per_tensor_fp8_static_quant_precision_test()
+
+    def test_empty_input_returns_empty_output_without_launching_kernel(self):
+        input = torch.empty((0, 128), dtype=torch.bfloat16, device="cuda")
+
+        output, dynamic_scale = scaled_fp8_per_tensor_quant(input)
+        self.assertEqual(output.shape, input.shape)
+        self.assertEqual(output.dtype, torch.float8_e4m3fn)
+        self.assertEqual(dynamic_scale.shape, (1,))
+
+        static_scale = torch.ones(1, dtype=torch.float32, device="cuda")
+        output, returned_scale = scaled_fp8_per_tensor_quant(input, static_scale)
+        self.assertEqual(output.shape, input.shape)
+        self.assertIs(returned_scale, static_scale)
 
 
 if __name__ == "__main__":

@@ -104,7 +104,12 @@ class QWen3_VL(QwenV3):
             raise ValueError(
                 "Qwen3-VL config.json text_config must contain rope_scaling"
             )
-        mrope_section = rope_scaling.get("mrope_section", [16, 24, 24])
+        if "mrope_section" not in rope_scaling:
+            logging.warning(
+                "Qwen3-VL text_config.rope_scaling does not specify "
+                "mrope_section; using the official 128-dim fallback [24, 20, 20]"
+            )
+        mrope_section = rope_scaling.get("mrope_section", [24, 20, 20])
         if (
             not isinstance(mrope_section, (list, tuple))
             or len(mrope_section) != 3
