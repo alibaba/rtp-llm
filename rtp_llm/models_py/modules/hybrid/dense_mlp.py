@@ -172,12 +172,26 @@ class DenseMLP(nn.Module):
     def forward_without_output_bias(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if not self.is_gated and self.activation_type == ActivationType.Gelu:
+        ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
+        quantized_activation = None
+        if (
+            not self.is_gated
+            and self.activation_type == ActivationType.Gelu
+            and ffn_tp_size == 1
+            and self.up_proj.supports_fused_bias_gelu_quant
+            and self.down_proj.supports_fused_bias_gelu_quant
+        ):
+            quantized_activation = self.up_proj.forward_with_bias_gelu_quantized(x)
+        if quantized_activation is not None:
+            output = self.down_proj.forward_quantized(
+                *quantized_activation, apply_bias=False
+            )
+            return output, self.down_proj.bias
+        elif not self.is_gated and self.activation_type == ActivationType.Gelu:
             activated = self.up_proj.forward_with_bias_gelu(x)
         else:
             up = self.up_proj(x)
             activated = self.act_fn(up)
-        ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         if ffn_tp_size > 1 or not self.down_proj.supports_deferred_bias:
             output = self.down_proj(activated)
             if ffn_tp_size > 1:

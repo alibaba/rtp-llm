@@ -28,6 +28,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
     supports_fused_silu_quant = True
     supports_deferred_bias = True
+    supports_fused_bias_gelu_quant = True
 
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
@@ -369,3 +370,25 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         rtp_llm_ops.fused_bias_gelu(output, self.bias.to(output.dtype))
         return output
+
+    def forward_with_bias_gelu_quantized(
+        self, input: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
+            return None
+        output = self.forward_without_bias(input)
+        output_fp8 = torch.empty_like(output, dtype=torch.float8_e4m3fn)
+        output_scales = create_per_token_group_quant_fp8_output_scale(
+            x_shape=output.shape,
+            device=output.device,
+            group_size=128,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        rtp_llm_ops.fused_bias_gelu_quant_fp8(
+            output, self.bias.to(output.dtype), output_fp8, output_scales
+        )
+        return output_fp8, output_scales
