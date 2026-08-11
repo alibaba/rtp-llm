@@ -23,12 +23,25 @@
 #if USING_ROCM
 #include "rtp_llm/models_py/bindings/rocm/cuda_shims.h"
 #endif
+#include <cstdint>
 #include <stdlib.h>
 
 namespace rtp_llm {
 
 template<typename T>
 void invokeAddBiasGelu(T* output, const T* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
+
+#if USING_CUDA
+template<typename T>
+void invokeAddBiasGeluQuantFp8(const T*     input,
+                               const T*     bias,
+                               void*        output,
+                               uint32_t*    scales,
+                               size_t       rows,
+                               size_t       hidden_size,
+                               size_t       scale_stride,
+                               cudaStream_t stream);
+#endif
 
 template<typename T>
 void invokeAddBiasSoftMax(T*           logits,
