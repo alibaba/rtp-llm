@@ -236,7 +236,9 @@ def scaled_fp8_per_tensor_quant(
         raise ValueError(
             f"FP8 per-tensor quantization requires 2D input, got {input.shape}"
         )
-    _validate_native_quant_input(input, "FP8 per-tensor quantization")
+    _validate_native_quant_input(
+        input, "FP8 per-tensor quantization", allow_empty=True
+    )
     vector_width = 16 // input.element_size()
     if input.numel() % vector_width != 0:
         raise ValueError(
@@ -252,8 +254,11 @@ def scaled_fp8_per_tensor_quant(
 
     if scale is None:
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        with torch.cuda.device(input.device):
-            _resolve_compute_op("per_tensor_quant_fp8")(input, output, scale, False)
+        if input.numel() > 0:
+            with torch.cuda.device(input.device):
+                _resolve_compute_op("per_tensor_quant_fp8")(
+                    input, output, scale, False
+                )
     else:
         if scale.numel() != 1:
             raise ValueError(
@@ -263,8 +268,11 @@ def scaled_fp8_per_tensor_quant(
             raise ValueError(f"FP8 scale must be on {input.device}, got {scale.device}")
         if scale.dtype != torch.float32 or not scale.is_contiguous():
             raise TypeError("FP8 per-tensor scale must be contiguous float32")
-        with torch.cuda.device(input.device):
-            _resolve_compute_op("per_tensor_quant_fp8")(input, output, scale, True)
+        if input.numel() > 0:
+            with torch.cuda.device(input.device):
+                _resolve_compute_op("per_tensor_quant_fp8")(
+                    input, output, scale, True
+                )
     return output, scale
 
 
@@ -276,7 +284,9 @@ def scaled_fp8_per_token_quant(
         raise ValueError(
             f"FP8 per-token quantization requires 2D input, got {input.shape}"
         )
-    _validate_native_quant_input(input, "FP8 per-token quantization")
+    _validate_native_quant_input(
+        input, "FP8 per-token quantization", allow_empty=True
+    )
     if input.shape[1] % 8 != 0:
         raise ValueError(
             f"FP8 per-token input width must be divisible by 8, got {input.shape[1]}"
@@ -288,8 +298,9 @@ def scaled_fp8_per_token_quant(
         output = torch.empty(
             input.shape, device=input.device, dtype=torch.float8_e4m3fn
         )
-    with torch.cuda.device(input.device):
-        _resolve_compute_op("per_token_quant_fp8")(input, output, scale)
+    if input.numel() > 0:
+        with torch.cuda.device(input.device):
+            _resolve_compute_op("per_token_quant_fp8")(input, output, scale)
     return output, scale.reshape(-1, 1)
 
 

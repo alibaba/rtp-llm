@@ -35,6 +35,7 @@ def _model_config():
         compute_dtype=torch.float32,
         generate_env_config=None,
         lora_infos={},
+        eplb_config=types.SimpleNamespace(enable_eplb=lambda: False),
         quant_config=types.SimpleNamespace(get_runtime_method_key=lambda: "none"),
     )
 
@@ -380,6 +381,16 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         base_model.force_cpu_load_weights = False
 
         with self.assertRaisesRegex(ValueError, "p-tuning is not supported"):
+            base_model._load_with_new_loader()
+
+    def test_eplb_configuration_is_rejected_before_model_loading(self):
+        config = _model_config()
+        config.eplb_config = types.SimpleNamespace(enable_eplb=lambda: True)
+        base_model = object.__new__(BaseModel)
+        base_model.model_config = config
+        base_model.force_cpu_load_weights = False
+
+        with self.assertRaisesRegex(ValueError, "EPLB is not supported"):
             base_model._load_with_new_loader()
 
     def test_layer_micro_batch_is_rejected_by_public_load(self):
