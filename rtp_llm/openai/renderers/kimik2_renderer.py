@@ -1,12 +1,11 @@
 import logging
 import re
-from typing import List, Optional, Set
+from typing import List, Optional, Sequence, Set
 
 from typing_extensions import override
 
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
-    GPTToolDefinition,
     ToolCall,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
@@ -14,9 +13,9 @@ from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
 from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
-    rtp_tools_to_sglang_tools,
     streaming_parse_result_to_tool_calls,
 )
+from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
 )
@@ -150,7 +149,7 @@ class KimiK2Renderer(ReasoningToolBaseRenderer):
     async def _extract_tool_calls_content(
         self,
         detector: Optional[BaseFormatDetector],
-        tools: Optional[List[GPTToolDefinition]],
+        tools: Optional[Sequence[Tool]],
         text: str,
         is_streaming: bool,
     ) -> tuple[Optional[List[ToolCall]], str]:
@@ -163,16 +162,13 @@ class KimiK2Renderer(ReasoningToolBaseRenderer):
         if not detector:
             return None, text
 
-        # 转换工具格式
-        sglang_tools = rtp_tools_to_sglang_tools(tools)
-
         try:
             if is_streaming:
-                parse_result = detector.parse_streaming_increment(text, sglang_tools)
+                parse_result = detector.parse_streaming_increment(text, tools)
             else:
                 # 兼容kimik2在非流式的情况下可能返回结果中有以<|im_end|>的结果
                 cleaned_text = self._clean_stop_words(text)
-                parse_result = detector.detect_and_parse(cleaned_text, sglang_tools)
+                parse_result = detector.detect_and_parse(cleaned_text, tools)
 
             # 有工具调用时，使用格式转换函数
             tool_calls, remaining_text = streaming_parse_result_to_tool_calls(

@@ -10,6 +10,8 @@ from rtp_llm.openai.api_datatype import (
     ChatMessage,
     FinisheReason,
     FunctionCall,
+    GPTFunctionDefinition,
+    GPTToolDefinition,
     RoleEnum,
     ToolCall,
 )
@@ -25,11 +27,81 @@ from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
 )
+from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
+    StreamingParseResult,
+)
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import (
     Qwen3Detector,
     ReasoningParser,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+
+
+class ToolStatusInitializationTest(IsolatedAsyncioTestCase):
+    @staticmethod
+    def _request() -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="test")],
+            tools=[
+                GPTToolDefinition(
+                    function=GPTFunctionDefinition(
+                        name="lookup",
+                        description="lookup a value",
+                        parameters={"type": "object", "properties": {}},
+                    )
+                )
+            ],
+        )
+
+    @staticmethod
+    def _renderer(detectors):
+        renderer = Mock(spec=ReasoningToolBaseRenderer)
+        renderer._create_status_list = (
+            ReasoningToolBaseRenderer._create_status_list.__get__(renderer)
+        )
+        renderer.in_think_mode = Mock(return_value=False)
+        renderer._create_detector = Mock(side_effect=detectors)
+        renderer._create_reasoning_parser = Mock(return_value=None)
+        return renderer
+
+    async def test_tools_are_converted_once_and_shared_across_choices(self):
+        request = self._request()
+        detectors = [Mock(spec=BaseFormatDetector), Mock(spec=BaseFormatDetector)]
+        for detector in detectors:
+            detector.parse_streaming_increment.return_value = StreamingParseResult()
+        renderer = self._renderer(detectors)
+        renderer._extract_tool_calls_content = (
+            ReasoningToolBaseRenderer._extract_tool_calls_content.__get__(renderer)
+        )
+        converted_tool = Mock(name="converted_tool")
+
+        with patch(
+            "rtp_llm.openai.renderers.reasoning_tool_base_renderer."
+            "rtp_tools_to_sglang_tools",
+            return_value=[converted_tool],
+        ) as convert:
+            statuses = await renderer._create_status_list(2, request)
+            await renderer._extract_tool_calls_content(
+                statuses[0].detector,
+                statuses[0].sglang_tools,
+                "first token",
+                is_streaming=True,
+            )
+            await renderer._extract_tool_calls_content(
+                statuses[0].detector,
+                statuses[0].sglang_tools,
+                "second token",
+                is_streaming=True,
+            )
+
+        convert.assert_called_once_with(request.tools)
+        self.assertEqual(len(statuses), 2)
+        self.assertIs(statuses[0].sglang_tools, statuses[1].sglang_tools)
+        self.assertIsInstance(statuses[0].sglang_tools, tuple)
+        self.assertEqual(statuses[0].sglang_tools, (converted_tool,))
+        self.assertIs(statuses[0].detector, detectors[0])
+        self.assertIs(statuses[1].detector, detectors[1])
+        self.assertIsNot(statuses[0].detector, statuses[1].detector)
 
 
 class ProcessReasoningAndToolCallsTest(IsolatedAsyncioTestCase):

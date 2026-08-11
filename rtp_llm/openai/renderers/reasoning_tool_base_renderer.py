@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from abc import ABC
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from jinja2 import BaseLoader, Environment
 from typing_extensions import override
@@ -13,7 +13,6 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     DeltaMessage,
     FinisheReason,
-    GPTToolDefinition,
     RoleEnum,
     ToolCall,
 )
@@ -28,6 +27,7 @@ from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
     rtp_tools_to_sglang_tools,
     streaming_parse_result_to_tool_calls,
 )
+from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
 )
@@ -43,17 +43,24 @@ class ReasoningToolStreamStatus(StreamStatus):
     generating_tool_call: bool = False
     detector: Optional[BaseFormatDetector] = None
     reasoning_parser: Optional[ReasoningParser] = None
+    sglang_tools: Tuple[Tool, ...] = ()
 
     def __init__(
         self,
         request: ChatCompletionRequest,
         detector: Optional[BaseFormatDetector],
         reasoning_parser: Optional[ReasoningParser],
+        sglang_tools: Optional[Tuple[Tool, ...]] = None,
     ):
         super().__init__(request)
         self.generating_tool_call = False
         self.detector = detector
         self.reasoning_parser = reasoning_parser
+        self.sglang_tools = (
+            tuple(rtp_tools_to_sglang_tools(request.tools or []))
+            if sglang_tools is None
+            else sglang_tools
+        )
 
 
 class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
@@ -110,11 +117,13 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     ) -> List[StreamStatus]:
         """创建状态列表"""
         if (request.tools or self.in_think_mode(request)) and not request.logprobs:
+            sglang_tools = tuple(rtp_tools_to_sglang_tools(request.tools or []))
             return [
                 ReasoningToolStreamStatus(
                     request,
                     self._create_detector(request),
                     self._create_reasoning_parser(request),
+                    sglang_tools,
                 )
                 for _ in range(n)
             ]
@@ -504,7 +513,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
 
         tool_calls, remaining_after_tools = await self._extract_tool_calls_content(
             status.detector,
-            status.request.tools,
+            status.sglang_tools,
             remaining_after_reasoning,
             is_streaming,
         )
@@ -562,7 +571,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     async def _extract_tool_calls_content(
         self,
         detector: Optional[BaseFormatDetector],
-        tools: Optional[List[GPTToolDefinition]],
+        tools: Optional[Sequence[Tool]],
         text: str,
         is_streaming: bool,
     ) -> tuple[Optional[List[ToolCall]], str]:
@@ -574,15 +583,12 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         if not detector or not tools:
             return None, text
 
-        # 转换工具格式
-        sglang_tools = rtp_tools_to_sglang_tools(tools)
-
         try:
             if is_streaming:
-                parse_result = detector.parse_streaming_increment(text, sglang_tools)
+                parse_result = detector.parse_streaming_increment(text, tools)
             else:
                 cleaned_text = self._clean_stop_words(text)
-                parse_result = detector.detect_and_parse(cleaned_text, sglang_tools)
+                parse_result = detector.detect_and_parse(cleaned_text, tools)
 
             tool_calls, remaining_text = streaming_parse_result_to_tool_calls(
                 parse_result
