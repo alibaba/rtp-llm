@@ -12,10 +12,9 @@ import java.util.concurrent.CompletableFuture;
  * the endpoint's gRPC port and drives the mock cancel behaviour: a live
  * request is removed and a CANCELLED completion surfaces in the next
  * WorkerStatus finished list, exactly like a real engine would report.
- * Mirrors the simplified engine contract: any cancel that reaches an engine
- * acks ACCEPTED (intent registration) — including cancels landing after
- * completion or for unknown ids — the observable effect lives in the mock
- * engine state, never in the ack.
+ * Mirrors the engine contract: a live request and its accepted-cancel
+ * tombstone return ACCEPTED; a request not known by the specifically addressed
+ * Prefill returns NOT_FOUND; Decode rejects this RPC as unsupported.
  *
  * <p><b>Wiring:</b> this class is NOT a Spring component. Production contexts
  * keep {@code UnsupportedEngineCancelChannel}; tests inject this channel
@@ -35,22 +34,25 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
 
     @Override
     public boolean isSupported(DecodeEndpoint endpoint) {
-        return services.containsKey(endpoint.getGrpcPort());
+        return endpoint != null && services.containsKey(endpoint.getGrpcPort());
     }
 
     @Override
-    public CompletableFuture<CancelOutcome> cancel(CancelTarget target, long requestId, CancelReason reason) {
-        DecodeEndpoint endpoint = target.decodeEndpoint();
-        JavaMockEngineCluster.FastRpcService service = services.get(endpoint.getGrpcPort());
+    public CompletableFuture<CancelOutcome> cancel(CancelTarget target, long requestId,
+                                                   long timeoutMs) {
+        JavaMockEngineCluster.FastRpcService service = target == null
+                ? null : services.get(target.prefillGrpcPort());
         if (service == null) {
             return CompletableFuture.completedFuture(CancelOutcome.unsupported());
         }
         try {
-            // The mock engine applies the cancel side effects (removal +
-            // CANCELLED WorkerStatus record for a live request; no-op for a
-            // finished/unknown one); the ack is ACCEPTED either way.
-            service.cancelRequest(requestId);
-            return CompletableFuture.completedFuture(CancelOutcome.accepted());
+            // Deliberately inspect only the addressed Prefill. Scanning other
+            // workers would hide an incorrect Prefill route in tests.
+            JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
+            return CompletableFuture.completedFuture(
+                    result.found() ? CancelOutcome.accepted() : CancelOutcome.notFound());
+        } catch (UnsupportedOperationException e) {
+            return CompletableFuture.completedFuture(CancelOutcome.failed());
         } catch (Exception e) {
             // Contract: never throw synchronously; surface as a failed future.
             return CompletableFuture.failedFuture(e);

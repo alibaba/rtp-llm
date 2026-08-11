@@ -5,21 +5,38 @@ package org.flexlb.enums;
  * (design doc 10.1). Ordinal order is the eviction stage order
  * (design doc 11.3): earlier phases are cheaper to evict.
  *
- * <p><b>Reserved-only simplification:</b> Phase 4 only ever creates and
- * evicts {@link #RESERVED_NOT_ACCEPTED} entries (Master shadow reservation,
- * engine not yet confirmed); accepted/running requests are folded into a
- * single confirmed-running counter on the decode endpoint. The other two
- * phases are defined for the Phase 5 accepted/running layered view and
- * preemption interface but are never eviction candidates in this phase.
+ * <p>The first two values deliberately split the old ambiguous shadow layer:
+ * a request still in the Master queue can be removed locally, while a request
+ * whose dispatch may have reached Prefill must use the same Cancel protocol as
+ * an accepted/running request.</p>
  */
 public enum DecodeTaskPhase {
 
-    /** Master shadow reservation; the engine has not confirmed the request. */
-    RESERVED_NOT_ACCEPTED,
+    /** Still owned exclusively by the Master queue; Engine cannot have seen it. */
+    MASTER_QUEUED_NOT_DISPATCHED,
+
+    /** Dispatch started or is in flight; original Prefill must handle Cancel. */
+    ENGINE_MAY_HAVE_SEEN,
 
     /** Engine accepted (KV allocated) but not yet running. Phase 5 only. */
     ACCEPTED_NOT_RUNNING,
 
-    /** Engine is running the request. Never evicted before Phase 5+. */
-    RUNNING
+    /** Engine is running the request. Eviction requires Cancel and release confirmation. */
+    RUNNING;
+
+    /** Whether eviction must go through the original Prefill Cancel owner. */
+    public boolean requiresEngineCancel() {
+        return this == ENGINE_MAY_HAVE_SEEN
+                || this == ACCEPTED_NOT_RUNNING
+                || this == RUNNING;
+    }
+
+    /** Whether the phase is represented by Engine WorkerStatus. */
+    public boolean isEngineConfirmed() {
+        return this == ACCEPTED_NOT_RUNNING || this == RUNNING;
+    }
+
+    public boolean isMasterQueued() {
+        return this == MASTER_QUEUED_NOT_DISPATCHED;
+    }
 }

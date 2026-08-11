@@ -39,8 +39,8 @@ import java.util.concurrent.CompletableFuture;
  * </ol>
  *
  * <p>Contract mirror of MockEngineCancelChannel: a cancel is an intent
- * injection only — release confirmation remains the next WorkerStatus report
- * (iron rule 4). Never throws synchronously; transport failures surface as a
+ * injection only — settlement requires original-Prefill WorkerStatus carrying
+ * typed {@code CANCELED+8429}. Never throws synchronously; transport failures surface as a
  * failed future, local branches as a completed {@code CancelOutcome}.
  */
 @Slf4j
@@ -88,18 +88,16 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
     @Override
     public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
                                                    long requestId,
-                                                   CancelReason reason) {
+                                                   long timeoutMs) {
         try {
             // TEST-ONLY routing: the mock control plane resolves the target
-            // engine by the Decode endpoint's gRPC port (110 topology).
-            DecodeEndpoint endpoint = target.decodeEndpoint();
-            if (endpoint == null) {
+            // engine by the original Prefill endpoint's gRPC port.
+            if (target == null || !target.isRoutable()) {
                 return CompletableFuture.completedFuture(CancelOutcome.unsupported());
             }
             String body = MAPPER.createObjectNode()
-                    .put("port", endpoint.getGrpcPort())
+                    .put("port", target.prefillGrpcPort())
                     .put("request_id", requestId)
-                    .put("reason", reason == null ? null : reason.name())
                     .toString();
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(controlUrl + "/cancel_request"))
@@ -116,11 +114,9 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
     }
 
     /**
-     * Maps the control-plane HTTP status onto the simplified intent contract:
-     * any 200 is an intent registration — accepted() regardless of the JSON
-     * body (found / already_finished carry no decision-relevant information
-     * anymore). A 404 (unknown engine/port) maps to the unsupported branch —
-     * the planning gate should have kept us away from that endpoint.
+     * Maps the control-plane response onto the engine Cancel contract. A 404
+     * means the target engine itself is unsupported; a 200 body carries either
+     * ACCEPTED or NOT_FOUND for the specifically addressed Prefill.
      */
     private CancelOutcome mapResponse(HttpResponse<String> response, long requestId) {
         if (response.statusCode() == 404) {
@@ -131,6 +127,21 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
                     + response.statusCode() + " for request " + requestId
                     + ": " + response.body());
         }
-        return CancelOutcome.accepted();
+        try {
+            String status = MAPPER.readTree(response.body()).path("status").asText();
+            return switch (status) {
+                case "ACCEPTED" -> CancelOutcome.accepted();
+                case "NOT_FOUND" -> CancelOutcome.notFound();
+                default -> throw new IllegalStateException(
+                        "mock cancel control plane returned unknown status '" + status
+                                + "' for request " + requestId);
+            };
+        } catch (Exception e) {
+            if (e instanceof IllegalStateException illegalStateException) {
+                throw illegalStateException;
+            }
+            throw new IllegalStateException(
+                    "mock cancel control plane returned invalid JSON for request " + requestId, e);
+        }
     }
 }

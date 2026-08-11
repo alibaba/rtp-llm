@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
-#include "rtp_llm/cpp/engine_base/schedulers/CancelIntentMap.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
 namespace rtp_llm {
@@ -43,15 +42,6 @@ public:
     }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
 
-    // AutoTPM Cancel: cancel-intent map shared with the RPC layer. The Cancel
-    // RPC handler writes intents; schedule() consumes them cooperatively (R2)
-    // and sweeps expired entries (R3).
-    const std::shared_ptr<CancelIntentMap>& cancelIntentMap() const {
-        return cancel_intent_map_;
-    }
-
-protected:
-    std::shared_ptr<CancelIntentMap> cancel_intent_map_ = std::make_shared<CancelIntentMap>();
 };
 
 }  // namespace rtp_llm

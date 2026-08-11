@@ -130,8 +130,8 @@ class DecodeEvictionSchedulerTest {
         decodeWs.setIp("10.0.0.2");
         decodeWs.setPort(8081);
         decodeWs.setGrpcPort(8082);
-        decodeWs.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
-        decodeWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
+        decodeWs.setAvailableKvCacheTokens(new AtomicLong(128L));
+        decodeWs.setTotalKvCacheTokens(new AtomicLong(256L));
         endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);
         // Calibrate once so reportedKvAvailable reflects the engine report
         // (plenty of KV: only the slot dimension is ever in deficit here).
@@ -146,7 +146,11 @@ class DecodeEvictionSchedulerTest {
 
     private Response routeAnswer(BalanceContext ctx) {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        if (decodeEp.getTotalLoad() + 1 > config.getDecodeConcurrencyLimit()) {
+        boolean slotFull = config.getDecodeConcurrencyLimit() > 0
+                && decodeEp.getEngineLoad() + 1 > config.getDecodeConcurrencyLimit();
+        boolean kvFull = decodeEp.realKvTotal() > 0
+                && decodeEp.realKvAvailable() < ctx.getRequest().getSeqLen();
+        if (slotFull || kvFull) {
             return Response.error(StrategyErrorType.NO_DECODE_WORKER);
         }
         decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority(), ctx.getDeadlineMs());
@@ -161,10 +165,8 @@ class DecodeEvictionSchedulerTest {
 
         CompletableFuture<Response> victim = scheduler.submit(context(1, 30));
         await(() -> decodeEp.reservedView().containsKey(1L));
-        // task 35 P1-3: slot eviction now targets engine-facing load only —
-        // model the victim as already dispatched to prefill (non-queued), the
-        // exact shape whose reservation holds a real engine slot.
-        decodeEp.markDispatchedPhase(1L);
+        // Keep the local victim Master-queued. Its reservation consumes the
+        // available KV, so the incoming uses the local KV-eviction path.
 
         CompletableFuture<Response> incoming = scheduler.submit(context(2, 70));
 
@@ -183,9 +185,9 @@ class DecodeEvictionSchedulerTest {
         assertEquals(1, decodeEp.getTotalLoad());
         assertFalse(incoming.isDone());
 
-        verify(priorityReporter).reportEvictionPlan(eq(70), eq("decode_slot_full"), eq("feasible"));
-        verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_slot_full"), eq("success"));
-        verify(priorityReporter).reportVictim(eq(30), eq(70), eq("decode_reserved"), eq("decode_slot_full"));
+        verify(priorityReporter).reportEvictionPlan(eq(70), eq("decode_kv_full"), eq("feasible"));
+        verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_kv_full"), eq("success"));
+        verify(priorityReporter).reportVictim(eq(30), eq(70), eq("decode_reserved"), eq("decode_kv_full"));
         verify(priorityReporter).reportVictimKvTokens(eq(30), eq("decode_reserved"), eq(128L));
     }
 
@@ -201,15 +203,12 @@ class DecodeEvictionSchedulerTest {
         Response response = scheduler.submit(context(12, 50)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        // Redesign C-2: infeasible is an ordinary capacity failure — the full
-        // retry budget is consumed, then a reason-tagged exhaustion surfaces.
-        assertTrue(response.getErrorMessage().contains("reason=capacity_no_evict_candidates"),
-                "expected reason-tagged exhaustion, got: " + response.getErrorMessage());
-        // One route for the victim + MAX_PLAN_RETRIES (3) for the incoming
-        verify(router, times(4)).route(any(BalanceContext.class));
-        verify(priorityReporter, times(3))
-                .reportEvictionPlan(eq(50), eq("decode_slot_full"), eq("infeasible"));
+        assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), response.getCode());
+        assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                response.getAdmissionRejectReason());
+        verify(router, times(2)).route(any(BalanceContext.class));
+        verify(priorityReporter)
+                .reportEvictionPlan(eq(50), eq("decode_kv_full"), eq("infeasible"));
         verify(priorityReporter, never()).reportVictim(anyInt(), anyInt(), anyString(), anyString());
 
         // The reserved equal-priority request is untouched
@@ -230,9 +229,13 @@ class DecodeEvictionSchedulerTest {
 
         Response response = scheduler.submit(context(22, 70)).get(2, TimeUnit.SECONDS);
 
-        // The router's own decode-full failure surfaces unchanged
+        // Auto-TPM never leaks the router's generic 8403. The lower-priority
+        // KV looks sufficient, but the disabled eviction gate means this
+        // snapshot cannot prove physical-vs-control attribution.
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_DECODE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
+        assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.UNSPECIFIED,
+                response.getAdmissionRejectReason());
         verify(router, times(2)).route(any(BalanceContext.class));
         verify(priorityReporter, never()).reportEvictionPlan(anyInt(), anyString(), anyString());
 
@@ -265,9 +268,7 @@ class DecodeEvictionSchedulerTest {
 
         CompletableFuture<Response> victim = scheduler.submit(context(31, 30));
         await(() -> decodeEp.reservedView().containsKey(31L));
-        // task 35 P1-3: keep the victim engine-facing (non-queued) so the
-        // slot-eviction plan under test still targets it.
-        decodeEp.markDispatchedPhase(31L);
+        // The victim remains Master-queued; its KV is locally releasable.
 
         CompletableFuture<Response> incoming = scheduler.submit(context(32, 70));
 
@@ -281,8 +282,8 @@ class DecodeEvictionSchedulerTest {
         assertFalse(incoming.isDone());
 
         verify(priorityReporter).reportPlanConflict(eq("decode_admission_version"));
-        verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_slot_full"), eq("version_mismatch"));
-        verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_slot_full"), eq("success"));
+        verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_kv_full"), eq("version_mismatch"));
+        verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_kv_full"), eq("success"));
     }
 
     // ==================== victim termination by id is idempotent ====================

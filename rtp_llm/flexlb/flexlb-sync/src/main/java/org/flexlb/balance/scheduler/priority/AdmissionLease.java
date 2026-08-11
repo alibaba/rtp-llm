@@ -142,7 +142,7 @@ public final class AdmissionLease implements AutoCloseable {
         // leak the activeLeaseCount backpressure counter (Fix: counter leak).
         try {
             cancelSoftTimeout();
-            releaseResources();
+            releaseResourcesIfOwned("admission_future_terminal");
         } catch (Exception e) {
             Logger.error("[auto-tpm] admission lease close error: request_id={} error={}",
                     item.requestId(), e.getMessage(), e);
@@ -201,14 +201,19 @@ public final class AdmissionLease implements AutoCloseable {
                                 + "(decode accepted, TOCTOU): request_id={}",
                         item.requestId());
             } else {
-                releaseResources();
-                // Fix B: send cancel signal to engine so C++ releases con_ref.
-                // Only on the soft-timeout path — the normal close() failure path
-                // doesn't need this (the engine already knows the request failed).
-                registrar.finishYieldedById(item.requestId(), "post_success_soft_timeout");
-                Logger.info("[auto-tpm] admission lease force-closed after handover: "
-                                + "request_id={} reason=post_success_soft_timeout",
-                        item.requestId());
+                // Cleanup and priority Cancel share one registrar-owned
+                // linearization point. If Cancel already owns the request,
+                // neither the lease nor its follow-up terminal signal may
+                // release Decode accounting ahead of typed CANCELED.
+                if (releaseResourcesIfOwned("post_success_soft_timeout")) {
+                    // Fix B: send cancel signal to engine so C++ releases con_ref.
+                    // Only on the soft-timeout path — the normal close() failure path
+                    // doesn't need this (the engine already knows the request failed).
+                    registrar.finishYieldedById(item.requestId(), "post_success_soft_timeout");
+                    Logger.info("[auto-tpm] admission lease force-closed after handover: "
+                                    + "request_id={} reason=post_success_soft_timeout",
+                            item.requestId());
+                }
             }
         } catch (Exception e) {
             Logger.error("[auto-tpm] admission lease forceCloseAfterHandover error: "
@@ -279,6 +284,25 @@ public final class AdmissionLease implements AutoCloseable {
         }
         // 3. Unregister from inflight (no-op if already removed/tombstoned).
         registrar.unregisterInflight(item);
+    }
+
+    /**
+     * Acquire ordinary-cleanup ownership before touching any resource. The
+     * registrar serializes this decision with {@code claimForPreemption}; a
+     * winning preemption claim retains Decode accounting and owns any later
+     * replay of this cleanup.
+     *
+     * @return true when this lease owns and completed the cleanup
+     */
+    private boolean releaseResourcesIfOwned(String detail) {
+        if (registrar.registrarOwnsAdmissionCleanup(item, detail)) {
+            Logger.info("[auto-tpm] admission lease cleanup deferred to priority preemption: "
+                            + "request_id={} reason={}",
+                    item.requestId(), detail);
+            return false;
+        }
+        releaseResources();
+        return true;
     }
 
     /**

@@ -8,7 +8,6 @@ import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelTarget;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelAck;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelOutcome;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelReason;
 import org.flexlb.balance.scheduler.priority.HttpMockEngineCancelChannel;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -47,8 +46,11 @@ import static org.junit.jupiter.api.Assertions.fail;
  * evidence): a REAL {@link MockControlServer} on a real HTTP port +
  * {@link HttpMockEngineCancelChannel} pointed at it, asserting:
  * <ul>
- *   <li>the channel outcome is intent-only: any routable HTTP cancel (queued,
- *       running, double cancel, unknown request id) acks ACCEPTED,</li>
+ *   <li>a live request and its priority-cancel tombstone return ACCEPTED;
+ *       completed-before-cancel, unknown, or wrongly routed Prefill requests
+ *       return NOT_FOUND,</li>
+ *   <li>a Decode target returns HTTP 501 / a failed channel future, matching
+ *       the production UNIMPLEMENTED contract,</li>
  *   <li>the raw /cancel_request JSON still exposes the mock control-plane
  *       detail (found / already_finished / phase) for self-test evidence —
  *       including a queued decode request (opt-in
@@ -72,6 +74,7 @@ class HttpMockCancelIntegrationTest {
     private ScheduledExecutorService scheduler;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private MockControlServer controlServer;
+    private JavaMockEngineCluster.FastRpcService prefillService;
     private JavaMockEngineCluster.FastRpcService decodeService;
     private int nextPortOffset;
 
@@ -106,11 +109,11 @@ class HttpMockCancelIntegrationTest {
         EngineCancelChannel channel = channel();
 
         // 1 running + 1 queued (KV_ALLOCATED under the opt-in flag).
-        assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(1L), -1, null));
-        assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(2L), -1, null));
+        assertTrue(scheduleOwnedDecode(1L));
+        assertTrue(scheduleOwnedDecode(2L));
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 2L, CancelReason.PRIORITY_PREEMPTED)
+                .cancel(target(prefillService.getGrpcPort()), 2L, 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome.ack(),
                 "queued request cancel over HTTP must register the intent (ACCEPTED)");
@@ -123,20 +126,24 @@ class HttpMockCancelIntegrationTest {
                         == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
         assertTrue(cancelledReported,
                 "CANCELLED completion must appear in the next WorkerStatus finished list");
+        assertFalse(prefillService.hasDownstreamOwnership(2L));
+        assertFalse(decodeService.hasUpstreamOwnership(2L));
+        assertTrue(prefillService.hasDownstreamOwnership(1L),
+                "the unrelated live request must retain its exact ownership");
     }
 
     @Test
     void rawHttpCancelOfRunningRequestReportsRunningPhase() throws Exception {
         startGatedDecodeCluster(true);
 
-        assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(11L), -1, null));
+        assertTrue(scheduleOwnedDecode(11L));
 
         // The channel outcome is intent-only (ACCEPTED, no phase) — the phase
         // evidence lives in the raw control-plane JSON.
         HttpResponse<String> ok = HttpClient.newHttpClient().send(HttpRequest.newBuilder()
                         .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + "/cancel_request"))
                         .POST(HttpRequest.BodyPublishers.ofString(
-                                "{\"port\": " + decodeService.getGrpcPort() + ", \"request_id\": 11}"))
+                                "{\"port\": " + prefillService.getGrpcPort() + ", \"request_id\": 11}"))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, ok.statusCode());
@@ -146,36 +153,89 @@ class HttpMockCancelIntegrationTest {
                 "a truly running request must report the RUNNING phase");
     }
 
-    // ──────────── accepted over HTTP: double cancel / unknown request id ────────────
+    // ──────────── idempotent tombstone / NOT_FOUND unknown request ────────────
 
     @Test
-    void httpDoubleCancelIsIdempotentAndAccepted() throws Exception {
+    void httpRepeatedPriorityCancelStaysAcceptedAndPublishesOneTerminal() throws Exception {
         startGatedDecodeCluster(false);
         EngineCancelChannel channel = channel();
 
-        assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(21L), -1, null));
+        assertTrue(scheduleOwnedDecode(21L));
         CancelOutcome first = channel
-                .cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
+                .cancel(target(prefillService.getGrpcPort()), 21L, 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, first.ack());
 
         CancelOutcome second = channel
-                .cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
+                .cancel(target(prefillService.getGrpcPort()), 21L, 5_000)
                 .get(5, TimeUnit.SECONDS);
-        assertEquals(CancelAck.ACCEPTED, second.ack(), "second cancel must be idempotent");
+        assertEquals(CancelAck.ACCEPTED, second.ack());
+        long terminalCount = workerStatus(prefillService, -1).getFinishedTaskListList().stream()
+                .filter(task -> task.getRequestId() == 21L
+                        && task.getErrorInfo().getErrorCode() == 8429L
+                        && task.getPriorityPreemptionProgress()
+                        == EngineRpcService.PriorityPreemptionProgressPB
+                        .PRIORITY_PREEMPTION_CANCELED)
+                .count();
+        assertEquals(1L, terminalCount,
+                "a retry must not publish a second CANCELED+8429 terminal");
     }
 
     @Test
-    void httpCancelUnknownRequestStillAccepted() throws Exception {
+    void httpCancelUnknownRequestIsNotFound() throws Exception {
         startGatedDecodeCluster(false);
         EngineCancelChannel channel = channel();
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 424242L,
-                        CancelReason.PRIORITY_PREEMPTED)
+                .cancel(target(prefillService.getGrpcPort()), 424242L, 5_000)
                 .get(5, TimeUnit.SECONDS);
-        assertEquals(CancelAck.ACCEPTED, outcome.ack(),
-                "unknown request id is still ACCEPTED (intent registered, engine no-op)");
+        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
+    }
+
+    @Test
+    void httpWrongWorkerDoesNotScanOtherServices() throws Exception {
+        startGatedDecodeCluster(false);
+        assertTrue(scheduleOwnedDecode(23L));
+
+        int wrongPort = BASE_PORT + nextPortOffset++;
+        JavaMockEngineCluster.FastRpcService wrongPrefill =
+                new JavaMockEngineCluster.FastRpcService(
+                        "prefill-wrong", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                        wrongPort, services, scheduler, decodeService.getPerformance(), 100,
+                        new JavaMockEngineCluster.ClusterStats());
+        services.put(wrongPort, wrongPrefill);
+
+        CancelOutcome outcome = channel().cancel(target(wrongPort), 23L, 5_000)
+                .get(5, TimeUnit.SECONDS);
+
+        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
+        assertTrue(decodeService.getInflightCount() > 0,
+                "the control plane must not find and cancel a request on another worker");
+    }
+
+    @Test
+    void httpDecodeTargetIsUnimplementedAndDoesNotCancelOwnedRequest() throws Exception {
+        startGatedDecodeCluster(false);
+        assertTrue(scheduleOwnedDecode(24L));
+
+        var future = channel().cancel(target(decodeService.getGrpcPort()), 24L, 5_000);
+        assertThrows(ExecutionException.class,
+                () -> future.get(5, TimeUnit.SECONDS),
+                "HTTP 501 must surface as the channel FAILED path");
+        assertTrue(decodeService.getInflightCount() > 0,
+                "a Decode-targeted Cancel must not cancel the request");
+
+        HttpResponse<String> raw = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + controlServer.getPort()
+                                + "/cancel_request"))
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"port\": " + decodeService.getGrpcPort()
+                                        + ", \"request_id\": 24}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(501, raw.statusCode());
+        assertEquals("UNIMPLEMENTED", MAPPER.readTree(raw.body()).path("status").asText());
     }
 
     // ──────────── unsupported branch + transport failure + isSupported ────────────
@@ -189,7 +249,7 @@ class HttpMockCancelIntegrationTest {
                 "a configured control URL supports every endpoint");
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(endpoint(59999), 0L), 1L, CancelReason.ADMIN)
+                .cancel(target(59999), 1L, 5_000)
                 .get(5, TimeUnit.SECONDS);
         assertEquals(CancelAck.UNSUPPORTED, outcome.ack(),
                 "unknown engine port (HTTP 404) → UNSUPPORTED");
@@ -201,7 +261,7 @@ class HttpMockCancelIntegrationTest {
         // Port 1 is never listening — connection refused.
         EngineCancelChannel channel = new HttpMockEngineCancelChannel("http://127.0.0.1:1");
 
-        var future = channel.cancel(CancelTarget.of(endpoint(decodeService.getGrpcPort()), 0L), 1L, CancelReason.ADMIN);
+        var future = channel.cancel(target(prefillService.getGrpcPort()), 1L, 5_000);
         assertNotNull(future, "cancel must never throw synchronously");
         assertThrows(ExecutionException.class, () -> future.get(5, TimeUnit.SECONDS),
                 "transport failure must surface as a failed future");
@@ -219,7 +279,7 @@ class HttpMockCancelIntegrationTest {
         HttpResponse<String> badRequest = http.send(HttpRequest.newBuilder()
                         .uri(URI.create(base + "/cancel_request"))
                         .POST(HttpRequest.BodyPublishers.ofString(
-                                "{\"port\": " + decodeService.getGrpcPort() + "}"))
+                                "{\"port\": " + prefillService.getGrpcPort() + "}"))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(400, badRequest.statusCode());
@@ -229,7 +289,7 @@ class HttpMockCancelIntegrationTest {
         HttpResponse<String> textualId = http.send(HttpRequest.newBuilder()
                         .uri(URI.create(base + "/cancel_request"))
                         .POST(HttpRequest.BodyPublishers.ofString(
-                                "{\"port\": " + decodeService.getGrpcPort()
+                                "{\"port\": " + prefillService.getGrpcPort()
                                         + ", \"request_id\": \"abc\"}"))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
@@ -237,7 +297,7 @@ class HttpMockCancelIntegrationTest {
         HttpResponse<String> fractionalId = http.send(HttpRequest.newBuilder()
                         .uri(URI.create(base + "/cancel_request"))
                         .POST(HttpRequest.BodyPublishers.ofString(
-                                "{\"port\": " + decodeService.getGrpcPort()
+                                "{\"port\": " + prefillService.getGrpcPort()
                                         + ", \"request_id\": 1.5}"))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
@@ -252,22 +312,23 @@ class HttpMockCancelIntegrationTest {
         assertEquals(405, wrongMethod.statusCode());
 
         // Engine-name addressing (Python-compat dual addressing) + full schema.
-        assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(31L), -1, null));
-        assertTrue(invokeScheduleDecodeCompletion(decodeService, shapeOf(32L), -1, null));
+        assertTrue(scheduleOwnedDecode(31L));
+        assertTrue(scheduleOwnedDecode(32L));
         HttpResponse<String> ok = http.send(HttpRequest.newBuilder()
                         .uri(URI.create(base + "/cancel_request"))
                         .POST(HttpRequest.BodyPublishers.ofString(
-                                "{\"engine\": \"" + decodeService.getEngineName()
+                                "{\"engine\": \"" + prefillService.getEngineName()
                                         + "\", \"request_id\": 32}"))
                         .build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(200, ok.statusCode());
         JsonNode json = MAPPER.readTree(ok.body());
+        assertEquals("ACCEPTED", json.get("status").asText());
         assertTrue(json.get("found").asBoolean());
         assertEquals("TASK_PHASE_KV_ALLOCATED", json.get("phase").asText(),
                 "queued request phase must serialize as the proto enum name");
         assertFalse(json.get("already_finished").asBoolean());
-        assertEquals(decodeService.getGrpcPort(), json.get("port").asInt());
+        assertEquals(prefillService.getGrpcPort(), json.get("port").asInt());
     }
 
     // ──────────── Setup helpers ────────────
@@ -279,6 +340,13 @@ class HttpMockCancelIntegrationTest {
      */
     private void startGatedDecodeCluster(boolean reportQueuedAsKvAllocated) throws Exception {
         MockPerformanceModel model = model(10_000.0, 4, reportQueuedAsKvAllocated);
+        int prefillPort = BASE_PORT + nextPortOffset++;
+        prefillService = new JavaMockEngineCluster.FastRpcService(
+                "prefill-0", "127.0.0.1", "prefill",
+                EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
+                prefillPort, services, scheduler, model, 100,
+                new JavaMockEngineCluster.ClusterStats(), 10_000_000L, 1);
+        services.put(prefillPort, prefillService);
         int port = BASE_PORT + nextPortOffset++;
         decodeService = new JavaMockEngineCluster.FastRpcService(
                 "decode-0", "127.0.0.1", "decode",
@@ -291,8 +359,22 @@ class HttpMockCancelIntegrationTest {
         controlServer.start();
     }
 
+    private boolean scheduleOwnedDecode(long requestId) throws Exception {
+        prefillService.registerDecodeOwnership(requestId, decodeService);
+        boolean accepted = invokeScheduleDecodeCompletion(
+                decodeService, shapeOf(requestId), -1, null);
+        if (!accepted) {
+            prefillService.clearDecodeOwnership(requestId, decodeService);
+        }
+        return accepted;
+    }
+
     private EngineCancelChannel channel() {
         return new HttpMockEngineCancelChannel("http://127.0.0.1:" + controlServer.getPort());
+    }
+
+    private static CancelTarget target(int grpcPort) {
+        return new CancelTarget("127.0.0.1", grpcPort);
     }
 
     private static DecodeEndpoint endpoint(int grpcPort) {

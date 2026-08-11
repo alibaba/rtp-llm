@@ -159,13 +159,10 @@ class KvAllocatedReportOptInTest {
         assertEquals(16, decode.getActiveKvTokens(),
                 "opt-in: running + queued requests both hold KV before the cancel");
 
-        // Cancel the QUEUED request (rid=2): the three-branch contract must
-        // carry the KV_ALLOCATED phase — this is exactly what the accepted
-        // eviction path reports back through /cancel_request.
-        JavaMockEngineCluster.CancelResult result = decode.cancelRequest(2L);
-        assertTrue(result.found(), "queued request must be found");
-        assertFalse(result.alreadyFinished());
-        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED, result.phase(),
+        // Cancel the QUEUED request (rid=2) through Decode's ordinary internal
+        // stream-cancellation path. Priority Cancel RPC itself is Prefill-only.
+        EngineRpcService.TaskPhase phase = decode.cancel(2L);
+        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED, phase,
                 "cancel of a queued request must report the KV_ALLOCATED phase");
         // Cancel of a queued opt-in request must release its enqueue-time KV
         // reservation immediately (P2-5), leaving only the running request's.

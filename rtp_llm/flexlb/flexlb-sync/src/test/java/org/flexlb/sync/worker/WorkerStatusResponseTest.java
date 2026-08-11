@@ -3,6 +3,7 @@ package org.flexlb.sync.worker;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
@@ -35,5 +36,30 @@ class WorkerStatusResponseTest {
         Assertions.assertEquals(RoleType.PREFILL, response.getRole());
         Assertions.assertEquals(131072L, response.getMaxSeqLen());
         Assertions.assertEquals(262144L, response.getMaxBatchTokensSize());
+    }
+
+    @Test
+    void converterPreservesAuthoritativePriorityCanceledTerminal() {
+        EngineRpcService.TaskInfoPB canceled = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(8429001L)
+                .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
+                        .PRIORITY_PREEMPTION_CANCELED)
+                .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                        .setErrorCode(8429L)
+                        .setErrorMessage("preempted by a higher-priority request"))
+                .build();
+        EngineRpcService.WorkerStatusPB proto = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .addFinishedTaskList(canceled)
+                .build();
+
+        WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
+        var converted = response.getFinishedTaskInfo().get("8429001");
+
+        Assertions.assertEquals(RoleType.PREFILL, response.getRole());
+        Assertions.assertNotNull(converted);
+        Assertions.assertEquals(PriorityPreemptionProgress.CANCELED,
+                converted.getPriorityPreemptionProgress());
+        Assertions.assertEquals(8429L, converted.getErrorCode());
     }
 }

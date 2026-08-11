@@ -586,11 +586,14 @@ public class FlexlbConfig {
 
     // ---- Auto-TPM reserved config (design doc §18) — future phases, not wired yet ----
 
-    /** Decode accepted-entry eviction switch (Phase 5, reserved). */
+    /** Decode engine-owned/in-flight eviction switch. */
     private boolean autoTpmDecodeAcceptedEvictEnabled = false;
 
-    /** Max wait for victim KV release before commit gives up, ms (Phase 5, reserved). */
-    private long autoTpmCommitWaitReleaseTimeoutMs = 50;
+    /** Deadline for the Prefill Cancel RPC acknowledgement phase. */
+    private long autoTpmCancelAckTimeoutMs = 50;
+
+    /** Independent deadline for typed WorkerStatus CANCELED confirmation. */
+    private long autoTpmCancelCompletionTimeoutMs = 1000;
 
     /**
      * Normal-path plan commit strategy (plan-commit concurrency redesign N3):

@@ -79,11 +79,6 @@ private:
     void   dispatchPreparedGroup(StreamGroup& group);
     void    cancelStreams(std::list<GenerateStreamPtr>& streams);
     void    cancelGroups(StreamGroupQueue& group_queue);
-    // AutoTPM Cancel: R2/R3 checkpoints, called each schedule() round under
-    // lock_ — stop + detach streams with a matching cancel intent, then sweep
-    // expired entries.
-    void evaluateCancelIntents();
-
 protected:
     void                            evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
     PDSepConfig                     pd_sep_config_;

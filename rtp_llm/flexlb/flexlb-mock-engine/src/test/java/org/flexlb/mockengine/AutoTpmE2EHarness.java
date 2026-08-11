@@ -9,6 +9,7 @@ import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.priority.DecodePreemptionCoordinator;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.PlanCommitter;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
@@ -28,6 +29,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
@@ -225,7 +227,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 configService, router, endpointRegistry, new PlanCommitter(),
                 new PrioritySloPolicy(PrioritySloPolicy.DEFAULT_SLO_LENGTH_BUCKETS,
                         PrioritySloPolicy.DEFAULT_PRIORITY_SLO_MULTIPLIERS),
-                priorityReporter, reporter, cancelChannel) {
+                priorityReporter, reporter, cancelChannel,
+                new DecodePreemptionCoordinator(cancelChannel)) {
             @Override
             protected ServerStatus selectPrefillForDecodeEviction(BalanceContext ctx,
                                                                   FlexlbConfig config,
@@ -283,6 +286,14 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 ipPortByEnginePort.get(decodeEngines.get(index).getGrpcPort()));
     }
 
+    void setDecodeKvCapacity(int index, long available, long total) {
+        int grpcPort = decodeEngines.get(index).getGrpcPort();
+        WorkerStatus status = statusByPort.get(grpcPort);
+        status.getAvailableKvCacheTokens().set(available);
+        status.getTotalKvCacheTokens().set(total);
+        decodeEndpoint(index).onWorkerStatusUpdate(status, new WorkerStatusResponse());
+    }
+
     ServerStatus prefillServer(int index, long requestId) {
         int grpcPort = prefillEngines.get(index).getGrpcPort();
         return server(RoleType.PREFILL, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
@@ -297,7 +308,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     Response defaultRoute(BalanceContext ctx) {
         DecodeEndpoint decodeEp = decodeEndpoint(0);
         if (config.getDecodeConcurrencyLimit() > 0
-                && decodeEp.getTotalLoad() + 1 > config.getDecodeConcurrencyLimit()) {
+                && decodeEp.getEngineLoad() + 1 > config.getDecodeConcurrencyLimit()) {
+            return Response.error(StrategyErrorType.NO_DECODE_WORKER);
+        }
+        if (decodeEp.realKvTotal() > 0 && decodeEp.realKvAvailable() < 128) {
             return Response.error(StrategyErrorType.NO_DECODE_WORKER);
         }
         decodeEp.reserve(ctx.getRequestId(), 128, 136, ctx.getPriority(), ctx.getDeadlineMs());
@@ -416,6 +430,13 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         info.setErrorCode(task.getErrorInfo().getErrorCode());
         info.setErrorMessage(task.getErrorInfo().getErrorMessage());
         info.setEndTimeMs(task.getEndTimeMs());
+        if (task.getPriorityPreemptionProgress()
+                == EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELING) {
+            info.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELING);
+        } else if (task.getPriorityPreemptionProgress()
+                == EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED) {
+            info.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELED);
+        }
         if (task.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING) {
             info.setPhase(TaskPhase.RUNNING);
         } else if (task.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED) {

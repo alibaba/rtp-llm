@@ -46,15 +46,14 @@ public final class PriorityCostFunction {
 
     /**
      * Stage multiplier g(stage) (design doc 11.4/12.5): deeper stages are
-     * exponentially more expensive to evict. Phase 4 only ever uses
-     * {@code RESERVED_NOT_ACCEPTED}; the other two values are defined for the
-     * Phase 5 preemption interface.
+     * exponentially more expensive to evict.
      */
     public static long g(DecodeTaskPhase stage) {
         return switch (stage) {
-            case RESERVED_NOT_ACCEPTED -> 1L;
-            case ACCEPTED_NOT_RUNNING -> 4L;
-            case RUNNING -> 32L;
+            case MASTER_QUEUED_NOT_DISPATCHED -> 1L;
+            case ENGINE_MAY_HAVE_SEEN -> 4L;
+            case ACCEPTED_NOT_RUNNING -> 16L;
+            case RUNNING -> 64L;
         };
     }
 

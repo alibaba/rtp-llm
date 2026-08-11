@@ -370,7 +370,7 @@ async def _async_iter(items):
 
 
 class TestRunRemoteDecodeCancelForward(unittest.IsolatedAsyncioTestCase):
-    """Verify cancel signal is forwarded to the remote engine during _run_remote_decode."""
+    """Verify Prefill cancels the existing remote decode stream."""
 
     async def asyncSetUp(self) -> None:
         self.pb2, self.pb2_grpc = ensure_proto_modules()
@@ -390,7 +390,7 @@ class TestRunRemoteDecodeCancelForward(unittest.IsolatedAsyncioTestCase):
         await self.cluster.stop()
 
     async def test_cancel_forwarded_to_remote(self) -> None:
-        """When request is cancelled, stub.Cancel must be called and counter incremented."""
+        """Cancel uses the upstream stream; Decode.Cancel is never invoked."""
         request_id = 500
         input_pb = _make_input(
             self.pb2,
@@ -400,14 +400,29 @@ class TestRunRemoteDecodeCancelForward(unittest.IsolatedAsyncioTestCase):
             decode_http_port=9998,
         )
 
-        # A mock output that the remote stream would yield
-        mock_output = self.pb2.GenerateOutputsPB(request_id=request_id)
+        cancel_event = asyncio.Event()
+
+        class _CancellableStream:
+            def __init__(self):
+                self.cancelled = False
+                self._released = asyncio.Event()
+
+            def cancel(self):
+                self.cancelled = True
+                self._released.set()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await self._released.wait()
+                raise StopAsyncIteration
+
+        stream = _CancellableStream()
 
         # Build mock stub
         mock_stub = MagicMock()
-        mock_stub.GenerateStreamCall = MagicMock(
-            return_value=_async_iter([mock_output])
-        )
+        mock_stub.GenerateStreamCall = MagicMock(return_value=stream)
         mock_stub.Cancel = AsyncMock()
 
         # Inject mocks into cluster
@@ -415,22 +430,176 @@ class TestRunRemoteDecodeCancelForward(unittest.IsolatedAsyncioTestCase):
         self.cluster.pb2_grpc = MagicMock()
         self.cluster.pb2_grpc.RpcServiceStub = MagicMock(return_value=mock_stub)
 
-        # Mark the request as cancelled BEFORE _run_remote_decode runs
-        self.prefill._cancelled.add(request_id)
-
         queue = asyncio.Queue()
-        await self.prefill._run_remote_decode(input_pb, queue)
+        operation = asyncio.create_task(
+            self.prefill._run_remote_decode(input_pb, queue, cancel_event)
+        )
+        await asyncio.sleep(0)
+        cancel_event.set()
+        await operation
 
-        # stub.Cancel must have been called exactly once
-        mock_stub.Cancel.assert_called_once()
-        # Cluster counter must reflect the forward
+        self.assertTrue(stream.cancelled)
+        mock_stub.Cancel.assert_not_called()
         self.assertEqual(1, self.cluster._grpc_cancel_forward_count)
 
-        # SENTINEL must be in queue; the output must NOT be (break before queue.put)
-        items = []
-        while not queue.empty():
-            items.append(await queue.get())
-        self.assertEqual([SENTINEL], items)
+        # _run_owned_downstream is the sole producer of the priority terminal;
+        # _run_remote_decode must not end the response queue on cancellation.
+        self.assertTrue(queue.empty())
+
+    async def test_cross_cluster_stream_cancel_stops_remote_decode(self) -> None:
+        """A canceled remote stream eventually releases Decode's mock KV."""
+        remote_cluster = MockEngineCluster(self.pb2, self.pb2_grpc, self.perf)
+        remote_decode = await remote_cluster.add_engine(
+            name="decode-remote",
+            role="decode",
+            host="127.0.0.1",
+            port=0,
+            cache_capacity_blocks=4,
+            total_kv_tokens=4096,
+            block_size=1024,
+            performance_override=PerformanceModel(
+                {
+                    "sleep_scale": 1.0,
+                    "decode": {
+                        "step_ms_by_batch": [[1, 100.0]],
+                        "scale": 1.0,
+                    },
+                }
+            ),
+        )
+        try:
+            request_id = 501
+            input_pb = _make_input(
+                self.pb2,
+                request_id=request_id,
+                decode_ip="127.0.0.1",
+                decode_grpc_port=remote_decode.grpc_port,
+                decode_http_port=remote_decode.http_port,
+            )
+            input_pb.generate_config.max_new_tokens = 20
+            queue = asyncio.Queue()
+            cancel_event = asyncio.Event()
+            operation = asyncio.create_task(
+                self.prefill._run_remote_decode(input_pb, queue, cancel_event)
+            )
+
+            for _ in range(100):
+                if request_id in remote_decode._running:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertIn(request_id, remote_decode._running)
+            self.assertGreater(remote_decode._active_kv_tokens, 0)
+
+            cancel_event.set()
+            await operation
+
+            for _ in range(100):
+                if request_id not in remote_decode._running:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertNotIn(request_id, remote_decode._running)
+            self.assertEqual(0, remote_decode._active_kv_tokens)
+        finally:
+            await remote_cluster.stop()
+
+    async def test_stage4_prefill_canceled_follows_remote_decode_cleanup(self) -> None:
+        """Typed CANCELED is the fence after remote Decode accounting cleanup."""
+        remote_cluster = MockEngineCluster(self.pb2, self.pb2_grpc, self.perf)
+        remote_decode = await remote_cluster.add_engine(
+            name="decode-remote",
+            role="decode",
+            host="127.0.0.1",
+            port=0,
+            cache_capacity_blocks=4,
+            total_kv_tokens=4096,
+            block_size=1024,
+            performance_override=PerformanceModel(
+                {
+                    "sleep_scale": 1.0,
+                    "decode": {
+                        "step_ms_by_batch": [[1, 100.0]],
+                        "scale": 1.0,
+                    },
+                }
+            ),
+        )
+        remote_decode.set_injection({"cancel_cleanup_delay_ms": 100})
+
+        import grpc
+
+        channel = grpc.aio.insecure_channel(
+            f"{self.prefill.host}:{self.prefill.grpc_port}"
+        )
+        try:
+            stub = self.pb2_grpc.RpcServiceStub(channel)
+            request_id = 502
+            input_pb = _make_input(
+                self.pb2,
+                request_id=request_id,
+                decode_ip="127.0.0.1",
+                decode_grpc_port=remote_decode.grpc_port,
+                decode_http_port=remote_decode.http_port,
+            )
+            input_pb.generate_config.max_new_tokens = 20
+            batch = self.pb2.EnqueueBatchRequestPB(batch_id=12)
+            batch.dp_slots.add(dp_rank=0).requests.add().input.CopyFrom(input_pb)
+            await stub.EnqueueBatch(batch)
+
+            for _ in range(100):
+                if request_id in remote_decode._running:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertIn(request_id, remote_decode._running)
+            allocated_kv = remote_decode._active_kv_tokens
+            self.assertGreater(allocated_kv, 0)
+
+            ack = await stub.Cancel(self.pb2.CancelRequestPB(request_id=request_id))
+            self.assertEqual(self.pb2.CANCEL_STATUS_ACCEPTED, ack.status)
+
+            canceling = await stub.GetWorkerStatus(
+                self.pb2.StatusVersionPB(latest_finished_version=-1)
+            )
+            self.assertFalse(
+                any(
+                    int(task.request_id) == request_id
+                    and task.priority_preemption_progress
+                    == self.pb2.PRIORITY_PREEMPTION_CANCELED
+                    for task in canceling.finished_task_list
+                )
+            )
+            self.assertIn(request_id, remote_decode._running)
+            self.assertEqual(allocated_kv, remote_decode._active_kv_tokens)
+
+            terminal = None
+            for _ in range(100):
+                status = await stub.GetWorkerStatus(
+                    self.pb2.StatusVersionPB(latest_finished_version=-1)
+                )
+                terminal = next(
+                    (
+                        task
+                        for task in status.finished_task_list
+                        if int(task.request_id) == request_id
+                        and task.priority_preemption_progress
+                        == self.pb2.PRIORITY_PREEMPTION_CANCELED
+                    ),
+                    None,
+                )
+                if terminal is not None:
+                    self.assertNotIn(request_id, remote_decode._running)
+                    self.assertEqual(0, remote_decode._active_kv_tokens)
+                    break
+                await asyncio.sleep(0.01)
+
+            self.assertIsNotNone(terminal)
+            self.assertEqual(8429, terminal.error_info.error_code)
+            self.assertNotIn(request_id, remote_decode._running)
+            self.assertEqual(0, remote_decode._active_kv_tokens)
+            self.assertNotIn(request_id, remote_decode._response_queues)
+            self.assertEqual(0, remote_decode._rpc_counts["fetch_response"])
+        finally:
+            await channel.close()
+            await remote_cluster.stop()
 
 
 # ---------------------------------------------------------------------------

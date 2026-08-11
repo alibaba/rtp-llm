@@ -2,10 +2,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 #include <grpcpp/alarm.h>
 #include "autil/LockFreeThreadPool.h"
@@ -13,7 +15,14 @@
 
 namespace rtp_llm {
 
+class PriorityCancelExecutor;
+
 struct DeferredPrefillContext {
+    struct StartOperationResult {
+        bool started{false};
+        bool priority_finalizer_claimed{false};
+    };
+
     AtomicGuardPtr                   request_guard;
     std::shared_ptr<GenerateInputPB> input;
     // Members are destroyed in reverse order: context must go before input,
@@ -22,25 +31,53 @@ struct DeferredPrefillContext {
     std::shared_ptr<grpc::Alarm>            ttl_alarm;
 
     void cancel(const grpc::Status& status);
+    // Return true exactly once when the caller becomes the asynchronous
+    // finalization owner.
+    bool finishOperation();
+    StartOperationResult tryStartOperation();
+    bool requestPriorityFinalization();
+
+private:
+    std::mutex operation_mu_;
+    bool       operation_active_{true};
+    bool       priority_finalize_requested_{false};
+    bool       priority_finalize_claimed_{false};
 };
 
-// Owns contexts that have been prepared but not yet claimed by FetchResponse.
+// Tracks cancel-visible active contexts and Fetch-visible prepared contexts.
 class DeferredPrefillContextMap: public std::enable_shared_from_this<DeferredPrefillContextMap> {
 public:
+    grpc::Status registerActive(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& context);
     grpc::Status store(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& context);
     grpc::Status
     armTtl(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& context, std::chrono::milliseconds ttl);
     grpc::Status                            take(int64_t request_id, std::shared_ptr<DeferredPrefillContext>& context);
     std::shared_ptr<DeferredPrefillContext> remove(int64_t request_id, const DeferredPrefillContext* expected);
+    bool cancelByPriorityPreemption(int64_t                                      request_id,
+                                    std::shared_ptr<DeferredPrefillContext>&      context,
+                                    bool*                                         newly_installed = nullptr);
+    bool cancelByPriorityPreemption(int64_t request_id) {
+        std::shared_ptr<DeferredPrefillContext> ignored;
+        return cancelByPriorityPreemption(request_id, ignored);
+    }
+    void publishPriorityPreemptionCanceled(int64_t request_id, const DeferredPrefillContext* expected);
+    void finish(int64_t request_id, const DeferredPrefillContext* expected);
     void                                    stopAccepting();
     void                                    cancelAll(const grpc::Status& status);
     size_t                                  size() const;
 
 private:
     void expire(int64_t request_id, const DeferredPrefillContext* expected);
+    void sweepPriorityPreemptionTombstones(int64_t now_ms);
 
     mutable std::mutex                                                   mu_;
     std::unordered_map<int64_t, std::shared_ptr<DeferredPrefillContext>> contexts_;
+    std::unordered_map<int64_t, std::weak_ptr<DeferredPrefillContext>>   active_contexts_;
+    // Request-id reuse is explicitly out of scope. A latched tombstone keeps
+    // duplicate Cancel and a future FetchResponse idempotent after the active
+    // context has moved to asynchronous cleanup.
+    std::unordered_map<int64_t, int64_t>                                 priority_preemption_tombstones_;
+    std::deque<std::pair<int64_t, int64_t>>                              priority_preemption_tombstone_expiries_;
     bool                                                                 stopping_{false};
 };
 
@@ -55,7 +92,7 @@ private:
 // -> prepareGroup -> enqueueGroupStreams -> publishSlot).
 class PrefillBatchRpcServer: public PrefillRpcServer {
 public:
-    PrefillBatchRpcServer() = default;
+    PrefillBatchRpcServer();
     ~PrefillBatchRpcServer() override;
 
     grpc::Status init(const EngineInitParams&                                maga_init_params,
@@ -75,11 +112,15 @@ public:
     void beginShutdown();
 
 private:
+    bool onCancelRequest(int64_t request_id) override;
+    void finalizePriorityPreemption(int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred);
+    void finishSlotOperation(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& deferred);
+
     // One accepted request inside a group; carried across the EnqueueGroup phase methods.
     struct BatchSlot {
         std::shared_ptr<GenerateInputPB>        input;
-        std::unique_ptr<PrefillGenerateContext> prefill_context;
-        AtomicGuardPtr                          request_guard;
+        std::shared_ptr<DeferredPrefillContext> deferred;
+        grpc::Status                            registration_status = grpc::Status::OK;
         int64_t                                 fetch_attach_timeout_ms{0};
     };
 
@@ -112,11 +153,13 @@ private:
 
     // ---- Batch infrastructure ----
     void initThreadPools();
+    void schedulePriorityFinalization(int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred);
 
 private:
     std::shared_ptr<DeferredPrefillContextMap> deferred_contexts_ = std::make_shared<DeferredPrefillContextMap>();
     std::atomic<bool>                          stopping_{false};
     autil::ThreadPoolBasePtr                   prepare_resource_worker_pool_;
+    std::unique_ptr<PriorityCancelExecutor>    priority_cancel_executor_;
 };
 
 }  // namespace rtp_llm

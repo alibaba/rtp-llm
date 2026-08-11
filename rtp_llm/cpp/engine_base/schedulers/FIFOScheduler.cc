@@ -94,55 +94,6 @@ absl::Status FIFOScheduler::stop() {
     return absl::OkStatus();
 }
 
-// AutoTPM Cancel: R2 checkpoint — consume cancel intents against waiting and
-// running streams, then TTL-sweep stale entries (R3). Runs under lock_,
-// mirroring the cancelStreams idiom (reportError + moveToNext + erase). Order
-// per hit is fixed: read-only match() confirms the hit, the stream is stopped
-// first, and only then tryConsume() removes the entry — if stopping ever
-// failed the intent would survive for the next tick, and tryConsume (atomic
-// match + erase) consumes an entry that a duplicate cancel overwrote in
-// between as one atomic step. Repeated consumption of an already-stopped
-// stream is a no-op, so this stays idempotent. Loading-cache streams are
-// intentionally skipped: an in-flight KV transfer runs to completion and the
-// stream is consumed on the next tick once it re-enters running (release
-// delay is accepted by design).
-void FIFOScheduler::evaluateCancelIntents() {
-    auto& intents = *cancel_intent_map_;
-    intents.sweepExpired(autil::TimeUtility::currentTimeInMilliSeconds());
-    if (intents.empty()) {
-        return;
-    }
-    auto consume = [&intents](std::list<GenerateStreamPtr>& streams) {
-        for (auto it = streams.begin(); it != streams.end();) {
-            auto&      stream = *it;
-            const auto intent = intents.match(stream->streamId());
-            if (!intent.has_value()) {
-                ++it;
-                continue;
-            }
-            // Existing termination path: the terminal code carries the cancel
-            // attribution (PRIORITY_PREEMPTED -> 8429).
-            stream->reportError(intent->terminal_code,
-                                "cancelled by master: " + ErrorCodeToString(intent->terminal_code));
-            stream->moveToNext();
-            intents.tryConsume(stream->streamId());
-            it = streams.erase(it);
-        }
-    };
-    consume(waiting_streams_);
-    consume(running_streams_);
-    // Group members leave one by one; drop a group node when it became empty
-    // so schedule() never sees an empty group.
-    for (auto git = waiting_group_queue_.begin(); git != waiting_group_queue_.end();) {
-        consume(*git);
-        if (git->empty()) {
-            git = waiting_group_queue_.erase(git);
-        } else {
-            ++git;
-        }
-    }
-}
-
 int64_t FIFOScheduler::lastScheduleTime() {
     return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() : last_schedule_time_.load();
 }
@@ -709,8 +660,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_admitted_context_batch_size_ = 0;
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
-
-    evaluateCancelIntents();
 
     evaluateAndUpdateStreams(loading_cache_streams_);
     evaluateAndUpdateStreams(running_streams_);

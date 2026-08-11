@@ -520,9 +520,10 @@ final class MockControlServer {
      * contract as the in-process MockEngineCancelChannel — on the found branch
      * the request is removed and the CANCELLED completion surfaces in the next
      * WorkerStatus finished list (iron rule 4: WorkerStatus stays the sole
-     * release-confirmation source). Response: {@code {found, phase,
+     * release-confirmation source). Response: {@code {status, found, phase,
      * already_finished}} with {@code phase} as the TaskPhase enum name (null
-     * unless found).
+     * unless found). A Decode target returns HTTP 501 / {@code UNIMPLEMENTED},
+     * matching the production role contract.
      */
     private void handleCancelRequest(HttpExchange exchange) throws IOException {
         if (!"POST".equals(exchange.getRequestMethod())) {
@@ -538,6 +539,7 @@ final class MockControlServer {
             long requestId = parseRequestId(body.get("request_id"));
             JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
             Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", result.found() ? "ACCEPTED" : "NOT_FOUND");
             response.put("found", result.found());
             response.put("phase", result.phase() == null ? null : result.phase().name());
             response.put("already_finished", result.alreadyFinished());
@@ -545,6 +547,10 @@ final class MockControlServer {
             response.put("port", service.getGrpcPort());
             response.put("request_id", requestId);
             sendJson(exchange, 200, response);
+        } catch (UnsupportedOperationException e) {
+            sendJson(exchange, 501, Map.of(
+                    "status", "UNIMPLEMENTED",
+                    "error", e.getMessage()));
         } catch (ApiException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));
         } catch (Exception e) {

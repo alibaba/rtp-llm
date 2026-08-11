@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 class FlexlbScheduleProtocolTest {
@@ -28,10 +29,15 @@ class FlexlbScheduleProtocolTest {
                 EngineRpcService.GenerateInputPB.getDescriptor().findFieldByNumber(10);
         assertEquals("priority", priority.getName());
         assertEquals(Descriptors.FieldDescriptor.Type.INT32, priority.getType());
-        // AutoTPM Cancel: TaskInfoPB carries the per-request priority; the
-        // former generation-fencing field 14 was removed as dead plumbing and
-        // must stay absent.
-        assertNull(EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(14));
+        // AutoTPM Cancel: field 14 is the typed weak-ACK completion progress.
+        Descriptors.FieldDescriptor preemptionProgress =
+                EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(14);
+        assertNotNull(preemptionProgress);
+        assertEquals("priority_preemption_progress", preemptionProgress.getName());
+        assertEquals(Descriptors.FieldDescriptor.Type.ENUM, preemptionProgress.getType());
+        assertEquals(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_NONE,
+                EngineRpcService.TaskInfoPB.getDefaultInstance()
+                        .getPriorityPreemptionProgress());
         Descriptors.FieldDescriptor taskPriority =
                 EngineRpcService.TaskInfoPB.getDescriptor().findFieldByNumber(15);
         assertEquals("priority", taskPriority.getName());

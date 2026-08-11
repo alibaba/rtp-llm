@@ -322,8 +322,8 @@ public class ConfigService {
         log.info("autoTpmPlanCacheHitBenefitCap={}", config.getAutoTpmPlanCacheHitBenefitCap());
         log.info("autoTpmDecodeAcceptedEvictEnabled={}",
             config.isAutoTpmDecodeAcceptedEvictEnabled());
-        log.info("autoTpmCommitWaitReleaseTimeoutMs={}",
-            config.getAutoTpmCommitWaitReleaseTimeoutMs());
+        log.info("autoTpmCancelAckTimeoutMs={}, autoTpmCancelCompletionTimeoutMs={}",
+            config.getAutoTpmCancelAckTimeoutMs(), config.getAutoTpmCancelCompletionTimeoutMs());
         log.info("autoTpmCommitStrategy={}, autoTpmVictimGuardMode={}",
             config.getAutoTpmCommitStrategy(), config.getAutoTpmVictimGuardMode());
         log.info("workerTimeoutMs={}",

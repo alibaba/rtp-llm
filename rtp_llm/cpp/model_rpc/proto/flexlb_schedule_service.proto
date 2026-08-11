@@ -67,6 +67,16 @@ message FlexlbServerStatusPB {
     reserved 5;
 }
 
+// Why an incoming request was rejected by the admission decision.  This is
+// produced by the Master from one consistent scheduling snapshot; consumers
+// must not infer it from priority thresholds or error_message text.
+enum ScheduleFailureReasonPB {
+    SCHEDULE_FAILURE_REASON_UNSPECIFIED = 0;
+    HIGHER_PRIORITY_AHEAD = 1;
+    SAME_PRIORITY_AHEAD = 2;
+    RESOURCE_EXHAUSTED = 3;
+}
+
 message FlexlbScheduleResponsePB {
     bool success = 1;
     int32 code = 2;
@@ -76,6 +86,7 @@ message FlexlbScheduleResponsePB {
     int32 queue_length = 6;
     bool enqueued_by_master = 7;
     RequestLifecyclePB lifecycle = 8;
+    ScheduleFailureReasonPB admission_reject_reason = 9;
 }
 
 message FlexlbCancelRequestPB {

@@ -12,8 +12,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -23,7 +26,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * Decode-side endpoint with Auto-TPM shadow admission accounting.
  *
  * <p><b>Layered view (Phase 5):</b> {@code inflightRequests} only ever holds
- * {@code RESERVED_NOT_ACCEPTED} shadow entries; engine-confirmed requests are
+     * shadow entries; engine-confirmed requests are
  * folded into {@code confirmedRunningCount} by calibrate exactly as in
  * Phase 4 (accounting unchanged), and are additionally tracked per-request in
  * {@link #trackedConfirmed} split by phase — {@code KV_ALLOCATED} →
@@ -57,6 +60,26 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final ConcurrentHashMap<Long, ConfirmedTask> trackedConfirmed = new ConcurrentHashMap<>();
 
     /**
+     * Token-fenced priority-preemption ownership.  Victim accounting remains
+     * in its original layer until a typed Prefill WorkerStatus CANCELED event
+     * is settled; an ACCEPTED Cancel response only advances the claim state.
+     * All access is under {@link #admissionLock}.
+     */
+    private final Map<Long, PreemptionClaim> preemptionClaims = new HashMap<>();
+    private final Map<Long, EndpointPreemptionAttempt> preemptionAttempts = new HashMap<>();
+
+    /** KV that Decode has reported free but the Prefill CANCELED fence has not settled yet. */
+    private final AtomicLong priorityPreemptionHeldKv = new AtomicLong();
+
+    /**
+     * Request-id fence against a stale WorkerStatus resurrecting a settled
+     * victim: requestId -> settlement time. It shares the endpoint inflight
+     * TTL cleanup, so the fence is long enough for delayed status deltas but
+     * bounded by the same retention policy as scheduler terminal tombstones.
+     */
+    private final Map<Long, Long> priorityCanceledTombstones = new HashMap<>();
+
+    /**
      * Reserved entries whose request is still sitting in a prefill queue —
      * committed by the scheduler but not yet dispatched to the engine (N2,
      * plan-commit redesign). These reservations keep protecting KV against
@@ -64,7 +87,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * counting them produced the shadow-saturation 8400 storm (root cause C —
      * queued reservations saturating {@code getTotalLoad()} while the engine
      * sat idle). Marked at plan commit ({@code markQueuedPhase}), unmarked at
-     * batch dispatch ({@code markDispatchedPhase}); release/calibrate prune
+     * batch dispatch ({@code tryMarkEngineMayHaveSeen}); release/calibrate prune
      * it alongside {@code inflightRequests}. Legacy/DIRECT paths never mark,
      * so their accounting is unchanged.
      */
@@ -75,8 +98,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * incremented when a reservation is marked queued and decremented when
      * it is dispatched / released / calibrated out, so {@link #getEngineLoad}
      * avoids the per-call O(n) scan of the legacy formula. Read lock-free;
-     * written under {@link #admissionLock} (except {@link #markDispatchedPhase}
-     * which relies on the atomic add/remove return value).
+     * written under {@link #admissionLock}.
      */
     private final AtomicInteger queuedPhaseCount = new AtomicInteger(0);
 
@@ -171,7 +193,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Atomic decode eviction commit (design doc 11.5/17.2): under the single
      * endpoint admission lock — validate the version, validate every victim is
-     * still a {@code RESERVED_NOT_ACCEPTED} entry, then release all victims
+     * still Master-queued entries, then release all victims
      * and reserve the incoming request. Validate-first guarantees
      * all-or-nothing; on any validation failure nothing is applied.
      *
@@ -193,7 +215,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             for (Long victimId : victimIds) {
                 RequestInflight victim = inflightRequests.get(victimId);
-                if (victim == null || victim.phase() != DecodeTaskPhase.RESERVED_NOT_ACCEPTED) {
+                if (victim == null || !queuedPhase.contains(victimId)
+                        || preemptionClaims.containsKey(victimId)) {
                     return ReleaseReserveResult.VICTIM_GONE;
                 }
             }
@@ -210,7 +233,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * CAS-style conditional release (redesign N3 §3.4): under the admission
      * lock, release the reservation only if it is still held as a
-     * {@code RESERVED_NOT_ACCEPTED} shadow entry. Returns {@code false} —
+     * Master-queued shadow entry. Returns {@code false} —
      * touching nothing — when the reservation is gone (already released) or
      * has been folded into the confirmed layer (the engine owns the request;
      * contract 5.3 forbids terminal operations on dispatched requests).
@@ -219,7 +242,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         admissionLock.lock();
         try {
             RequestInflight held = inflightRequests.get(requestId);
-            if (held == null || held.phase() != DecodeTaskPhase.RESERVED_NOT_ACCEPTED) {
+            if (held == null || !queuedPhase.contains(requestId)
+                    || preemptionClaims.containsKey(requestId)) {
                 return false;
             }
             release(requestId);
@@ -237,7 +261,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Presence-guarded decode eviction commit (redesign N3 §3.4,
      * {@code autoTpmVictimGuardMode=victim_presence}): under the admission
      * lock, conditionally release every victim still holding a
-     * {@code RESERVED_NOT_ACCEPTED} reservation ({@link #releaseIfHeld}).
+     * Master-queued reservation ({@link #releaseIfHeld}).
      * All victims freed → reserve the incoming request and succeed. Any
      * victim already gone (dispatched / settled) → the freed releases are
      * NOT rolled back — their host requests are driven terminal by the
@@ -296,10 +320,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
             List<ConfirmedTaskView> confirmed = new java.util.ArrayList<>(trackedConfirmed.size());
             trackedConfirmed.forEach((requestId, task) ->
                     confirmed.add(new ConfirmedTaskView(requestId, task.priority(), task.deadlineMs(),
-                            task.kvTokens(), task.phase(), task.cancelRequested())));
+                            task.kvTokens(), task.phase(), task.priorityKnown(),
+                            preemptionClaims.containsKey(requestId))));
             return new LayeredAdmissionView(admissionVersion.get(),
                     Map.copyOf(inflightRequests), List.copyOf(confirmed),
-                    java.util.Set.copyOf(queuedPhase));
+                    java.util.Set.copyOf(queuedPhase),
+                    Set.copyOf(preemptionClaims.keySet()));
         } finally {
             admissionLock.unlock();
         }
@@ -309,7 +335,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public record LayeredAdmissionView(long admissionVersion,
                                        Map<Long, RequestInflight> reserved,
                                        List<ConfirmedTaskView> confirmed,
-                                       java.util.Set<Long> queued) {
+                                       java.util.Set<Long> queued,
+                                       Set<Long> claimed) {
     }
 
     /** Immutable point-in-time view of one layered-registry entry. */
@@ -318,92 +345,317 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                     long deadlineMs,
                                     long kvTokens,
                                     DecodeTaskPhase phase,
-                                    boolean cancelRequested) {
+                                    boolean priorityKnown,
+                                    boolean claimedForPreemption) {
+    }
+
+    // ==================== Priority-preemption transaction ====================
+
+    public enum PreemptionBeginResult {
+        SUCCESS,
+        VERSION_MISMATCH,
+        VICTIM_GONE,
+        VICTIM_ALREADY_CLAIMED,
+        INVALID_PRIORITY,
+        INCOMING_ALREADY_RESERVED
     }
 
     /**
-     * Atomic begin of an accepted-eviction commit (Phase 5, design doc
-     * 11.5/17.2): under the admission lock — validate the version, validate
-     * every reserved victim is still {@code RESERVED_NOT_ACCEPTED} and every
-     * accepted victim is still an {@code ACCEPTED_NOT_RUNNING} layered entry
-     * without a pending cancel, then release the reserved victims and mark
-     * the accepted victims {@code CANCEL_REQUESTED} (dedup against repeated
-     * cancels). Validate-first: on any failure nothing is applied.
-     *
-     * <p>The incoming request is deliberately NOT reserved here — cancel is
-     * only an intent injection and the release must be confirmed by a later
-     * WorkerStatus report before the incoming may take the freed capacity
-     * (iron rule 4: a cancel timeout never assumes the resources are free).
+     * Atomically claim Engine-visible victims and reserve the incoming demand
+     * as provisional capacity.  Victim accounting is intentionally untouched:
+     * Cancel ACCEPTED is only an intent acknowledgement.
      */
-    public ReleaseReserveResult tryBeginAcceptedEviction(List<Long> reservedVictimIds,
-                                                         List<Long> acceptedVictimIds,
-                                                         long expectedAdmissionVersion) {
+    public PreemptionBeginResult beginPriorityPreemption(
+            long attemptToken,
+            List<Long> victimIds,
+            long incomingRequestId,
+            long incomingKvTokens,
+            long incomingExpectedKvTokens,
+            int incomingPriority,
+            long incomingDeadlineMs,
+            long expectedAdmissionVersion,
+            boolean requireVersionMatch) {
         admissionLock.lock();
         try {
-            if (admissionVersion.get() != expectedAdmissionVersion) {
-                return ReleaseReserveResult.VERSION_MISMATCH;
+            if (attemptToken <= 0 || victimIds == null || victimIds.isEmpty()) {
+                throw new IllegalArgumentException("attempt token and victims are required");
             }
-            return beginAcceptedEvictionValidated(reservedVictimIds, acceptedVictimIds);
+            if (requireVersionMatch && admissionVersion.get() != expectedAdmissionVersion) {
+                return PreemptionBeginResult.VERSION_MISMATCH;
+            }
+            if (inflightRequests.containsKey(incomingRequestId)
+                    || trackedConfirmed.containsKey(incomingRequestId)) {
+                return PreemptionBeginResult.INCOMING_ALREADY_RESERVED;
+            }
+
+            Map<Long, ClaimOwner> owners = new HashMap<>();
+            for (Long victimId : victimIds) {
+                if (preemptionClaims.containsKey(victimId)) {
+                    return PreemptionBeginResult.VICTIM_ALREADY_CLAIMED;
+                }
+                RequestInflight shadow = inflightRequests.get(victimId);
+                ConfirmedTask confirmed = trackedConfirmed.get(victimId);
+                if (shadow != null && !queuedPhase.contains(victimId)) {
+                    if (shadow.priority() <= 0 || shadow.priority() >= incomingPriority) {
+                        return PreemptionBeginResult.INVALID_PRIORITY;
+                    }
+                    owners.put(victimId, ClaimOwner.SHADOW_IN_FLIGHT);
+                } else if (confirmed != null && confirmed.phase().isEngineConfirmed()) {
+                    if (confirmed.priority() <= 0 || confirmed.priority() >= incomingPriority) {
+                        return PreemptionBeginResult.INVALID_PRIORITY;
+                    }
+                    owners.put(victimId, ClaimOwner.ENGINE_CONFIRMED);
+                } else {
+                    return PreemptionBeginResult.VICTIM_GONE;
+                }
+            }
+
+            // Provisional incoming ownership closes the free-pool race while
+            // Cancel runs.  It is not visible to the prefill queue yet.
+            reserve(incomingRequestId, incomingKvTokens, incomingExpectedKvTokens,
+                    incomingPriority, incomingDeadlineMs);
+            for (Map.Entry<Long, ClaimOwner> entry : owners.entrySet()) {
+                RequestInflight shadow = inflightRequests.get(entry.getKey());
+                ConfirmedTask confirmed = trackedConfirmed.get(entry.getKey());
+                long hardKv = shadow != null ? shadow.kvTokens()
+                        : confirmed != null ? confirmed.kvTokens() : 0;
+                long expectedKv = shadow != null ? shadow.expectedKvTokens() : hardKv;
+                preemptionClaims.put(entry.getKey(),
+                        new PreemptionClaim(attemptToken, entry.getValue(), hardKv, expectedKv));
+            }
+            preemptionAttempts.put(attemptToken,
+                    new EndpointPreemptionAttempt(incomingRequestId, Set.copyOf(victimIds)));
+            admissionVersion.incrementAndGet();
+            return PreemptionBeginResult.SUCCESS;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    /** CLAIMED -> CANCEL_IN_FLIGHT; must complete before any outbound RPC. */
+    public boolean markPriorityCancelInFlight(long attemptToken) {
+        admissionLock.lock();
+        try {
+            EndpointPreemptionAttempt attempt = preemptionAttempts.get(attemptToken);
+            if (attempt == null) {
+                return false;
+            }
+            for (Long victimId : attempt.victimIds) {
+                PreemptionClaim claim = preemptionClaims.get(victimId);
+                if (claim == null || claim.attemptToken != attemptToken
+                        || claim.state != ClaimState.CLAIMED) {
+                    return false;
+                }
+            }
+            for (Long victimId : attempt.victimIds) {
+                preemptionClaims.get(victimId).state = ClaimState.CANCEL_IN_FLIGHT;
+            }
+            admissionVersion.incrementAndGet();
+            return true;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    /** Cancel ACCEPTED: retain every byte/slot and only advance control state. */
+    public boolean markPriorityCancelAccepted(long attemptToken, long requestId) {
+        return transitionClaim(attemptToken, requestId,
+                ClaimState.CANCEL_IN_FLIGHT, ClaimState.CANCEL_REQUESTED);
+    }
+
+    public boolean markPriorityCancelNotFound(long attemptToken, long requestId) {
+        return transitionClaim(attemptToken, requestId,
+                ClaimState.CANCEL_IN_FLIGHT, ClaimState.NOT_FOUND_STALE);
+    }
+
+    public boolean markPriorityCancelUnknown(long attemptToken, long requestId) {
+        admissionLock.lock();
+        try {
+            PreemptionClaim claim = preemptionClaims.get(requestId);
+            if (claim == null || claim.attemptToken != attemptToken
+                    || (claim.state != ClaimState.CANCEL_IN_FLIGHT
+                        && claim.state != ClaimState.CANCEL_REQUESTED)) {
+                return false;
+            }
+            claim.state = ClaimState.CANCEL_UNKNOWN;
+            admissionVersion.incrementAndGet();
+            return true;
         } finally {
             admissionLock.unlock();
         }
     }
 
     /**
-     * Presence-guarded variant of {@link #tryBeginAcceptedEviction} (redesign
-     * N3 §3.4, {@code autoTpmVictimGuardMode=victim_presence}): the same
-     * all-or-nothing victim validation — every reserved victim still
-     * {@code RESERVED_NOT_ACCEPTED}, every accepted victim still an
-     * {@code ACCEPTED_NOT_RUNNING} layered entry without a pending cancel —
-     * but without the admission-version check, so unrelated admission-state
-     * mutations no longer abort the commit. The cancel-wait-confirm flow
-     * (iron rule 4) is unchanged.
+     * Typed Prefill CANCELED settlement.  This is the sole transition that
+     * deletes the victim accounting; duplicate observations are
+     * a token-fenced no-op.
      */
-    public ReleaseReserveResult tryBeginAcceptedEvictionPresent(List<Long> reservedVictimIds,
-                                                                List<Long> acceptedVictimIds) {
+    public boolean settlePriorityCanceled(long attemptToken, long requestId) {
         admissionLock.lock();
         try {
-            return beginAcceptedEvictionValidated(reservedVictimIds, acceptedVictimIds);
+            PreemptionClaim claim = preemptionClaims.get(requestId);
+            if (claim == null || claim.attemptToken != attemptToken
+                    || (claim.state != ClaimState.CANCEL_REQUESTED
+                        && claim.state != ClaimState.CANCEL_UNKNOWN)) {
+                return false;
+            }
+            if (claim.owner == ClaimOwner.SHADOW_IN_FLIGHT) {
+                RequestInflight removed = inflightRequests.remove(requestId);
+                if (removed != null) {
+                    inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+                    inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+                }
+                if (queuedPhase.remove(requestId)) {
+                    queuedPhaseCount.decrementAndGet();
+                }
+            } else {
+                trackedConfirmed.remove(requestId);
+                confirmedRunningCount = Math.max(0, confirmedRunningCount - 1);
+            }
+            if (claim.kvHeldAfterWorkerRelease) {
+                priorityPreemptionHeldKv.addAndGet(-claim.hardKvTokens);
+                claim.kvHeldAfterWorkerRelease = false;
+            }
+            claim.state = ClaimState.CANCELED_SETTLED;
+            priorityCanceledTombstones.put(requestId, System.currentTimeMillis());
+            // A completion can arrive after the incoming attempt has already
+            // timed out and released its provisional reservation.  In that
+            // case there is no later commit/abort pass to discard the claim;
+            // the typed CANCELED observation is still authoritative and must
+            // finish the victim without leaving a permanent accounting fence.
+            if (!preemptionAttempts.containsKey(attemptToken)) {
+                preemptionClaims.remove(requestId);
+            }
+            admissionVersion.incrementAndGet();
+            return true;
         } finally {
             admissionLock.unlock();
         }
     }
 
-    /** Validate-first accepted-eviction begin; caller holds {@link #admissionLock}. */
-    private ReleaseReserveResult beginAcceptedEvictionValidated(List<Long> reservedVictimIds,
-                                                                List<Long> acceptedVictimIds) {
-        for (Long victimId : reservedVictimIds) {
-            RequestInflight victim = inflightRequests.get(victimId);
-            if (victim == null || victim.phase() != DecodeTaskPhase.RESERVED_NOT_ACCEPTED) {
-                return ReleaseReserveResult.VICTIM_GONE;
+    /** Mark the full incoming reservation committed after every victim settles. */
+    public boolean commitPriorityPreemption(long attemptToken) {
+        admissionLock.lock();
+        try {
+            EndpointPreemptionAttempt attempt = preemptionAttempts.get(attemptToken);
+            if (attempt == null || !inflightRequests.containsKey(attempt.incomingRequestId)) {
+                return false;
             }
-        }
-        for (Long victimId : acceptedVictimIds) {
-            ConfirmedTask victim = trackedConfirmed.get(victimId);
-            if (victim == null || victim.phase() != DecodeTaskPhase.ACCEPTED_NOT_RUNNING
-                    || victim.cancelRequested()) {
-                return ReleaseReserveResult.VICTIM_GONE;
+            for (Long victimId : attempt.victimIds) {
+                PreemptionClaim claim = preemptionClaims.get(victimId);
+                if (claim == null || claim.attemptToken != attemptToken
+                        || claim.state != ClaimState.CANCELED_SETTLED) {
+                    return false;
+                }
             }
+            for (Long victimId : attempt.victimIds) {
+                preemptionClaims.remove(victimId);
+            }
+            preemptionAttempts.remove(attemptToken);
+            admissionVersion.incrementAndGet();
+            return true;
+        } finally {
+            admissionLock.unlock();
         }
-        for (Long victimId : reservedVictimIds) {
-            release(victimId);
-        }
-        for (Long victimId : acceptedVictimIds) {
-            trackedConfirmed.get(victimId).markCancelRequested();
-        }
-        admissionVersion.incrementAndGet();
-        return ReleaseReserveResult.SUCCESS;
     }
 
     /**
-     * Whether the request is still present in the confirmed (accepted or
-     * running) layered registry. Turning {@code false} is the release
-     * confirmation the accepted-eviction wait window polls for — calibrate
-     * drops the entry when the next WorkerStatus report no longer lists the
-     * request as confirmed (or lists it as finished).
+     * Abort the incoming attempt.  Provisional incoming ownership is released;
+     * successfully canceled victims become ordinary free capacity, while
+     * NOT_FOUND/unknown claims retain their accounting and reconciliation
+     * fence.
      */
-    public boolean isConfirmedTracked(long requestId) {
-        return trackedConfirmed.containsKey(requestId);
+    public void abortPriorityPreemption(long attemptToken) {
+        admissionLock.lock();
+        try {
+            EndpointPreemptionAttempt attempt = preemptionAttempts.remove(attemptToken);
+            if (attempt == null) {
+                return;
+            }
+            release(attempt.incomingRequestId);
+            for (Long victimId : attempt.victimIds) {
+                PreemptionClaim claim = preemptionClaims.get(victimId);
+                if (claim == null || claim.attemptToken != attemptToken) {
+                    continue;
+                }
+                if (claim.state == ClaimState.CLAIMED
+                        || claim.state == ClaimState.CANCEL_IN_FLIGHT
+                        || claim.state == ClaimState.CANCELED_SETTLED) {
+                    preemptionClaims.remove(victimId);
+                }
+            }
+            admissionVersion.incrementAndGet();
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    /** Fresh active status is the only path that reopens a NOT_FOUND_STALE victim. */
+    public boolean reconcilePriorityVictimActive(long requestId) {
+        admissionLock.lock();
+        try {
+            PreemptionClaim claim = preemptionClaims.get(requestId);
+            if (claim == null || claim.state != ClaimState.NOT_FOUND_STALE) {
+                return false;
+            }
+            releaseHeldKv(claim);
+            preemptionClaims.remove(requestId);
+            admissionVersion.incrementAndGet();
+            return true;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    /**
+     * Reconcile a one-shot ordinary Decode terminal after Cancel NOT_FOUND or
+     * a transport-unknown ACK. Neither outcome is typed priority completion,
+     * so the ordinary terminal resumes the pre-existing completion path.
+     */
+    public boolean reconcilePriorityVictimFinished(long requestId) {
+        admissionLock.lock();
+        try {
+            PreemptionClaim claim = preemptionClaims.get(requestId);
+            if (claim == null || (claim.state != ClaimState.NOT_FOUND_STALE
+                    && claim.state != ClaimState.CANCEL_UNKNOWN)) {
+                return false;
+            }
+            if (claim.owner == ClaimOwner.ENGINE_CONFIRMED) {
+                trackedConfirmed.remove(requestId);
+                confirmedRunningCount = Math.max(0, confirmedRunningCount - 1);
+                releaseHeldKv(claim);
+            } else {
+                RequestInflight removed = inflightRequests.remove(requestId);
+                if (removed != null) {
+                    inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+                    inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
+                }
+                if (queuedPhase.remove(requestId)) {
+                    queuedPhaseCount.decrementAndGet();
+                }
+            }
+            preemptionClaims.remove(requestId);
+            admissionVersion.incrementAndGet();
+            return true;
+        } finally {
+            admissionLock.unlock();
+        }
+    }
+
+    private boolean transitionClaim(long attemptToken, long requestId,
+                                    ClaimState expected, ClaimState next) {
+        admissionLock.lock();
+        try {
+            PreemptionClaim claim = preemptionClaims.get(requestId);
+            if (claim == null || claim.attemptToken != attemptToken || claim.state != expected) {
+                return false;
+            }
+            claim.state = next;
+            admissionVersion.incrementAndGet();
+            return true;
+        } finally {
+            admissionLock.unlock();
+        }
     }
 
     /** Accepted-not-running layer size (Phase 5 gauge). */
@@ -455,92 +707,73 @@ public class DecodeEndpoint extends WorkerEndpoint {
         this.reportedKvAvailable.set(status.getAvailableKvCacheTokens().get());
         admissionVersion.incrementAndGet();
 
-        // Phase 1: process running requests — KV_ALLOCATED or RUNNING means the engine
-        // has taken ownership, so we can release our inflight reservation.
-        //
-        // Two-pass to avoid transient undercount: if we remove from inflightRequests before
-        // updating confirmedRunningCount, a task transitioning from inflight to confirmed
-        // is briefly counted in neither, which could allow oversubscription. By updating
-        // the count first and removing second, the transient window overcounts (conservative).
-        int kvAllocatedRequests = 0;
-        if (runningTaskInfo != null) {
-            // First pass: count and update confirmedRunningCount
-            for (TaskInfo task : runningTaskInfo.values()) {
-                TaskPhase phase = task.getPhase();
-                if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
-                    kvAllocatedRequests++;
-                }
-            }
-        }
-        this.confirmedRunningCount = kvAllocatedRequests;
-
-        // Second pass: remove confirmed tasks from inflightRequests, and sync
-        // the layered registry (Phase 5). The shadow accounting transfer is
-        // byte-for-byte the Phase 4 behavior; the layered registry is a pure
-        // metadata addition on top of it.
-        java.util.Set<Long> confirmedNow = new java.util.HashSet<>();
+        // Build one authoritative Decode view.  Claimed victims that disappear
+        // are held synthetically until the original Prefill publishes typed
+        // CANCELED; generic Decode absence/finished must not release them.
+        Set<Long> confirmedNow = new HashSet<>();
+        int actualConfirmed = 0;
         long now = System.currentTimeMillis();
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
                 TaskPhase phase = task.getPhase();
-                if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
+                long requestId = task.getRequestId();
+                if ((phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING)
+                        && !priorityCanceledTombstones.containsKey(requestId)) {
+                    actualConfirmed++;
+                    RequestInflight removed = inflightRequests.remove(requestId);
                     if (removed != null) {
                         inflightKvReservedTotal.addAndGet(-removed.kvTokens());
                         inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
                     }
-                    confirmedNow.add(task.getRequestId());
+                    PreemptionClaim claim = preemptionClaims.get(requestId);
+                    if (claim != null
+                            && claim.state == ClaimState.NOT_FOUND_STALE
+                            && !preemptionAttempts.containsKey(claim.attemptToken)) {
+                        releaseHeldKv(claim);
+                        preemptionClaims.remove(requestId);
+                        claim = null;
+                    }
+                    if (claim != null) {
+                        claim.owner = ClaimOwner.ENGINE_CONFIRMED;
+                        releaseHeldKv(claim);
+                    }
+                    confirmedNow.add(requestId);
                     trackConfirmed(task, phase, removed, now);
                 }
             }
         }
-        // Confirmed entries no longer reported (finished, or regressed out of
-        // the confirmed phases) leave the layered registry — this is also the
-        // release-confirmation signal for the accepted-eviction wait window.
-        trackedConfirmed.keySet().retainAll(confirmedNow);
 
-        // Phase 2: process finished non-success requests
+        int syntheticallyHeldSlots = 0;
+        for (Map.Entry<Long, PreemptionClaim> entry : preemptionClaims.entrySet()) {
+            PreemptionClaim claim = entry.getValue();
+            if (claim.owner == ClaimOwner.ENGINE_CONFIRMED
+                    && claim.state != ClaimState.CANCELED_SETTLED
+                    && !confirmedNow.contains(entry.getKey())) {
+                syntheticallyHeldSlots++;
+                holdReleasedKv(claim);
+            }
+        }
+        this.confirmedRunningCount = actualConfirmed + syntheticallyHeldSlots;
+
+        // Keep claimed entries discoverable even if Decode reports them
+        // finished first.  Unclaimed entries follow ordinary calibration.
+        trackedConfirmed.entrySet().removeIf(entry ->
+                !confirmedNow.contains(entry.getKey())
+                        && !preemptionClaims.containsKey(entry.getKey()));
+
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
-                if (task.getErrorCode() != 0) {
-                    trackedConfirmed.remove(task.getRequestId());
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                        inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
-                    } else {
-                        logger.debug("Decode calibrate: finished failed request reqId={} not in inflight, error={}",
-                                task.getRequestId(), task.getErrorMessage());
-                    }
+                long requestId = task.getRequestId();
+                if (priorityCanceledTombstones.containsKey(requestId)
+                        || preemptionClaims.containsKey(requestId)) {
+                    continue;
                 }
-            }
-
-            // Phase 3: process finished success requests
-            for (TaskInfo task : finishedTaskInfo.values()) {
-                if (task.getErrorCode() == 0) {
-                    trackedConfirmed.remove(task.getRequestId());
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                        inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
-                    }
+                trackedConfirmed.remove(requestId);
+                RequestInflight removed = inflightRequests.remove(requestId);
+                if (removed != null) {
+                    inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+                    inflightExpectedKvReservedTotal.addAndGet(-removed.expectedKvTokens());
                 }
-            }
-
-            // AutoTPM Cancel: an explicit finished record is
-            // the release-confirmation event — feed the ReleaseTracker so the
-            // accepted-eviction wait completes. Task DISAPPEARANCE deliberately
-            // does NOT feed the tracker (absence is never release proof).
-            for (TaskInfo task : finishedTaskInfo.values()) {
-                org.flexlb.balance.scheduler.priority.ReleaseTracker.global().onWorkerStatus(
-                        new org.flexlb.balance.scheduler.priority.ReleaseTracker.ReleaseObservation(
-                                ipPort(),
-                                /*workerEpoch=*/0L,
-                                /*statusVersion=*/0L,
-                                task.getRequestId(),
-                                /*resourceReleased=*/true,
-                                /*lifecycleRevision=*/0L,
-                                (int) task.getErrorCode()));
             }
         }
 
@@ -573,14 +806,29 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 ? DecodeTaskPhase.ACCEPTED_NOT_RUNNING
                 : DecodeTaskPhase.RUNNING;
         ConfirmedTask tracked = trackedConfirmed.get(task.getRequestId());
-        if (tracked == null) {
+        boolean priorityKnown = removed != null;
+        if (tracked == null || (!tracked.priorityKnown() && priorityKnown)) {
             int priority = removed != null ? removed.priority() : RequestInflight.DEFAULT_PRIORITY;
             long deadlineMs = removed != null ? removed.deadlineMs() : 0;
             long kvTokens = Math.max(0, task.getInputLength());
             trackedConfirmed.put(task.getRequestId(),
-                    new ConfirmedTask(priority, deadlineMs, kvTokens, layer, now));
+                    new ConfirmedTask(priority, deadlineMs, kvTokens, layer, now, priorityKnown));
         } else {
             tracked.refresh(layer, now);
+        }
+    }
+
+    private void holdReleasedKv(PreemptionClaim claim) {
+        if (!claim.kvHeldAfterWorkerRelease) {
+            priorityPreemptionHeldKv.addAndGet(claim.hardKvTokens);
+            claim.kvHeldAfterWorkerRelease = true;
+        }
+    }
+
+    private void releaseHeldKv(PreemptionClaim claim) {
+        if (claim.kvHeldAfterWorkerRelease) {
+            priorityPreemptionHeldKv.addAndGet(-claim.hardKvTokens);
+            claim.kvHeldAfterWorkerRelease = false;
         }
     }
 
@@ -637,7 +885,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * slightly inconsistent snapshot. This is acceptable for scheduling decisions.
      */
     public long realKvAvailable() {
-        return Math.max(0, reportedKvAvailable.get() - inflightHardKvReserved());
+        return Math.max(0, reportedKvAvailable.get()
+                - inflightHardKvReserved() - priorityPreemptionHeldKv.get());
     }
 
     // ==================== Metrics ====================
@@ -675,7 +924,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public int evictExpiredRequests(long ttlMs) {
         admissionLock.lock();
         try {
-            int evicted = requestEvictor.evictExpired(ttlMs);
+            // A priority claim is a stronger accounting owner than generic
+            // TTL cleanup. In particular, an ENGINE_MAY_HAVE_SEEN shadow must
+            // remain charged until typed Prefill CANCELED or explicit
+            // NOT_FOUND/UNKNOWN reconciliation settles the claim.
+            int evicted = requestEvictor.evictExpired(
+                    ttlMs, requestId -> !preemptionClaims.containsKey(requestId));
             // Drop stale queued ids one-by-one so the O(1) counter stays in
             // sync (PR-C) — evictExpired may have removed inflight entries.
             java.util.Iterator<Long> queuedEvictIt = queuedPhase.iterator();
@@ -689,7 +943,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long cutoff = System.currentTimeMillis() - ttlMs;
             boolean trackedPurged = trackedConfirmed.values()
                     .removeIf(task -> task.lastSeenMs() < cutoff);
-            if (evicted > 0 || trackedPurged) {
+            boolean canceledTombstonesPurged = priorityCanceledTombstones.entrySet()
+                    .removeIf(entry -> entry.getValue() < cutoff);
+            if (evicted > 0 || trackedPurged || canceledTombstonesPurged) {
                 admissionVersion.incrementAndGet();
             }
             return evicted;
@@ -714,7 +970,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * + max(0, inflightRequests.size() − queuedPhaseCount)}. The
      * {@link #queuedPhaseCount} AtomicInteger is maintained incrementally at
      * every queuedPhase mutation point ({@link #markQueuedPhase},
-     * {@link #markDispatchedPhase}, {@link #reserve}, {@link #release},
+     * {@link #tryMarkEngineMayHaveSeen}, {@link #reserve}, {@link #release},
      * {@link #doCalibrate}, {@link #evictExpiredRequests}) so the hot gate
      * path no longer scans the queued set.
      *
@@ -754,13 +1010,27 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Mark a queued request as dispatched to the engine (N2): from this point
-     * its reservation counts against the engine concurrency again, until
-     * calibrate confirms it. Idempotent.
+     * Claim dispatch ownership before the scheduler exposes a request to the
+     * engine. Under the same admission lock used by local victim release, a
+     * queued reservation moves to ENGINE_MAY_HAVE_SEEN; whichever side wins
+     * excludes the other. A legacy/non-queued reservation is already in that
+     * phase and remains dispatchable. Missing, released, or preemption-claimed
+     * reservations return {@code false} and must not be sent.
      */
-    public void markDispatchedPhase(long requestId) {
-        if (queuedPhase.remove(requestId)) {
-            queuedPhaseCount.decrementAndGet();
+    public boolean tryMarkEngineMayHaveSeen(long requestId) {
+        admissionLock.lock();
+        try {
+            if (!inflightRequests.containsKey(requestId)
+                    || preemptionClaims.containsKey(requestId)) {
+                return false;
+            }
+            if (queuedPhase.remove(requestId)) {
+                queuedPhaseCount.decrementAndGet();
+                admissionVersion.incrementAndGet();
+            }
+            return true;
+        } finally {
+            admissionLock.unlock();
         }
     }
 
@@ -774,6 +1044,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return confirmedRunningCount;
     }
 
+    /** Whether the latest Decode WorkerStatus still owns this request. */
+    public boolean isConfirmedTracked(long requestId) {
+        return trackedConfirmed.containsKey(requestId);
+    }
+
     @Override
     public long getLoadMetric() {
         return getTotalLoad();
@@ -782,24 +1057,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /**
      * Mutable layered-registry entry for one engine-confirmed request
      * (Phase 5). Identity fields (priority / deadline / KV estimate) are fixed
-     * at first sight; {@code phase}, {@code cancelRequested} and
-     * {@code lastSeenMs} are volatile and only mutated under
-     * {@link #admissionLock} by calibrate / accepted-eviction begin.
+     * at first sight; {@code phase} and {@code lastSeenMs} are volatile and
+     * only mutated under {@link #admissionLock} by calibration.
      */
     static final class ConfirmedTask {
 
         private final int priority;
         private final long deadlineMs;
         private final long kvTokens;
+        private final boolean priorityKnown;
         private volatile DecodeTaskPhase phase;
-        private volatile boolean cancelRequested;
         private volatile long lastSeenMs;
 
         ConfirmedTask(int priority, long deadlineMs, long kvTokens,
-                      DecodeTaskPhase layer, long now) {
+                      DecodeTaskPhase layer, long now, boolean priorityKnown) {
             this.priority = priority;
             this.deadlineMs = deadlineMs;
             this.kvTokens = kvTokens;
+            this.priorityKnown = priorityKnown;
             this.phase = layer;
             this.lastSeenMs = now;
         }
@@ -807,18 +1082,55 @@ public class DecodeEndpoint extends WorkerEndpoint {
         int priority() { return priority; }
         long deadlineMs() { return deadlineMs; }
         long kvTokens() { return kvTokens; }
+        boolean priorityKnown() { return priorityKnown; }
         DecodeTaskPhase phase() { return phase; }
-        boolean cancelRequested() { return cancelRequested; }
         long lastSeenMs() { return lastSeenMs; }
-
-        void markCancelRequested() {
-            this.cancelRequested = true;
-        }
 
         /** Refresh layer membership and liveness on every calibrate round. */
         void refresh(DecodeTaskPhase layer, long now) {
             this.phase = layer;
             this.lastSeenMs = now;
+        }
+    }
+
+    private enum ClaimOwner {
+        SHADOW_IN_FLIGHT,
+        ENGINE_CONFIRMED
+    }
+
+    private enum ClaimState {
+        CLAIMED,
+        CANCEL_IN_FLIGHT,
+        CANCEL_REQUESTED,
+        CANCELED_SETTLED,
+        NOT_FOUND_STALE,
+        CANCEL_UNKNOWN
+    }
+
+    private static final class PreemptionClaim {
+        private final long attemptToken;
+        private ClaimOwner owner;
+        private final long hardKvTokens;
+        private final long expectedKvTokens;
+        private ClaimState state = ClaimState.CLAIMED;
+        private boolean kvHeldAfterWorkerRelease;
+
+        private PreemptionClaim(long attemptToken, ClaimOwner owner,
+                                long hardKvTokens, long expectedKvTokens) {
+            this.attemptToken = attemptToken;
+            this.owner = owner;
+            this.hardKvTokens = hardKvTokens;
+            this.expectedKvTokens = expectedKvTokens;
+        }
+    }
+
+    private static final class EndpointPreemptionAttempt {
+        private final long incomingRequestId;
+        private final Set<Long> victimIds;
+
+        private EndpointPreemptionAttempt(long incomingRequestId, Set<Long> victimIds) {
+            this.incomingRequestId = incomingRequestId;
+            this.victimIds = victimIds;
         }
     }
 

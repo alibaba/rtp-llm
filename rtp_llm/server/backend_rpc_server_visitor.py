@@ -43,6 +43,14 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+_TERMINAL_ADMISSION_EXCEPTION_TYPES = frozenset(
+    {
+        ExceptionType.PRIORITY_PREEMPTED,
+        ExceptionType.PRIORITY_ADMISSION_REJECTED,
+        ExceptionType.RESOURCE_EXHAUSTED,
+        ExceptionType.ADMISSION_UNAVAILABLE,
+    }
+)
 
 
 class BackendRPCServerVisitor:
@@ -161,7 +169,16 @@ class BackendRPCServerVisitor:
         # carries exception_type; gRPC RpcError and other exceptions do not.
         if isinstance(e, FtRuntimeException):
             try:
-                return int(e.exception_type) >= 8000
+                exception_type = int(e.exception_type)
+                # These are completed admission decisions, not transient route
+                # transport failures.  A new request id would change request
+                # identity and hide the typed 429 result selected by Master.
+                if any(
+                    exception_type == int(terminal_type)
+                    for terminal_type in _TERMINAL_ADMISSION_EXCEPTION_TYPES
+                ):
+                    return False
+                return exception_type >= 8000
             except (TypeError, ValueError):
                 pass
         text = str(e)
@@ -575,7 +592,19 @@ class BackendRPCServerVisitor:
                         # root cause; the caller should see the original
                         # exception so that servicer/frontend maps it to the
                         # correct HTTP status code.
-                        if first_exc is not None and first_exc is not e:
+                        # A later terminal admission decision is authoritative;
+                        # do not hide it behind an earlier retryable transport
+                        # or legacy capacity failure.
+                        is_terminal_admission_decision = (
+                            isinstance(e, FtRuntimeException)
+                            and e.exception_type
+                            in _TERMINAL_ADMISSION_EXCEPTION_TYPES
+                        )
+                        if (
+                            first_exc is not None
+                            and first_exc is not e
+                            and not is_terminal_admission_decision
+                        ):
                             raise first_exc
                         raise
                     request_id_factory = getattr(self, "request_id_factory", None)

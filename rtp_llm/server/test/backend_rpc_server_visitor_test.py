@@ -2,7 +2,11 @@ import unittest
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
@@ -285,12 +289,37 @@ class _EscalatingErrorModelRpcClient:
 
     async def enqueue(self, _input):
         self.attempts += 1
+        # Production ModelRpcClient.enqueue() is an async generator. Keep this
+        # fake's call shape identical so failures are raised while iterating.
+        if False:
+            yield None
         if self.attempts == 1:
             raise FtRuntimeException(
                 ExceptionType.MASTER_NO_AVAILABLE_WORKER,
                 "no available worker",
             )
         raise RuntimeError("unexpected downstream error")
+
+
+class _CapacityThenPreemptedModelRpcClient:
+    def __init__(self):
+        self.attempts = 0
+
+    async def enqueue(self, _input):
+        self.attempts += 1
+        # Keep the fake aligned with ModelRpcClient.enqueue(), which returns an
+        # async iterator rather than an awaitable coroutine.
+        if False:
+            yield None
+        if self.attempts == 1:
+            raise FtRuntimeException(
+                ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+                "no available worker",
+            )
+        raise FtRuntimeException(
+            ExceptionType.PRIORITY_PREEMPTED,
+            "preempted by higher-priority request",
+        )
 
 
 class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
@@ -425,6 +454,82 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             ctx.exception.exception_type,
             ExceptionType.MASTER_NO_AVAILABLE_WORKER,
+        )
+        self.assertEqual(client.attempts, 2)
+
+    async def test_priority_preempted_is_terminal_and_never_retried(self):
+        client = _AlwaysFailingModelRpcClient(
+            FtRuntimeException(
+                ExceptionType.PRIORITY_PREEMPTED,
+                "preempted by higher-priority request",
+            )
+        )
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+        with self.assertRaises(FtRuntimeException) as ctx:
+            [output async for output in stream]
+
+        self.assertEqual(
+            ctx.exception.exception_type,
+            ExceptionType.PRIORITY_PREEMPTED,
+        )
+        self.assertEqual(client.attempts, 1)
+
+    async def test_admission_rejections_are_terminal_and_keep_typed_reason(self):
+        cases = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            ),
+            (
+                ExceptionType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
+        )
+        for exception_type, reason in cases:
+            with self.subTest(exception_type=exception_type, reason=reason):
+                client = _AlwaysFailingModelRpcClient(
+                    FtRuntimeException(
+                        exception_type,
+                        "typed admission rejection",
+                        admission_reject_reason=reason,
+                    )
+                )
+                visitor = self._visitor(client)
+                visitor.set_request_id_factory(lambda: 456)
+
+                stream = await visitor.enqueue(
+                    _FakeInput(_FakeGenerateConfig(False))
+                )
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    [output async for output in stream]
+
+                self.assertEqual(exception_type, ctx.exception.exception_type)
+                self.assertEqual(reason, ctx.exception.admission_reject_reason)
+                self.assertEqual(1, client.attempts)
+
+    async def test_priority_preempted_overrides_earlier_retryable_capacity(self):
+        client = _CapacityThenPreemptedModelRpcClient()
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+        with self.assertRaises(FtRuntimeException) as ctx:
+            [output async for output in stream]
+
+        self.assertEqual(
+            ctx.exception.exception_type,
+            ExceptionType.PRIORITY_PREEMPTED,
         )
         self.assertEqual(client.attempts, 2)
 

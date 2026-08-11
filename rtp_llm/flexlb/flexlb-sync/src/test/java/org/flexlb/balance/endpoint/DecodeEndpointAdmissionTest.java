@@ -50,7 +50,7 @@ class DecodeEndpointAdmissionTest {
         RequestInflight entry = endpoint.reservedView().get(1L);
         assertEquals(70, entry.priority());
         assertEquals(123L, entry.deadlineMs());
-        assertEquals(DecodeTaskPhase.RESERVED_NOT_ACCEPTED, entry.phase());
+        assertEquals(DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN, entry.phase());
     }
 
     // ==================== reserve / release bump the admission version ====================
@@ -76,6 +76,8 @@ class DecodeEndpointAdmissionTest {
     void tryReleaseVictimsAndReserveIncoming_success_appliesAtomically() {
         endpoint.reserve(1L, 100, 110, 30, 1_000);
         endpoint.reserve(2L, 200, 220, 40, 2_000);
+        endpoint.markQueuedPhase(1L);
+        endpoint.markQueuedPhase(2L);
         long version = endpoint.admissionVersion();
 
         DecodeEndpoint.ReleaseReserveResult result = endpoint.tryReleaseVictimsAndReserveIncoming(
@@ -110,6 +112,7 @@ class DecodeEndpointAdmissionTest {
     @Test
     void tryReleaseVictimsAndReserveIncoming_victimGone_appliesNothing() {
         endpoint.reserve(1L, 100, 110, 30, 1_000);
+        endpoint.markQueuedPhase(1L);
         long version = endpoint.admissionVersion();
 
         DecodeEndpoint.ReleaseReserveResult result = endpoint.tryReleaseVictimsAndReserveIncoming(
@@ -120,6 +123,28 @@ class DecodeEndpointAdmissionTest {
         assertFalse(endpoint.reservedView().containsKey(9L));
         assertEquals(100, endpoint.inflightHardKvReserved());
         assertEquals(version, endpoint.admissionVersion());
+    }
+
+    @Test
+    void dispatchAndLocalEvictionHaveOneAdmissionLockWinner() {
+        // Eviction wins: it removes the reservation, so the batch item must be
+        // skipped before startDispatch / gRPC publication.
+        endpoint.reserve(1L, 100, 110, 30, 1_000);
+        endpoint.markQueuedPhase(1L);
+        assertTrue(endpoint.releaseIfHeld(1L));
+        assertFalse(endpoint.tryMarkEngineMayHaveSeen(1L));
+
+        // Dispatch wins: the queued bit is atomically cleared while the
+        // reservation stays held; a later local-eviction attempt cannot touch it.
+        endpoint.reserve(2L, 100, 110, 30, 1_000);
+        endpoint.markQueuedPhase(2L);
+        assertTrue(endpoint.tryMarkEngineMayHaveSeen(2L));
+        assertFalse(endpoint.releaseIfHeld(2L));
+        assertTrue(endpoint.reservedView().containsKey(2L));
+
+        // Legacy paths never set the queued bit but still own a reservation.
+        endpoint.reserve(3L, 100, 110, 30, 1_000);
+        assertTrue(endpoint.tryMarkEngineMayHaveSeen(3L));
     }
 
     // ==================== 10.1: confirmed requests leave the reserved view ====================

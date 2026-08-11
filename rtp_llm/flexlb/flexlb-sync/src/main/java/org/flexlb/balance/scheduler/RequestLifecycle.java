@@ -12,17 +12,26 @@ final class RequestLifecycle {
     private static final Map<RequestLifecycleState, EnumSet<RequestLifecycleState>> ALLOWED = Map.of(
             RequestLifecycleState.QUEUED, EnumSet.of(
                     RequestLifecycleState.DISPATCHING,
+                    RequestLifecycleState.CANCEL_REQUESTED,
                     RequestLifecycleState.TIMED_OUT,
                     RequestLifecycleState.FAILED),
             RequestLifecycleState.DISPATCHING, EnumSet.of(
                     RequestLifecycleState.ACKNOWLEDGED,
+                    RequestLifecycleState.CANCEL_REQUESTED,
                     RequestLifecycleState.TIMED_OUT,
                     RequestLifecycleState.FAILED,
                     RequestLifecycleState.COMPLETED),
             RequestLifecycleState.ACKNOWLEDGED, EnumSet.of(
+                    RequestLifecycleState.CANCEL_REQUESTED,
                     RequestLifecycleState.TIMED_OUT,
                     RequestLifecycleState.FAILED,
                     RequestLifecycleState.COMPLETED),
+            RequestLifecycleState.CANCEL_REQUESTED, EnumSet.of(
+                    RequestLifecycleState.CANCELLED,
+                    RequestLifecycleState.TIMED_OUT,
+                    RequestLifecycleState.FAILED,
+                    RequestLifecycleState.COMPLETED),
+            RequestLifecycleState.CANCELLED, EnumSet.noneOf(RequestLifecycleState.class),
             RequestLifecycleState.TIMED_OUT, EnumSet.noneOf(RequestLifecycleState.class),
             RequestLifecycleState.FAILED, EnumSet.noneOf(RequestLifecycleState.class),
             RequestLifecycleState.COMPLETED, EnumSet.noneOf(RequestLifecycleState.class));
@@ -70,7 +79,7 @@ final class RequestLifecycle {
     }
 
     synchronized RequestLifecycleSnapshot acknowledge() {
-        if (state.isTerminal()) {
+        if (state.isTerminal() || state == RequestLifecycleState.CANCEL_REQUESTED) {
             return snapshot();
         }
         return transition(RequestLifecycleState.ACKNOWLEDGED, "engine acknowledged batch");
@@ -95,6 +104,23 @@ final class RequestLifecycle {
             return snapshot();
         }
         return transition(RequestLifecycleState.COMPLETED, message);
+    }
+
+    synchronized RequestLifecycleSnapshot requestCancel(String message) {
+        if (state.isTerminal()) {
+            return snapshot();
+        }
+        return transition(RequestLifecycleState.CANCEL_REQUESTED, message);
+    }
+
+    synchronized RequestLifecycleSnapshot cancel(String message) {
+        if (state.isTerminal()) {
+            return snapshot();
+        }
+        if (state != RequestLifecycleState.CANCEL_REQUESTED) {
+            transition(RequestLifecycleState.CANCEL_REQUESTED, message);
+        }
+        return transition(RequestLifecycleState.CANCELLED, message);
     }
 
     synchronized boolean isTerminal() {

@@ -1,16 +1,19 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.enums.DecodeTaskPhase;
+
 import java.util.Comparator;
 import java.util.List;
 
 /**
- * Pure planning result for one decode reserved-only eviction on one endpoint
+ * Pure planning result for one decode eviction on one endpoint
  * (design doc 11-13). Produced by {@link EvictionPlanner#planDecode}; carries
  * no live endpoint reference and has zero side effects.
  *
- * <p>Victims are always {@code RESERVED_NOT_ACCEPTED} shadow reservations of
- * strictly lower priority than the incoming request (design doc 3.3);
- * confirmed (accepted/running) requests never appear.
+ * <p>Victims are strictly lower priority than the incoming request. Depending
+ * on the feature gate, they may be Master shadow reservations or
+ * engine-confirmed accepted/running requests; confirmed victims require the
+ * Cancel-and-release-confirm commit path.
  *
  * @param endpointId       decode endpoint key ("ip:httpPort")
  * @param admissionVersion admission version the plan was built against
@@ -29,6 +32,19 @@ public record DecodeEvictionProposal(
         long totalCost,
         long freedKvTokens,
         PlanCost cost) {
+
+    public DecodeEvictionProposal {
+        boolean hasLocal = victims.stream().anyMatch(victim -> victim.phase().isMasterQueued());
+        boolean hasCancel = victims.stream().anyMatch(victim -> victim.phase().requiresEngineCancel());
+        if (hasLocal && hasCancel) {
+            throw new IllegalArgumentException(
+                    "decode proposal cannot mix Master-local and Engine-Cancel victims");
+        }
+    }
+
+    public boolean requiresEngineCancel() {
+        return !victims.isEmpty() && victims.get(0).phase().requiresEngineCancel();
+    }
 
     /** Concurrency slots exhausted (design doc 11). */
     public static final String CASE_SLOT = "decode_slot_full";

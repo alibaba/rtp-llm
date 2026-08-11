@@ -135,7 +135,7 @@ class DecodeEndpointTest {
         assertEquals(1, endpoint.getEngineLoad());
 
         // dispatch req 1 → back to engine load 2
-        endpoint.markDispatchedPhase(1L);
+        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L));
         assertEquals(2, endpoint.getEngineLoad());
 
         // release req 2 (was queued) → inflight=2, queued=0
@@ -181,8 +181,8 @@ class DecodeEndpointTest {
     void getEngineLoad_idempotent_markDispatched_does_not_over_decrement() {
         endpoint.reserve(1L, 100, 100);
         endpoint.markQueuedPhase(1L);
-        endpoint.markDispatchedPhase(1L);
-        endpoint.markDispatchedPhase(1L); // idempotent: remove returns false
+        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L));
+        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L)); // already engine-visible
         assertEquals(1, endpoint.getEngineLoad());
     }
 

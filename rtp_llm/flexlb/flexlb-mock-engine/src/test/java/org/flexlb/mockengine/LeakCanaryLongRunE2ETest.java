@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Task35 场景 D：泄漏金丝雀长跑（≥60s）—— 混合优先级流量 + 队列驱逐 +
- * orTimeout 超时释放全程生效，中途注入两轮瞬态故障（enqueue 延迟 / enqueue
+ * reducer deadline 超时收敛全程生效，中途注入两轮瞬态故障（enqueue 延迟 / enqueue
  * 拒绝），结束后强断言：
  * <ul>
  *   <li>全部请求到达明确终态，且终态码只落在已知集合内；</li>
@@ -37,11 +37,16 @@ class LeakCanaryLongRunE2ETest {
     void d_long_run_mixed_traffic_with_transient_faults_leaks_nothing() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, false)) {
             h.config.setAutoTpmPrefillQueueEvictEnabled(true);
-            // PR-D: rescue removed — orTimeout + AdmissionLease handle deadline expiry
+            // PR-D: rescue removed — reducer deadline + AdmissionLease handle expiry
             // 小队列制造真实驱逐压力；小批次 + 快派发形成持续流转
             h.config.setFlexlbBatchQueueMaxSize(64);
             h.config.setFlexlbBatchSizeMax(4);
             h.config.setFlexlbBatchFixedWaitMs(5);
+            // This canary verifies queue eviction and the two injected
+            // EnqueueBatch fault windows. Keep the independent post-success
+            // backpressure gate out of the way, otherwise it can reject the
+            // whole tail as 8431 before the injected 8510 path is exercised.
+            h.config.setAutoTpmPostSuccessBackpressureLimit(0);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
             h.startAutoPump(10);
 
@@ -91,8 +96,9 @@ class LeakCanaryLongRunE2ETest {
                 int code = response.isSuccess() ? 200 : response.getCode();
                 codeByRid.put(100_000L + i, code);
                 codeTally.merge(code, 1, Integer::sum);
-                assertTrue(code == 200 || code == 8400 || code == 8502
-                                || code == 8510 || code == 8515,
+                assertTrue(code == 200 || code == 8400 || code == 8429
+                                || code == 8430 || code == 8431 || code == 8432
+                                || code == 8502 || code == 8510 || code == 8515,
                         "unexpected terminal code " + code + ": " + response.getErrorMessage());
             }
 
@@ -124,7 +130,11 @@ class LeakCanaryLongRunE2ETest {
             }
             assertTrue(lostReports.size() <= Math.max(5, futures.size() / 500),
                     "lost finished reports must stay rare (mock race), got " + lostReports.size());
-            h.decodeEndpoint(0).evictExpiredRequests(3_000);
+            // We have already waited 2.5s after all public futures and all
+            // engines drained. Use a strictly smaller TTL so the cleanup is
+            // deterministic even when the lost completion belongs to the
+            // very last submitted request.
+            h.decodeEndpoint(0).evictExpiredRequests(2_000);
 
             assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
                     "decode shadow inflight must settle to zero");

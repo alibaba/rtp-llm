@@ -13,6 +13,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -91,6 +92,9 @@ class PriorityAdmissionSchedulerTest {
 
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
+            endpointRegistry.getDecode(DECODE_IP_PORT)
+                    .reserve(ctx.getRequestId(), 128, 136,
+                            ctx.getPriority(), ctx.getDeadlineMs());
             return successRoute(ctx.getRequestId());
         });
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
@@ -192,14 +196,14 @@ class PriorityAdmissionSchedulerTest {
     }
 
     @Test
-    void request_without_priority_field_and_no_worker_fails_8400_via_priority_path() throws Exception {
+    void request_without_priority_field_and_no_worker_isTypedUnknown() throws Exception {
         when(router.route(any(BalanceContext.class))).thenReturn(null);
 
         Response response = scheduler.submit(context(62, 0)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        // Same 8400 outcome as legacy, but produced by the priority path.
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
         verify(priorityScheduler).schedule(any(), any(), any());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
@@ -243,19 +247,21 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(context(21)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
     }
 
     @Test
-    void router_failure_response_passes_through_like_legacy_path() throws Exception {
+    void routerCapacityFailureIsTypedUnknownWithoutCausalSnapshot() throws Exception {
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
 
         Response response = scheduler.submit(context(22)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
     }
 
     // ==================== offer failure: decode reservation rollback ====================
@@ -284,8 +290,8 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(context(31)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        assertTrue(response.getErrorMessage().contains("retries exhausted"));
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
         // One route per attempt (MAX_PLAN_RETRIES = 3)
         verify(router, times(3)).route(any(BalanceContext.class));
         // Rollback: every decode reservation released (shadow load/KV restored)
@@ -311,6 +317,9 @@ class PriorityAdmissionSchedulerTest {
                 // Concurrent enqueue between snapshot and commit → queue version bump
                 assertTrue(batcher.tryOffer(dummyItem(901)));
             }
+            endpointRegistry.getDecode(DECODE_IP_PORT)
+                    .reserve(ctx.getRequestId(), 128, 136,
+                            ctx.getPriority(), ctx.getDeadlineMs());
             return successRoute(ctx.getRequestId());
         });
 
@@ -344,11 +353,10 @@ class PriorityAdmissionSchedulerTest {
         Response response = scheduler.submit(context(51)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        // Every attempt failed on a stale queue version (pure OCC conflict),
-        // so the explicit SCHEDULER_PLAN_CONFLICT is surfaced instead of the
-        // capacity-shortage NO_AVAILABLE_WORKER (task10 P1-2).
-        assertEquals(StrategyErrorType.SCHEDULER_PLAN_CONFLICT.getErrorCode(), response.getCode());
-        assertTrue(response.getErrorMessage().contains("auto-tpm plan retries exhausted"));
+        // Pure OCC has no reliable capacity fact, so the typed attribution is
+        // deliberately unknown rather than reconstructed from retry text.
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
         verify(router, times(3)).route(any(BalanceContext.class));
         // All decode reservations rolled back across the retries
         assertEquals(0, decodeEp.getInflightCount());

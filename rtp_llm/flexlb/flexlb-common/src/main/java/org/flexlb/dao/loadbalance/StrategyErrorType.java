@@ -38,10 +38,18 @@ public enum StrategyErrorType {
     // (VERSION_MISMATCH / eviction CONFLICT on every attempt, design doc 16.3).
     // Distinct from NO_AVAILABLE_WORKER, which still covers capacity shortage.
     SCHEDULER_PLAN_CONFLICT(8515, false),
-    // Auto-TPM: queued request preempted by a strictly higher-priority request
-    // (429 / Throttling.Aborted semantics, design doc 16.3). Non-retryable
-    // against this master — the cluster is saturated with higher-priority work.
-    PRIORITY_PREEMPTED(8429, false);
+    // Auto-TPM victim terminal: an already-admitted request was cancelled by
+    // a strictly higher-priority admission attempt.
+    PRIORITY_PREEMPTED(8429, false),
+    // Auto-TPM incoming rejection caused by a proven priority blocker.  The
+    // typed AdmissionRejectReason distinguishes higher- and same-priority.
+    PRIORITY_ADMISSION_REJECTED(8430, false),
+    // Auto-TPM incoming rejection caused by a proven instantaneous physical
+    // resource shortage.
+    RESOURCE_EXHAUSTED(8431, false),
+    // Admission is unavailable but the snapshot cannot prove priority or
+    // physical-resource attribution.
+    ADMISSION_UNAVAILABLE(8432, false);
 
     private final int errorCode;
     private final String errorMsg;

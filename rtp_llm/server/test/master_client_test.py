@@ -1,9 +1,18 @@
 import unittest
+from types import SimpleNamespace
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
+    HIGHER_PRIORITY_AHEAD,
+    RESOURCE_EXHAUSTED,
+    SAME_PRIORITY_AHEAD,
+    SCHEDULE_FAILURE_REASON_UNSPECIFIED,
 )
 from rtp_llm.server.master_client import MasterClient
 
@@ -91,12 +100,51 @@ class _DeadlineMasterClient(MasterClient):
         )
 
 
+class _RejectingMasterClient(MasterClient):
+    def __init__(self, code, reason, *, include_reason=True):
+        super().__init__(
+            host_service=_FakeHostService(),
+            master_config=_FakeMasterConfig(),
+        )
+        self.code = code
+        self.reason = reason
+        self.include_reason = include_reason
+
+    async def _send_schedule_request(self, addr, request_pb, timeout_s, request_id):
+        fields = {
+            "code": int(self.code),
+            "error_message": "private scheduler diagnostic",
+            "queue_length": 3,
+        }
+        if self.include_reason:
+            fields["admission_reject_reason"] = int(self.reason)
+        return SimpleNamespace(**fields)
+
+
 class _FakeInputPB:
     def SerializeToString(self):
         return b"serialized-input"
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
+    def test_python_reason_enum_matches_schedule_wire_values(self):
+        self.assertEqual(
+            int(AdmissionRejectReason.UNSPECIFIED),
+            SCHEDULE_FAILURE_REASON_UNSPECIFIED,
+        )
+        self.assertEqual(
+            int(AdmissionRejectReason.HIGHER_PRIORITY_AHEAD),
+            HIGHER_PRIORITY_AHEAD,
+        )
+        self.assertEqual(
+            int(AdmissionRejectReason.SAME_PRIORITY_AHEAD),
+            SAME_PRIORITY_AHEAD,
+        )
+        self.assertEqual(
+            int(AdmissionRejectReason.RESOURCE_EXHAUSTED),
+            RESOURCE_EXHAUSTED,
+        )
+
     async def test_schedule_payload_contains_batch_fields_and_pb(self):
         client = _CaptureMasterClient()
 
@@ -126,7 +174,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(request_pb.force_disable_sp_run)
         self.assertEqual(request_pb.generate_input, b"serialized-input")
         self.assertEqual(request_pb.cache_key_block_size, 1024)
-        self.assertEqual(request_pb.priority, 0)
+        self.assertEqual(request_pb.priority, 50)
 
     async def test_schedule_payload_priority_from_qos_header(self):
         client = _CaptureMasterClient()
@@ -152,7 +200,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             input_pb=_FakeInputPB(),
         )
 
-        self.assertEqual(client.calls[0]["request_pb"].priority, 0)
+        self.assertEqual(client.calls[0]["request_pb"].priority, 50)
 
     async def test_schedule_payload_priority_invalid_header_no_raise(self):
         client = _CaptureMasterClient()
@@ -166,7 +214,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(response.is_ok)
-        self.assertEqual(client.calls[0]["request_pb"].priority, 0)
+        self.assertEqual(client.calls[0]["request_pb"].priority, 50)
 
     async def test_schedule_deadline_does_not_retry_slave(self):
         client = _DeadlineMasterClient()
@@ -184,6 +232,68 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             raised.exception.exception_type, ExceptionType.DEADLINE_EXCEEDED
         )
         self.assertEqual(client.calls, ["master:1234"])
+
+    async def test_schedule_failure_preserves_typed_admission_reason(self):
+        cases = (
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.PRIORITY_ADMISSION_REJECTED,
+                AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+            ),
+            (
+                ExceptionType.RESOURCE_EXHAUSTED,
+                AdmissionRejectReason.RESOURCE_EXHAUSTED,
+            ),
+            (
+                ExceptionType.ADMISSION_UNAVAILABLE,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
+        )
+        for exception_type, reason in cases:
+            with self.subTest(exception_type=exception_type, reason=reason):
+                client = _RejectingMasterClient(exception_type, reason)
+                with self.assertRaises(FtRuntimeException) as raised:
+                    await client.get_backend_role_addrs(
+                        block_cache_keys=[1],
+                        cache_key_block_size=1024,
+                        input=_FakeInput(),
+                        request_id=104,
+                        input_pb=_FakeInputPB(),
+                    )
+
+                self.assertEqual(exception_type, raised.exception.exception_type)
+                self.assertEqual(
+                    reason,
+                    raised.exception.admission_reject_reason,
+                )
+                self.assertEqual(
+                    "private scheduler diagnostic",
+                    raised.exception.message,
+                )
+
+    async def test_missing_reason_field_falls_back_to_unspecified(self):
+        client = _RejectingMasterClient(
+            ExceptionType.ADMISSION_UNAVAILABLE,
+            AdmissionRejectReason.UNSPECIFIED,
+            include_reason=False,
+        )
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            await client.get_backend_role_addrs(
+                block_cache_keys=[1],
+                cache_key_block_size=1024,
+                input=_FakeInput(),
+                request_id=105,
+                input_pb=_FakeInputPB(),
+            )
+
+        self.assertEqual(
+            AdmissionRejectReason.UNSPECIFIED,
+            raised.exception.admission_reject_reason,
+        )
 
 
 if __name__ == "__main__":

@@ -284,7 +284,7 @@ public class PrioritySchedulerReporter {
      *
      * @param priority normalized priority of the cancelled request; 0 when
      *                 the request carried no Auto-TPM budget
-     * @param reason   cancel reason label ({@code CancelReason.name()})
+     * @param reason   cancel reason metric label
      */
     public void reportCancel(int priority, String reason) {
         monitor.report(AUTO_TPM_CANCEL_QPS,

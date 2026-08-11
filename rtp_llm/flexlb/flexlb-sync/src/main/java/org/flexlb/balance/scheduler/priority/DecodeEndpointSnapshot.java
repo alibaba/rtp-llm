@@ -19,11 +19,11 @@ import java.util.List;
  * staleness only causes a retry, never a wrong commit.
  *
  * <p><b>Layered view (Phase 5):</b> {@link #reserved} holds only
- * {@code RESERVED_NOT_ACCEPTED} shadow entries; {@link #accepted} holds
+ * Master-queued and Engine-may-have-seen shadow entries; {@link #accepted} holds
  * engine-confirmed {@code ACCEPTED_NOT_RUNNING} entries without a pending
- * cancel (eviction candidates only behind the accepted-evict gate);
- * {@link #running} holds engine-confirmed {@code RUNNING} entries and is
- * never a candidate source in this phase. {@code totalLoad} aggregates
+ * cancel; {@link #running} holds engine-confirmed {@code RUNNING} entries
+ * without a pending cancel. Both lists are eviction candidates only behind
+ * the accepted-evict gate. {@code totalLoad} aggregates
  * confirmed running + reserved inflight counts.
  *
  * @param endpoint           the live endpoint (used at commit time only)
@@ -42,7 +42,8 @@ import java.util.List;
  *                           eviction planning; confirmed requests never appear
  * @param accepted           engine-confirmed accepted-not-running entries with
  *                           no pending cancel (Phase 5 candidates behind gate)
- * @param running            engine-confirmed running entries (never candidates)
+ * @param running            engine-confirmed running entries with no pending
+ *                           cancel (Phase 5 candidates behind the same gate)
  */
 public record DecodeEndpointSnapshot(
         DecodeEndpoint endpoint,
@@ -105,20 +106,29 @@ public record DecodeEndpointSnapshot(
         // version and falsely pass the commit-time re-check.
         DecodeEndpoint.LayeredAdmissionView view = endpoint.layeredAdmissionView();
         List<DecodeRequestSnapshot> reserved = new ArrayList<>();
-        view.reserved().forEach((requestId, entry) ->
-                reserved.add(new DecodeRequestSnapshot(requestId, entry.priority(), entry.phase(),
-                        entry.releasableKvTokens(), entry.expectedKvTokens(), entry.deadlineMs(),
-                        view.queued().contains(requestId))));
+        view.reserved().forEach((requestId, entry) -> {
+            if (view.claimed().contains(requestId)) {
+                return;
+            }
+            boolean masterQueued = view.queued().contains(requestId);
+            DecodeTaskPhase phase = masterQueued
+                    ? DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED
+                    : DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN;
+            reserved.add(new DecodeRequestSnapshot(requestId, entry.priority(), phase,
+                    entry.releasableKvTokens(), entry.expectedKvTokens(), entry.deadlineMs(),
+                    true, masterQueued));
+        });
         List<DecodeRequestSnapshot> accepted = new ArrayList<>();
         List<DecodeRequestSnapshot> running = new ArrayList<>();
         for (DecodeEndpoint.ConfirmedTaskView task : view.confirmed()) {
+            // A cancel-requested confirmed entry is already claimed by an
+            // in-flight eviction, regardless of whether it has started running.
+            if (task.claimedForPreemption()) {
+                continue;
+            }
             if (task.phase() == DecodeTaskPhase.ACCEPTED_NOT_RUNNING) {
-                // A cancel-requested entry is already claimed by an in-flight
-                // accepted eviction — planning must not pick it again.
-                if (!task.cancelRequested()) {
-                    accepted.add(toSnapshot(task));
-                }
-            } else {
+                accepted.add(toSnapshot(task));
+            } else if (task.phase() == DecodeTaskPhase.RUNNING) {
                 running.add(toSnapshot(task));
             }
         }
@@ -142,6 +152,7 @@ public record DecodeEndpointSnapshot(
         // Confirmed KV is engine-owned; the tracked inputLength estimate serves
         // as both releasable and expected KV (no generation-growth estimate).
         return new DecodeRequestSnapshot(task.requestId(), task.priority(), task.phase(),
-                task.kvTokens(), task.kvTokens(), task.deadlineMs());
+                task.kvTokens(), task.kvTokens(), task.deadlineMs(),
+                task.priorityKnown(), false);
     }
 }

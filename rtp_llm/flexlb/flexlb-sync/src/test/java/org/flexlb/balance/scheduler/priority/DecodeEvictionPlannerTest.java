@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.enums.DecodeTaskPhase;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -11,6 +12,9 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Phase 4 tests for {@link EvictionPlanner#planDecode}: slot-full victim
@@ -21,6 +25,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class DecodeEvictionPlannerTest {
 
     private final FlexlbConfig config = new FlexlbConfig();
+    private final EngineCancelChannel channel = mock(EngineCancelChannel.class);
+
+    @BeforeEach
+    void enableEngineCancelPlanning() {
+        config.setAutoTpmDecodeAcceptedEvictEnabled(true);
+        when(channel.isSupported(any())).thenReturn(true);
+    }
 
     // ==================== slot full: deadline-slack ordering ====================
 
@@ -34,7 +45,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 128), List.of(ep), config, failures);
+                incoming(50, 128), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
         assertEquals("d1", proposal.endpointId());
@@ -44,7 +55,7 @@ class DecodeEvictionPlannerTest {
         assertEquals(List.of(2L), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
         // h(DECODE_SLOT_FULL)=4 x f(30)=1 x g(RESERVED_NOT_ACCEPTED)=1
-        assertEquals(4, proposal.totalCost());
+        assertEquals(16, proposal.totalCost());
         assertEquals(128, proposal.freedKvTokens());
     }
 
@@ -58,7 +69,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 128), List.of(ep), config, failures);
+                incoming(50, 128), List.of(ep), config, channel, failures);
 
         assertNull(proposal);
         assertEquals("insufficient_lower_priority_candidates", failures.get("d1"));
@@ -76,7 +87,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 128), List.of(ep), config, failures);
+                incoming(50, 128), List.of(ep), config, channel, failures);
 
         assertNull(proposal);
         assertEquals("insufficient_lower_priority_candidates", failures.get("d1"));
@@ -90,7 +101,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 128), List.of(ep), config, failures);
+                incoming(50, 128), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
         assertEquals(List.of(2L), proposal.victims().stream()
@@ -109,7 +120,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 2_000), List.of(ep), config, failures);
+                incoming(50, 2_000), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
         assertEquals(DecodeEvictionProposal.CASE_KV, proposal.evictionCase());
@@ -117,7 +128,7 @@ class DecodeEvictionPlannerTest {
         assertEquals(List.of(2L), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
         // h(DECODE_KV_FULL)=8 x f(30)=1 x g=1 x lengthWasteCost(2048)=1
-        assertEquals(8, proposal.totalCost());
+        assertEquals(32, proposal.totalCost());
         assertEquals(2_048, proposal.freedKvTokens());
     }
 
@@ -128,7 +139,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 2_000), List.of(ep), config, failures);
+                incoming(50, 2_000), List.of(ep), config, channel, failures);
 
         assertNull(proposal);
         assertEquals("insufficient_releasable_kv", failures.get("d1"));
@@ -144,7 +155,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 128), List.of(ep), config, failures);
+                incoming(50, 128), List.of(ep), config, channel, failures);
 
         assertNull(proposal);
         assertEquals("deficit_exceeds_max_victims", failures.get("d1"));
@@ -163,7 +174,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 1_000), List.of(ep), config, failures);
+                incoming(50, 1_000), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
         assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, proposal.evictionCase());
@@ -173,7 +184,7 @@ class DecodeEvictionPlannerTest {
                 .map(DecodeRequestSnapshot::requestId).toList());
         // slotPart = 4 x (1 + 1) = 8; kvPart = 8 x 1 x 1 x 1 = 8;
         // totalCost = 8 + 8 = 16 — parts are added, never re-multiplied by h.
-        assertEquals(16, proposal.totalCost());
+        assertEquals(64, proposal.totalCost());
         assertEquals(1_800, proposal.freedKvTokens());
     }
 
@@ -186,13 +197,13 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 500), List.of(ep), config, failures);
+                incoming(50, 500), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
         assertEquals(List.of(1L), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
-        assertEquals(4, proposal.totalCost());
+        assertEquals(16, proposal.totalCost());
     }
 
     // ==================== 10.1: confirmed requests are never candidates ====================
@@ -205,7 +216,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(70, 128), List.of(ep), config, failures);
+                incoming(70, 128), List.of(ep), config, channel, failures);
 
         assertNull(proposal);
         assertEquals("insufficient_lower_priority_candidates", failures.get("d1"));
@@ -217,7 +228,7 @@ class DecodeEvictionPlannerTest {
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 128), List.of(ep), config, failures);
+                incoming(50, 128), List.of(ep), config, channel, failures);
 
         assertNull(proposal);
         assertEquals("decode_capacity_sufficient", failures.get("d1"));
@@ -238,7 +249,8 @@ class DecodeEvictionPlannerTest {
     private static DecodeRequestSnapshot reserved(long requestId, int priority,
                                                   long kvTokens, long deadlineMs) {
         return new DecodeRequestSnapshot(requestId, priority,
-                DecodeTaskPhase.RESERVED_NOT_ACCEPTED, kvTokens, kvTokens + 8, deadlineMs);
+                DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
+                kvTokens, kvTokens + 8, deadlineMs, true, false);
     }
 
     private static PriorityRequestEnvelope incoming(int priority, long seqLen) {

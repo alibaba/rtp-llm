@@ -7,6 +7,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.enums.PriorityPreemptionProgress;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -110,6 +111,13 @@ public class EngineStatusConverter {
             taskInfo.setBatchId(taskInfoPB.getBatchId());
             taskInfo.setExecutionTimeMs(taskInfoPB.getExecutionTimeMs());
             taskInfo.setPhase(convertPhase(taskInfoPB.getPhase()));
+            taskInfo.setPriorityPreemptionProgress(switch (
+                    taskInfoPB.getPriorityPreemptionProgress()) {
+                case PRIORITY_PREEMPTION_CANCELING -> PriorityPreemptionProgress.CANCELING;
+                case PRIORITY_PREEMPTION_CANCELED -> PriorityPreemptionProgress.CANCELED;
+                case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
+                        PriorityPreemptionProgress.NONE;
+            });
             if (taskInfoPB.hasErrorInfo() && taskInfoPB.getErrorInfo().getErrorCode() != 0L) {
                 taskInfo.setErrorCode(taskInfoPB.getErrorInfo().getErrorCode());
                 taskInfo.setErrorMessage(taskInfoPB.getErrorInfo().getErrorMessage());

@@ -43,6 +43,12 @@ public final class EvictionPlanner {
     private EvictionPlanner() {
     }
 
+    /** A decode plan never mixes Master-local removal with Engine Cancel. */
+    private enum VictimOwnership {
+        MASTER_LOCAL,
+        ENGINE_CANCEL
+    }
+
     /**
      * Plan the cheapest prefill-queue eviction that frees enough room for the
      * incoming request across the given queues.
@@ -165,8 +171,8 @@ public final class EvictionPlanner {
     /**
      * Reserved-only decode planning (Phase 4 signature): equivalent to
      * {@link #planDecode(PriorityRequestEnvelope, List, FlexlbConfig,
-     * EngineCancelChannel, Map)} with no cancel channel, so the accepted layer
-     * is never considered. Kept for callers that must not preempt accepted
+     * EngineCancelChannel, Map)} with no cancel channel, so engine-confirmed
+     * layers are never considered. Kept for callers that must not preempt confirmed
      * requests (e.g. deadline-rescue placement).
      */
     public static DecodeEvictionProposal planDecode(PriorityRequestEnvelope envelope,
@@ -183,13 +189,15 @@ public final class EvictionPlanner {
      * <p>Candidates are the strictly lower-priority reserved entries, plus —
      * only when {@code autoTpmDecodeAcceptedEvictEnabled} is set AND the
      * endpoint's engine supports the Cancel RPC — the strictly lower-priority
-     * accepted-layer entries (Phase 5). Running requests are never candidates.
+     * engine-confirmed accepted/running entries (Phase 5). Running entries use
+     * a larger stage cost, so an otherwise equivalent accepted-not-running
+     * victim is preferred.
      *
      * @param envelope incoming request descriptor (priority + hardKvTokens)
      * @param decodes  candidate decode endpoint snapshots
-     * @param config   live config (victim cap + accepted-evict gate)
+     * @param config   live config (victim cap + engine-confirmed-evict gate)
      * @param channel  engine cancel channel for the per-endpoint support gate;
-     *                 {@code null} disables the accepted layer entirely
+     *                 {@code null} disables confirmed layers entirely
      * @param failures out-param: per-endpoint infeasibility reason
      * @return the best proposal by {@link DecodeEvictionProposal#ORDER}, or
      *         {@code null} when no endpoint has a feasible plan
@@ -260,18 +268,40 @@ public final class EvictionPlanner {
             failures.put(ep.endpointId(), "decode_capacity_sufficient");
             return null;
         }
-        // Phase 5 gate: the accepted layer joins the candidate pool only when
-        // the switch is on AND this endpoint's engine has the Cancel RPC.
-        boolean includeAccepted = config.isAutoTpmDecodeAcceptedEvictEnabled()
+        boolean engineCancelEnabled = config.isAutoTpmDecodeAcceptedEvictEnabled()
                 && channel != null && channel.isSupported(ep.endpoint());
         int maxVictims = MAX_VICTIMS_PER_PLAN;
+
+        DecodeEvictionProposal local = planDecodeOneOwnership(envelope, ep,
+                slotDeficit, kvDeficit, maxVictims, VictimOwnership.MASTER_LOCAL, failures);
+        DecodeEvictionProposal engine = engineCancelEnabled
+                ? planDecodeOneOwnership(envelope, ep, slotDeficit, kvDeficit,
+                        maxVictims, VictimOwnership.ENGINE_CANCEL, failures)
+                : null;
+        if (local == null) {
+            return engine;
+        }
+        if (engine == null) {
+            return local;
+        }
+        return DecodeEvictionProposal.ORDER.compare(local, engine) <= 0 ? local : engine;
+    }
+
+    private static DecodeEvictionProposal planDecodeOneOwnership(
+            PriorityRequestEnvelope envelope,
+            DecodeEndpointSnapshot ep,
+            long slotDeficit,
+            long kvDeficit,
+            int maxVictims,
+            VictimOwnership ownership,
+            Map<String, String> failures) {
         if (slotDeficit > 0 && kvDeficit > 0) {
             return planDecodeCombined(envelope, ep, slotDeficit, kvDeficit,
-                    maxVictims, includeAccepted, failures);
+                    maxVictims, ownership, failures);
         }
         DecodeVictimSet set = slotDeficit > 0
-                ? selectSlotVictims(envelope, ep, slotDeficit, Set.of(), maxVictims, includeAccepted)
-                : selectKvVictims(envelope, ep, kvDeficit, Set.of(), maxVictims, includeAccepted);
+                ? selectSlotVictims(envelope, ep, slotDeficit, Set.of(), maxVictims, ownership)
+                : selectKvVictims(envelope, ep, kvDeficit, Set.of(), maxVictims, ownership);
         if (!set.ok()) {
             failures.put(ep.endpointId(), set.failReason());
             return null;
@@ -294,18 +324,18 @@ public final class EvictionPlanner {
                                                              long slotDeficit,
                                                              long kvDeficit,
                                                              int maxVictims,
-                                                             boolean includeAccepted,
+                                                             VictimOwnership ownership,
                                                              Map<String, String> failures) {
         // 13.2: slot-only incidentally freeing enough KV / kv-only incidentally
         // freeing enough slots — prefer the cheaper single-case plan.
         DecodeVictimSet slotOnly = selectSlotVictims(envelope, ep, slotDeficit, Set.of(),
-                maxVictims, includeAccepted);
+                maxVictims, ownership);
         DecodeEvictionProposal slotSide = slotOnly.ok() && slotOnly.freedKvTokens() >= kvDeficit
                 ? buildDecodeProposal(ep, DecodeEvictionProposal.CASE_SLOT,
                         slotOnly.victims(), slotOnly.weightedCost(), slotOnly.freedKvTokens())
                 : null;
         DecodeVictimSet kvOnly = selectKvVictims(envelope, ep, kvDeficit, Set.of(),
-                maxVictims, includeAccepted);
+                maxVictims, ownership);
         // P1-3: only non-queued victims free an engine slot — queued ones
         // never counted against the engine load in the first place.
         DecodeEvictionProposal kvSide = kvOnly.ok() && nonQueuedCount(kvOnly.victims()) >= slotDeficit
@@ -330,7 +360,7 @@ public final class EvictionPlanner {
         DecodeVictimSet first;
         DecodeVictimSet second;
         if (kvPressure >= slotPressure) {
-            first = selectKvVictims(envelope, ep, kvDeficit, Set.of(), maxVictims, includeAccepted);
+            first = selectKvVictims(envelope, ep, kvDeficit, Set.of(), maxVictims, ownership);
             if (!first.ok()) {
                 failures.put(ep.endpointId(), first.failReason());
                 return null;
@@ -339,10 +369,10 @@ public final class EvictionPlanner {
             second = remainingSlots > 0
                     ? selectSlotVictims(envelope, ep, remainingSlots,
                             victimIds(first.victims()), remainingBudget(maxVictims, first),
-                            includeAccepted)
+                            ownership)
                     : DecodeVictimSet.EMPTY;
         } else {
-            first = selectSlotVictims(envelope, ep, slotDeficit, Set.of(), maxVictims, includeAccepted);
+            first = selectSlotVictims(envelope, ep, slotDeficit, Set.of(), maxVictims, ownership);
             if (!first.ok()) {
                 failures.put(ep.endpointId(), first.failReason());
                 return null;
@@ -351,7 +381,7 @@ public final class EvictionPlanner {
             second = remainingKv > 0
                     ? selectKvVictims(envelope, ep, remainingKv,
                             victimIds(first.victims()), remainingBudget(maxVictims, first),
-                            includeAccepted)
+                            ownership)
                     : DecodeVictimSet.EMPTY;
         }
         if (!second.ok()) {
@@ -374,12 +404,12 @@ public final class EvictionPlanner {
                                                      long deficit,
                                                      Set<Long> excludedVictimIds,
                                                      int maxVictims,
-                                                     boolean includeAccepted) {
+                                                     VictimOwnership ownership) {
         if (maxVictims > 0 && deficit > maxVictims) {
             return DecodeVictimSet.fail("deficit_exceeds_max_victims");
         }
         List<DecodeRequestSnapshot> candidates =
-                lowerPriorityCandidates(envelope, ep, excludedVictimIds, false, includeAccepted, true);
+                lowerPriorityCandidates(envelope, ep, excludedVictimIds, false, ownership, true);
         if (candidates.size() < deficit) {
             return DecodeVictimSet.fail("insufficient_lower_priority_candidates");
         }
@@ -405,9 +435,9 @@ public final class EvictionPlanner {
                                                    long kvDeficit,
                                                    Set<Long> excludedVictimIds,
                                                    int maxVictims,
-                                                   boolean includeAccepted) {
+                                                   VictimOwnership ownership) {
         List<DecodeRequestSnapshot> candidates =
-                lowerPriorityCandidates(envelope, ep, excludedVictimIds, true, includeAccepted, false);
+                lowerPriorityCandidates(envelope, ep, excludedVictimIds, true, ownership, false);
         candidates.sort(DECODE_KV_ORDER);
         List<DecodeRequestSnapshot> victims = new ArrayList<>();
         long cost = 0;
@@ -434,10 +464,10 @@ public final class EvictionPlanner {
 
     /**
      * 3.3 + 10.1: only strictly lower-priority entries are candidates. The
-     * base pool is the reserved (engine-unconfirmed) entries; the accepted
-     * layer joins only behind the Phase 5 gate ({@code includeAccepted}),
-     * with the same strict priority boundary. Running requests never qualify
-     * — the snapshot keeps them in a separate list this method never reads.
+     * base pool is the reserved (engine-unconfirmed) entries; both confirmed
+     * layers join only behind the Phase 5 gate ({@code includeAccepted}), with
+     * the same strict priority boundary. The stage comparator/cost makes
+     * {@code ACCEPTED_NOT_RUNNING} cheaper than {@code RUNNING}.
      * Task40: no-priority entries (priority 0, legacy path) never qualify.
      * P1-3: slot selection additionally skips queued-phase reservations
      * ({@code excludeQueued}) — they hold no engine slot, so evicting them
@@ -448,11 +478,15 @@ public final class EvictionPlanner {
                                                                        DecodeEndpointSnapshot ep,
                                                                        Set<Long> excludedVictimIds,
                                                                        boolean releasableKvOnly,
-                                                                       boolean includeAccepted,
+                                                                       VictimOwnership ownership,
                                                                        boolean excludeQueued) {
         List<DecodeRequestSnapshot> candidates = new ArrayList<>();
         for (DecodeRequestSnapshot entry : ep.reserved()) {
-            if (entry.phase() == DecodeTaskPhase.RESERVED_NOT_ACCEPTED
+            boolean ownershipMatches = ownership == VictimOwnership.MASTER_LOCAL
+                    ? entry.phase().isMasterQueued()
+                    : entry.phase() == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN;
+            if (ownershipMatches
+                    && entry.priorityKnown()
                     && PriorityNormalizer.hasPriority(entry.priority())
                     && entry.priority() < envelope.priority()
                     && !excludedVictimIds.contains(entry.requestId())
@@ -461,18 +495,30 @@ public final class EvictionPlanner {
                 candidates.add(entry);
             }
         }
-        if (includeAccepted) {
-            for (DecodeRequestSnapshot entry : ep.accepted()) {
-                if (entry.phase() == DecodeTaskPhase.ACCEPTED_NOT_RUNNING
-                        && PriorityNormalizer.hasPriority(entry.priority())
-                        && entry.priority() < envelope.priority()
-                        && !excludedVictimIds.contains(entry.requestId())
-                        && (!releasableKvOnly || entry.kvTokens() > 0)) {
-                    candidates.add(entry);
-                }
-            }
+        if (ownership == VictimOwnership.ENGINE_CANCEL) {
+            addConfirmedCandidates(candidates, ep.accepted(), envelope,
+                    excludedVictimIds, releasableKvOnly);
+            addConfirmedCandidates(candidates, ep.running(), envelope,
+                    excludedVictimIds, releasableKvOnly);
         }
         return candidates;
+    }
+
+    private static void addConfirmedCandidates(List<DecodeRequestSnapshot> candidates,
+                                               List<DecodeRequestSnapshot> entries,
+                                               PriorityRequestEnvelope envelope,
+                                               Set<Long> excludedVictimIds,
+                                               boolean releasableKvOnly) {
+        for (DecodeRequestSnapshot entry : entries) {
+            if (entry.phase().isEngineConfirmed()
+                    && entry.priorityKnown()
+                    && PriorityNormalizer.hasPriority(entry.priority())
+                    && entry.priority() < envelope.priority()
+                    && !excludedVictimIds.contains(entry.requestId())
+                    && (!releasableKvOnly || entry.kvTokens() > 0)) {
+                candidates.add(entry);
+            }
+        }
     }
 
     private static Set<Long> victimIds(List<DecodeRequestSnapshot> victims) {

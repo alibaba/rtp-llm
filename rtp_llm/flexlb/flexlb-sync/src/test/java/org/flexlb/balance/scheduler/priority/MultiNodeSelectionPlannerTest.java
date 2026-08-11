@@ -10,6 +10,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -29,11 +30,26 @@ class MultiNodeSelectionPlannerTest {
 
     private FlexlbConfig config;
     private Map<String, String> failures;
+    private EngineCancelChannel cancelChannel;
 
     @BeforeEach
     void setUp() {
         config = new FlexlbConfig();
+        config.setAutoTpmDecodeAcceptedEvictEnabled(true);
         failures = new HashMap<>();
+        cancelChannel = new EngineCancelChannel() {
+            @Override
+            public boolean isSupported(org.flexlb.balance.endpoint.DecodeEndpoint endpoint) {
+                return true;
+            }
+
+            @Override
+            public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
+                                                           long requestId,
+                                                           long timeoutMs) {
+                return CompletableFuture.completedFuture(CancelOutcome.unsupported());
+            }
+        };
     }
 
     // ==================== prefill：跨 endpoint 矩阵选择 ====================
@@ -173,7 +189,7 @@ class MultiNodeSelectionPlannerTest {
     @Test
     void decode_matrix_picks_cheapest_across_slot_kv_and_infeasible_endpoints() {
         // d1：slot-full 只能驱逐 P40 → 4x1024；d2：kv-full 驱逐 P30 → 8x1x1x1=8；
-        // d3：slot-full 驱逐 P30 → 4；d4：容量充足不可行 → 必选 d3。
+        // d3：slot-full Engine-owned P30 → 4×stage(4)=16；d4：容量充足不可行 → 必选 d3。
         DecodeEndpointSnapshot d1 = endpoint("d1", 1, 100_000, 200_000, 2, 2, List.of(
                 reserved(11, 40, 128, 1_000),
                 reserved(12, 70, 128, 2_000)));
@@ -185,14 +201,15 @@ class MultiNodeSelectionPlannerTest {
         DecodeEndpointSnapshot d4 = endpoint("d4", 4, 100_000, 200_000, 0, 2, List.of());
 
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 128), List.of(d1, d2, d3, d4), config, failures);
+                incoming(50, 128), List.of(d1, d2, d3, d4),
+                config, cancelChannel, failures);
 
         assertNotNull(proposal);
         assertEquals("d3", proposal.endpointId());
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
         assertEquals(List.of(31L), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
-        assertEquals(4, proposal.totalCost());
+        assertEquals(16, proposal.totalCost());
         assertEquals("decode_capacity_sufficient", failures.get("d4"));
     }
 
@@ -207,7 +224,8 @@ class MultiNodeSelectionPlannerTest {
                 reserved(21, 30, 128, 1_000)));
 
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                incoming(50, 1_000), List.of(d1, d2), config, failures);
+                incoming(50, 1_000), List.of(d1, d2),
+                config, cancelChannel, failures);
 
         assertNotNull(proposal);
         assertEquals("d2", proposal.endpointId());
@@ -225,7 +243,8 @@ class MultiNodeSelectionPlannerTest {
         for (List<DecodeEndpointSnapshot> permutation
                 : List.of(List.of(dA, dB), List.of(dB, dA))) {
             DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
-                    incoming(50, 128), permutation, config, new HashMap<>());
+                    incoming(50, 128), permutation,
+                    config, cancelChannel, new HashMap<>());
             assertNotNull(proposal);
             assertEquals("dA", proposal.endpointId(),
                     "tie-break must not depend on input order");
@@ -239,7 +258,8 @@ class MultiNodeSelectionPlannerTest {
                 List.of(reserved(1, 50, 128, 1_000)));
         DecodeEndpointSnapshot sufficient = endpoint("d2", 2, 100_000, 200_000, 0, 4, List.of());
         assertNull(EvictionPlanner.planDecode(
-                incoming(50, 128), List.of(equalPriority, sufficient), config, failures));
+                incoming(50, 128), List.of(equalPriority, sufficient),
+                config, cancelChannel, failures));
         assertEquals("insufficient_lower_priority_candidates", failures.get("d1"));
         assertEquals("decode_capacity_sufficient", failures.get("d2"));
 
@@ -248,7 +268,7 @@ class MultiNodeSelectionPlannerTest {
                 List.of(reserved(3, 40, 128, 1_000)));
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
                 incoming(50, 128), List.of(equalPriority, sufficient, onlyFeasible),
-                config, new HashMap<>());
+                config, cancelChannel, new HashMap<>());
         assertNotNull(proposal);
         assertEquals("d3", proposal.endpointId());
     }
@@ -334,7 +354,8 @@ class MultiNodeSelectionPlannerTest {
     private static DecodeRequestSnapshot reserved(long requestId, int priority,
                                                   long kvTokens, long deadlineMs) {
         return new DecodeRequestSnapshot(requestId, priority,
-                DecodeTaskPhase.RESERVED_NOT_ACCEPTED, kvTokens, kvTokens + 8, deadlineMs);
+                DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
+                kvTokens, kvTokens + 8, deadlineMs, true, false);
     }
 
     private static PriorityRequestEnvelope incoming(int priority, long seqLen) {

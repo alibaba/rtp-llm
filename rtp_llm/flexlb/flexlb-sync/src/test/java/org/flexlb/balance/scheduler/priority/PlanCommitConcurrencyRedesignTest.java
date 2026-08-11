@@ -17,6 +17,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -184,14 +185,14 @@ class PlanCommitConcurrencyRedesignTest {
     /**
      * P1-1 (task33 review): the queued-phase mark must be set BEFORE the plan
      * commit publishes the item to the batcher. Marking after the commit (the
-     * pre-fix onCommitted) races the dispatch side's markDispatchedPhase: an
+     * pre-fix onCommitted) races the dispatch-side ownership claim: an
      * item that dispatches immediately is unmarked first and re-marked
      * afterwards, leaving a stale queued mark that hides the dispatched
      * request from the engine concurrency gate until the next calibrate.
      *
      * <p>Deterministic interleaving: {@code reportPlanAge} (which the pre-fix
      * onCommitted invoked right before its late markQueuedPhase) blocks until
-     * the gRPC dispatch — which runs after markDispatchedPhase — happened;
+     * the gRPC dispatch — which runs after tryMarkEngineMayHaveSeen — happened;
      * {@code reportNormalPlacement} (invoked after the pre-fix late mark)
      * releases the assertion. Pre-fix: stale mark ⇒ engineLoad 0 (red).
      * Post-fix: the mark precedes the commit, dispatch clears it ⇒
@@ -216,7 +217,7 @@ class PlanCommitConcurrencyRedesignTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
                 any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenAnswer(inv -> {
-                    // markDispatchedPhase already ran — it precedes the dispatch
+                    // The engine-visibility claim already ran — it precedes dispatch.
                     dispatched.countDown();
                     EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
                     return CompletableFuture.completedFuture(ackFor(request));
@@ -268,12 +269,10 @@ class PlanCommitConcurrencyRedesignTest {
         Response response = scheduler.submit(context(200)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        // Exhaustion is reason-tagged, not the bare "no feasible eviction plan"
-        assertTrue(response.getErrorMessage().contains("no_evict_candidates"),
-                "expected reason-tagged exhaustion, got: " + response.getErrorMessage());
-        // The full retry budget was consumed (MAX_PLAN_RETRIES = 3)
-        verify(router, times(3)).route(any(BalanceContext.class));
+        assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                response.getAdmissionRejectReason());
+        verify(router, times(1)).route(any(BalanceContext.class));
     }
 
     // ==================== A-1: orphan decode reservation reclaimed by cleanup ====================
@@ -376,6 +375,9 @@ class PlanCommitConcurrencyRedesignTest {
                 // Concurrent enqueue between snapshot and commit → version bump
                 assertTrue(batcher.tryOffer(dummyItem(901)));
             }
+            endpointRegistry.getDecode(DECODE_IP_PORT)
+                    .reserve(ctx.getRequestId(), 128, 136,
+                            ctx.getPriority(), ctx.getDeadlineMs());
             return successRoute(ctx.getRequestId());
         });
 
@@ -414,9 +416,8 @@ class PlanCommitConcurrencyRedesignTest {
         Response response = scheduler.submit(context(502)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        assertTrue(response.getErrorMessage().contains("reason=prefill_queue_full"),
-                "expected fast-reject reason tag, got: " + response.getErrorMessage());
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
         // Primary + one fallback re-route — not the full 3-attempt budget
         verify(router, times(2)).route(any(BalanceContext.class));
         // Rollback: every decode reservation released
@@ -479,6 +480,7 @@ class PlanCommitConcurrencyRedesignTest {
     void n3_release_if_held_is_cas_style_conditional() {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         decodeEp.reserve(31, 128, 136);
+        decodeEp.markQueuedPhase(31);
 
         assertTrue(decodeEp.releaseIfHeld(31));
         assertEquals(0, decodeEp.getInflightCount());
@@ -497,6 +499,7 @@ class PlanCommitConcurrencyRedesignTest {
     void n3_presence_decode_eviction_partial_release_keeps_freed_and_replans() {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         decodeEp.reserve(41, 128, 136, 30, 0);
+        decodeEp.markQueuedPhase(41);
         // Victim 42 no longer holds a reservation (already dispatched/settled)
 
         DecodeEndpoint.PresenceEvictionOutcome outcome =

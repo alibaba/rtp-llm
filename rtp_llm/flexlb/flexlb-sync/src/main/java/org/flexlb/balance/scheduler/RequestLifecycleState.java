@@ -5,11 +5,13 @@ public enum RequestLifecycleState {
     QUEUED,
     DISPATCHING,
     ACKNOWLEDGED,
+    CANCEL_REQUESTED,
+    CANCELLED,
     TIMED_OUT,
     FAILED,
     COMPLETED;
 
     public boolean isTerminal() {
-        return this == TIMED_OUT || this == FAILED || this == COMPLETED;
+        return this == CANCELLED || this == TIMED_OUT || this == FAILED || this == COMPLETED;
     }
 }

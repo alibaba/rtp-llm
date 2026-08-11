@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
@@ -12,6 +14,18 @@
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
 
 namespace rtp_llm {
+
+enum class PrefillTerminalCause : uint8_t {
+    ACTIVE              = 0,
+    PRIORITY_PREEMPTION = 1,
+    OTHER               = 2,
+};
+
+enum class PriorityPreemptionRequestResult : uint8_t {
+    INSTALLED         = 0,
+    ALREADY_INSTALLED = 1,
+    REJECTED          = 2,
+};
 
 struct PrefillStatInfo {
     enum ExecuteStage {
@@ -75,6 +89,16 @@ public:
     ~PrefillGenerateContext();
     void         reset() override;
     bool         isRequestCancelled() const override;
+    PriorityPreemptionRequestResult requestPriorityPreempt();
+    bool         isPriorityPreempted() const;
+    bool         tryMarkOtherTerminal();
+    PrefillTerminalCause terminalCause() const;
+    void         tryCancelDownstream();
+    bool         finalizePriorityPreemption();
+    void         setLocalStreamSchedulerOwned(bool owned);
+    // Linearizes ordinary runtime-meta removal with installation of the
+    // priority-preemption first cause and its CANCELING overlay.
+    void         dequeueStreamFromRuntimeMeta();
     void         nextStage();
     grpc::Status closeGrpcStream();
     void         closeGrpcConnection();
@@ -103,6 +127,13 @@ public:
     int64_t                              loading_cache_requests               = 0;
     bool                                 recent_cache_key_metric_reported     = false;
     int64_t                              prefill_stop_stream_wait_timeout_ms_ = 2000;
+
+private:
+    std::atomic<PrefillTerminalCause> terminal_cause_{PrefillTerminalCause::ACTIVE};
+    std::mutex                        terminal_transition_mu_;
+    std::mutex        priority_finalize_mu_;
+    bool              priority_finalized_{false};
+    bool              local_stream_scheduler_owned_{false};
 };
 
 }  // namespace rtp_llm

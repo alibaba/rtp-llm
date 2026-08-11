@@ -6,8 +6,8 @@ import org.springframework.stereotype.Component;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Default {@link EngineCancelChannel} wired until the engine-side Cancel RPC
- * ships: every endpoint is unsupported, so the accepted-eviction gate
+ * Default {@link EngineCancelChannel} used when production Cancel wiring is
+ * disabled: accepted eviction is unsupported, so its capability gate
  * ({@code autoTpmDecodeAcceptedEvictEnabled && channel.isSupported(...)})
  * never opens and Phase 5 stays behaviorally dormant. No fake gRPC stub —
  * {@link #cancel} only reports the unsupported branch defensively in case it
@@ -24,7 +24,7 @@ public class UnsupportedEngineCancelChannel implements EngineCancelChannel {
     @Override
     public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
                                                    long requestId,
-                                                   CancelReason reason) {
+                                                   long timeoutMs) {
         return CompletableFuture.completedFuture(CancelOutcome.unsupported());
     }
 }

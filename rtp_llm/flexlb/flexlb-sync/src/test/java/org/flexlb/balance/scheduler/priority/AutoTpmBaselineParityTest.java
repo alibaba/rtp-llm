@@ -11,6 +11,8 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -144,18 +146,37 @@ class AutoTpmBaselineParityTest {
             throws Exception {
         Harness on = new Harness(cfg -> {
             Harness.enableAll(cfg);
-            cfg.setDecodeConcurrencyLimit(1);
+            // Keep Decode routable; this case is deliberately a Prefill
+            // FIFO/queue-capacity rejection, not a Decode slot rejection.
+            cfg.setDecodeConcurrencyLimit(100);
+            cfg.setFlexlbBatchQueueMaxSize(1);
         });
         try {
             DecodeEndpoint decodeEp = on.endpointRegistry.getDecode(DECODE_IP_PORT);
-            CompletableFuture<Response> holder = on.scheduler.submit(context(31, 50, 128));
+            CompletableFuture<Response> holder = on.submit(31, 50);
             await(() -> decodeEp.reservedView().containsKey(31L));
+            await(() -> requestIds(on.prefillQueueSnapshot()).contains(31L));
+            PrefillQueueSnapshot fullQueue = on.prefillQueueSnapshot();
+            assertEquals(1, fullQueue.queueCapacity());
+            assertEquals(1, fullQueue.items().size());
+            assertEquals(50, fullQueue.items().get(0).priority());
+            assertEquals(QueuedRequestSnapshot.PREFILL_QUEUED,
+                    fullQueue.items().get(0).state());
+            assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                    AdmissionFailureClassifier.classifyPrefill(
+                            new PriorityRequestEnvelope(32, 50, 128, 8,
+                                    System.currentTimeMillis(), 0, 0, 128, 136),
+                            fullQueue).reason());
 
-            // 同优先级涌入：全部明确失败（可重试 8400），绝不驱逐已占位者
+            // Prefill 队列已被先到的同优先级请求占满：Master 必须从
+            // 这一份队列快照判定 SAME_PRIORITY_AHEAD，不能按 QoS 阈值猜原因。
             for (long id = 32; id <= 34; id++) {
-                Response r = on.scheduler.submit(context(id, 50, 128)).get(2, TimeUnit.SECONDS);
+                Response r = on.submit(id, 50).get(2, TimeUnit.SECONDS);
                 assertFalse(r.isSuccess());
-                assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), r.getCode());
+                assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),
+                        r.getCode(), r.getErrorMessage());
+                assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                        r.getAdmissionRejectReason());
             }
             assertTrue(decodeEp.reservedView().containsKey(31L), "victim reservation untouched");
             assertFalse(holder.isCompletedExceptionally());
@@ -184,10 +205,10 @@ class AutoTpmBaselineParityTest {
             });
             try {
                 DecodeEndpoint decodeEp = h.endpointRegistry.getDecode(DECODE_IP_PORT);
-                h.scheduler.submit(context(41, 50, 128));
+                h.submit(41, 50);
                 await(() -> decodeEp.reservedView().containsKey(41L));
 
-                Response r = h.scheduler.submit(context(42, 50, 128)).get(2, TimeUnit.SECONDS);
+                Response r = h.submit(42, 50).get(2, TimeUnit.SECONDS);
 
                 // 任一子开关组合：同优先级下无驱逐、无让位、失败明确
                 assertFalse(r.isSuccess(), "incoming must fail explicitly");
@@ -299,10 +320,19 @@ class AutoTpmBaselineParityTest {
         }
 
         private CompletableFuture<Response> submitAndTrack(long requestId, int priority) {
-            CompletableFuture<Response> future = scheduler.submit(context(requestId, priority, 128));
+            CompletableFuture<Response> future = submit(requestId, priority);
             submittedIds.add(requestId);
             submittedFutures.add(future);
             return future;
+        }
+
+        private CompletableFuture<Response> submit(long requestId, int priority) {
+            BalanceContext ctx = context(requestId, priority, 128);
+            if (config.isAutoTpmEnabled()) {
+                long now = System.currentTimeMillis();
+                ctx.setBudget(ScheduleBudget.forDeadline(priority, now, now + 30_000));
+            }
+            return scheduler.submit(ctx);
         }
 
         /** admitted = 拿到 decode 占位（future 未失败）。 */

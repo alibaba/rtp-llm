@@ -5,10 +5,15 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -17,6 +22,83 @@
 
 using namespace std;
 namespace rtp_llm {
+
+// Dedicated managed executor for idle priority-cancel cleanup. Tasks submitted
+// here never wait for a prepare/Fetch operation to exit; operation owners only
+// submit after they have exited. This prevents Cancel storms from consuming
+// the finite prepare pool with waiters.
+class PriorityCancelExecutor {
+public:
+    explicit PriorityCancelExecutor(size_t worker_count) {
+        worker_count = std::max<size_t>(worker_count, 1);
+        workers_.reserve(worker_count);
+        for (size_t i = 0; i < worker_count; ++i) {
+            workers_.emplace_back([this] { run(); });
+        }
+    }
+
+    ~PriorityCancelExecutor() {
+        stop();
+    }
+
+    bool submit(std::function<void()> task) {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (stopping_) {
+                return false;
+            }
+            tasks_.push_back(std::move(task));
+        }
+        cv_.notify_one();
+        return true;
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (stopping_) {
+                return;
+            }
+            stopping_ = true;
+        }
+        cv_.notify_all();
+        for (auto& worker : workers_) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        workers_.clear();
+    }
+
+private:
+    void run() {
+        while (true) {
+            std::function<void()> task;
+            {
+                std::unique_lock<std::mutex> lock(mu_);
+                cv_.wait(lock, [this] { return stopping_ || !tasks_.empty(); });
+                if (stopping_ && tasks_.empty()) {
+                    return;
+                }
+                task = std::move(tasks_.front());
+                tasks_.pop_front();
+            }
+            try {
+                task();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("priority-cancel finalizer failed: %s", e.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("priority-cancel finalizer failed with unknown exception");
+            }
+        }
+    }
+
+    std::mutex                       mu_;
+    std::condition_variable          cv_;
+    std::deque<std::function<void()>> tasks_;
+    std::vector<std::thread>         workers_;
+    bool                             stopping_{false};
+};
 
 namespace {
 
@@ -53,23 +135,99 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, int64_t
     error_info->set_error_message(msg);
 }
 
+int64_t batchErrorCode(const grpc::Status& status) {
+    // AutoTPM 8429 is carried in gRPC details because RESOURCE_EXHAUSTED is
+    // only its transport projection. Preserve the domain code when adapting
+    // the status into EnqueueBatchErrorPB.
+    ErrorDetailsPB details;
+    if (!status.error_details().empty() && details.ParseFromString(status.error_details())
+        && details.error_code() == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED)) {
+        return details.error_code();
+    }
+    return status.error_code();
+}
+
 }  // namespace
 
 void DeferredPrefillContext::cancel(const grpc::Status& status) {
     if (!context) {
         return;
     }
+    if (!context->tryMarkOtherTerminal()) {
+        return;
+    }
     context->error_status = status;
     context->cancel_state->store(true);
-    if (context->client_context) {
-        context->client_context->TryCancel();
-    }
+    context->tryCancelDownstream();
     auto stream = context->getStream();
     if (stream && !stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
         stream->reportError(status.error_code() == grpc::StatusCode::CANCELLED ? ErrorCode::CANCELLED :
                                                                                  ErrorCode::UNKNOWN_ERROR,
                             status.error_message());
     }
+}
+
+bool DeferredPrefillContext::finishOperation() {
+    std::lock_guard<std::mutex> lock(operation_mu_);
+    if (!operation_active_) {
+        return false;
+    }
+    operation_active_ = false;
+    if (priority_finalize_requested_ && !priority_finalize_claimed_) {
+        priority_finalize_claimed_ = true;
+        return true;
+    }
+    return false;
+}
+
+DeferredPrefillContext::StartOperationResult DeferredPrefillContext::tryStartOperation() {
+    std::lock_guard<std::mutex> lock(operation_mu_);
+    if (operation_active_) {
+        return {};
+    }
+    if (priority_finalize_requested_) {
+        if (!priority_finalize_claimed_) {
+            priority_finalize_claimed_ = true;
+            return {/*started=*/false, /*priority_finalizer_claimed=*/true};
+        }
+        return {};
+    }
+    if (!context || context->terminalCause() != PrefillTerminalCause::ACTIVE || priority_finalize_claimed_) {
+        return {};
+    }
+    operation_active_ = true;
+    return {/*started=*/true, /*priority_finalizer_claimed=*/false};
+}
+
+bool DeferredPrefillContext::requestPriorityFinalization() {
+    std::lock_guard<std::mutex> lock(operation_mu_);
+    priority_finalize_requested_ = true;
+    if (!operation_active_ && !priority_finalize_claimed_) {
+        priority_finalize_claimed_ = true;
+        return true;
+    }
+    return false;
+}
+
+grpc::Status DeferredPrefillContextMap::registerActive(int64_t                                        request_id,
+                                                       const std::shared_ptr<DeferredPrefillContext>& deferred) {
+    if (!deferred || !deferred->context) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "active prefill context is missing");
+    }
+    std::lock_guard<std::mutex> lock(mu_);
+    if (stopping_) {
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down");
+    }
+    auto active = active_contexts_.find(request_id);
+    if (active != active_contexts_.end()) {
+        auto current = active->second.lock();
+        if (current) {
+            return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, "request already exists in active context map");
+        }
+        active_contexts_.erase(active);
+    }
+    active_contexts_[request_id] = deferred;
+    return grpc::Status::OK;
 }
 
 grpc::Status DeferredPrefillContextMap::store(int64_t                                        request_id,
@@ -119,10 +277,22 @@ grpc::Status DeferredPrefillContextMap::take(int64_t request_id, std::shared_ptr
     deferred.reset();
     {
         std::lock_guard<std::mutex> lock(mu_);
+        sweepPriorityPreemptionTombstones(autil::TimeUtility::currentTimeInMilliSeconds());
+        if (priority_preemption_tombstones_.find(request_id) != priority_preemption_tombstones_.end()) {
+            return statusFromErrorInfo(
+                ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request"));
+        }
         auto                        it = contexts_.find(request_id);
         if (it == contexts_.end()) {
             return grpc::Status(grpc::StatusCode::NOT_FOUND,
                                 "request [" + std::to_string(request_id) + "] not found in deferred context map");
+        }
+        auto start_result = it->second->tryStartOperation();
+        if (!start_result.started) {
+            return it->second->context && it->second->context->isPriorityPreempted() ?
+                       statusFromErrorInfo(
+                           ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request")) :
+                       grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "request context is already terminal");
         }
         deferred = std::move(it->second);
         contexts_.erase(it);
@@ -144,11 +314,115 @@ std::shared_ptr<DeferredPrefillContext> DeferredPrefillContextMap::remove(int64_
         }
         deferred = std::move(it->second);
         contexts_.erase(it);
+        if (deferred->context) {
+            deferred->context->tryMarkOtherTerminal();
+        }
+        auto active = active_contexts_.find(request_id);
+        if (active != active_contexts_.end()) {
+            auto current = active->second.lock();
+            if (!current || current.get() == expected) {
+                active_contexts_.erase(active);
+            }
+        }
     }
     if (deferred->ttl_alarm) {
         deferred->ttl_alarm->Cancel();
     }
     return deferred;
+}
+
+bool DeferredPrefillContextMap::cancelByPriorityPreemption(
+    int64_t request_id, std::shared_ptr<DeferredPrefillContext>& deferred, bool* newly_installed) {
+    if (newly_installed) {
+        *newly_installed = false;
+    }
+    std::shared_ptr<grpc::Alarm> alarm;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (stopping_) {
+            return false;
+        }
+        const int64_t               now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+        sweepPriorityPreemptionTombstones(now_ms);
+        if (priority_preemption_tombstones_.find(request_id) != priority_preemption_tombstones_.end()) {
+            deferred.reset();
+            return true;
+        }
+        auto it = active_contexts_.find(request_id);
+        if (it == active_contexts_.end()) {
+            return false;
+        }
+        deferred = it->second.lock();
+        if (!deferred) {
+            active_contexts_.erase(it);
+            return false;
+        }
+
+        // The terminal-cause CAS below is the first-cause linearization point.
+        // Holding the registry lock also prevents Fetch/finish from moving the
+        // context while the priority latch and tombstone are installed.
+        const auto preempt_result = deferred->context->requestPriorityPreempt();
+        if (preempt_result == PriorityPreemptionRequestResult::REJECTED) {
+            deferred.reset();
+            return false;
+        }
+        if (newly_installed) {
+            *newly_installed = preempt_result == PriorityPreemptionRequestResult::INSTALLED;
+        }
+        constexpr int64_t kPriorityPreemptionTombstoneTtlMs = 10 * 60 * 1000;
+        const int64_t     expires_at_ms = now_ms + kPriorityPreemptionTombstoneTtlMs;
+        priority_preemption_tombstones_[request_id] = expires_at_ms;
+        priority_preemption_tombstone_expiries_.emplace_back(expires_at_ms, request_id);
+        auto fetchable = contexts_.find(request_id);
+        if (fetchable != contexts_.end() && fetchable->second.get() == deferred.get()) {
+            contexts_.erase(fetchable);
+            alarm = deferred->ttl_alarm;
+        }
+    }
+    if (alarm) {
+        alarm->Cancel();
+    }
+    return true;
+}
+
+void DeferredPrefillContextMap::sweepPriorityPreemptionTombstones(int64_t now_ms) {
+    while (!priority_preemption_tombstone_expiries_.empty()
+           && priority_preemption_tombstone_expiries_.front().first <= now_ms) {
+        const auto [expires_at_ms, request_id] = priority_preemption_tombstone_expiries_.front();
+        priority_preemption_tombstone_expiries_.pop_front();
+        auto tombstone = priority_preemption_tombstones_.find(request_id);
+        if (tombstone != priority_preemption_tombstones_.end() && tombstone->second == expires_at_ms) {
+            priority_preemption_tombstones_.erase(tombstone);
+        }
+    }
+}
+
+void DeferredPrefillContextMap::publishPriorityPreemptionCanceled(int64_t                       request_id,
+                                                                  const DeferredPrefillContext* expected) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto                        active = active_contexts_.find(request_id);
+    if (active == active_contexts_.end()) {
+        return;
+    }
+    auto current = active->second.lock();
+    if (!current || current.get() == expected) {
+        active_contexts_.erase(active);
+    }
+}
+
+void DeferredPrefillContextMap::finish(int64_t request_id, const DeferredPrefillContext* expected) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto                        it = active_contexts_.find(request_id);
+    if (it == active_contexts_.end()) {
+        return;
+    }
+    auto current = it->second.lock();
+    if (!current || current.get() == expected) {
+        if (current && current->context) {
+            current->context->tryMarkOtherTerminal();
+        }
+        active_contexts_.erase(it);
+    }
 }
 
 void DeferredPrefillContextMap::expire(int64_t request_id, const DeferredPrefillContext* expected) {
@@ -161,6 +435,10 @@ void DeferredPrefillContextMap::expire(int64_t request_id, const DeferredPrefill
         }
         deferred = std::move(it->second);
         contexts_.erase(it);
+        if (deferred->context) {
+            deferred->context->tryMarkOtherTerminal();
+        }
+        active_contexts_.erase(request_id);
     }
     deferred->cancel(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "FetchResponse context TTL expired"));
 }
@@ -177,9 +455,18 @@ void DeferredPrefillContextMap::cancelAll(const grpc::Status& status) {
         stopping_ = true;
         deferred_contexts.reserve(contexts_.size());
         for (auto& entry : contexts_) {
+            if (entry.second && entry.second->context) {
+                entry.second->context->tryMarkOtherTerminal();
+            }
             deferred_contexts.push_back(std::move(entry.second));
         }
+        for (auto& entry : active_contexts_) {
+            if (auto active = entry.second.lock(); active && active->context) {
+                active->context->tryMarkOtherTerminal();
+            }
+        }
         contexts_.clear();
+        active_contexts_.clear();
     }
     for (auto& deferred : deferred_contexts) {
         if (deferred->ttl_alarm) {
@@ -189,10 +476,54 @@ void DeferredPrefillContextMap::cancelAll(const grpc::Status& status) {
     }
 }
 
+bool PrefillBatchRpcServer::onCancelRequest(int64_t request_id) {
+    std::shared_ptr<DeferredPrefillContext> deferred;
+    if (!deferred_contexts_->cancelByPriorityPreemption(request_id, deferred)) {
+        return false;
+    }
+    // Active Stage 2/4 operations own their exit and submit finalization only
+    // after quiescing. An idle Stage 3 context is submitted immediately. No
+    // waiter is ever placed on the prepare pool.
+    if (deferred && deferred->requestPriorityFinalization()) {
+        schedulePriorityFinalization(request_id, deferred);
+    }
+    return true;
+}
+
+void PrefillBatchRpcServer::finishSlotOperation(
+    int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& deferred) {
+    if (deferred && deferred->finishOperation()) {
+        schedulePriorityFinalization(request_id, deferred);
+    }
+}
+
+void PrefillBatchRpcServer::finalizePriorityPreemption(
+    int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred) {
+    if (!deferred->context->finalizePriorityPreemption()) {
+        // The scheduler still owns the local stream. Retry in a later executor
+        // turn rather than occupying a worker in an unbounded polling loop.
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        schedulePriorityFinalization(request_id, std::move(deferred));
+        return;
+    }
+    deferred_contexts_->publishPriorityPreemptionCanceled(request_id, deferred.get());
+}
+
+void PrefillBatchRpcServer::schedulePriorityFinalization(
+    int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred) {
+    if (!priority_cancel_executor_
+        || !priority_cancel_executor_->submit(
+            [this, request_id, deferred] { finalizePriorityPreemption(request_id, deferred); })) {
+        RTP_LLM_LOG_WARNING("request [%ld] priority-preemption finalizer executor is stopping", request_id);
+    }
+}
+
 size_t DeferredPrefillContextMap::size() const {
     std::lock_guard<std::mutex> lock(mu_);
     return contexts_.size();
 }
+
+PrefillBatchRpcServer::PrefillBatchRpcServer() = default;
 
 PrefillBatchRpcServer::~PrefillBatchRpcServer() {
     beginShutdown();
@@ -200,6 +531,10 @@ PrefillBatchRpcServer::~PrefillBatchRpcServer() {
     if (prepare_resource_worker_pool_) {
         prepare_resource_worker_pool_->stop();
         prepare_resource_worker_pool_.reset();
+    }
+    if (priority_cancel_executor_) {
+        priority_cancel_executor_->stop();
+        priority_cancel_executor_.reset();
     }
 }
 
@@ -245,6 +580,9 @@ void PrefillBatchRpcServer::initThreadPools() {
                      prepare_resource_queue,
                      pd_sep_config.prefill_prepare_resource_pool_size,
                      concurrency_limit);
+
+    const size_t cancel_workers = static_cast<size_t>(std::min<int64_t>(16, std::max<int64_t>(2, concurrency_limit)));
+    priority_cancel_executor_   = std::make_unique<PriorityCancelExecutor>(cancel_workers);
 }
 
 // ---------------------------------------------------------------------------
@@ -426,11 +764,39 @@ grpc::Status PrefillBatchRpcServer::acceptGroup(std::vector<BatchSlot> slots, En
         auto& slot       = slots[i];
         auto& result     = prepare_results[i];
         auto  request_id = slot.input->request_id();
+        auto& prefill_context = *slot.deferred->context;
         if (!result.prepared) {
             if (result.stage_status.ok()) {
                 result.stage_status = grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed");
             }
-            addBatchError(response, request_id, result.stage_status.error_code(), result.stage_status.error_message());
+            // Finish under the same mutex used by Cancel, then select the
+            // terminal status. If Cancel won, its 8429 latch must override
+            // every prepare error/exception; if finish won, Cancel returns
+            // NOT_FOUND.
+            deferred_contexts_->finish(request_id, slot.deferred.get());
+            result.stage_status = preferPriorityPreemption(prefill_context, result.stage_status);
+            addBatchError(
+                response, request_id, batchErrorCode(result.stage_status), result.stage_status.error_message());
+            continue;
+        }
+
+        // PREPARE ownership ended in its own future. Claim a new group-phase
+        // operation before touching the context again. A priority finalizer
+        // that won the gap owns the context and this slot must not continue.
+        const auto start_result = slot.deferred->tryStartOperation();
+        if (start_result.priority_finalizer_claimed) {
+            schedulePriorityFinalization(request_id, slot.deferred);
+        }
+        if (!start_result.started) {
+            deferred_contexts_->finish(request_id, slot.deferred.get());
+            auto terminal_status = prefill_context.isPriorityPreempted() ?
+                                       preferPriorityPreemption(prefill_context, grpc::Status::OK) :
+                                       grpc::Status(grpc::StatusCode::UNAVAILABLE,
+                                                    "request became terminal before group admission");
+            addBatchError(response,
+                          request_id,
+                          batchErrorCode(terminal_status),
+                          terminal_status.error_message());
             continue;
         }
 
@@ -472,8 +838,12 @@ void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
         pfx_ctx->onflight_requests      = onflight_requests_;
         pfx_ctx->loading_cache_requests = loading_cache_requests_;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);
-        slot.prefill_context            = std::move(pfx_ctx);
-        slot.request_guard              = guard;
+        auto deferred                   = std::make_shared<DeferredPrefillContext>();
+        deferred->context               = std::move(pfx_ctx);
+        deferred->input                 = slot.input;
+        deferred->request_guard         = std::move(guard);
+        slot.deferred                   = std::move(deferred);
+        slot.registration_status        = deferred_contexts_->registerActive(slot.input->request_id(), slot.deferred);
     }
 }
 
@@ -487,34 +857,52 @@ std::vector<PrefillBatchRpcServer::PrepareResult> PrefillBatchRpcServer::prepare
     for (size_t i = 0; i < slots.size(); ++i) {
         auto* slot   = &slots[i];
         auto* result = &results[i];
+        if (!slot->registration_status.ok()) {
+            result->stage_status = slot->registration_status;
+            slot->deferred->context->tryMarkOtherTerminal();
+            finishSlotOperation(slot->input->request_id(), slot->deferred);
+            continue;
+        }
         try {
             auto future =
                 prepare_resource_worker_pool_->async([this, slot, result, max_retry_times, max_retry_timeout_ms] {
+                    auto& prefill_context = *slot->deferred->context;
                     try {
                         int64_t begin_time_us = currentTimeUs();
-                        auto    stage         = slot->prefill_context->stat_info.saveStage();
+                        auto    stage           = prefill_context.stat_info.saveStage();
                         for (int attempt = 0; attempt <= max_retry_times; ++attempt) {
-                            slot->prefill_context->reset();
-                            slot->prefill_context->stat_info.restoreStage(stage);
-                            slot->prefill_context->retry_times++;
-                            prepareAllocateResource(*slot->prefill_context);
-                            if (slot->prefill_context->ok()) {
-                                result->prepared = true;
-                                return;
+                            if (prefill_context.isPriorityPreempted()) {
+                                result->stage_status = preferPriorityPreemption(prefill_context, grpc::Status::OK);
+                                break;
                             }
-                            auto cost_time_us                         = currentTimeUs() - begin_time_us;
-                            slot->prefill_context->retry_cost_time_ms = cost_time_us / 1000;
+                            prefill_context.reset();
+                            prefill_context.stat_info.restoreStage(stage);
+                            prefill_context.retry_times++;
+                            prepareAllocateResource(prefill_context);
+                            if (prefill_context.isPriorityPreempted()) {
+                                result->stage_status =
+                                    preferPriorityPreemption(prefill_context, prefill_context.error_status);
+                                break;
+                            }
+                            if (prefill_context.ok()) {
+                                result->prepared = true;
+                                break;
+                            }
+                            auto cost_time_us                  = currentTimeUs() - begin_time_us;
+                            prefill_context.retry_cost_time_ms = cost_time_us / 1000;
                             if (max_retry_timeout_ms > 0 && cost_time_us >= max_retry_timeout_ms * 1000) {
                                 break;
                             }
                             usleep(1000);
                         }
-                        result->stage_status = slot->prefill_context->error_status.ok() ?
-                                                   statusFromErrorInfo(slot->prefill_context->error_info) :
-                                                   slot->prefill_context->error_status;
-                        if (result->stage_status.ok()) {
-                            result->stage_status =
-                                grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed");
+                        if (!result->prepared && result->stage_status.ok()) {
+                            result->stage_status = prefill_context.error_status.ok() ?
+                                                       statusFromErrorInfo(prefill_context.error_info) :
+                                                       prefill_context.error_status;
+                            if (result->stage_status.ok()) {
+                                result->stage_status =
+                                    grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed");
+                            }
                         }
                     } catch (const std::exception& e) {
                         result->stage_status = grpc::Status(
@@ -523,13 +911,24 @@ std::vector<PrefillBatchRpcServer::PrepareResult> PrefillBatchRpcServer::prepare
                         result->stage_status =
                             grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource unknown exception");
                     }
+                    if (!result->prepared && !prefill_context.tryMarkOtherTerminal()) {
+                        result->stage_status = preferPriorityPreemption(prefill_context, result->stage_status);
+                    }
+                    // PREPARE is owned per slot. A canceled slot can now hand
+                    // itself to the finalizer without waiting for sibling
+                    // futures or the remaining group phases.
+                    finishSlotOperation(slot->input->request_id(), slot->deferred);
                 });
             prepare_futures.emplace_back(std::move(future));
         } catch (const std::exception& e) {
             result->stage_status =
                 grpc::Status(grpc::StatusCode::INTERNAL, "submit prepare task exception: " + std::string(e.what()));
+            slot->deferred->context->tryMarkOtherTerminal();
+            finishSlotOperation(slot->input->request_id(), slot->deferred);
         } catch (...) {
             result->stage_status = grpc::Status(grpc::StatusCode::INTERNAL, "submit prepare task unknown exception");
+            slot->deferred->context->tryMarkOtherTerminal();
+            finishSlotOperation(slot->input->request_id(), slot->deferred);
         }
     }
     for (auto& future : prepare_futures) {
@@ -543,31 +942,24 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
     if (ready_slots.empty()) {
         return grpc::Status::OK;
     }
-    // AutoTPM Cancel: R1 checkpoint — reject slots with a matching cancel
-    // intent before enqueue. tryConsume claims the entry atomically
-    // (consume-then-act is safe here: rejectSlot always writes the error to
-    // the response and cannot fail, so a claimed intent is always honored).
-    auto& cancel_intents = *engine_->getScheduler().cancelIntentMap();
-    if (!cancel_intents.empty()) {
-        std::vector<ReadySlot> live_slots;
-        live_slots.reserve(ready_slots.size());
-        for (auto& ready_slot : ready_slots) {
-            const auto& input  = ready_slot.slot->input;
-            const auto  intent = cancel_intents.tryConsume(input->request_id());
-            if (intent) {
-                rejectSlot(ready_slot,
-                           statusFromErrorInfo(
-                               ErrorInfo(intent->terminal_code,
-                                         "cancelled before enqueue: " + ErrorCodeToString(intent->terminal_code))),
-                           response);
-                continue;
-            }
-            live_slots.push_back(std::move(ready_slot));
+    // Context-local R1 checkpoint. Active registration precedes prepare, so
+    // an accepted priority Cancel is already latched here; no global
+    // scheduler intent or full-stream scan is needed.
+    std::vector<ReadySlot> live_slots;
+    live_slots.reserve(ready_slots.size());
+    for (auto& ready_slot : ready_slots) {
+        auto& prefill_context = *ready_slot.deferred->context;
+        if (prefill_context.isPriorityPreempted()) {
+            rejectSlot(ready_slot,
+                       preferPriorityPreemption(prefill_context, grpc::Status::OK),
+                       response);
+            continue;
         }
-        ready_slots = std::move(live_slots);
-        if (ready_slots.empty()) {
-            return grpc::Status::OK;
-        }
+        live_slots.push_back(std::move(ready_slot));
+    }
+    ready_slots = std::move(live_slots);
+    if (ready_slots.empty()) {
+        return grpc::Status::OK;
     }
     std::vector<std::shared_ptr<GenerateInput>> generate_inputs;
     generate_inputs.reserve(ready_slots.size());
@@ -579,15 +971,25 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
 
     std::vector<bool>              enqueue_successes;
     std::vector<GenerateStreamPtr> streams;
+    const auto mark_all_other_terminal = [&ready_slots] {
+        for (auto& ready_slot : ready_slots) {
+            if (ready_slot.deferred && ready_slot.deferred->context) {
+                ready_slot.deferred->context->tryMarkOtherTerminal();
+            }
+        }
+    };
     try {
         std::tie(enqueue_successes, streams) = engine_->enqueueMultiple(generate_inputs);
     } catch (const std::exception& e) {
+        mark_all_other_terminal();
         return grpc::Status(grpc::StatusCode::INTERNAL, "enqueueMultiple exception: " + std::string(e.what()));
     } catch (...) {
+        mark_all_other_terminal();
         return grpc::Status(grpc::StatusCode::INTERNAL, "enqueueMultiple unknown exception");
     }
 
     if (enqueue_successes.size() != generate_inputs.size() || streams.size() != generate_inputs.size()) {
+        mark_all_other_terminal();
         return grpc::Status(grpc::StatusCode::INTERNAL,
                             "enqueueMultiple result size mismatch: input=" + std::to_string(generate_inputs.size())
                                 + " status=" + std::to_string(enqueue_successes.size())
@@ -600,21 +1002,34 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
         auto& stream     = streams[i];
         auto& ready_slot = ready_slots[i];
         if (!stream) {
+            mark_all_other_terminal();
             return grpc::Status(grpc::StatusCode::INTERNAL, "enqueueMultiple returned null stream");
         }
         if (stream->streamId() != ready_slot.slot->input->request_id()) {
+            mark_all_other_terminal();
             return grpc::Status(grpc::StatusCode::INTERNAL,
                                 "enqueueMultiple result order mismatch: expected request_id="
                                     + std::to_string(ready_slot.slot->input->request_id())
                                     + " actual=" + std::to_string(stream->streamId()));
         }
         ready_slot.deferred->context->setStream(stream);
+        ready_slot.deferred->context->setLocalStreamSchedulerOwned(enqueue_successes[i]);
         if (!enqueue_successes[i]) {
+            // The scheduler rejection and priority Cancel arbitrate through
+            // the same terminal-cause CAS. Whichever wins determines the
+            // outward error; processing order below cannot rewrite it.
+            ready_slot.deferred->context->tryMarkOtherTerminal();
             auto status = statusFromErrorInfo(stream->statusInfo());
             if (status.ok()) {
                 status = grpc::Status(grpc::StatusCode::INTERNAL, "scheduler rejected request");
             }
             rejectSlot(ready_slot, status, response);
+            continue;
+        }
+        if (ready_slot.deferred->context->isPriorityPreempted()) {
+            rejectSlot(ready_slot,
+                       preferPriorityPreemption(*ready_slot.deferred->context, grpc::Status::OK),
+                       response);
             continue;
         }
         admitted_slots.push_back(std::move(ready_slot));
@@ -625,16 +1040,18 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
 
 std::shared_ptr<DeferredPrefillContext> PrefillBatchRpcServer::storeSlot(BatchSlot&              slot,
                                                                          EnqueueBatchResponsePB* response) {
-    const auto request_id   = slot.input->request_id();
-    auto       deferred     = std::make_shared<DeferredPrefillContext>();
-    deferred->context       = std::move(slot.prefill_context);
-    deferred->input         = slot.input;
-    deferred->request_guard = std::move(slot.request_guard);
+    const auto request_id = slot.input->request_id();
+    auto       deferred   = slot.deferred;
 
     const auto store_status = deferred_contexts_->store(request_id, deferred);
     if (!store_status.ok()) {
-        deferred->cancel(store_status);
-        addBatchError(response, request_id, store_status.error_code(), store_status.error_message());
+        deferred_contexts_->finish(request_id, deferred.get());
+        const auto outward_status = preferPriorityPreemption(*deferred->context, store_status);
+        if (!deferred->context->isPriorityPreempted()) {
+            deferred->cancel(store_status);
+        }
+        addBatchError(response, request_id, batchErrorCode(outward_status), outward_status.error_message());
+        finishSlotOperation(request_id, deferred);
         return nullptr;
     }
     return deferred;
@@ -644,6 +1061,12 @@ void PrefillBatchRpcServer::publishSlot(ReadySlot& ready_slot, EnqueueBatchRespo
     auto&             slot                 = *ready_slot.slot;
     const auto        request_id           = slot.input->request_id();
     const auto&       deferred             = ready_slot.deferred;
+    if (deferred->context->isPriorityPreempted()) {
+        rejectSlot(ready_slot,
+                   preferPriorityPreemption(*deferred->context, grpc::Status::OK),
+                   response);
+        return;
+    }
     constexpr int64_t kDefaultContextTtlMs = 10 * 60 * 1000;
     int64_t           ttl_ms = slot.fetch_attach_timeout_ms > 0 ? slot.fetch_attach_timeout_ms : kDefaultContextTtlMs;
     if (deferred->context->request_timeout_ms > 0) {
@@ -664,6 +1087,7 @@ void PrefillBatchRpcServer::publishSlot(ReadySlot& ready_slot, EnqueueBatchRespo
         return;
     }
     addBatchSuccess(response, request_id);
+    finishSlotOperation(request_id, deferred);
 }
 
 void PrefillBatchRpcServer::rejectSlot(ReadySlot&              ready_slot,
@@ -675,11 +1099,16 @@ void PrefillBatchRpcServer::rejectSlot(ReadySlot&              ready_slot,
     if (!deferred) {
         deferred = ready_slot.deferred;
     }
-    if (deferred && deferred->context && !deferred->context->cancel_state->load()) {
-        deferred->cancel(status);
+    const auto outward_status =
+        deferred && deferred->context ? preferPriorityPreemption(*deferred->context, status) : status;
+    if (deferred && deferred->context && !deferred->context->isPriorityPreempted()
+        && !deferred->context->cancel_state->load()) {
+        deferred->cancel(outward_status);
     }
+    addBatchError(response, request_id, batchErrorCode(outward_status), outward_status.error_message());
     ready_slot.deferred.reset();
-    addBatchError(response, request_id, status.error_code(), status.error_message());
+    slot.deferred.reset();
+    finishSlotOperation(request_id, deferred);
 }
 
 // ---------------------------------------------------------------------------
@@ -710,8 +1139,16 @@ grpc::Status PrefillBatchRpcServer::FetchResponse(grpc::ServerContext*          
     } catch (...) {
         status = grpc::Status(grpc::StatusCode::INTERNAL, "finishStream unknown exception");
     }
+    // Linearize completion against Cancel: a Cancel that wins this map lock
+    // has already latched its reason; a later Cancel no longer targets a
+    // completed FetchResponse.
+    deferred_contexts_->finish(request_id, deferred.get());
+    status = preferPriorityPreemption(prefill_context, status);
     if (!status.ok()) {
         prefill_context.error_status = status;
+    }
+    if (deferred->finishOperation()) {
+        schedulePriorityFinalization(request_id, deferred);
     }
     return status;
 }

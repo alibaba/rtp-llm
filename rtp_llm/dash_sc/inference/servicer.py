@@ -23,6 +23,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 import torch
 
 from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
     ExceptionCategory,
     ExceptionType,
     FtRuntimeException,
@@ -32,11 +33,13 @@ from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
+    DASH_ERROR_ADMISSION_OVERLOADED,
     DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
+    DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
@@ -109,31 +112,85 @@ def _capture_access_exception(access_agg: Any, e: BaseException) -> None:
 
 
 def _dash_error_spec_for_ft_exception(exc: FtRuntimeException) -> DashErrorSpec:
-    # Auto-TPM victim preemption (Master 8429): dedicated spec —
-    # ABORT(10) / 429 / Throttling.Aborted — instead of the generic
-    # category-based CAPACITY mapping (TooManyRequests).
-    if exc.exception_type == ExceptionType.PRIORITY_PREEMPTED:
-        return DASH_ERROR_AUTO_TPM_PREEMPTED
-    return _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exc.exception_type.category]
+    return _dash_error_mapping_for_ft_exception(exc).error_spec
 
 
-_TASK_LIST_FULL_MARKER = "TASK_LIST_FULL"
+@dataclass(frozen=True)
+class _DashFtErrorMapping:
+    error_spec: DashErrorSpec
+    public_message: Optional[str] = None
+    protocol_error: bool = False
+    attribution_unknown: bool = False
 
 
-def _is_engine_capacity_backpressure(e: BaseException) -> bool:
-    """Detect engine task-list-full backpressure from the exception message.
+def _dash_error_mapping_for_ft_exception(
+    exc: FtRuntimeException,
+) -> _DashFtErrorMapping:
+    """Pure mapping from internal code/reason to the public Dash contract.
 
-    The C++ engine reports TASK_LIST_FULL via an ErrorCode that maps to
-    ExceptionType.UNKNOWN_ERROR (category=INTERNAL→500) because there is no
-    dedicated TASK_LIST_FULL entry in the ExceptionType enum.  The finish-reason
-    marker "TASK_LIST_FULL" survives in the error *message*, so a string check
-    is the only reliable signal at this layer.
-
-    Only match when the category-based spec would have returned 500 — existing
-    CAPACITY errors (8400/8515/8500 etc.) already map to 429 and must not be
-    touched.
+    Priority is deliberately absent from the input.  Scheduler diagnostics in
+    ``str(exc)`` are also excluded: only the typed reason may select a public
+    admission response.
     """
-    return _TASK_LIST_FULL_MARKER in str(e)
+
+    exception_type = exc.exception_type
+    reason = getattr(
+        exc,
+        "admission_reject_reason",
+        AdmissionRejectReason.UNSPECIFIED,
+    )
+    try:
+        reason = AdmissionRejectReason(reason)
+    except (TypeError, ValueError):
+        reason = AdmissionRejectReason.UNSPECIFIED
+
+    if exception_type == ExceptionType.PRIORITY_PREEMPTED:
+        return _DashFtErrorMapping(
+            DASH_ERROR_AUTO_TPM_PREEMPTED,
+            "Too many requests.",
+        )
+
+    if exception_type == ExceptionType.PRIORITY_ADMISSION_REJECTED:
+        if reason == AdmissionRejectReason.HIGHER_PRIORITY_AHEAD:
+            return _DashFtErrorMapping(
+                DASH_ERROR_ADMISSION_OVERLOADED,
+                "Higher-priority requests are being served. Please retry later.",
+            )
+        if reason == AdmissionRejectReason.SAME_PRIORITY_AHEAD:
+            return _DashFtErrorMapping(
+                DASH_ERROR_ADMISSION_OVERLOADED,
+                "Requests with the same priority are ahead in the queue. "
+                "Please retry later.",
+            )
+        return _DashFtErrorMapping(
+            DASH_ERROR_ADMISSION_OVERLOADED,
+            "Too many requests.",
+            protocol_error=True,
+        )
+
+    if exception_type == ExceptionType.RESOURCE_EXHAUSTED:
+        if reason == AdmissionRejectReason.RESOURCE_EXHAUSTED:
+            return _DashFtErrorMapping(
+                DASH_ERROR_RESOURCE_EXHAUSTED,
+                "Resources are temporarily exhausted. Please retry later.",
+            )
+        return _DashFtErrorMapping(
+            DASH_ERROR_ADMISSION_OVERLOADED,
+            "Too many requests.",
+            protocol_error=True,
+        )
+
+    if exception_type == ExceptionType.ADMISSION_UNAVAILABLE:
+        return _DashFtErrorMapping(
+            DASH_ERROR_ADMISSION_OVERLOADED,
+            "Too many requests.",
+            protocol_error=reason != AdmissionRejectReason.UNSPECIFIED,
+            attribution_unknown=reason == AdmissionRejectReason.UNSPECIFIED,
+        )
+
+    return _DashFtErrorMapping(
+        _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exception_type.category]
+    )
 
 
 _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
@@ -983,39 +1040,22 @@ async def iter_real_model_stream_infer(
                 yield (resp, stats) if yield_access_stats else resp
     except FtRuntimeException as e:
         _capture_access_exception(access_agg, e)
-        error_spec = _dash_error_spec_for_ft_exception(e)
-        # Engine task-list-full backpressure: the C++ engine reports
-        # TASK_LIST_FULL via an ErrorCode that maps to UNKNOWN_ERROR
-        # (category=INTERNAL→500).  Remap to 429 so callers see a
-        # capacity error, not an internal failure.
-        if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
-            error_spec = DASH_ERROR_CAPACITY
-        status_message = str(e)
-        # autoTPM 429 响应规范：有 qos header 时按 priority 区分 status_name，
-        # 统一 status_message 为 "Too many requests."；无 qos header 的容量拒绝
-        # 返回 503 ServiceUnavailable / "Service unavailable."（塘主规范）。
-        if error_spec.status_code == 429:
-            qos_priority = (
-                getattr(locals().get("generate_config"), "qos_priority", 0) or 0
+        error_mapping = _dash_error_mapping_for_ft_exception(e)
+        error_spec = error_mapping.error_spec
+        status_message = error_mapping.public_message or str(e)
+        if error_mapping.protocol_error:
+            logging.error(
+                "[DashScGrpc] [%s] invalid admission code/reason pair: "
+                "code=%s reason=%s",
+                tag,
+                int(e.exception_type),
+                getattr(e, "admission_reject_reason", None),
             )
-            if qos_priority > 0:
-                if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
-                    pass  # status_name 已经是 Throttling.Aborted
-                elif qos_priority <= 40:
-                    error_spec = error_spec._replace(
-                        status_name="Throttling.ServiceOverloaded"
-                    )
-                else:
-                    error_spec = error_spec._replace(
-                        status_name="Throttling.ResourceExhausted"
-                    )
-                status_message = "Too many requests."
-            else:
-                error_spec = error_spec._replace(
-                    status_code=503,
-                    status_name="ServiceUnavailable",
-                )
-                status_message = "Service unavailable."
+        elif error_mapping.attribution_unknown:
+            logging.warning(
+                "[DashScGrpc] [%s] admission rejected without attribution",
+                tag,
+            )
         if error_spec.status_code == 500:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
         elif error_spec.status_code == 499:
@@ -1033,46 +1073,8 @@ async def iter_real_model_stream_infer(
     except Exception as e:
         _capture_access_exception(access_agg, e)
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
-        # An FtRuntimeException that wasn't caught by the except FtRuntimeException
-        # clause above (e.g. due to async-generator exception propagation) still
-        # needs the category-based error spec for correct HTTP status mapping.
-        # Use isinstance instead of hasattr — duck-typing on "exception_type" could
-        # match unrelated exceptions that happen to expose an attribute of that name.
-        if isinstance(e, FtRuntimeException):
-            error_spec = _dash_error_spec_for_ft_exception(e)
-        else:
-            error_spec = DASH_ERROR_INTERNAL
-        # Same TASK_LIST_FULL remap as above — covers generic Exception paths
-        # (e.g. gRPC RpcError without grpc-status-details-bin metadata) where
-        # the error message still carries the TASK_LIST_FULL marker.
-        if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
-            error_spec = DASH_ERROR_CAPACITY
+        error_spec = DASH_ERROR_INTERNAL
         fallback_status_message = f"{type(e).__name__}: {e}"
-        # autoTPM 429 响应规范：有 qos header 时按 priority 区分 status_name，
-        # 统一 status_message 为 "Too many requests."；无 qos header 的容量拒绝
-        # 返回 503 ServiceUnavailable / "Service unavailable."（塘主规范）。
-        if error_spec.status_code == 429:
-            qos_priority = (
-                getattr(locals().get("generate_config"), "qos_priority", 0) or 0
-            )
-            if qos_priority > 0:
-                if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
-                    pass  # status_name 已经是 Throttling.Aborted
-                elif qos_priority <= 40:
-                    error_spec = error_spec._replace(
-                        status_name="Throttling.ServiceOverloaded"
-                    )
-                else:
-                    error_spec = error_spec._replace(
-                        status_name="Throttling.ResourceExhausted"
-                    )
-                fallback_status_message = "Too many requests."
-            else:
-                error_spec = error_spec._replace(
-                    status_code=503,
-                    status_name="ServiceUnavailable",
-                )
-                fallback_status_message = "Service unavailable."
         response = build_dash_error_response(
             str(request.id),
             request.model_name,

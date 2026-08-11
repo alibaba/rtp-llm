@@ -231,15 +231,32 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                 callback.onSuccess(item, batchId);
             } else if (errorByRequestId.containsKey(item.requestId())) {
                 EngineRpcService.EnqueueBatchErrorPB error = errorByRequestId.get(item.requestId());
+                long errorCode = error.hasErrorInfo()
+                        ? error.getErrorInfo().getErrorCode()
+                        : 0L;
                 String errorMessage = error.hasErrorInfo()
                         ? error.getErrorInfo().getErrorMessage()
                         : "missing error_info";
-                callback.onFailure(item, new RuntimeException(
+                callback.onFailure(item, new EngineRejectedException(errorCode,
                         "EnqueueBatch rejected request " + item.requestId() + ": " + errorMessage));
             } else {
                 callback.onFailure(item, new RuntimeException(
                         "EnqueueBatch missing ack for request " + item.requestId()));
             }
+        }
+    }
+
+    /** Domain error returned for one item in an otherwise successful batch RPC. */
+    public static final class EngineRejectedException extends RuntimeException {
+        private final long errorCode;
+
+        public EngineRejectedException(long errorCode, String message) {
+            super(message);
+            this.errorCode = errorCode;
+        }
+
+        public long errorCode() {
+            return errorCode;
         }
     }
 

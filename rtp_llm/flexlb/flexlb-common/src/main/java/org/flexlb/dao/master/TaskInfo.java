@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.enums.PriorityPreemptionProgress;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
@@ -35,5 +36,9 @@ public class TaskInfo {
     private TaskPhase phase;
     @JsonProperty("execution_time_ms")
     private long executionTimeMs = -1;
+
+    @JsonProperty("priority_preemption_progress")
+    private PriorityPreemptionProgress priorityPreemptionProgress =
+            PriorityPreemptionProgress.NONE;
 
 }

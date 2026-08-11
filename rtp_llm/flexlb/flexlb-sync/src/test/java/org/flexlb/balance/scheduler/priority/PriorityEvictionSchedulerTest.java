@@ -13,6 +13,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -181,14 +182,15 @@ class PriorityEvictionSchedulerTest {
         Response response = scheduler.submit(context(12, 50)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
-        // Redesign C-2: infeasible is an ordinary capacity failure — the full
-        // retry budget is consumed, then a reason-tagged exhaustion surfaces.
-        assertTrue(response.getErrorMessage().contains("reason=capacity_no_evict_candidates"),
-                "expected reason-tagged exhaustion, got: " + response.getErrorMessage());
-        // One route for the victim + MAX_PLAN_RETRIES (3) for the incoming
-        verify(router, times(4)).route(any(BalanceContext.class));
-        verify(priorityReporter, times(3))
+        assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),
+                response.getCode());
+        assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+                response.getAdmissionRejectReason());
+        assertTrue(response.getErrorMessage().contains("same-priority requests are ahead"),
+                "expected typed same-priority detail, got: " + response.getErrorMessage());
+        // One route for the victim + one causally classified incoming attempt.
+        verify(router, times(2)).route(any(BalanceContext.class));
+        verify(priorityReporter)
                 .reportEvictionPlan(eq(50), eq("prefill_queue_full"), eq("infeasible"));
         verify(priorityReporter, never()).reportVictim(anyInt(), anyInt(), anyString(), anyString());
 
@@ -213,11 +215,12 @@ class PriorityEvictionSchedulerTest {
         Response response = scheduler.submit(context(22, 70)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
+        assertEquals(AdmissionRejectReason.UNSPECIFIED, response.getAdmissionRejectReason());
         // N3 §3.3 (default lockfree): a capacity failure is not transient —
-        // primary + one fallback offer, then a reason-tagged fast reject.
-        assertTrue(response.getErrorMessage().contains("reason=prefill_queue_full"),
-                "expected fast-reject reason tag, got: " + response.getErrorMessage());
+        // primary + one fallback offer, then conservative unknown attribution.
+        assertTrue(response.getErrorMessage().contains("blocker attribution is unknown"),
+                "expected conservative attribution detail, got: " + response.getErrorMessage());
         // 1 victim route + primary + one fallback re-route for the incoming
         verify(router, times(3)).route(any(BalanceContext.class));
         verify(priorityReporter, never()).reportEvictionPlan(anyInt(), anyString(), anyString());

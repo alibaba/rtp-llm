@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Generic TTL eviction manager for inflight maps across all scheduling layers.
@@ -41,10 +42,20 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
      * @return number of entries evicted
      */
     public int evictExpired(long ttlMs) {
+        return evictExpired(ttlMs, ignored -> true);
+    }
+
+    /**
+     * Remove expired entries accepted by {@code canEvict}. The caller may use
+     * this predicate to protect entries held by a stronger ownership protocol
+     * while retaining the generic counter callback.
+     */
+    public int evictExpired(long ttlMs, Predicate<K> canEvict) {
         long now = System.currentTimeMillis();
         int count = 0;
         for (Map.Entry<K, V> entry : map.entrySet()) {
-            if (now - entry.getValue().createdAtMs() > ttlMs) {
+            if (now - entry.getValue().createdAtMs() > ttlMs
+                    && canEvict.test(entry.getKey())) {
                 // Use map.remove() instead of iterator.remove() to avoid race with
                 // concurrent release()/calibrate() map.remove(key). If another thread
                 // already removed the entry, map.remove() returns null and we skip

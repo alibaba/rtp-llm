@@ -147,6 +147,7 @@ class FlexLBSmokeBase:
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         block_keys: Optional[List[int]] = None,
+        priority: int = 0,
     ):
         input_pb = self._build_generate_input(
             request_id,
@@ -168,6 +169,9 @@ class FlexLBSmokeBase:
             model="engine_service",
             api_key="",
             cache_key_block_size=1024,
+            # Priority must be carried by the schedule protocol; embedding it
+            # only in unique_key metadata does not reach Auto-TPM admission.
+            priority=priority,
         )
 
     # -- Master gRPC helpers ----------------------------------------------

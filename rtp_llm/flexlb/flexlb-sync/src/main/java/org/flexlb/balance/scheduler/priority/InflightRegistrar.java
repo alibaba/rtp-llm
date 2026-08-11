@@ -2,6 +2,8 @@ package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.scheduler.BatchItem;
 
+import java.util.concurrent.CompletableFuture;
+
 /**
  * Registers Auto-TPM admitted requests into the batch scheduler's inflight
  * tracking so that dispatch, completion, TTL cleanup and rollback treat them
@@ -22,6 +24,20 @@ public interface InflightRegistrar {
 
     /** Remove a previously registered item (offer failed, plan aborted). */
     void unregisterInflight(BatchItem item);
+
+    /**
+     * Atomically decide whether an AdmissionLease cleanup or a priority
+     * preemption claim owns the request.
+     *
+     * <p>{@code true} means the registrar already owns cleanup: normally a
+     * preemption claim won and this cleanup was deferred behind it, or another
+     * terminal path acquired cleanup first. The caller must not release Decode
+     * accounting or unregister the item. {@code false} means this caller won
+     * cleanup ownership and may perform its normal idempotent
+     * release/unregister sequence. A later {@link #claimForPreemption} for the
+     * same inflight entry must then fail.
+     */
+    boolean registrarOwnsAdmissionCleanup(BatchItem item, String detail);
 
     /**
      * Drive an evicted victim to its terminal state (design doc 9.5/17.3):
@@ -56,15 +72,45 @@ public interface InflightRegistrar {
      */
     void finishYieldedById(long requestId, String detail);
 
+    /** Atomically attach one victim to a token before endpoint mutation. */
+    boolean claimForPreemption(long requestId, long attemptToken, String detail);
+
+    /** Roll back a claim when no Cancel RPC has been issued. */
+    boolean releasePreemptionClaim(long requestId, long attemptToken);
+
+    /** CLAIMED -> CANCEL_IN_FLIGHT; called for every victim before the first RPC. */
+    boolean markPreemptionCancelInFlight(long requestId, long attemptToken);
+
+    /** Cancel ACCEPTED; does not complete the victim or release resources. */
+    boolean markPreemptionCancelAccepted(long requestId, long attemptToken);
+
+    /** Explicit negative acknowledgement; keeps a stale reconciliation fence. */
+    boolean markPreemptionNotFound(long requestId, long attemptToken);
+
+    /** Transport result unknown; preserves attribution and accounting. */
+    boolean markPreemptionUnknown(long requestId, long attemptToken);
+
     /**
-     * Mark an inflight accepted-eviction victim as CANCEL_REQUESTED (Phase 5)
-     * so a later engine-reported CANCELLED completion is attributed to
-     * {@code PRIORITY_PREEMPTED} instead of a generic worker failure. Default
-     * no-op keeps non-scheduler implementations source-compatible.
-     *
-     * @return true when the id was inflight and the mark was recorded
+     * Signal completed only by original-Prefill WorkerStatus carrying
+     * priority_preemption_progress=CANCELED and exact code 8429.
      */
-    default boolean markCancelRequested(long requestId, String detail) {
-        return false;
+    CompletableFuture<PriorityCanceledObservation> priorityCanceledSignal(
+            long requestId, long attemptToken);
+
+    /** Token-fenced terminal settlement after the endpoint accounting CAS wins. */
+    boolean finishPreemptedById(long requestId, long attemptToken, String detail);
+
+    /** Fresh active observation reopens a NOT_FOUND_STALE victim. */
+    boolean reconcilePreemptionActive(long requestId);
+
+    /**
+     * Resolve the original Prefill route from the authoritative inflight
+     * entry. Returning {@code null} means the request is no longer inflight or
+     * its Prefill route is unavailable.
+     */
+    EngineCancelChannel.CancelTarget resolveCancelTarget(long requestId);
+
+    record PriorityCanceledObservation(long requestId, long errorCode) {
     }
+
 }

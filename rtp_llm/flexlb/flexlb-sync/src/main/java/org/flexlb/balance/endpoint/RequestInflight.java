@@ -7,8 +7,10 @@ import org.flexlb.enums.DecodeTaskPhase;
  * Tracks a single inflight decode request's KV reservation (Auto-TPM decode
  * admission view, design doc 10.1).
  *
- * <p>Phase note: entries are created as {@link DecodeTaskPhase#RESERVED_NOT_ACCEPTED}
- * (Master shadow reservation). Once the engine confirms a request
+ * <p>Phase note: entries are created as {@link DecodeTaskPhase#ENGINE_MAY_HAVE_SEEN}.
+ * The endpoint's queued ownership bit projects them as
+ * {@link DecodeTaskPhase#MASTER_QUEUED_NOT_DISPATCHED} in planning snapshots.
+ * Once the engine confirms a request
  * (KV_ALLOCATED / RUNNING), {@code DecodeEndpoint.calibrate} removes the entry
  * and counts it in {@code confirmedRunningCount} instead — the accepted and
  * running layers are merged into a single confirmed count because the current
@@ -24,8 +26,7 @@ import org.flexlb.enums.DecodeTaskPhase;
  * @param priority         Auto-TPM normalized priority (30/40/50/60/70);
  *                         0 = no priority (task40) — never evictable
  * @param deadlineMs       Auto-TPM admission deadline (epoch ms); 0 = unset
- * @param phase            decode admission phase; always
- *                         {@code RESERVED_NOT_ACCEPTED} in Phase 4
+ * @param phase            shadow admission phase
  */
 public record RequestInflight(
         long kvTokens,
@@ -49,7 +50,7 @@ public record RequestInflight(
 
     RequestInflight(long kvTokens, long expectedKvTokens, int priority, long deadlineMs) {
         this(kvTokens, expectedKvTokens, System.currentTimeMillis(),
-                priority, deadlineMs, DecodeTaskPhase.RESERVED_NOT_ACCEPTED);
+                priority, deadlineMs, DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN);
     }
 
     /**

@@ -217,17 +217,23 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] start to remote allocate resource", prefill_context.request_id);
-    prefill_context.client_context.reset(new ClientContext());
+    auto    client_context     = std::make_shared<ClientContext>();
     auto    request_timeout_ms = prefill_context.request_timeout_ms;
     auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
     if (final_timeout_ms > 0) {
         auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
-        prefill_context.client_context->set_deadline(deadline);
+        client_context->set_deadline(deadline);
+    }
+    std::atomic_store(&prefill_context.client_context, client_context);
+    // Close the publish-before-cancel window: either requestPriorityPreempt()
+    // observes this ClientContext, or this check observes its cancel latch.
+    if (prefill_context.cancel_state->load(std::memory_order_seq_cst)) {
+        client_context->TryCancel();
     }
     // final_timeout_ms <= 0: skip set_deadline; gRPC treats it as no deadline.
     prefill_context.client_stream =
-        std::move(prefill_context.grpc_connection.stub->RemoteGenerate(prefill_context.client_context.get()));
+        std::move(prefill_context.grpc_connection.stub->RemoteGenerate(client_context.get()));
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request;
     alloc_request.set_stage(RemoteStage::ALLOCATE);
@@ -270,18 +276,6 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", prefill_context.request_id);
-    // AutoTPM Cancel: R1 checkpoint — reject before stream creation when a
-    // matching cancel intent exists. tryConsume claims the entry atomically
-    // (consume-then-act is safe here: the reject is a local error write with
-    // no failure path, so a claimed intent is always honored).
-    auto& cancel_intents = *engine_->getScheduler().cancelIntentMap();
-    if (const auto intent = cancel_intents.tryConsume(prefill_context.request_id)) {
-        prefill_context.error_info =
-            ErrorInfo(intent->terminal_code, "cancelled before enqueue: " + ErrorCodeToString(intent->terminal_code));
-        prefill_context.error_status =
-            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
-        return;
-    }
     auto stream = engine_->enqueue(prefill_context.generate_input);
     prefill_context.setStream(stream);
     RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", prefill_context.request_id);
@@ -348,7 +342,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
 
-    meta_->dequeue(prefill_context.request_id, prefill_context.getStream());
+    prefill_context.dequeueStreamFromRuntimeMeta();
     if (!prefill_context.getStream()->hasEvent(StreamEvents::NeedRemoteGenerate)) {
         RTP_LLM_LOG_DEBUG("request [%ld] pd-sep prefill finished locally without remote generate, "
                           "skipping remote generate stages",
@@ -536,6 +530,16 @@ grpc::Status PrefillRpcServer::finishStream(PrefillGenerateContext& prefill_cont
     return grpc::Status::OK;
 }
 
+grpc::Status PrefillRpcServer::preferPriorityPreemption(PrefillGenerateContext& prefill_context,
+                                                        const grpc::Status&     fallback) {
+    if (!prefill_context.isPriorityPreempted()) {
+        return fallback;
+    }
+    return serializeErrorMsg(prefill_context.request_key,
+                             prefill_context.request_info,
+                             ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request"));
+}
+
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* writer) {
@@ -618,35 +622,18 @@ PrefillRpcServer::RemoteFinish(grpc::ServerContext* context, const RemoteFinishR
 }
 
 grpc::Status
-PrefillRpcServer::Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response) {
+PrefillRpcServer::Cancel(grpc::ServerContext* /*context*/, const CancelRequestPB* request, CancelResponsePB* response) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (request == nullptr || request->request_id() == 0) {
+    if (request == nullptr || request->request_id() <= 0) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "cancel request missing request_id");
     }
-    // Map the master's reason to the terminal error code once, at write time;
-    // only priority preemption is attributed as PRIORITY_PREEMPTED (8429).
-    ErrorCode terminal_code = ErrorCode::CANCELLED;
-    switch (request->reason()) {
-        case EngineCancelReasonPB::ENGINE_CANCEL_REASON_PRIORITY_PREEMPTED:
-            terminal_code = ErrorCode::PRIORITY_PREEMPTED;
-            break;
-        case EngineCancelReasonPB::ENGINE_CANCEL_REASON_DEADLINE_EXCEEDED:
-            terminal_code = ErrorCode::DEADLINE_EXCEEDED;
-            break;
-        default:
-            break;
+    if (!onCancelRequest(request->request_id())) {
+        response->set_status(CancelStatusPB::CANCEL_STATUS_NOT_FOUND);
+        RTP_LLM_LOG_INFO("request [%ld] priority-preemption cancel not found", request->request_id());
+        return grpc::Status::OK;
     }
-    // Register the intent and ack immediately: ACCEPTED only means "intent
-    // registered". No stream lookup, no synchronous cleanup — consumption is
-    // cooperative (R1 enqueue checkpoint / R2 schedule checkpoint) and the
-    // master's release decision relies solely on WorkerStatus finished
-    // records. Duplicate cancel overwrites the entry.
-    engine_->getScheduler().cancelIntentMap()->registerCancel(
-        request->request_id(), terminal_code, autil::TimeUtility::currentTimeInMilliSeconds());
-    response->set_ack(EngineCancelAckPB::ENGINE_CANCEL_ACK_ACCEPTED);
-    RTP_LLM_LOG_INFO("request [%ld] cancel intent registered, reason %d",
-                     request->request_id(),
-                     static_cast<int>(request->reason()));
+    response->set_status(CancelStatusPB::CANCEL_STATUS_ACCEPTED);
+    RTP_LLM_LOG_INFO("request [%ld] priority-preemption cancel accepted", request->request_id());
     return grpc::Status::OK;
 }
 

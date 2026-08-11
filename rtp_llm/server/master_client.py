@@ -9,7 +9,11 @@ from typing import Dict, List, Optional
 import grpc
 import grpc.aio
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    AdmissionRejectReason,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
@@ -61,6 +65,9 @@ class FlexlbResponse:
     connection_failed: bool = False
     error_code: Optional[int] = None
     error_message: Optional[str] = None
+    admission_reject_reason: AdmissionRejectReason = (
+        AdmissionRejectReason.UNSPECIFIED
+    )
     enqueued_by_master: bool = False
 
     @property
@@ -79,6 +86,7 @@ class FlexlbResponse:
             connection_failed=False,
             error_code=None,
             error_message=None,
+            admission_reject_reason=AdmissionRejectReason.UNSPECIFIED,
             enqueued_by_master=enqueued_by_master,
         )
 
@@ -87,6 +95,9 @@ class FlexlbResponse:
         cls,
         error_code: int,
         error_message: Optional[str] = None,
+        admission_reject_reason: AdmissionRejectReason = (
+            AdmissionRejectReason.UNSPECIFIED
+        ),
     ) -> "FlexlbResponse":
         """Scheduler returned error (e.g. non-200 body). No slave retry / no domain fallback."""
         return cls(
@@ -94,6 +105,7 @@ class FlexlbResponse:
             connection_failed=False,
             error_code=error_code,
             error_message=error_message,
+            admission_reject_reason=admission_reject_reason,
             enqueued_by_master=False,
         )
 
@@ -105,8 +117,27 @@ class FlexlbResponse:
             connection_failed=True,
             error_code=None,
             error_message=None,
+            admission_reject_reason=AdmissionRejectReason.UNSPECIFIED,
             enqueued_by_master=False,
         )
+
+
+def _admission_reject_reason_from_response(response) -> AdmissionRejectReason:
+    """Read field 9 without interpreting scheduler diagnostic text.
+
+    Old peers that do not yet send the field naturally yield UNSPECIFIED.  An
+    unknown numeric enum value is also kept out of the business mapping and
+    falls back to UNSPECIFIED, where Dash applies the protocol-safe response.
+    """
+
+    raw_reason = getattr(response, "admission_reject_reason", 0)
+    try:
+        return AdmissionRejectReason(int(raw_reason))
+    except (TypeError, ValueError):
+        route_logger.error(
+            "Unknown FlexLB admission rejection reason: %r", raw_reason
+        )
+        return AdmissionRejectReason.UNSPECIFIED
 
 
 class MasterClient:
@@ -300,6 +331,7 @@ class MasterClient:
         self.latest_queue_length = response.queue_length
 
         if response.code != SUCCESS_CODE:
+            admission_reject_reason = _admission_reject_reason_from_response(response)
             try:
                 exception_type = ExceptionType(response.code)
             except ValueError:
@@ -307,10 +339,11 @@ class MasterClient:
             message = response.error_message or "master schedule error"
             route_logger.error(
                 "Master schedule error, request_id=%s, error_code=%s, "
-                "error_message=%s",
+                "error_message=%s, admission_reject_reason=%s",
                 request_id,
                 response.code,
                 message,
+                admission_reject_reason.name,
             )
             kmonitor.report(
                 AccMetrics.MASTER_ROUTE_ERROR_QPS_METRIC,
@@ -320,6 +353,7 @@ class MasterClient:
             raise FtRuntimeException(
                 exception_type=exception_type,
                 message=message,
+                admission_reject_reason=admission_reject_reason,
             )
 
         role_addrs = [

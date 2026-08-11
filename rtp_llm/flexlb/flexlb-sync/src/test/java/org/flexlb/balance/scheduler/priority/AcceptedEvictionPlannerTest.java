@@ -23,7 +23,7 @@ import static org.mockito.Mockito.when;
  * AND per-endpoint Cancel RPC support), the strict lower-priority boundary
  * on the accepted layer, stage-ascending preference (reserved before
  * accepted, before any kvBucket/deadline tie-break), the higher accepted
- * victim cost (g=4), and the running layer never joining the pool.
+ * victim cost (g=4), and running-layer selection with its larger cost (g=32).
  */
 class AcceptedEvictionPlannerTest {
 
@@ -78,9 +78,8 @@ class AcceptedEvictionPlannerTest {
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
         assertEquals(List.of(1L), ids(proposal.victims()));
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, proposal.victims().get(0).phase());
-        // h(DECODE_SLOT_FULL)=4 x f(30)=1 x g(ACCEPTED_NOT_RUNNING)=4 — an
-        // accepted victim costs 4x its reserved counterpart.
-        assertEquals(16, proposal.totalCost());
+        // h(DECODE_SLOT_FULL)=4 x f(30)=1 x g(ACCEPTED_NOT_RUNNING)=16.
+        assertEquals(64, proposal.totalCost());
         assertEquals(256, proposal.freedKvTokens());
     }
 
@@ -104,7 +103,7 @@ class AcceptedEvictionPlannerTest {
     // ==================== stage asc: reserved preferred over accepted ====================
 
     @Test
-    void samePriority_reservedIsEvictedBeforeAccepted() {
+    void slotDeficitSelectsEngineVictimBecauseMasterQueuedDoesNotHoldASlot() {
         config.setAutoTpmDecodeAcceptedEvictEnabled(true);
         when(channel.isSupported(any())).thenReturn(true);
         // The accepted entry has more deadline slack — without the stage
@@ -118,10 +117,10 @@ class AcceptedEvictionPlannerTest {
                 incoming(70, 128), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
-        assertEquals(List.of(1L), ids(proposal.victims()));
-        assertEquals(DecodeTaskPhase.RESERVED_NOT_ACCEPTED, proposal.victims().get(0).phase());
-        // Reserved victim keeps the cheap g=1 cost: 4 x 1 x 1.
-        assertEquals(4, proposal.totalCost());
+        assertEquals(List.of(2L), ids(proposal.victims()));
+        assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                proposal.victims().get(0).phase());
+        assertEquals(64, proposal.totalCost());
     }
 
     @Test
@@ -161,17 +160,17 @@ class AcceptedEvictionPlannerTest {
                 incoming(50, 2_000), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
-        assertEquals(List.of(1L, 2L), ids(proposal.victims()));
-        assertEquals(2_560, proposal.freedKvTokens());
-        // 8 x (f(30)=1 x g(RESERVED)=1 x waste(512)=1
-        //      + f(30)=1 x g(ACCEPTED)=4 x waste(2048)=1) = 8 x 5 = 40.
-        assertEquals(40, proposal.totalCost());
+        // A plan is ownership-homogeneous: it never combines a Master-local
+        // removal with an Engine Cancel transaction.
+        assertEquals(List.of(2L), ids(proposal.victims()));
+        assertEquals(2_048, proposal.freedKvTokens());
+        assertEquals(128, proposal.totalCost());
     }
 
-    // ==================== running layer is never a candidate source ====================
+    // ==================== running layer is cancellable behind the same gate ====================
 
     @Test
-    void runningEntries_areNeverCandidatesEvenBehindTheGate() {
+    void runningEntry_becomesVictimBehindTheGate() {
         config.setAutoTpmDecodeAcceptedEvictEnabled(true);
         when(channel.isSupported(any())).thenReturn(true);
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 1, 1,
@@ -183,8 +182,28 @@ class AcceptedEvictionPlannerTest {
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
                 incoming(70, 128), List.of(ep), config, channel, failures);
 
-        assertNull(proposal);
-        assertEquals("insufficient_lower_priority_candidates", failures.get("d1"));
+        assertNotNull(proposal);
+        assertEquals(List.of(1L), ids(proposal.victims()));
+        assertEquals(DecodeTaskPhase.RUNNING, proposal.victims().get(0).phase());
+        // h(DECODE_SLOT_FULL)=4 x f(30)=1 x g(RUNNING)=64.
+        assertEquals(256, proposal.totalCost());
+    }
+
+    @Test
+    void samePriority_acceptedIsPreferredBeforeRunning() {
+        config.setAutoTpmDecodeAcceptedEvictEnabled(true);
+        when(channel.isSupported(any())).thenReturn(true);
+        DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 2, 2,
+                List.of(), List.of(accepted(1, 30, 256, 1_000)),
+                List.of(new DecodeRequestSnapshot(2, 30, DecodeTaskPhase.RUNNING,
+                        256, 256, 9_000)));
+
+        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
+                incoming(70, 128), List.of(ep), config, channel, new HashMap<>());
+
+        assertNotNull(proposal);
+        assertEquals(List.of(1L), ids(proposal.victims()));
+        assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, proposal.victims().get(0).phase());
     }
 
     // ==================== Phase 4 overload: accepted layer disabled ====================
@@ -224,7 +243,8 @@ class AcceptedEvictionPlannerTest {
     private static DecodeRequestSnapshot reserved(long requestId, int priority,
                                                   long kvTokens, long deadlineMs) {
         return new DecodeRequestSnapshot(requestId, priority,
-                DecodeTaskPhase.RESERVED_NOT_ACCEPTED, kvTokens, kvTokens + 8, deadlineMs);
+                DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
+                kvTokens, kvTokens + 8, deadlineMs, true);
     }
 
     private static DecodeRequestSnapshot accepted(long requestId, int priority,

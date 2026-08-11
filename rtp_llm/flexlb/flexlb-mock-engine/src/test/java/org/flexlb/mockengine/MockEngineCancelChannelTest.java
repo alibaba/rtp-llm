@@ -6,7 +6,6 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelAck;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelOutcome;
-import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelReason;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelTarget;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -38,10 +37,12 @@ import static org.junit.jupiter.api.Assertions.fail;
  * engine cluster (test wiring only — production Spring contexts keep
  * UnsupportedEngineCancelChannel):
  * <ul>
- *   <li>accepted: any routable cancel (mid-flight, after completion, double
- *       cancel, unknown request id) registers the intent and acks ACCEPTED;
- *       for a mid-flight cancel the CANCELLED completion surfaces in the next
- *       WorkerStatus finished list (iron rule 4 confirmation source),</li>
+ *   <li>accepted: a live request on the addressed worker is cancelled and its
+ *       CANCELLED completion surfaces in WorkerStatus;</li>
+ *   <li>idempotent: an accepted priority-cancel tombstone stays ACCEPTED;</li>
+ *   <li>not found: completed-before-cancel and unknown requests do not scan
+ *       another Prefill for a match;</li>
+ *   <li>failed: Decode rejects the Prefill-owned Cancel RPC;</li>
  *   <li>unsupported: endpoint whose port maps to no mock engine.</li>
  * </ul>
  */
@@ -88,19 +89,21 @@ class MockEngineCancelChannelTest {
         awaitInflight(prefill, 1, 1_000);
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(endpoint(prefill.getGrpcPort()), 0L), 1L, CancelReason.PRIORITY_PREEMPTED)
+                .cancel(target(prefill.getGrpcPort()), 1L, 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, outcome.ack(),
                 "mid-flight cancel must register the intent");
 
-        // Iron rule 4: the CANCELLED terminal must surface in WorkerStatus finished list.
+        // The addressed Prefill is the authoritative typed CANCELED producer.
         EngineRpcService.WorkerStatusPB status = workerStatus(prefill, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
                 .anyMatch(task -> task.getRequestId() == 1L
-                        && task.getErrorInfo().getErrorCode()
-                        == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
+                        && task.getErrorInfo().getErrorCode() == 8429L
+                        && task.getPriorityPreemptionProgress()
+                        == EngineRpcService.PriorityPreemptionProgressPB
+                        .PRIORITY_PREEMPTION_CANCELED);
         assertTrue(cancelledReported,
-                "CANCELLED completion for request 1 must appear in WorkerStatus finished list");
+                "typed CANCELED+8429 for request 1 must appear in Prefill WorkerStatus");
 
         awaitAllInflightZero(10_000);
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
@@ -109,10 +112,48 @@ class MockEngineCancelChannelTest {
         }
     }
 
-    // ---- accepted: cancel after completion / double cancel (idempotent no-op) ----
+    @Test
+    void cancelStage4RoutesThroughOriginalPrefillToOwnedDecode() throws Exception {
+        startCluster(model("10", 10_000.0), 1, 1);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+        JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
+        EngineCancelChannel channel = new MockEngineCancelChannel(services);
+
+        enqueue(prefill, batch(9050, slot(0,
+                inputWithDecode(51, 10, decode.getGrpcPort()))));
+        awaitInflight(decode, 1, 1_000);
+        awaitNoInflight(prefill, 1_000);
+        assertEquals(0, prefill.getInflightCount(),
+                "stage 4 begins only after Prefill handed the request to Decode");
+        assertTrue(prefill.hasDownstreamOwnership(51L));
+
+        CancelOutcome outcome = channel.cancel(target(prefill.getGrpcPort()), 51L, 2_000)
+                .get(2, TimeUnit.SECONDS);
+
+        assertEquals(CancelAck.ACCEPTED, outcome.ack());
+        assertEquals(0, decode.getInflightCount());
+        assertFalse(prefill.hasDownstreamOwnership(51L));
+        assertFalse(decode.hasUpstreamOwnership(51L));
+        boolean cancelledReported = workerStatus(decode, 0).getFinishedTaskListList().stream()
+                .anyMatch(task -> task.getRequestId() == 51L
+                        && task.getErrorInfo().getErrorCode()
+                        == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
+        assertTrue(cancelledReported,
+                "Decode must retain its ordinary CANCELLED terminal");
+        boolean typedCanceledReported = workerStatus(prefill, 0).getFinishedTaskListList().stream()
+                .anyMatch(task -> task.getRequestId() == 51L
+                        && task.getErrorInfo().getErrorCode() == 8429L
+                        && task.getPriorityPreemptionProgress()
+                        == EngineRpcService.PriorityPreemptionProgressPB
+                        .PRIORITY_PREEMPTION_CANCELED);
+        assertTrue(typedCanceledReported,
+                "original Prefill must report authoritative typed CANCELED+8429");
+    }
+
+    // ---- not found after natural completion / idempotent cancel tombstone ----
 
     @Test
-    void cancelAfterCompletionStillAccepted() throws Exception {
+    void cancelAfterCompletionIsNotFound() throws Exception {
         startCluster(model("10"), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
@@ -122,17 +163,17 @@ class MockEngineCancelChannelTest {
         awaitAllInflightZero(5_000);
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(endpoint(prefill.getGrpcPort()), 0L), 11L, CancelReason.USER_CANCELLED)
+                .cancel(target(prefill.getGrpcPort()), 11L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        // Intent registration: the ack carries no terminal info — a cancel
-        // landing after completion is still ACCEPTED (engine-side no-op).
-        assertEquals(CancelAck.ACCEPTED, outcome.ack());
+        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
         // Behavior: the request had already finished; nothing is re-inflight.
         assertEquals(0, prefill.getInflightCount());
+        assertEquals(0, prefill.getDownstreamOwnershipCount());
+        assertEquals(0, decodeServices.get(0).getUpstreamOwnershipCount());
     }
 
     @Test
-    void doubleCancelIsIdempotentAndAccepted() throws Exception {
+    void repeatedPriorityCancelStaysAcceptedAndPublishesOneTerminal() throws Exception {
         startCluster(model("500"), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
@@ -142,30 +183,58 @@ class MockEngineCancelChannelTest {
         awaitInflight(prefill, 1, 1_000);
 
         CancelOutcome first = channel
-                .cancel(CancelTarget.of(endpoint(prefill.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
+                .cancel(target(prefill.getGrpcPort()), 21L, 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.ACCEPTED, first.ack());
 
         CancelOutcome second = channel
-                .cancel(CancelTarget.of(endpoint(prefill.getGrpcPort()), 0L), 21L, CancelReason.ADMIN)
+                .cancel(target(prefill.getGrpcPort()), 21L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        assertEquals(CancelAck.ACCEPTED, second.ack(), "second cancel must be idempotent");
+        assertEquals(CancelAck.ACCEPTED, second.ack(),
+                "accepted priority-cancel tombstones are idempotent");
+        long terminalCount = workerStatus(prefill, -1).getFinishedTaskListList().stream()
+                .filter(task -> task.getRequestId() == 21L
+                        && task.getErrorInfo().getErrorCode() == 8429L
+                        && task.getPriorityPreemptionProgress()
+                        == EngineRpcService.PriorityPreemptionProgressPB
+                        .PRIORITY_PREEMPTION_CANCELED)
+                .count();
+        assertEquals(1L, terminalCount,
+                "a retry must not publish a second CANCELED+8429 terminal");
         awaitAllInflightZero(10_000);
     }
 
-    // ---- accepted: unknown request id (intent registered, engine no-op) ----
+    // ---- not found: unknown request id / wrong worker ----
 
     @Test
-    void cancelUnknownRequestStillAccepted() throws Exception {
+    void cancelUnknownRequestIsNotFound() throws Exception {
         startCluster(model("10"), 1, 1);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(endpoint(prefillServices.get(0).getGrpcPort()), 0L), 424242L,
-                        CancelReason.PRIORITY_PREEMPTED)
+                .cancel(target(prefillServices.get(0).getGrpcPort()), 424242L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        assertEquals(CancelAck.ACCEPTED, outcome.ack(),
-                "unknown request id is still ACCEPTED (intent registered, engine no-op)");
+        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
+    }
+
+    @Test
+    void decodeTargetFailsWithoutScanningOrCancellingPrefill() throws Exception {
+        startCluster(model("500"), 1, 1);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+        EngineCancelChannel channel = new MockEngineCancelChannel(services);
+
+        enqueue(prefill, batch(9300, slot(0,
+                inputWithDecode(31, 10, decodeServices.get(0).getGrpcPort()))));
+        awaitInflight(prefill, 1, 1_000);
+
+        CancelOutcome outcome = channel
+                .cancel(target(decodeServices.get(0).getGrpcPort()), 31L, 2_000)
+                .get(2, TimeUnit.SECONDS);
+
+        assertEquals(CancelAck.FAILED, outcome.ack(),
+                "Decode must model the real UNIMPLEMENTED Cancel contract");
+        assertTrue(prefill.getInflightCount() > 0,
+                "a wrong target must not cancel the request on another worker");
     }
 
     // ---- unsupported branch + isSupported gate ----
@@ -180,12 +249,16 @@ class MockEngineCancelChannelTest {
         assertFalse(channel.isSupported(endpoint(59999)));
 
         CancelOutcome outcome = channel
-                .cancel(CancelTarget.of(endpoint(59999), 0L), 1L, CancelReason.ADMIN)
+                .cancel(target(59999), 1L, 2_000)
                 .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.UNSUPPORTED, outcome.ack());
     }
 
     // ---- helpers ----
+
+    private static CancelTarget target(int grpcPort) {
+        return new CancelTarget("127.0.0.1", grpcPort);
+    }
 
     private static DecodeEndpoint endpoint(int grpcPort) {
         WorkerStatus status = new WorkerStatus();
@@ -221,6 +294,10 @@ class MockEngineCancelChannelTest {
     }
 
     private MockPerformanceModel model(String formula) throws IOException {
+        return model(formula, 1.0);
+    }
+
+    private MockPerformanceModel model(String formula, double decodeStepMs) throws IOException {
         Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
         Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         MAPPER.writeValue(performance.toFile(), Map.of(
@@ -228,7 +305,8 @@ class MockEngineCancelChannelTest {
                 "sleep_scale", 1.0,
                 "jitter_pct", 0.0,
                 "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
+                "decode", Map.of("scale", 1.0,
+                        "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
         MAPPER.writeValue(master.toFile(), Map.of(
                 "zone_process_setting", Map.of(
                         "process_info", Map.of(
@@ -246,6 +324,18 @@ class MockEngineCancelChannelTest {
             Thread.sleep(5);
         }
         fail("inflight never reached " + min + " on port " + service.getGrpcPort());
+    }
+
+    private void awaitNoInflight(JavaMockEngineCluster.FastRpcService service, long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        while (System.nanoTime() < deadline) {
+            if (service.getInflightCount() == 0) {
+                return;
+            }
+            Thread.sleep(5);
+        }
+        fail("inflight never reached zero on port " + service.getGrpcPort());
     }
 
     private void awaitAllInflightZero(long timeoutMs) throws InterruptedException {

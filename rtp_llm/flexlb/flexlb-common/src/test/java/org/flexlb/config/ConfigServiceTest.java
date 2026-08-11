@@ -128,7 +128,8 @@ class ConfigServiceTest {
         // autoTpmMaxTransferCount, autoTpmDangerThresholdMs) — replaced by AdmissionLease + orTimeout.
         // Remaining reserved fields:
         assertFalse(config.isAutoTpmDecodeAcceptedEvictEnabled());
-        assertEquals(50L, config.getAutoTpmCommitWaitReleaseTimeoutMs());
+        assertEquals(50L, config.getAutoTpmCancelAckTimeoutMs());
+        assertEquals(1000L, config.getAutoTpmCancelCompletionTimeoutMs());
     }
 
     @Test
@@ -155,11 +156,13 @@ class ConfigServiceTest {
         // PR-D removed rescue fields; spot-check the remaining reserved fields via env override
         ConfigService configService = new ConfigService(Map.of(
                 "AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED", "true",
-                "AUTO_TPM_COMMIT_WAIT_RELEASE_TIMEOUT_MS", "100"));
+                "AUTO_TPM_CANCEL_ACK_TIMEOUT_MS", "100",
+                "AUTO_TPM_CANCEL_COMPLETION_TIMEOUT_MS", "2000"));
 
         FlexlbConfig config = configService.loadBalanceConfig();
         assertTrue(config.isAutoTpmDecodeAcceptedEvictEnabled());
-        assertEquals(100L, config.getAutoTpmCommitWaitReleaseTimeoutMs());
+        assertEquals(100L, config.getAutoTpmCancelAckTimeoutMs());
+        assertEquals(2000L, config.getAutoTpmCancelCompletionTimeoutMs());
     }
 
     @Test
@@ -183,8 +186,10 @@ class ConfigServiceTest {
                 "dumpEffectiveConfig should log autoTpmSloLengthBuckets");
         assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmDecodeAcceptedEvictEnabled=")),
                 "dumpEffectiveConfig should log autoTpmDecodeAcceptedEvictEnabled");
-        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmCommitWaitReleaseTimeoutMs=")),
-                "dumpEffectiveConfig should log autoTpmCommitWaitReleaseTimeoutMs");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmCancelAckTimeoutMs=")),
+                "dumpEffectiveConfig should log autoTpmCancelAckTimeoutMs");
+        assertTrue(lines.stream().anyMatch(line -> line.contains("autoTpmCancelCompletionTimeoutMs=")),
+                "dumpEffectiveConfig should log autoTpmCancelCompletionTimeoutMs");
     }
 
     // ---- F3 (P0-3): unmatched env var scan ----

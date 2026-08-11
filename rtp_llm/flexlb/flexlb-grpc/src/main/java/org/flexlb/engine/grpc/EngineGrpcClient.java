@@ -117,6 +117,14 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
                                                            Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
                                                            long requestTimeoutMs,
                                                            ServiceType serviceType) {
+        return executeGrpcCallAsync(ip, port, grpcCall, requestTimeoutMs, serviceType, true);
+    }
+
+    private <R> CompletableFuture<R> executeGrpcCallAsync(String ip, int port,
+                                                           Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
+                                                           long requestTimeoutMs,
+                                                           ServiceType serviceType,
+                                                           boolean retryOnBrokenConnection) {
         CompletableFuture<R> resultFuture = new CompletableFuture<>();
         long startTime = System.nanoTime();
 
@@ -159,7 +167,9 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
 
                 @Override
                 public void onFailure(Throwable t) {
-                    if (t instanceof StatusRuntimeException e && isConnectionBrokenError(e)) {
+                    if (retryOnBrokenConnection
+                            && t instanceof StatusRuntimeException e
+                            && isConnectionBrokenError(e)) {
                         finalInvoker.markExpired();
                         long connectionDuration = finalInvoker.getConnectionDuration();
                         grpcReporter.reportConnectionDuration(
@@ -308,12 +318,17 @@ public class EngineGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.Grpc
     }
 
     /**
-     * AutoTPM Cancel: single-shot cancel to the engine worker holding the
-     * victim. No transport retry (channel is built with disableRetry);
-     * idempotency rides on request_id.
+     * AutoTPM priority-preemption Cancel to the victim's original Prefill.
+     * No transport retry (channel is built with disableRetry); idempotency
+     * rides on request_id.
      */
     public CompletableFuture<EngineRpcService.CancelResponsePB> cancelAsync(String ip, int port, EngineRpcService.CancelRequestPB request, long requestTimeoutMs) {
-        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request), requestTimeoutMs, ServiceType.ENGINE_CANCEL);
+        // Do not retry Cancel after an ambiguous connection failure: the first
+        // attempt may already have been ACCEPTED and completed, in which case a
+        // retry could return NOT_FOUND and turn a successful cancel into a false
+        // negative at the Master.
+        return executeGrpcCallAsync(ip, port, stub -> stub.getRpcServiceFutureStub().cancel(request),
+                requestTimeoutMs, ServiceType.ENGINE_CANCEL, false);
     }
 
     @Override

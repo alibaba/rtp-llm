@@ -36,17 +36,19 @@ public:
 
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
-    // AutoTPM Cancel: record the cancel intent into the scheduler's
-    // CancelIntentMap and ack ACCEPTED immediately ("intent registered").
-    // Consumption happens at the enqueue checkpoint (R1) and inside
-    // FIFOScheduler::schedule() (R2); the master confirms release via
-    // WorkerStatus finished records only.
+    // AutoTPM Cancel targets an active batch request. ACCEPTED is a weak ACK:
+    // the priority first-cause latch is installed and P-to-D cancellation is
+    // triggered, while completion is reported later through WorkerStatus.
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response);
 
 protected:
     // Shared with the derived batch server (each batch slot reuses these).
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     grpc::Status finishStream(PrefillGenerateContext& prefill_context);
+    grpc::Status preferPriorityPreemption(PrefillGenerateContext& prefill_context, const grpc::Status& fallback);
+    virtual bool onCancelRequest(int64_t request_id) {
+        return false;
+    }
 
 private:
     grpc::Status syncPrefix(PrefillGenerateContext& prefill_context);

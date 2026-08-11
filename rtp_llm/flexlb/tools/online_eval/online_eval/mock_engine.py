@@ -10,7 +10,7 @@ import signal
 import struct
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -103,6 +103,30 @@ class TaskRuntime:
     start_ms: int = 0
     execution_time_ms: int = 0
     dp_rank: int = 0
+    priority_preemption_progress: int = 0
+    terminal_error_code: int = 0
+    terminal_error_message: str = ""
+
+
+@dataclass
+class PrefillRequestControl:
+    """Prefill-owned cancellation state kept across the Decode handoff."""
+
+    request_id: int
+    queue: asyncio.Queue
+    input_pb: object
+    batch_id: int = -1
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    cancel_requested: bool = False
+    downstream_state: Optional["MockEngineState"] = None
+    status_task: Optional[TaskRuntime] = None
+    terminal_published: bool = False
+
+
+@dataclass(frozen=True)
+class TerminalError:
+    error_code: int
+    error_message: str
 
 
 # ATOMICITY INVARIANT: This class uses no locks. All critical sections contain only
@@ -143,6 +167,9 @@ class MockEngineState:
         self._finished: List[Tuple[int, object]] = []
         self._response_queues: Dict[int, asyncio.Queue] = {}
         self._cancelled: set[int] = set()
+        self._owned_requests: Dict[int, PrefillRequestControl] = {}
+        self._priority_cancel_events: Dict[int, asyncio.Event] = {}
+        self._decode_tasks: Dict[int, asyncio.Task] = {}
         self._status_version = 1
         self._finished_version = 0
         self._cache_version = 1
@@ -172,6 +199,8 @@ class MockEngineState:
           fetch_error    – fetch_response yields one frame then raises grpc.RpcError
           generate_error – generate_stream raises grpc.RpcError immediately
           no_respond     – prefill/decode sleep but never queue responses (stream hangs)
+          cancel_cleanup_delay_ms – delay Decode task/accounting cleanup after
+                                    the upstream stream is cancelled
         """
         self.inject_config = dict(config)
 
@@ -208,7 +237,7 @@ class MockEngineState:
             for item in slot.requests:
                 inputs.append(item.input)
         for input_pb in inputs:
-            self._response_queues.setdefault(int(input_pb.request_id), asyncio.Queue())
+            self._register_prefill_owner(input_pb, batch_id=batch_id)
         asyncio.create_task(self._run_prefill_batch(batch_id, inputs))
         response = self.pb2.EnqueueBatchResponsePB(batch_id=batch_id)
         for input_pb in inputs:
@@ -237,48 +266,154 @@ class MockEngineState:
             raise grpc.RpcError("injected enqueue_error")
         request_id = int(input_pb.request_id)
         queue = self._response_queues.setdefault(request_id, asyncio.Queue())
+        decode_task: Optional[asyncio.Task] = None
         if self.role == "decode":
-            asyncio.create_task(self._run_decode(input_pb, -1, queue))
+            decode_task = asyncio.create_task(self._run_decode(input_pb, -1, queue))
+            self._decode_tasks[request_id] = decode_task
+
+            def _forget_decode_task(completed: asyncio.Task) -> None:
+                if self._decode_tasks.get(request_id) is completed:
+                    self._decode_tasks.pop(request_id, None)
+
+            decode_task.add_done_callback(_forget_decode_task)
         else:
+            self._register_prefill_owner(input_pb, batch_id=-1)
             asyncio.create_task(self._run_prefill_batch(-1, [input_pb]))
-        async for output in self._read_response_queue(request_id):
-            yield output
+        stream_completed = False
+        try:
+            async for output in self._read_response_queue(request_id):
+                yield output
+            stream_completed = True
+        finally:
+            # In the cross-process mock path, Prefill cancels its existing
+            # upstream GenerateStreamCall instead of invoking Decode.Cancel.
+            # Propagate that stream cancellation into Decode's normal cancel
+            # event so the detached simulation task does not keep generating
+            # and holding KV forever after the RPC handler is gone.
+            if (
+                decode_task is not None
+                and not stream_completed
+                and not decode_task.done()
+            ):
+                self.request_priority_cancel(request_id)
+                self._response_queues.pop(request_id, None)
 
     async def fetch_response(self, request_id: int):
         self._rpc_counts["fetch_response"] += 1
+        request_id = int(request_id)
         logger.info(
-            "FetchResponse arrived engine=%s rid=%d", self.name, int(request_id)
+            "FetchResponse arrived engine=%s rid=%d", self.name, request_id
         )
-        self._response_queues.setdefault(int(request_id), asyncio.Queue())
+        self._response_queues.setdefault(request_id, asyncio.Queue())
         if self.inject_config.get("fetch_error"):
             import grpc
 
             yield self._output_pb(
-                int(request_id), finished=False, token_id=101, output_len=1
+                request_id, finished=False, token_id=101, output_len=1
             )
             raise grpc.RpcError("injected fetch_error")
-        async for output in self._read_response_queue(int(request_id)):
+        async for output in self._read_response_queue(request_id):
             yield output
 
-    async def cancel(self, request_id: int) -> None:
+    async def cancel(self, request_id: int) -> bool:
         self._rpc_counts["cancel"] += 1
+        request_id = int(request_id)
+        control = self._owned_requests.get(request_id)
+        if control is None:
+            # A retry for an already accepted priority cancellation is
+            # idempotently accepted from the Prefill tombstone.
+            if request_id in self._cancelled:
+                return True
+            logger.info(
+                "Cancel arrived engine=%s rid=%d status=NOT_FOUND",
+                self.name,
+                request_id,
+            )
+            return False
+        if control.cancel_requested:
+            return True
+
         self._cancelled_count += 1
-        was_running = int(request_id) in self._running
         logger.info(
-            "Cancel arrived engine=%s rid=%d was_running=%s",
+            "Cancel arrived engine=%s rid=%d status=ACCEPTED",
             self.name,
-            int(request_id),
-            was_running,
+            request_id,
         )
-        self._cancelled.add(int(request_id))
-        self._running.pop(int(request_id), None)
+        self._cancelled.add(request_id)
+        control.cancel_requested = True
+        control.cancel_event.set()
+        status_task = self._ensure_control_status_task(control)
+        status_task.priority_preemption_progress = (
+            self.pb2.PRIORITY_PREEMPTION_CANCELING
+        )
+        if control.downstream_state is not None:
+            control.downstream_state.request_priority_cancel(request_id)
+        lifecycle = self._request_lifecycle.get(request_id)
+        if lifecycle is not None:
+            lifecycle["end_state"] = "canceling"
         self._status_version += 1
-        queue = self._response_queues.get(int(request_id))
-        if queue is not None:
-            await queue.put(SENTINEL)
+        # Weak ACK: accepting the first cause does not wait for Decode cleanup
+        # and does not remove running/KV accounting.  WorkerStatus publishes
+        # CANCELED + 8429 only after the asynchronous finalizer completes.
+        return True
+
+    def request_priority_cancel(self, request_id: int) -> None:
+        """Internal Prefill->Decode stop trigger used by the mock P/D chain."""
+
+        request_id = int(request_id)
+        if request_id not in self._cancelled:
+            self._cancelled_count += 1
+        self._cancelled.add(request_id)
+        event = self._priority_cancel_events.setdefault(request_id, asyncio.Event())
+        event.set()
+        self._status_version += 1
+
+    def _register_prefill_owner(
+        self, input_pb, *, batch_id: int = -1
+    ) -> PrefillRequestControl:
+        request_id = int(input_pb.request_id)
+        queue = self._response_queues.setdefault(request_id, asyncio.Queue())
+        control = PrefillRequestControl(
+            request_id=request_id,
+            queue=queue,
+            input_pb=input_pb,
+            batch_id=batch_id,
+        )
+        self._owned_requests[request_id] = control
+        return control
+
+    def _ensure_control_status_task(
+        self, control: PrefillRequestControl
+    ) -> TaskRuntime:
+        if control.status_task is not None:
+            return control.status_task
+        active_task = self._running.get(control.request_id)
+        if active_task is not None:
+            control.status_task = replace(active_task)
+            return control.status_task
+        shape = self._shape_from_input(control.input_pb)
+        control.status_task = TaskRuntime(
+            request_id=control.request_id,
+            batch_id=control.batch_id,
+            input_len=shape.input_len,
+            output_len=shape.output_len,
+            block_keys=shape.block_keys,
+            prefix_len=shape.hit_tokens,
+            phase=self.pb2.TASK_PHASE_RUNNING,
+            start_ms=now_ms(),
+        )
+        return control.status_task
 
     async def worker_status(self, request) -> object:
         latest = int(getattr(request, "latest_finished_version", -1))
+        running_query_len = sum(
+            1
+            for task in self._running.values()
+            if not (
+                (control := self._owned_requests.get(task.request_id)) is not None
+                and control.cancel_requested
+            )
+        )
         status = self.pb2.WorkerStatusPB(
             role=self.role.upper(),
             role_type=self._role_pb(),
@@ -289,7 +424,10 @@ class MockEngineState:
                 self._injected_queue_depth if self._injected_queue_depth > 0 else 0,
                 self._prefill_waiting,
             ),
-            running_query_len=len(self._running),
+            # CANCELING is a control-plane overlay, not schedulable Prefill
+            # load.  The task remains in running_task_info so Master can
+            # reconcile it, but it must not inflate the load counter.
+            running_query_len=running_query_len,
             step_latency_ms=0.0,
             iterate_count=self._completed,
             dp_size=1,
@@ -302,8 +440,27 @@ class MockEngineState:
             available_kv_cache=max(0, self.total_kv_tokens - self._active_kv_tokens),
             total_kv_cache=self.total_kv_tokens,
         )
+        overlay_ids: set[int] = set()
         for task in self._running.values():
-            status.running_task_info.append(self._task_pb(task))
+            control = self._owned_requests.get(task.request_id)
+            if control is not None and control.cancel_requested:
+                overlay = self._ensure_control_status_task(control)
+                status.running_task_info.append(self._task_pb(overlay))
+                overlay_ids.add(task.request_id)
+            else:
+                status.running_task_info.append(self._task_pb(task))
+        # Stage 3/4 Prefill has already left the local compute scheduler, but
+        # remains the priority-terminal authority until downstream cleanup.
+        # This control overlay is visible for reconciliation and deliberately
+        # does not increment running_query_len or consume Prefill concurrency.
+        for control in self._owned_requests.values():
+            if (
+                control.cancel_requested
+                and not control.terminal_published
+                and control.request_id not in overlay_ids
+            ):
+                overlay = self._ensure_control_status_task(control)
+                status.running_task_info.append(self._task_pb(overlay))
         filtered_count = 0
         for version, task_pb in self._finished:
             if version > latest:
@@ -376,7 +533,16 @@ class MockEngineState:
         shapes = [self._shape_from_input(input_pb) for input_pb in inputs]
         start = now_ms()
         self._accepted += len(inputs)
-        for shape in shapes:
+        for input_pb, shape in zip(inputs, shapes):
+            control = self._owned_requests.get(shape.request_id)
+            if control is None and self.role == "prefill":
+                control = self._register_prefill_owner(
+                    input_pb, batch_id=batch_id
+                )
+            elif control is not None:
+                control.batch_id = batch_id
+                if control.status_task is not None:
+                    control.status_task.batch_id = batch_id
             task = TaskRuntime(
                 request_id=shape.request_id,
                 batch_id=batch_id,
@@ -387,6 +553,7 @@ class MockEngineState:
                 phase=self.pb2.TASK_PHASE_RUNNING,
                 start_ms=start,
                 dp_rank=0,
+                priority_preemption_progress=self.pb2.PRIORITY_PREEMPTION_NONE,
             )
             self._running[shape.request_id] = task
         arrived_ms = int(time.time() * 1000)
@@ -415,15 +582,26 @@ class MockEngineState:
             if task is None:
                 continue
             task.execution_time_ms = max(1, end - task.start_ms)
-            self._finish_task(task)
-            if self.cache.admit(shape.block_keys):
+            if shape.request_id in self._cancelled:
+                control = self._owned_requests.get(shape.request_id)
+                if control is not None:
+                    status_task = self._ensure_control_status_task(control)
+                    status_task.execution_time_ms = task.execution_time_ms
+            else:
+                self._finish_task(task)
+            if shape.request_id not in self._cancelled and self.cache.admit(
+                shape.block_keys
+            ):
                 self._cache_version += 1
         end_ms_lc = int(time.time() * 1000)
         for rid in [s.request_id for s in shapes]:
             lc = self._request_lifecycle.get(rid)
             if lc:
-                lc["end_ms"] = end_ms_lc
-                lc["end_state"] = "cancelled" if rid in self._cancelled else "completed"
+                if rid in self._cancelled:
+                    lc["end_state"] = "canceling"
+                else:
+                    lc["end_ms"] = end_ms_lc
+                    lc["end_state"] = "completed"
         self._status_version += 1
 
         if self.inject_config.get("no_respond"):
@@ -432,8 +610,17 @@ class MockEngineState:
         decode_tasks = []
         for input_pb, shape in zip(inputs, shapes):
             queue = self._response_queues.setdefault(shape.request_id, asyncio.Queue())
+            control = self._owned_requests.get(shape.request_id)
             if shape.request_id in self._cancelled:
+                if control is not None:
+                    self._publish_prefill_canceled(control)
+                lifecycle = self._request_lifecycle.get(shape.request_id)
+                if lifecycle is not None:
+                    lifecycle["end_ms"] = now_ms()
+                    lifecycle["end_state"] = "cancelled"
+                await queue.put(TerminalError(8429, "priority preempted"))
                 await queue.put(SENTINEL)
+                self._owned_requests.pop(shape.request_id, None)
                 continue
             decode_state = self.cluster.resolve_decode(input_pb)
             if decode_state is not None and decode_state is not self:
@@ -441,11 +628,20 @@ class MockEngineState:
                     f"[DIAG] _run_prefill_batch: rid={shape.request_id} "
                     f"decode_target={decode_state.name}"
                 )
-                decode_tasks.append(
-                    asyncio.create_task(
-                        decode_state._run_decode(input_pb, batch_id, queue)
+                if control is not None:
+                    control.downstream_state = decode_state
+                downstream_task = asyncio.create_task(
+                    self._run_owned_downstream(
+                        control,
+                        decode_state._run_decode(
+                            input_pb,
+                            batch_id,
+                            queue,
+                            priority_terminal_owned_by_prefill=True,
+                        ),
                     )
                 )
+                decode_tasks.append(downstream_task)
             else:
                 remote_addr = self._get_remote_decode_addr(input_pb)
                 if remote_addr is not None:
@@ -453,24 +649,91 @@ class MockEngineState:
                         f"[DIAG] _run_prefill_batch: rid={shape.request_id} "
                         f"decode_target=remote:{remote_addr}"
                     )
-                    decode_tasks.append(
-                        asyncio.create_task(self._run_remote_decode(input_pb, queue))
+                    downstream_task = asyncio.create_task(
+                        self._run_owned_downstream(
+                            control,
+                            self._run_remote_decode(
+                                input_pb,
+                                queue,
+                                control.cancel_event if control is not None else None,
+                            ),
+                        )
                     )
+                    decode_tasks.append(downstream_task)
                 else:
                     target_desc = "None" if decode_state is None else "self"
                     logger.debug(
                         f"[DIAG] _run_prefill_batch: rid={shape.request_id} "
                         f"decode_target={target_desc} (emit_without_decode, not tracked)"
                     )
-                    decode_tasks.append(
-                        asyncio.create_task(self._emit_without_decode(shape, queue))
+                    downstream_task = asyncio.create_task(
+                        self._run_owned_downstream(
+                            control,
+                            self._emit_without_decode(shape, queue),
+                        )
                     )
+                    decode_tasks.append(downstream_task)
         if batch_id < 0 and decode_tasks:
             await asyncio.gather(*decode_tasks, return_exceptions=True)
 
-    async def _run_decode(self, input_pb, batch_id: int, queue: asyncio.Queue) -> None:
+    async def _run_owned_downstream(
+        self,
+        control: Optional[PrefillRequestControl],
+        operation,
+    ) -> None:
+        try:
+            await operation
+        finally:
+            if control is not None:
+                if control.cancel_requested:
+                    self._publish_prefill_canceled(control)
+                    await control.queue.put(
+                        TerminalError(8429, "priority preempted")
+                    )
+                    await control.queue.put(SENTINEL)
+                lifecycle = self._request_lifecycle.get(control.request_id)
+                if lifecycle is not None and control.cancel_requested:
+                    lifecycle["end_ms"] = now_ms()
+                    lifecycle["end_state"] = "cancelled"
+                self._owned_requests.pop(control.request_id, None)
+
+    def _publish_prefill_canceled(
+        self, control: PrefillRequestControl
+    ) -> None:
+        if control.terminal_published:
+            return
+        terminal_task = replace(self._ensure_control_status_task(control))
+        terminal_task.priority_preemption_progress = (
+            self.pb2.PRIORITY_PREEMPTION_CANCELED
+        )
+        terminal_task.terminal_error_code = 8429
+        terminal_task.terminal_error_message = "priority preempted"
+        if terminal_task.execution_time_ms <= 0:
+            terminal_task.execution_time_ms = max(
+                1, now_ms() - terminal_task.start_ms
+            )
+        control.terminal_published = True
+        self._finish_task(terminal_task)
+        self._status_version += 1
+
+    async def _run_decode(
+        self,
+        input_pb,
+        batch_id: int,
+        queue: asyncio.Queue,
+        *,
+        priority_terminal_owned_by_prefill: bool = False,
+    ) -> None:
         shape = self._shape_from_input(input_pb)
         start = now_ms()
+        cancel_event = self._priority_cancel_events.setdefault(
+            shape.request_id, asyncio.Event()
+        )
+        if cancel_event.is_set():
+            self._priority_cancel_events.pop(shape.request_id, None)
+            if not priority_terminal_owned_by_prefill:
+                await queue.put(SENTINEL)
+            return
         self._accepted += 1
         active_batch = len(self._running) + 1
         self._active_kv_tokens += shape.input_len
@@ -482,6 +745,7 @@ class MockEngineState:
             block_keys=shape.block_keys,
             phase=self.pb2.TASK_PHASE_RUNNING,
             start_ms=start,
+            priority_preemption_progress=self.pb2.PRIORITY_PREEMPTION_NONE,
         )
         arrived_ms = int(time.time() * 1000)
         self._request_lifecycle[shape.request_id] = {
@@ -497,11 +761,10 @@ class MockEngineState:
         self._status_version += 1
 
         first_step_ms = self.performance.first_decode_step_ms(active_batch)
-        await asyncio.sleep(self.performance.sleep_seconds(first_step_ms))
-        if (
-            not self.inject_config.get("no_respond")
-            and shape.request_id not in self._cancelled
-        ):
+        cancelled = await self._sleep_until_priority_cancel(
+            self.performance.sleep_seconds(first_step_ms), cancel_event
+        )
+        if not self.inject_config.get("no_respond") and not cancelled:
             await queue.put(
                 self._output_pb(
                     shape.request_id, finished=False, token_id=101, output_len=1
@@ -510,29 +773,39 @@ class MockEngineState:
 
         total_decode_ms = self.performance.decode_ms(shape.output_len, active_batch)
         remaining_ms = max(0.0, total_decode_ms - first_step_ms)
-        await asyncio.sleep(self.performance.sleep_seconds(remaining_ms))
+        if not cancelled:
+            cancelled = await self._sleep_until_priority_cancel(
+                self.performance.sleep_seconds(remaining_ms), cancel_event
+            )
+        if cancelled:
+            cleanup_delay_ms = float(
+                self.inject_config.get("cancel_cleanup_delay_ms", 0.0) or 0.0
+            )
+            if cleanup_delay_ms > 0:
+                await asyncio.sleep(cleanup_delay_ms / 1000.0)
         end = now_ms()
 
         task = self._running.pop(shape.request_id, None)
         self._active_kv_tokens = max(0, self._active_kv_tokens - shape.input_len)
+        self._priority_cancel_events.pop(shape.request_id, None)
         if task is not None:
             task.execution_time_ms = max(1, end - task.start_ms)
             self._finish_task(task)
-        if self.cache.admit(shape.block_keys):
+        if not cancelled and self.cache.admit(shape.block_keys):
             self._cache_version += 1
         end_ms_lc = int(time.time() * 1000)
         lc = self._request_lifecycle.get(shape.request_id)
         if lc:
             lc["end_ms"] = end_ms_lc
             lc["end_state"] = (
-                "cancelled" if shape.request_id in self._cancelled else "completed"
+                "cancelled" if cancelled else "completed"
             )
         self._status_version += 1
 
         if self.inject_config.get("no_respond"):
             return
 
-        if shape.request_id not in self._cancelled:
+        if not cancelled:
             await queue.put(
                 self._output_pb(
                     shape.request_id,
@@ -541,25 +814,42 @@ class MockEngineState:
                     output_len=shape.output_len,
                 )
             )
-        await queue.put(SENTINEL)
+        if not cancelled or not priority_terminal_owned_by_prefill:
+            await queue.put(SENTINEL)
+
+    @staticmethod
+    async def _sleep_until_priority_cancel(
+        delay_s: float, cancel_event: asyncio.Event
+    ) -> bool:
+        if cancel_event.is_set():
+            return True
+        if delay_s <= 0:
+            await asyncio.sleep(0)
+            return cancel_event.is_set()
+        try:
+            await asyncio.wait_for(cancel_event.wait(), timeout=delay_s)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     async def _emit_without_decode(
         self, shape: RequestShape, queue: asyncio.Queue
     ) -> None:
-        if shape.request_id not in self._cancelled:
-            await queue.put(
-                self._output_pb(
-                    shape.request_id, finished=False, token_id=101, output_len=1
-                )
+        if shape.request_id in self._cancelled:
+            return
+        await queue.put(
+            self._output_pb(
+                shape.request_id, finished=False, token_id=101, output_len=1
             )
-            await queue.put(
-                self._output_pb(
-                    shape.request_id,
-                    finished=True,
-                    token_id=102,
-                    output_len=shape.output_len,
-                )
+        )
+        await queue.put(
+            self._output_pb(
+                shape.request_id,
+                finished=True,
+                token_id=102,
+                output_len=shape.output_len,
             )
+        )
         await queue.put(SENTINEL)
 
     def _get_remote_decode_addr(self, input_pb) -> Optional[str]:
@@ -569,7 +859,12 @@ class MockEngineState:
                 return f"{role_addr.ip}:{role_addr.grpc_port}"
         return None
 
-    async def _run_remote_decode(self, input_pb, queue: asyncio.Queue) -> None:
+    async def _run_remote_decode(
+        self,
+        input_pb,
+        queue: asyncio.Queue,
+        priority_cancel_event: Optional[asyncio.Event] = None,
+    ) -> None:
         """Forward a decode request to a remote engine via gRPC.
 
         Used when ``resolve_decode`` cannot find the decode engine locally
@@ -592,28 +887,44 @@ class MockEngineState:
         )
         MAX_RETRIES = 1  # at most 1 retry (2 attempts total)
         retry_count = 0
+        cancel_watcher: Optional[asyncio.Task] = None
+        ownership_state = self.cluster._resolve_process_mock_engine(decode_addr)
         try:
             while True:
                 try:
                     channel = await self.cluster._get_grpc_channel(decode_addr)
                     stub = self.cluster.pb2_grpc.RpcServiceStub(channel)
                     stream = stub.GenerateStreamCall(input_pb, timeout=120.0)
-                    async for output in stream:
-                        if request_id in self._cancelled:
-                            # Forward the cancel to the remote engine so it
-                            # stops decoding instead of running to completion.
+                    if priority_cancel_event is not None:
+                        async def _cancel_stream_on_priority_preemption() -> None:
+                            await priority_cancel_event.wait()
+                            stream.cancel()
                             self.cluster._grpc_cancel_forward_count += 1
-                            try:
-                                await stub.Cancel(
-                                    self.pb2.CancelRequestPB(request_id=request_id),
-                                    timeout=5.0,
-                                )
-                            except Exception:
-                                pass  # best-effort, never block the cancel path
+
+                        cancel_watcher = asyncio.create_task(
+                            _cancel_stream_on_priority_preemption()
+                        )
+                    async for output in stream:
+                        if (
+                            priority_cancel_event is not None
+                            and priority_cancel_event.is_set()
+                        ):
                             break
                         await queue.put(output)
                     break  # stream completed successfully, exit retry loop
+                except asyncio.CancelledError:
+                    if (
+                        priority_cancel_event is not None
+                        and priority_cancel_event.is_set()
+                    ):
+                        break
+                    raise
                 except Exception as exc:
+                    if (
+                        priority_cancel_event is not None
+                        and priority_cancel_event.is_set()
+                    ):
+                        break
                     retry_count += 1
                     self.cluster._grpc_error_count += 1
                     logger.error(
@@ -626,7 +937,37 @@ class MockEngineState:
                     self.cluster._grpc_retry_count += 1
                     await asyncio.sleep(0.5)
         finally:
-            await queue.put(SENTINEL)
+            if cancel_watcher is not None:
+                cancel_watcher.cancel()
+                await asyncio.gather(cancel_watcher, return_exceptions=True)
+            priority_cancelled = (
+                priority_cancel_event is not None
+                and priority_cancel_event.is_set()
+            )
+            if (
+                priority_cancelled
+                and ownership_state is not None
+                and ownership_state.role == "decode"
+            ):
+                # Model delivery of client-stream cancellation inside the
+                # in-process mock, then wait on the Decode owner's existing
+                # task future.  If admission has not happened yet, the cancel
+                # event is a tombstone and the late task cannot allocate KV.
+                ownership_state.request_priority_cancel(request_id)
+                decode_task = ownership_state._decode_tasks.get(request_id)
+                try:
+                    if decode_task is not None:
+                        await asyncio.shield(decode_task)
+                except Exception as exc:
+                    self.cluster._grpc_error_count += 1
+                    logger.error(
+                        "[DIAG] _run_remote_decode: rid=%d failed waiting for "
+                        "remote ownership completion: %s",
+                        request_id,
+                        exc,
+                    )
+            elif not priority_cancelled:
+                await queue.put(SENTINEL)
 
     async def _read_response_queue(self, request_id: int):
         queue = self._response_queues.setdefault(request_id, asyncio.Queue())
@@ -634,6 +975,10 @@ class MockEngineState:
             item = await queue.get()
             if item is SENTINEL:
                 self._response_queues.pop(request_id, None)
+                return
+            if isinstance(item, TerminalError):
+                self._response_queues.pop(request_id, None)
+                yield item
                 return
             yield item
 
@@ -678,7 +1023,7 @@ class MockEngineState:
             self._finished = self._finished[-5000:]
 
     def _task_pb(self, task: TaskRuntime):
-        return self.pb2.TaskInfoPB(
+        task_pb = self.pb2.TaskInfoPB(
             request_id=task.request_id,
             prefix_length=task.prefix_len,
             input_length=task.input_len,
@@ -689,7 +1034,12 @@ class MockEngineState:
             batch_id=task.batch_id,
             phase=task.phase,
             execution_time_ms=task.execution_time_ms,
+            priority_preemption_progress=task.priority_preemption_progress,
         )
+        if task.terminal_error_code:
+            task_pb.error_info.error_code = task.terminal_error_code
+            task_pb.error_info.error_message = task.terminal_error_message
+        return task_pb
 
     def _output_pb(
         self, request_id: int, *, finished: bool, token_id: int, output_len: int
@@ -741,11 +1091,24 @@ class MockRpcServicer:
         return await self.state.enqueue_batch(batch)
 
     async def FetchResponse(self, request, context):
+        if self.state.role == "decode":
+            import grpc
+
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "FetchResponse is not implemented by Decode",
+            )
         async for output in self.state.fetch_response(int(request.request_id)):
+            if isinstance(output, TerminalError):
+                await self._abort_with_terminal_error(context, output)
+                return
             yield output
 
     async def GenerateStreamCall(self, request, context):
         async for output in self.state.generate_stream(request):
+            if isinstance(output, TerminalError):
+                await self._abort_with_terminal_error(context, output)
+                return
             yield output
 
     async def RemoteLoad(self, request, context):
@@ -764,8 +1127,38 @@ class MockRpcServicer:
         return self.pb2.EmptyPB()
 
     async def Cancel(self, request, context):
-        await self.state.cancel(int(request.request_id))
-        return self.pb2.EmptyPB()
+        if self.state.role != "prefill":
+            import grpc
+
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "priority Cancel is owned by the original Prefill",
+            )
+        found = await self.state.cancel(int(request.request_id))
+        return self.pb2.CancelResponsePB(
+            status=(
+                self.pb2.CANCEL_STATUS_ACCEPTED
+                if found
+                else self.pb2.CANCEL_STATUS_NOT_FOUND
+            )
+        )
+
+    async def _abort_with_terminal_error(
+        self, context, terminal_error: TerminalError
+    ) -> None:
+        import grpc
+
+        details = self.pb2.ErrorDetailsPB(
+            error_code=terminal_error.error_code,
+            error_message=terminal_error.error_message,
+        )
+        context.set_trailing_metadata(
+            (("grpc-status-details-bin", details.SerializeToString()),)
+        )
+        await context.abort(
+            grpc.StatusCode.RESOURCE_EXHAUSTED,
+            terminal_error.error_message,
+        )
 
     async def SetPause(self, request, context):
         return self.pb2.EmptyPB()
@@ -976,6 +1369,8 @@ def generate_aggregated_prometheus_metrics(
 
 
 class MockEngineCluster:
+    _process_by_grpc_addr: Dict[str, MockEngineState] = {}
+
     def __init__(
         self,
         pb2,
@@ -1047,7 +1442,25 @@ class MockEngineCluster:
         self._by_grpc_addr[f"{state.host}:{state.grpc_port}"] = state
         self._by_grpc_addr[f"localhost:{state.grpc_port}"] = state
         self._by_grpc_addr[f"127.0.0.1:{state.grpc_port}"] = state
+        for address in self._state_grpc_addresses(state):
+            self._process_by_grpc_addr[address] = state
         return state
+
+    @staticmethod
+    def _state_grpc_addresses(state: MockEngineState) -> Tuple[str, ...]:
+        return (
+            f"{state.host}:{state.grpc_port}",
+            f"localhost:{state.grpc_port}",
+            f"127.0.0.1:{state.grpc_port}",
+        )
+
+    @classmethod
+    def _resolve_process_mock_engine(
+        cls, target: str
+    ) -> Optional[MockEngineState]:
+        """Resolve mock-internal ownership state, never request routing."""
+
+        return cls._process_by_grpc_addr.get(target)
 
     def resolve_decode(self, input_pb) -> Optional[MockEngineState]:
         request_id = int(input_pb.request_id)
@@ -1487,6 +1900,10 @@ class MockEngineCluster:
         for channel in self._grpc_channels.values():
             await channel.close()
         self._grpc_channels.clear()
+        for state in self.states:
+            for address in self._state_grpc_addresses(state):
+                if self._process_by_grpc_addr.get(address) is state:
+                    self._process_by_grpc_addr.pop(address, None)
 
     async def snapshot(self) -> dict:
         engines = []

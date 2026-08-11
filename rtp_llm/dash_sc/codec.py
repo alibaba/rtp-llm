@@ -116,6 +116,18 @@ DASH_ERROR_AUTO_TPM_PREEMPTED = DashErrorSpec(
     status_code=429,
     status_name="Throttling.Aborted",
 )
+DASH_ERROR_ADMISSION_OVERLOADED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.ServiceOverloaded",
+)
+DASH_ERROR_RESOURCE_EXHAUSTED = DashErrorSpec(
+    error_no=LLMFinishReason.TASK_LIST_FULL,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
+    status_code=429,
+    status_name="Throttling.ResourceExhausted",
+)
 DASH_ERROR_TIMEOUT = DashErrorSpec(
     error_no=LLMFinishReason.STOP_TIMEOUT,
     finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,

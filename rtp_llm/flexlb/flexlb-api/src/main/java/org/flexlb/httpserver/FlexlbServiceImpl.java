@@ -9,6 +9,7 @@ import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -343,6 +344,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
         builder.setQueueLength(response.getQueueLength() != null ? response.getQueueLength() : 0);
         builder.setEnqueuedByMaster(response.isEnqueuedByMaster());
+        builder.setAdmissionRejectReason(toProtoAdmissionRejectReason(
+                response.getAdmissionRejectReason()));
 
         if (response.getServerStatus() != null) {
             for (ServerStatus ss : response.getServerStatus()) {
@@ -355,6 +358,24 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
         }
         return builder.build();
+    }
+
+    private static FlexlbScheduleProtocol.ScheduleFailureReasonPB toProtoAdmissionRejectReason(
+            AdmissionRejectReason reason) {
+        if (reason == null) {
+            return FlexlbScheduleProtocol.ScheduleFailureReasonPB
+                    .SCHEDULE_FAILURE_REASON_UNSPECIFIED;
+        }
+        return switch (reason) {
+            case HIGHER_PRIORITY_AHEAD ->
+                    FlexlbScheduleProtocol.ScheduleFailureReasonPB.HIGHER_PRIORITY_AHEAD;
+            case SAME_PRIORITY_AHEAD ->
+                    FlexlbScheduleProtocol.ScheduleFailureReasonPB.SAME_PRIORITY_AHEAD;
+            case RESOURCE_EXHAUSTED ->
+                    FlexlbScheduleProtocol.ScheduleFailureReasonPB.RESOURCE_EXHAUSTED;
+            case UNSPECIFIED -> FlexlbScheduleProtocol.ScheduleFailureReasonPB
+                    .SCHEDULE_FAILURE_REASON_UNSPECIFIED;
+        };
     }
 
     private boolean shouldForwardToMaster() {
@@ -371,6 +392,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             case QUEUED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_QUEUED;
                             case DISPATCHING -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_DISPATCHING;
                             case ACKNOWLEDGED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED;
+                            case CANCEL_REQUESTED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCEL_REQUESTED;
+                            case CANCELLED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_CANCELLED;
                             case TIMED_OUT -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_TIMED_OUT;
                             case FAILED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_FAILED;
                             case COMPLETED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_COMPLETED;

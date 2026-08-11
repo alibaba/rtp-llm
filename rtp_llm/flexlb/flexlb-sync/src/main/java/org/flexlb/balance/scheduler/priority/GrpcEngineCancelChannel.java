@@ -13,8 +13,9 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Production {@link EngineCancelChannel} that forwards cancel intents to the
- * Decode worker currently holding the victim via the engine gRPC
- * {@code RpcService.Cancel} method.
+ * victim's original Prefill worker via the engine gRPC
+ * {@code RpcService.Cancel} method. The original Prefill is the authoritative
+ * producer of typed {@code CANCELED}; Decode does not implement Cancel.
  *
  * <p>Conditional wiring: the bean only exists when
  * {@code flexlb.auto-tpm.engine-cancel-enabled=true}. When absent, Spring wires
@@ -24,9 +25,9 @@ import java.util.concurrent.CompletableFuture;
  * channel whose own {@code @ConditionalOnProperty} is not set).
  *
  * <p>Contract mirror of {@link EngineCancelChannel}: a cancel is an intent
- * injection only — release confirmation remains the next WorkerStatus report
- * (iron rule 4). The engine Cancel RPC always answers ACCEPTED (intent
- * registration semantics), so a successful RPC maps to {@code accepted()} and
+ * injection only — settlement requires original-Prefill WorkerStatus carrying
+ * typed {@code CANCELED+8429}. The engine Cancel RPC distinguishes ACCEPTED from NOT_FOUND;
+ * these map to the matching local outcomes, while
  * any transport failure to {@code failed()} — never throws synchronously.
  */
 @Slf4j
@@ -35,9 +36,6 @@ import java.util.concurrent.CompletableFuture;
 @ConditionalOnProperty(name = "flexlb.auto-tpm.engine-cancel-enabled", havingValue = "true")
 public class GrpcEngineCancelChannel implements EngineCancelChannel {
 
-    /** Single-call deadline (1s). */
-    private static final long CANCEL_RPC_TIMEOUT_MS = 1000L;
-
     private final EngineGrpcClient engineGrpcClient;
 
     public GrpcEngineCancelChannel(EngineGrpcClient engineGrpcClient) {
@@ -45,8 +43,8 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
     }
 
     /**
-     * gRPC cancel is available for all workers (every engine process
-     * serves the {@code RpcService.Cancel} method).
+     * The Decode argument is only the planning capability gate. The actual
+     * destination is the original Prefill route carried by {@code target}.
      */
     @Override
     public boolean isSupported(DecodeEndpoint endpoint) {
@@ -56,21 +54,18 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
     @Override
     public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
                                                    long requestId,
-                                                   CancelReason reason) {
-        DecodeEndpoint destination = target.decodeEndpoint();
-        if (destination == null) {
+                                                   long timeoutMs) {
+        if (target == null || !target.isRoutable()) {
             // No routable endpoint — report the transport-failure branch: the
             // intent never reached the engine, but release is still settled by
-            // the WorkerStatus report, never by this ack (iron rule 4).
-            log.warn("[auto-tpm] cancel has no decode endpoint for request_id={}, not routed",
+            // the WorkerStatus report (iron rule 4).
+            log.warn("[auto-tpm] cancel has no prefill control owner for request_id={}, not routed",
                     requestId);
             return CompletableFuture.completedFuture(CancelOutcome.failed());
         }
 
         EngineRpcService.CancelRequestPB requestPB = EngineRpcService.CancelRequestPB.newBuilder()
                 .setRequestId(requestId)
-                .setBatchId(target.batchId())
-                .setReason(mapReason(reason))
                 .build();
 
         // Fire-and-forget contract: fork the gRPC Context so that when the
@@ -81,13 +76,11 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
         Context previous = fork.attach();
         try {
             return engineGrpcClient.cancelAsync(
-                            destination.getIp(),
-                            destination.getGrpcPort(),
+                            target.prefillIp(),
+                            target.prefillGrpcPort(),
                             requestPB,
-                            CANCEL_RPC_TIMEOUT_MS)
-                    // The response body carries no decision-relevant fields — the
-                    // RPC completing at all is the intent registration.
-                    .thenApply(response -> CancelOutcome.accepted())
+                            Math.max(1, timeoutMs))
+                    .thenApply(GrpcEngineCancelChannel::mapResponse)
                     .exceptionally(t -> {
                         log.warn("[auto-tpm] cancel rpc failed for request_id={}: {}",
                                 requestId, t.getMessage());
@@ -98,17 +91,12 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
         }
     }
 
-    // ==================== Proto mapping ====================
-
-    private static EngineRpcService.EngineCancelReasonPB mapReason(CancelReason reason) {
-        if (reason == null) {
-            return EngineRpcService.EngineCancelReasonPB.ENGINE_CANCEL_REASON_UNSPECIFIED;
-        }
-        return switch (reason) {
-            case PRIORITY_PREEMPTED -> EngineRpcService.EngineCancelReasonPB.ENGINE_CANCEL_REASON_PRIORITY_PREEMPTED;
-            case USER_CANCELLED -> EngineRpcService.EngineCancelReasonPB.ENGINE_CANCEL_REASON_USER_CANCELLED;
-            case DEADLINE_EXCEEDED -> EngineRpcService.EngineCancelReasonPB.ENGINE_CANCEL_REASON_DEADLINE_EXCEEDED;
-            case ADMIN -> EngineRpcService.EngineCancelReasonPB.ENGINE_CANCEL_REASON_ADMIN_CANCELLED;
+    private static CancelOutcome mapResponse(EngineRpcService.CancelResponsePB response) {
+        return switch (response.getStatus()) {
+            case CANCEL_STATUS_ACCEPTED -> CancelOutcome.accepted();
+            case CANCEL_STATUS_NOT_FOUND -> CancelOutcome.notFound();
+            case CANCEL_STATUS_UNSPECIFIED, UNRECOGNIZED -> CancelOutcome.failed();
         };
     }
+
 }

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/PrefillGenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 using grpc::Status;
 using grpc::ClientContext;
@@ -72,7 +73,7 @@ PrefillGenerateContext::~PrefillGenerateContext() {
 void PrefillGenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
-        meta->dequeue(request_id, stream_);
+        dequeueStreamFromRuntimeMeta();
         if (stream_->getStatus() != StreamState::FINISHED) {
             // The scheduler's moveToNext() runs BEFORE process() in each step(),
             // so GenerateDone set during process() won't be detected until the
@@ -109,8 +110,8 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
         return last_grpc_stream_closed_status;
     }
     grpc_stream_closed = true;
-    if ((cancelled() || isRequestCancelled()) && client_context) {
-        client_context->TryCancel();
+    if (cancelled() || isRequestCancelled()) {
+        tryCancelDownstream();
     }
     if (client_stream) {
         client_stream->WritesDone();
@@ -129,7 +130,10 @@ void PrefillGenerateContext::closeGrpcConnection() {
 
 void PrefillGenerateContext::reset() {
     GenerateContext::reset();
+    // The gRPC stream keeps a raw pointer to ClientContext; destroy the stream
+    // before dropping the atomically published context reference.
     client_stream.reset();
+    std::atomic_store(&client_context, std::shared_ptr<grpc::ClientContext>());
     grpc_stream_closed             = false;
     last_grpc_stream_closed_status = grpc::Status::OK;
 }
@@ -137,6 +141,124 @@ void PrefillGenerateContext::reset() {
 bool PrefillGenerateContext::isRequestCancelled() const {
     // cancel state for Async BatchRequest
     return GenerateContext::isRequestCancelled() || (cancel_state && cancel_state->load());
+}
+
+PriorityPreemptionRequestResult PrefillGenerateContext::requestPriorityPreempt() {
+    PriorityPreemptionRequestResult result;
+    {
+        // The first-cause transition and the CANCELING overlay are one
+        // observable operation relative to ordinary runtime-meta dequeue.
+        std::lock_guard<std::mutex> lock(terminal_transition_mu_);
+        auto                        expected = PrefillTerminalCause::ACTIVE;
+        if (!terminal_cause_.compare_exchange_strong(expected,
+                                                     PrefillTerminalCause::PRIORITY_PREEMPTION,
+                                                     std::memory_order_acq_rel,
+                                                     std::memory_order_acquire)) {
+            if (expected != PrefillTerminalCause::PRIORITY_PREEMPTION) {
+                return PriorityPreemptionRequestResult::REJECTED;
+            }
+            result = PriorityPreemptionRequestResult::ALREADY_INSTALLED;
+        } else {
+            if (meta) {
+                meta->markPriorityPreemptionCanceling(request_id);
+            }
+            result = PriorityPreemptionRequestResult::INSTALLED;
+        }
+    }
+    // seq_cst pairs with remoteAllocateResource's seq_cst publication/check:
+    // either this thread observes the ClientContext, or the publisher observes
+    // this cancel bit and cancels the newly published context.
+    cancel_state->store(true, std::memory_order_seq_cst);
+    // Reuse the same downstream cancellation mechanism as an upstream client
+    // disconnect. Decode observes its ServerContext cancellation and follows
+    // the existing stream cleanup path.
+    tryCancelDownstream();
+    return result;
+}
+
+bool PrefillGenerateContext::isPriorityPreempted() const {
+    return terminalCause() == PrefillTerminalCause::PRIORITY_PREEMPTION;
+}
+
+bool PrefillGenerateContext::tryMarkOtherTerminal() {
+    std::lock_guard<std::mutex> lock(terminal_transition_mu_);
+    auto expected = PrefillTerminalCause::ACTIVE;
+    if (terminal_cause_.compare_exchange_strong(expected,
+                                                PrefillTerminalCause::OTHER,
+                                                std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {
+        return true;
+    }
+    return expected == PrefillTerminalCause::OTHER;
+}
+
+void PrefillGenerateContext::dequeueStreamFromRuntimeMeta() {
+    std::lock_guard<std::mutex> lock(terminal_transition_mu_);
+    if (meta && stream_) {
+        meta->dequeue(request_id, stream_);
+    }
+}
+
+PrefillTerminalCause PrefillGenerateContext::terminalCause() const {
+    return terminal_cause_.load(std::memory_order_acquire);
+}
+
+void PrefillGenerateContext::tryCancelDownstream() {
+    auto context = std::atomic_load(&client_context);
+    if (context) {
+        context->TryCancel();
+    }
+}
+
+void PrefillGenerateContext::setLocalStreamSchedulerOwned(bool owned) {
+    local_stream_scheduler_owned_ = owned;
+}
+
+bool PrefillGenerateContext::finalizePriorityPreemption() {
+    std::lock_guard<std::mutex> lock(priority_finalize_mu_);
+    if (priority_finalized_) {
+        return true;
+    }
+    if (!isPriorityPreempted()) {
+        return false;
+    }
+
+    error_info = ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
+    ErrorDetailsPB details;
+    details.set_error_code(static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    details.set_error_message(error_info.ToString());
+    std::string serialized_details;
+    details.SerializeToString(&serialized_details);
+    error_status = grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED),
+                                error_info.ToString(),
+                                serialized_details);
+
+    // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
+    // execution; Decode's cancellation finalizer runs before Finish returns.
+    tryCancelDownstream();
+    (void)closeGrpcStream();
+
+    if (stream_) {
+        stream_->reportError(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
+        // A Prefill stream is scheduler-owned once published. Retry on the
+        // managed finalizer executor until the scheduler has completed its
+        // terminal transition; never occupy a worker with an unbounded poll.
+        if (local_stream_scheduler_owned_ && stream_->getStatus() != StreamState::FINISHED) {
+            return false;
+        }
+        stream_->waitPendingAsyncBookkeeping();
+        stream_->releaseResource();
+        markRequestEnd();
+        stream_.reset();
+    }
+
+    if (meta) {
+        meta->markPriorityPreemptionCanceled(request_id,
+                                             static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
+                                             "preempted by a higher-priority request");
+    }
+    priority_finalized_ = true;
+    return true;
 }
 
 void PrefillGenerateContext::nextStage() {

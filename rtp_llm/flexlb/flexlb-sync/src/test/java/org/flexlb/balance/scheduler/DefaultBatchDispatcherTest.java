@@ -159,6 +159,9 @@ class DefaultBatchDispatcherTest {
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
+        assertTrue(callback.lastError instanceof DefaultBatchDispatcher.EngineRejectedException);
+        assertEquals(500,
+                ((DefaultBatchDispatcher.EngineRejectedException) callback.lastError).errorCode());
     }
 
     @Test
@@ -305,6 +308,7 @@ class DefaultBatchDispatcherTest {
         final AtomicInteger failureCount = new AtomicInteger(0);
         final CountDownLatch successLatch = new CountDownLatch(1);
         final CountDownLatch failureLatch = new CountDownLatch(1);
+        volatile Throwable lastError;
 
         @Override
         public void onSuccess(BatchItem item, long batchId) {
@@ -314,6 +318,7 @@ class DefaultBatchDispatcherTest {
 
         @Override
         public void onFailure(BatchItem item, Throwable error) {
+            lastError = error;
             failureCount.incrementAndGet();
             failureLatch.countDown();
         }

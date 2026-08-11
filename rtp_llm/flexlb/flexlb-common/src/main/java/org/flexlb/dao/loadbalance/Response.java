@@ -38,11 +38,21 @@ public class Response {
     @JsonProperty("ready")
     private boolean ready = true;
 
+    @JsonProperty("admission_reject_reason")
+    private AdmissionRejectReason admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
+
     public static Response error(StrategyErrorType strategyErrorType) {
+        return error(strategyErrorType, AdmissionRejectReason.UNSPECIFIED);
+    }
+
+    public static Response error(StrategyErrorType strategyErrorType,
+                                 AdmissionRejectReason admissionRejectReason) {
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
         result.setErrorMessage(strategyErrorType.buildErrorMessage(null));
+        result.setAdmissionRejectReason(admissionRejectReason == null
+                ? AdmissionRejectReason.UNSPECIFIED : admissionRejectReason);
         return result;
     }
 

@@ -7,9 +7,9 @@ set -euo pipefail
 # 1. Start MockEngineCluster (2 prefill + 2 decode, with delays for cancel)
 # 2. Generate service-discovery env vars
 # 3. Build + start flexlb-api master (Java)
-# 4. Run cancel_smoke.py
-# 5. Collect results
-# 6. Cleanup (trap EXIT)
+# 4. Run the independent RUNNING-victim priority-preemption scenario
+# 5. Optionally run the unchanged six client-cancel scenarios
+# 6. Collect results and cleanup (trap EXIT)
 # ===========================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,8 +22,8 @@ RUN_ROOT="${RUN_ROOT:-${SCRIPT_DIR}/run}"
 RUN_ID="${RUN_ID:-cancel_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="${RUN_DIR:-${RUN_ROOT}/${RUN_ID}}"
 
-N_PREFILL="${N_PREFILL:-2}"
-N_DECODE="${N_DECODE:-4}"
+N_PREFILL="${N_PREFILL:-1}"
+N_DECODE="${N_DECODE:-1}"
 MOCK_BASE_GRPC_PORT="${MOCK_BASE_GRPC_PORT:-55151}"
 PREFILL_CACHE_BLOCKS="${PREFILL_CACHE_BLOCKS:-6000}"
 DECODE_CACHE_BLOCKS="${DECODE_CACHE_BLOCKS:-3000}"
@@ -34,9 +34,14 @@ FLEXLB_JAR="${FLEXLB_JAR:-${FLEXLB_DIR}/flexlb-api/target/flexlb-api-1.0.0-SNAPS
 
 START_FLEXLB="${START_FLEXLB:-1}"
 START_MOCK="${START_MOCK:-1}"
+BUILD_FLEXLB="${BUILD_FLEXLB:-1}"
 MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"
 
 SCHEDULE_MODE="${SCHEDULE_MODE:-batch}"
+# The six legacy scenarios exercise the now-separate frontend/client Cancel
+# API.  Keep them intact and runnable, but do not make them part of this
+# priority-preemption acceptance by default.
+RUN_CLIENT_CANCEL_SMOKE="${RUN_CLIENT_CANCEL_SMOKE:-0}"
 
 # Performance config for cancel tests: enough delay for cancel window.
 # prefill=100ms fixed, decode=20ms/step × 10 steps = 200ms total decode.
@@ -46,7 +51,7 @@ PERF_CONFIG_FILE="${PERF_CONFIG_DIR}/cancel_smoke_perf.json"
 # FlexLB master config — flattened individual env vars (override via environment)
 LOAD_BALANCE_STRATEGY="${LOAD_BALANCE_STRATEGY:-COST_BASED_PREFILL}"
 DECODE_LOAD_BALANCE_STRATEGY="${DECODE_LOAD_BALANCE_STRATEGY:-COST_BASED_DECODE}"
-DECODE_CONCURRENCY_LIMIT="${DECODE_CONCURRENCY_LIMIT:-132}"
+DECODE_CONCURRENCY_LIMIT="${DECODE_CONCURRENCY_LIMIT:-1}"
 FLEXLB_BATCH_ALGORITHM="${FLEXLB_BATCH_ALGORITHM:-fixed_window}"
 FLEXLB_BATCH_FIXED_WAIT_MS="${FLEXLB_BATCH_FIXED_WAIT_MS:-10}"
 FLEXLB_BATCH_PREDICT_THRESHOLD_MS="${FLEXLB_BATCH_PREDICT_THRESHOLD_MS:-550}"
@@ -63,6 +68,15 @@ STRATEGY_CONFIGS='{}'
 OTEL_TRACE_SKIP_PATTERN="${OTEL_TRACE_SKIP_PATTERN:-.*}"
 OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-none}"
 HIPPO_ROLE="${HIPPO_ROLE:-flexlb_cancel_smoke_master}"
+
+# Priority-preemption acceptance gates.  RUNNING Decode victims are part of
+# the engine-owned/accepted layer, so the accepted gate is the running gate;
+# there is no separate AUTO_TPM_DECODE_RUNNING_EVICT_ENABLED property.
+AUTO_TPM_ENABLED="${AUTO_TPM_ENABLED:-true}"
+AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED="${AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED:-true}"
+AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED="${AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED:-true}"
+AUTO_TPM_CANCEL_ACK_TIMEOUT_MS="${AUTO_TPM_CANCEL_ACK_TIMEOUT_MS:-50}"
+AUTO_TPM_CANCEL_COMPLETION_TIMEOUT_MS="${AUTO_TPM_CANCEL_COMPLETION_TIMEOUT_MS:-1000}"
 
 # -- Internal state --------------------------------------------------------
 
@@ -198,7 +212,7 @@ echo "perf_config=${PERF_CONFIG_FILE}"
 
 if [[ "${START_MOCK}" == "1" ]]; then
   echo ""
-  echo "[1/4] Starting mock engine cluster (${N_PREFILL} prefill, ${N_DECODE} decode) ..."
+  echo "[1/5] Starting mock engine cluster (${N_PREFILL} prefill, ${N_DECODE} decode) ..."
   PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/mock_engine_cluster.py" \
     --n-prefill "${N_PREFILL}" \
     --n-decode "${N_DECODE}" \
@@ -237,16 +251,19 @@ PY
 
 if [[ "${START_FLEXLB}" == "1" ]]; then
   echo ""
-  echo "[2/4] Starting flexlb-api master ..."
+  echo "[2/5] Starting flexlb-api master ..."
 
   if [[ "$(java_major java)" -lt 21 ]]; then
     echo "Java 21 is required to build/start flexlb-api. Set JAVA21_HOME or JAVA_HOME." >&2
     exit 1
   fi
 
-  if [[ ! -f "${FLEXLB_JAR}" ]]; then
+  if [[ "${BUILD_FLEXLB}" == "1" ]]; then
     echo "  Building flexlb-api (mvnw) ..."
     (cd "${FLEXLB_DIR}" && ./mvnw -P"${MAVEN_PROFILES}" -pl flexlb-api -am package -DskipTests)
+  elif [[ ! -f "${FLEXLB_JAR}" ]]; then
+    echo "BUILD_FLEXLB=0 but FlexLB jar does not exist: ${FLEXLB_JAR}" >&2
+    exit 1
   fi
 
   env "${FLEXLB_ENV_ARGS[@]}" \
@@ -268,6 +285,11 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     "OTEL_TRACE_SKIP_PATTERN=${OTEL_TRACE_SKIP_PATTERN}" \
     "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \
+    "AUTO_TPM_ENABLED=${AUTO_TPM_ENABLED}" \
+    "AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED=${AUTO_TPM_DECODE_RESERVED_EVICT_ENABLED}" \
+    "AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED=${AUTO_TPM_DECODE_ACCEPTED_EVICT_ENABLED}" \
+    "AUTO_TPM_CANCEL_ACK_TIMEOUT_MS=${AUTO_TPM_CANCEL_ACK_TIMEOUT_MS}" \
+    "AUTO_TPM_CANCEL_COMPLETION_TIMEOUT_MS=${AUTO_TPM_CANCEL_COMPLETION_TIMEOUT_MS}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \
@@ -283,28 +305,57 @@ else
   echo "  [skipped] flexlb-api master already running"
 fi
 
-# -- Run cancel smoke tests ------------------------------------------------
+# -- Run priority-preemption acceptance -----------------------------------
 
 echo ""
-echo "[3/4] Running cancel smoke tests ..."
+echo "[3/5] Running RUNNING-victim priority-preemption smoke test ..."
 echo ""
 
-PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/cancel_smoke.py" \
+set +e
+PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/priority_preemption_smoke.py" \
   --master-ip 127.0.0.1 \
   --master-http-port "${FLEXLB_HTTP_PORT}" \
+  --mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))" \
+  --flexlb-http-port "${FLEXLB_HTTP_PORT}" \
   --schedule-mode "${SCHEDULE_MODE}" \
-  2>&1 | tee "${RUN_DIR}/cancel_smoke.stdout"
+  2>&1 | tee "${RUN_DIR}/priority_preemption_smoke.stdout"
 
-SMOKE_EXIT="${PIPESTATUS[0]}"
+PRIORITY_SMOKE_EXIT="${PIPESTATUS[0]}"
+set -e
+
+echo ""
+echo "[4/5] Existing client-cancel smoke tests ..."
+echo ""
+
+SMOKE_EXIT=0
+if [[ "${RUN_CLIENT_CANCEL_SMOKE}" == "1" ]]; then
+  set +e
+  PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/cancel_smoke.py" \
+    --master-ip 127.0.0.1 \
+    --master-http-port "${FLEXLB_HTTP_PORT}" \
+    --mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))" \
+    --flexlb-http-port "${FLEXLB_HTTP_PORT}" \
+    --schedule-mode "${SCHEDULE_MODE}" \
+    2>&1 | tee "${RUN_DIR}/cancel_smoke.stdout"
+  SMOKE_EXIT="${PIPESTATUS[0]}"
+  set -e
+else
+  echo "  skipped (set RUN_CLIENT_CANCEL_SMOKE=1 to run the unchanged six scenarios)"
+fi
 
 # -- Collect results -------------------------------------------------------
 
 echo ""
-echo "[4/4] Results:"
-echo "  exit_code=${SMOKE_EXIT}"
+echo "[5/5] Results:"
+echo "  client_cancel_exit_code=${SMOKE_EXIT}"
+echo "  priority_preemption_exit_code=${PRIORITY_SMOKE_EXIT}"
 echo "  stdout=${RUN_DIR}/cancel_smoke.stdout"
+echo "  priority_stdout=${RUN_DIR}/priority_preemption_smoke.stdout"
 echo "  mock_log=${RUN_DIR}/mock_engine.log"
 echo "  flexlb_log=${RUN_DIR}/flexlb.log"
 echo ""
 
-exit "${SMOKE_EXIT}"
+if [[ "${SMOKE_EXIT}" != "0" || "${PRIORITY_SMOKE_EXIT}" != "0" ]]; then
+  exit 1
+fi
+exit 0

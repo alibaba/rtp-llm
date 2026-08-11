@@ -375,6 +375,11 @@ public final class JavaMockEngineCluster {
         private final LinkedHashMap<Long, Map<String, Object>> requestLifecycles = new LinkedHashMap<>();
         // Bounded cancelled rid history (Python _cancelled / snapshot "cancelled_rids").
         private final LinkedHashSet<Long> cancelledRidHistory = new LinkedHashSet<>();
+        // Priority-Cancel tombstones mirror the C++ Prefill contract: once a
+        // request accepted priority cancellation, retries stay ACCEPTED even
+        // after the live ownership entry has been removed.  Keep this separate
+        // from client-cancel history so a normal terminal remains NOT_FOUND.
+        private final LinkedHashSet<Long> priorityCancelTombstones = new LinkedHashSet<>();
         // Recent execution times for snapshot prefill_ms_*/decode_ms_* fields.
         private final ArrayDeque<Double> recentPrefillTimes = new ArrayDeque<>();
         private final ArrayDeque<Double> recentDecodeTimes = new ArrayDeque<>();
@@ -423,8 +428,15 @@ public final class JavaMockEngineCluster {
         private final Map<Long, EngineRpcService.TaskInfoPB> runningTasks = new ConcurrentHashMap<>();
         private final Map<Long, LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB>> responseQueues = new ConcurrentHashMap<>();
         private final Map<Long, String> requestStates = new ConcurrentHashMap<>();
+        // Explicit P->D ownership used by the test-only Cancel channel.  A Prefill
+        // may cancel only the Decode selected from that request's role_addrs; it
+        // must never scan the cluster for a matching request id.
+        private final Map<Long, FastRpcService> downstreamDecodeOwners = new ConcurrentHashMap<>();
+        private final Map<Long, FastRpcService> upstreamPrefillOwners = new ConcurrentHashMap<>();
         /** Safety-net TTL for cancelled markers never consumed by a completion callback. */
         private static final long CANCELLED_MARKER_TTL_SECONDS = 600;
+        /** Public error contract for a victim canceled by priority preemption. */
+        private static final long PRIORITY_PREEMPTED_ERROR_CODE = 8429;
 
         /** rid -> insertion time (System.nanoTime); consumed by completion callbacks. */
         private final Map<Long, Long> cancelledRequests = new ConcurrentHashMap<>();
@@ -765,10 +777,21 @@ public final class JavaMockEngineCluster {
          *         {@code null} when no entry was found (already terminal).
          */
         EngineRpcService.TaskPhase cancel(long requestId) {
-            stats.cancelRpcs.increment();
-            rpcCancel.incrementAndGet();
+            return cancel(requestId, false, true);
+        }
+
+        private EngineRpcService.TaskPhase cancel(long requestId,
+                                                  boolean priorityPreemption,
+                                                  boolean countRpc) {
+            if (countRpc) {
+                stats.cancelRpcs.increment();
+                rpcCancel.incrementAndGet();
+            }
             cancelledRequests.put(requestId, System.nanoTime());
             addCancelledRid(requestId);
+            if (priorityPreemption) {
+                addPriorityCancelTombstone(requestId);
+            }
             recordLifecycleEnd(requestId, true);
             // Queued-vs-running discrimination, the runningTasks removal, the
             // slot/KV release, and the freed-slot drain all run under
@@ -844,7 +867,7 @@ public final class JavaMockEngineCluster {
             requestStates.put(requestId, "cancelled");
             cancelledCount.incrementAndGet();
             long version = completionVersion.incrementAndGet();
-            EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
+            EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     // Pass the ACTUAL phase the request was cancelled in through
                     // to the finished entry (P2-1): a queued opt-in decode
@@ -853,12 +876,21 @@ public final class JavaMockEngineCluster {
                     .setPhase(cancelledPhase != null
                             ? cancelledPhase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                            .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
-                            .setErrorMessage("cancelled by client")
+                            .setErrorCode(priorityPreemption
+                                    ? PRIORITY_PREEMPTED_ERROR_CODE
+                                    : EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
+                            .setErrorMessage(priorityPreemption
+                                    ? "preempted by higher-priority request"
+                                    : "cancelled by client")
                             .build())
                     .setEndTimeMs(System.currentTimeMillis())
-                    .setDpRank(0)
-                    .build();
+                    .setDpRank(0);
+            if (priorityPreemption) {
+                taskBuilder.setPriorityPreemptionProgress(
+                        EngineRpcService.PriorityPreemptionProgressPB
+                                .PRIORITY_PREEMPTION_CANCELED);
+            }
+            EngineRpcService.TaskInfoPB task = taskBuilder.build();
             completions.add(new VersionedTask(version, task));
             statusVersion.incrementAndGet();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue = responseQueues.get(requestId);
@@ -881,6 +913,9 @@ public final class JavaMockEngineCluster {
                 lastEnqueueTime.set(System.nanoTime());
                 runDecode(drainNext.shape(), drainNext.batchId(), drainNext.responseQueue());
             }
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                clearUpstreamOwnership(requestId);
+            }
             return cancelledPhase;
         }
 
@@ -893,6 +928,15 @@ public final class JavaMockEngineCluster {
          * WorkerStatus finished list.
          */
         CancelResult cancelRequest(long requestId) {
+            stats.cancelRpcs.increment();
+            rpcCancel.incrementAndGet();
+            if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                throw new UnsupportedOperationException(
+                        "priority Cancel is only implemented by the original Prefill");
+            }
+            if (hasPriorityCancelTombstone(requestId)) {
+                return new CancelResult(true, null, true);
+            }
             EngineRpcService.TaskInfoPB tracked = runningTasks.get(requestId);
             if (tracked != null) {
                 // P2-2: the authoritative phase is the one cancel() snapshots
@@ -900,8 +944,19 @@ public final class JavaMockEngineCluster {
                 // read above may be stale (the pending-queue drain can flip
                 // KV_ALLOCATED→RUNNING in between). Fall back to the pre-read
                 // only when a racing terminal already emptied the entry.
-                EngineRpcService.TaskPhase phase = cancel(requestId);
+                EngineRpcService.TaskPhase phase = cancel(
+                        requestId, true, false);
                 return new CancelResult(true, phase != null ? phase : tracked.getPhase(), false);
+            }
+            FastRpcService decode = downstreamDecodeOwners.get(requestId);
+            if (decode != null) {
+                CancelResult downstream = decode.cancelFromPrefill(requestId, this);
+                if (downstream.found()) {
+                    return downstream;
+                }
+                // The Decode won a terminal race and already removed its
+                // reverse ownership. Drop the stale Prefill entry as well.
+                downstreamDecodeOwners.remove(requestId, decode);
             }
             boolean alreadyFinished;
             synchronized (cancelledRidHistory) {
@@ -915,11 +970,95 @@ public final class JavaMockEngineCluster {
                 }
             }
             if (alreadyFinished) {
-                stats.cancelRpcs.increment();
-                rpcCancel.incrementAndGet();
                 return new CancelResult(false, null, true);
             }
             return new CancelResult(false, null, false);
+        }
+
+        /**
+         * Register the exact Decode selected for one request. Package-private so
+         * E2E tests that inject a Decode task directly can model the otherwise
+         * normal Prefill hand-off without teaching the cancel channel to scan.
+         */
+        void registerDecodeOwnership(long requestId, FastRpcService decode) {
+            if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                    || decode == null
+                    || decode.roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                throw new IllegalArgumentException("decode ownership requires Prefill -> Decode");
+            }
+            synchronized (decode.decodeQueueLock) {
+                FastRpcService previousDecode = downstreamDecodeOwners.put(requestId, decode);
+                if (previousDecode != null && previousDecode != decode) {
+                    previousDecode.upstreamPrefillOwners.remove(requestId, this);
+                }
+                FastRpcService previousPrefill = decode.upstreamPrefillOwners.put(requestId, this);
+                if (previousPrefill != null && previousPrefill != this) {
+                    previousPrefill.downstreamDecodeOwners.remove(requestId, decode);
+                }
+            }
+        }
+
+        void clearDecodeOwnership(long requestId, FastRpcService decode) {
+            if (decode == null) {
+                return;
+            }
+            synchronized (decode.decodeQueueLock) {
+                if (downstreamDecodeOwners.remove(requestId, decode)) {
+                    decode.upstreamPrefillOwners.remove(requestId, this);
+                }
+            }
+        }
+
+        private CancelResult cancelFromPrefill(long requestId, FastRpcService expectedPrefill) {
+            synchronized (decodeQueueLock) {
+                if (!upstreamPrefillOwners.remove(requestId, expectedPrefill)) {
+                    return new CancelResult(false, null, false);
+                }
+                expectedPrefill.downstreamDecodeOwners.remove(requestId, this);
+                // This is downstream stream cancellation, not a Decode Cancel
+                // RPC.  Preserve ordinary Decode accounting/terminal behavior
+                // without incrementing the Decode RPC counter.
+                EngineRpcService.TaskPhase phase = cancel(requestId, false, false);
+                EngineRpcService.TaskPhase observedPhase = phase != null
+                        ? phase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING;
+                // Decode retains its ordinary CANCELLED terminal for local
+                // accounting. The original Prefill is the authoritative
+                // producer of the typed priority-preemption completion.
+                expectedPrefill.recordPriorityPreemptionCanceled(requestId, observedPhase);
+                // Ownership is itself the admission proof. A cancel may win the
+                // narrow hand-off race before Decode publishes runningTasks; the
+                // existing cancelled marker then prevents later scheduling.
+                return new CancelResult(true, observedPhase, false);
+            }
+        }
+
+        private void recordPriorityPreemptionCanceled(long requestId,
+                                                      EngineRpcService.TaskPhase phase) {
+            addPriorityCancelTombstone(requestId);
+            long version = completionVersion.incrementAndGet();
+            EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
+                    .setRequestId(requestId)
+                    .setPhase(phase)
+                    .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
+                            .PRIORITY_PREEMPTION_CANCELED)
+                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                            .setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
+                            .setErrorMessage("preempted by higher-priority request")
+                            .build())
+                    .setEndTimeMs(System.currentTimeMillis())
+                    .setDpRank(0)
+                    .build();
+            completions.add(new VersionedTask(version, task));
+            statusVersion.incrementAndGet();
+        }
+
+        private void clearUpstreamOwnership(long requestId) {
+            synchronized (decodeQueueLock) {
+                FastRpcService prefill = upstreamPrefillOwners.remove(requestId);
+                if (prefill != null) {
+                    prefill.downstreamDecodeOwners.remove(requestId, this);
+                }
+            }
         }
 
         /**
@@ -1142,7 +1281,12 @@ public final class JavaMockEngineCluster {
                     // false = backpressure (decode pending queue full). On false the
                     // caller treats decodeStarted=false and delivers the finished
                     // output from the prefill side (degraded but no request lost).
-                    return decode.scheduleDecodeCompletion(shape, batchId, queue);
+                    registerDecodeOwnership(input.getRequestId(), decode);
+                    boolean accepted = decode.scheduleDecodeCompletion(shape, batchId, queue);
+                    if (!accepted) {
+                        clearDecodeOwnership(input.getRequestId(), decode);
+                    }
+                    return accepted;
                 }
                 return false;
             }
@@ -1295,8 +1439,8 @@ public final class JavaMockEngineCluster {
             long executionMs = performance.decodeMs(shape.outputLen(), activeBatch);
             scheduler.schedule(() -> {
                 long requestId = shape.input().getRequestId();
-                EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
-                boolean wasRunning = removed != null;
+                EngineRpcService.TaskInfoPB removed;
+                boolean wasRunning;
                 // Free the slot and drain one pending request under the same lock
                 // that guards admission, so the freed slot is handed to a queued
                 // request atomically (no lost slot, no over-admission). Skip
@@ -1304,6 +1448,12 @@ public final class JavaMockEngineCluster {
                 // runningTasks entry and already decremented pendingRequests).
                 DecodePendingTask nextPending = null;
                 synchronized (decodeQueueLock) {
+                    // Claim normal terminal ownership under the same lock as an
+                    // upstream cancel. Whichever path removes the reverse mapping
+                    // first owns the terminal transition.
+                    clearUpstreamOwnership(requestId);
+                    removed = runningTasks.remove(requestId);
+                    wasRunning = removed != null;
                     if (wasRunning) {
                         activeDecodeRequests.decrementAndGet();
                         activeKvTokens.addAndGet(-shape.inputLen());
@@ -1325,7 +1475,9 @@ public final class JavaMockEngineCluster {
                         }
                     }
                 }
-                recordCompletion(shape, batchId, executionMs, 0);
+                if (wasRunning) {
+                    recordCompletion(shape, batchId, executionMs, 0);
+                }
                 if (wasRunning) {
                     // Feed the per-sample decode completion window (java_mock_stats
                     // decode_done / decode_exec_*). wasRunning=false means the
@@ -1555,6 +1707,12 @@ public final class JavaMockEngineCluster {
                 decodePendingQueue.removeIf(
                         t -> !runningTasks.containsKey(t.shape().input().getRequestId()));
             }
+            for (Map.Entry<Long, FastRpcService> entry : downstreamDecodeOwners.entrySet()) {
+                clearDecodeOwnership(entry.getKey(), entry.getValue());
+            }
+            for (Long requestId : List.copyOf(upstreamPrefillOwners.keySet())) {
+                clearUpstreamOwnership(requestId);
+            }
         }
 
         /**
@@ -1573,6 +1731,10 @@ public final class JavaMockEngineCluster {
         void setStopped(boolean s) { this.stopped = s; }
         boolean isStopped() { return stopped; }
         int getGrpcPort() { return grpcPort; }
+        int getDownstreamOwnershipCount() { return downstreamDecodeOwners.size(); }
+        int getUpstreamOwnershipCount() { return upstreamPrefillOwners.size(); }
+        boolean hasDownstreamOwnership(long requestId) { return downstreamDecodeOwners.containsKey(requestId); }
+        boolean hasUpstreamOwnership(long requestId) { return upstreamPrefillOwners.containsKey(requestId); }
         String getRoleName() { return roleName; }
         String getEngineName() { return engineName; }
         String getHost() { return host; }
@@ -1647,6 +1809,26 @@ public final class JavaMockEngineCluster {
                 if (cancelledRidHistory.add(requestId) && cancelledRidHistory.size() > CANCELLED_RID_CAP) {
                     cancelledRidHistory.remove(cancelledRidHistory.iterator().next());
                 }
+            }
+        }
+
+        private void addPriorityCancelTombstone(long requestId) {
+            synchronized (priorityCancelTombstones) {
+                priorityCancelTombstones.add(requestId);
+                while (priorityCancelTombstones.size() > CANCELLED_RID_CAP) {
+                    var iterator = priorityCancelTombstones.iterator();
+                    if (!iterator.hasNext()) {
+                        break;
+                    }
+                    iterator.next();
+                    iterator.remove();
+                }
+            }
+        }
+
+        private boolean hasPriorityCancelTombstone(long requestId) {
+            synchronized (priorityCancelTombstones) {
+                return priorityCancelTombstones.contains(requestId);
             }
         }
 
@@ -1831,9 +2013,9 @@ public final class JavaMockEngineCluster {
 
     /**
      * Result of {@link FastRpcService#cancelRequest(long)}: mirrors the three
-     * branches of the v3 EngineCancelChannel contract — found (with the phase
-     * observed at cancel time), already finished before the cancel arrived, or
-     * unknown to this engine.
+     * branches of the v3 EngineCancelChannel contract — accepted (live or an
+     * idempotent priority-cancel tombstone), already finished before the first
+     * cancel arrived, or unknown to this engine.
      */
     record CancelResult(boolean found, EngineRpcService.TaskPhase phase, boolean alreadyFinished) {
     }

@@ -36,14 +36,6 @@ public final class BatchItem implements Prioritized {
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
 
-    /**
-     * Auto-TPM accepted-eviction CANCEL_REQUESTED mark (Phase 5): non-null
-     * once a preemption cancel was issued for this request, so an
-     * engine-reported CANCELLED completion is attributed to
-     * {@code PRIORITY_PREEMPTED}. Null = no cancel requested.
-     */
-    private volatile String preemptCancelDetail;
-
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
                      Response routeResponse,
@@ -106,11 +98,6 @@ public final class BatchItem implements Prioritized {
     /** Auto-TPM admission deadline (epoch ms); delegates to {@code ctx.budget()}. */
     public long deadlineMs() {
         return ctx != null && ctx.budget() != null ? ctx.budget().deadlineMs() : 0;
-    }
-
-    public String preemptCancelDetail() { return preemptCancelDetail; }
-    public void setPreemptCancelDetail(String preemptCancelDetail) {
-        this.preemptCancelDetail = preemptCancelDetail;
     }
 
     // -- derived accessors --

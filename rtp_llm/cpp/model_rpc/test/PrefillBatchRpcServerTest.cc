@@ -14,9 +14,8 @@ namespace {
 
 class PartialEnqueueEngine: public EngineBase {
 public:
-    // enqueueGroupStreams touches engine_->getScheduler().cancelIntentMap()
-    // (AutoTPM Cancel R1 checkpoint), so the stub engine must carry a real,
-    // if inert, scheduler.
+    // EngineBase requires a scheduler; this inert implementation keeps the
+    // batch-enqueue tests focused on their per-context cancellation path.
     class NoopScheduler: public SchedulerBase {
     public:
         absl::Status enqueue(const GenerateStreamPtr&) override {
@@ -97,6 +96,10 @@ public:
         maga_init_params_.parallelism_config.dp_rank = dp_rank;
     }
 
+    grpc::Status outwardStatus(PrefillGenerateContext& context, const grpc::Status& fallback) {
+        return preferPriorityPreemption(context, fallback);
+    }
+
     int                   enqueue_group_calls = 0;
     bool                  omit_last_result    = false;
     EnqueueGroupRequestPB captured_group_request;
@@ -163,17 +166,17 @@ void buildReadySlots(PrefillBatchRpcServer&                         server,
         slot.input            = std::make_shared<GenerateInputPB>();
         slot.input->set_request_id(request_id);
         RPCContext rpc_context{slot.input.get(), nullptr};
-        slot.prefill_context                 = std::make_unique<PrefillGenerateContext>(&server.resource(),
-                                                                        rpc_context,
-                                                                        /*timeout_ms=*/0,
-                                                                        /*server_context=*/nullptr,
-                                                                        server.metrics_reporter_,
-                                                                        server.meta_);
-        slot.prefill_context->generate_input = makeGenerateInput(request_id);
-        auto deferred                        = std::make_shared<DeferredPrefillContext>();
-        deferred->context                    = std::move(slot.prefill_context);
-        deferred->input                      = slot.input;
-        ready_slots.push_back(PrefillBatchRpcServer::ReadySlot{&slot, std::move(deferred)});
+        auto       context      = std::make_unique<PrefillGenerateContext>(&server.resource(),
+                                                                rpc_context,
+                                                                /*timeout_ms=*/0,
+                                                                /*server_context=*/nullptr,
+                                                                server.metrics_reporter_,
+                                                                server.meta_);
+        context->generate_input = makeGenerateInput(request_id);
+        slot.deferred           = std::make_shared<DeferredPrefillContext>();
+        slot.deferred->context  = std::move(context);
+        slot.deferred->input    = slot.input;
+        ready_slots.push_back(PrefillBatchRpcServer::ReadySlot{&slot, slot.deferred});
     }
 }
 
@@ -346,6 +349,27 @@ TEST(PrefillBatchRpcServerTest, PartialSchedulerRejectionCleansRejectedPrefillRe
     accepted_deferred.reset();
 }
 
+TEST(PrefillBatchRpcServerTest, LatchedPriorityCancelBeforeEnqueuePreservesRaw8429) {
+    PrefillBatchRpcServer server;
+    server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
+    auto engine    = std::make_shared<PartialEnqueueEngine>();
+    server.engine_ = engine;
+
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
+    std::vector<PrefillBatchRpcServer::ReadySlot> ready_slots;
+    buildReadySlots(server, {1013}, slots, ready_slots);
+    ASSERT_EQ(ready_slots[0].deferred->context->requestPriorityPreempt(),
+              PriorityPreemptionRequestResult::INSTALLED);
+
+    EnqueueBatchResponsePB response;
+    ASSERT_TRUE(server.enqueueGroupStreams(ready_slots, &response).ok());
+
+    EXPECT_TRUE(ready_slots.empty());
+    ASSERT_EQ(response.errors_size(), 1);
+    EXPECT_EQ(response.errors(0).request_id(), 1013);
+    EXPECT_EQ(response.errors(0).error_info().error_code(), static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+}
+
 TEST(PrefillBatchRpcServerTest, RejectsWhenEnqueueMultipleReordersStreams) {
     PrefillBatchRpcServer server;
     server.meta_   = std::make_shared<RpcServerRuntimeMeta>();
@@ -401,6 +425,7 @@ TEST(PrefillBatchRpcServerTest, DeferredContextMapTakesAndRemovesContext) {
 
     ASSERT_TRUE(contexts->store(3001, deferred).ok());
     ASSERT_TRUE(contexts->armTtl(3001, deferred, std::chrono::seconds(1)).ok());
+    EXPECT_FALSE(deferred->finishOperation());
     EXPECT_EQ(contexts->size(), 1);
     std::shared_ptr<DeferredPrefillContext> claimed;
     ASSERT_TRUE(contexts->take(3001, claimed).ok());
@@ -411,6 +436,316 @@ TEST(PrefillBatchRpcServerTest, DeferredContextMapTakesAndRemovesContext) {
     const auto                              duplicate_fetch_status = contexts->take(3001, duplicate_fetch);
     EXPECT_EQ(duplicate_fetch_status.error_code(), grpc::StatusCode::NOT_FOUND);
     EXPECT_EQ(duplicate_fetch, nullptr);
+}
+
+TEST(PrefillBatchRpcServerTest, ActiveOperationOwnsPriorityFinalizationOnExit) {
+    DeferredPrefillContext deferred;
+    EXPECT_FALSE(deferred.requestPriorityFinalization());
+    EXPECT_TRUE(deferred.finishOperation());
+    EXPECT_FALSE(deferred.finishOperation());
+}
+
+TEST(PrefillBatchRpcServerTest, IdleContextCanBeFinalizedWithoutOperationWaiter) {
+    DeferredPrefillContext deferred;
+    EXPECT_FALSE(deferred.finishOperation());
+    EXPECT_TRUE(deferred.requestPriorityFinalization());
+    EXPECT_FALSE(deferred.requestPriorityFinalization());
+}
+
+TEST(PrefillBatchRpcServerTest, PriorityPreemptionCancelRemainsRoutableAfterFetchTakesContext) {
+    PrefillBatchRpcServer server;
+    auto                  contexts = std::make_shared<DeferredPrefillContextMap>();
+    auto                  deferred = makeDeferred(server, 3009);
+
+    ASSERT_TRUE(contexts->registerActive(3009, deferred).ok());
+    ASSERT_TRUE(contexts->store(3009, deferred).ok());
+    EXPECT_FALSE(deferred->finishOperation());
+    std::shared_ptr<DeferredPrefillContext> claimed;
+    ASSERT_TRUE(contexts->take(3009, claimed).ok());
+
+    ASSERT_TRUE(contexts->cancelByPriorityPreemption(3009));
+    EXPECT_TRUE(claimed->context->cancel_state->load());
+    EXPECT_TRUE(claimed->context->isPriorityPreempted());
+
+    contexts->finish(3009, claimed.get());
+    // A retry joins the already-installed weak-ACK latch.
+    EXPECT_TRUE(contexts->cancelByPriorityPreemption(3009));
+}
+
+TEST(PrefillBatchRpcServerTest, PreparingContextIsVisibleToCancelBeforeStore) {
+    PrefillBatchRpcServer server;
+    auto                  contexts = std::make_shared<DeferredPrefillContextMap>();
+    auto                  deferred = makeDeferred(server, 3010);
+
+    ASSERT_TRUE(contexts->registerActive(3010, deferred).ok());
+    ASSERT_TRUE(contexts->cancelByPriorityPreemption(3010));
+
+    EXPECT_TRUE(deferred->context->isPriorityPreempted());
+    EXPECT_TRUE(deferred->context->cancel_state->load());
+    auto status_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(status_info.running_task_info_list.size(), 1);
+    EXPECT_EQ(status_info.running_task_info_list[0].priority_preemption_progress,
+              PriorityPreemptionProgress::CANCELING);
+    contexts->finish(3010, deferred.get());
+}
+
+TEST(PrefillBatchRpcServerTest, CancelUnknownRequestDoesNotCreateIntent) {
+    PrefillBatchRpcServer server;
+    auto                  engine = std::make_shared<PartialEnqueueEngine>();
+    server.engine_               = engine;
+    CancelRequestPB request;
+    request.set_request_id(3011);
+    CancelResponsePB response;
+
+    ASSERT_TRUE(server.Cancel(nullptr, &request, &response).ok());
+
+    EXPECT_EQ(response.status(), CancelStatusPB::CANCEL_STATUS_NOT_FOUND);
+}
+
+TEST(PrefillBatchRpcServerTest, CancelRejectsZeroRequestId) {
+    PrefillBatchRpcServer server;
+    auto                  engine = std::make_shared<PartialEnqueueEngine>();
+    server.engine_               = engine;
+    CancelRequestPB  request;
+    CancelResponsePB response;
+
+    auto status = server.Cancel(nullptr, &request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(PrefillBatchRpcServerTest, CancelActiveRequestLatches8429WithoutSchedulerIntent) {
+    PrefillBatchRpcServer server;
+    auto                  engine = std::make_shared<PartialEnqueueEngine>();
+    server.engine_               = engine;
+    auto deferred                = makeDeferred(server, 3012);
+    ASSERT_TRUE(server.deferred_contexts_->registerActive(3012, deferred).ok());
+    CancelRequestPB request;
+    request.set_request_id(3012);
+    CancelResponsePB response;
+
+    ASSERT_TRUE(server.Cancel(nullptr, &request, &response).ok());
+
+    EXPECT_EQ(response.status(), CancelStatusPB::CANCEL_STATUS_ACCEPTED);
+    EXPECT_TRUE(deferred->context->isPriorityPreempted());
+
+    // A tombstone retry acknowledges the already-installed weak latch but
+    // must not create a scheduler intent.
+    CancelResponsePB retry_response;
+    ASSERT_TRUE(server.Cancel(nullptr, &request, &retry_response).ok());
+    EXPECT_EQ(retry_response.status(), CancelStatusPB::CANCEL_STATUS_ACCEPTED);
+    auto status_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(status_info.running_task_info_list.size(), 1);
+    EXPECT_EQ(status_info.running_task_info_list[0].priority_preemption_progress,
+              PriorityPreemptionProgress::CANCELING);
+    server.deferred_contexts_->finish(3012, deferred.get());
+}
+
+TEST(PrefillBatchRpcServerTest, AcceptedPriorityPreemptionOverridesPrepareFailure) {
+    TestPrefillBatchRpcServer server;
+    auto                      contexts = std::make_shared<DeferredPrefillContextMap>();
+    auto                      deferred = makeDeferred(server, 3014);
+    ASSERT_TRUE(contexts->registerActive(3014, deferred).ok());
+
+    ASSERT_TRUE(contexts->cancelByPriorityPreemption(3014));
+    contexts->finish(3014, deferred.get());
+    auto           outward = server.outwardStatus(*deferred->context,
+                                        grpc::Status(grpc::StatusCode::INTERNAL, "prepareAllocateResource failed"));
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(outward.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_TRUE(contexts->cancelByPriorityPreemption(3014));
+}
+
+TEST(PrefillBatchRpcServerTest, OtherTerminalBeforePriorityCancelReturnsNotFound) {
+    PrefillBatchRpcServer server;
+    auto                  contexts = std::make_shared<DeferredPrefillContextMap>();
+    auto                  deferred = makeDeferred(server, 3018);
+    ASSERT_TRUE(contexts->registerActive(3018, deferred).ok());
+
+    ASSERT_TRUE(deferred->context->tryMarkOtherTerminal());
+    bool newly_installed = true;
+    std::shared_ptr<DeferredPrefillContext> canceled;
+    EXPECT_FALSE(contexts->cancelByPriorityPreemption(3018, canceled, &newly_installed));
+    EXPECT_FALSE(newly_installed);
+    EXPECT_EQ(canceled, nullptr);
+    EXPECT_EQ(deferred->context->terminalCause(), PrefillTerminalCause::OTHER);
+}
+
+TEST(PrefillBatchRpcServerTest, PriorityCancelBeforeOtherTerminalPreserves8429) {
+    PrefillBatchRpcServer server;
+    auto                  contexts = std::make_shared<DeferredPrefillContextMap>();
+    auto                  deferred = makeDeferred(server, 3019);
+    ASSERT_TRUE(contexts->registerActive(3019, deferred).ok());
+
+    bool newly_installed = false;
+    std::shared_ptr<DeferredPrefillContext> canceled;
+    ASSERT_TRUE(contexts->cancelByPriorityPreemption(3019, canceled, &newly_installed));
+    EXPECT_TRUE(newly_installed);
+    EXPECT_FALSE(deferred->context->tryMarkOtherTerminal());
+    EXPECT_EQ(deferred->context->terminalCause(), PrefillTerminalCause::PRIORITY_PREEMPTION);
+}
+
+TEST(PrefillBatchRpcServerTest, PriorityAndOtherTerminalBarrierHasExactlyOneWinner) {
+    PrefillBatchRpcServer server;
+    auto                  contexts = std::make_shared<DeferredPrefillContextMap>();
+    auto                  deferred = makeDeferred(server, 3020);
+    ASSERT_TRUE(contexts->registerActive(3020, deferred).ok());
+
+    std::atomic<int>  ready{0};
+    std::atomic<bool> start{false};
+    bool              other_won    = false;
+    bool              priority_won = false;
+    bool              newly_installed = false;
+    std::thread other_thread([&] {
+        ready.fetch_add(1);
+        while (!start.load()) {
+            std::this_thread::yield();
+        }
+        other_won = deferred->context->tryMarkOtherTerminal();
+    });
+    std::thread priority_thread([&] {
+        ready.fetch_add(1);
+        while (!start.load()) {
+            std::this_thread::yield();
+        }
+        std::shared_ptr<DeferredPrefillContext> canceled;
+        priority_won = contexts->cancelByPriorityPreemption(3020, canceled, &newly_installed);
+    });
+    while (ready.load() != 2) {
+        std::this_thread::yield();
+    }
+    start.store(true);
+    other_thread.join();
+    priority_thread.join();
+
+    EXPECT_NE(other_won, priority_won);
+    EXPECT_EQ(priority_won, newly_installed);
+    EXPECT_EQ(deferred->context->terminalCause(),
+              priority_won ? PrefillTerminalCause::PRIORITY_PREEMPTION : PrefillTerminalCause::OTHER);
+}
+
+TEST(PrefillBatchRpcServerTest, CanceledPrepareSlotCanFinalizeBeforeSiblingLeavesPrepare) {
+    PrefillBatchRpcServer server;
+    auto                  canceled = makeDeferred(server, 3021);
+    auto                  sibling  = makeDeferred(server, 3022);
+
+    EXPECT_EQ(canceled->context->requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+    EXPECT_FALSE(canceled->requestPriorityFinalization());
+    EXPECT_TRUE(canceled->finishOperation());
+
+    // The sibling still owns PREPARE, proving finalizer ownership is per slot.
+    EXPECT_FALSE(sibling->tryStartOperation().started);
+    EXPECT_FALSE(sibling->finishOperation());
+    EXPECT_TRUE(sibling->tryStartOperation().started);
+}
+
+TEST(PrefillBatchRpcServerTest, TerminalCauseAloneCannotStartFinalizerBeforeCancelRegistersIt) {
+    PrefillBatchRpcServer server;
+    auto                  deferred = makeDeferred(server, 3023);
+
+    EXPECT_EQ(deferred->context->requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+    // The operation may exit after the terminal CAS but before Cancel has
+    // registered finalization. It must not claim the finalizer prematurely.
+    EXPECT_FALSE(deferred->finishOperation());
+    EXPECT_TRUE(deferred->requestPriorityFinalization());
+}
+
+TEST(PrefillBatchRpcServerTest, FetchAfterAcceptedPriorityCancelReturns8429Tombstone) {
+    PrefillBatchRpcServer server;
+    auto                  contexts = std::make_shared<DeferredPrefillContextMap>();
+    auto                  deferred = makeDeferred(server, 3015);
+    ASSERT_TRUE(contexts->registerActive(3015, deferred).ok());
+    ASSERT_TRUE(contexts->store(3015, deferred).ok());
+    EXPECT_FALSE(deferred->finishOperation());
+
+    ASSERT_TRUE(contexts->cancelByPriorityPreemption(3015));
+
+    std::shared_ptr<DeferredPrefillContext> fetched;
+    auto status = contexts->take(3015, fetched);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(fetched, nullptr);
+}
+
+TEST(PrefillBatchRpcServerTest, PriorityPreemptionReturnsRaw8429InErrorDetails) {
+    TestPrefillBatchRpcServer server;
+    auto                      deferred = makeDeferred(server, 3013);
+    deferred->context->requestPriorityPreempt();
+
+    auto status =
+        server.outwardStatus(*deferred->context, grpc::Status(grpc::StatusCode::CANCELLED, "downstream cancelled"));
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+}
+
+TEST(PrefillBatchRpcServerTest, PrefillFinalizerPublishesCanceled8429ExactlyOnce) {
+    PrefillBatchRpcServer server;
+    auto                  deferred = makeDeferred(server, 3016);
+    deferred->context->requestPriorityPreempt();
+
+    EXPECT_TRUE(deferred->context->finalizePriorityPreemption());
+    EXPECT_TRUE(deferred->context->finalizePriorityPreemption());
+
+    auto status_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(status_info.running_task_info_list.empty());
+    ASSERT_EQ(status_info.finished_task_info_list.size(), 1);
+    const auto& task = status_info.finished_task_info_list[0];
+    EXPECT_EQ(task.request_id, 3016);
+    EXPECT_EQ(task.priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(task.error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+}
+
+TEST(PrefillBatchRpcServerTest, PriorityFirstCauseSuppressesOrdinaryDequeueTerminal) {
+    PrefillBatchRpcServer server;
+    auto                  deferred = makeDeferred(server, 3024);
+    auto                  input    = makeGenerateInput(3024);
+    auto                  stream   = makeGenerateStream(input);
+    deferred->context->generate_input = input;
+    deferred->context->setStream(stream);
+    deferred->context->setLocalStreamSchedulerOwned(false);
+    server.meta_->enqueue(3024, stream);
+
+    ASSERT_EQ(deferred->context->requestPriorityPreempt(), PriorityPreemptionRequestResult::INSTALLED);
+    deferred->context->dequeueStreamFromRuntimeMeta();
+
+    auto canceling = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(canceling.running_task_info_list.size(), 1);
+    EXPECT_TRUE(canceling.finished_task_info_list.empty());
+    EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress,
+              PriorityPreemptionProgress::CANCELING);
+
+    ASSERT_TRUE(deferred->context->finalizePriorityPreemption());
+    auto canceled = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(canceled.running_task_info_list.empty());
+    ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
+    EXPECT_EQ(canceled.finished_task_info_list[0].priority_preemption_progress,
+              PriorityPreemptionProgress::CANCELED);
+}
+
+TEST(PrefillBatchRpcServerTest, PriorityFinalizerDoesNotWaitForSchedulerRejectedStream) {
+    PrefillBatchRpcServer server;
+    auto                  deferred = makeDeferred(server, 3017);
+    auto                  input    = makeGenerateInput(3017);
+    auto                  stream   = makeGenerateStream(input);
+    deferred->context->generate_input = input;
+    deferred->context->setStream(stream);
+    deferred->context->setLocalStreamSchedulerOwned(false);
+    deferred->context->requestPriorityPreempt();
+
+    EXPECT_TRUE(deferred->context->finalizePriorityPreemption());
+
+    auto status_info = server.meta_->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(status_info.running_task_info_list.empty());
+    ASSERT_EQ(status_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(status_info.finished_task_info_list[0].priority_preemption_progress,
+              PriorityPreemptionProgress::CANCELED);
+    EXPECT_EQ(status_info.finished_task_info_list[0].error_code,
+              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
 }
 
 TEST(PrefillBatchRpcServerTest, DeferredContextMapRejectsDuplicateRequestId) {
@@ -424,6 +759,7 @@ TEST(PrefillBatchRpcServerTest, DeferredContextMapRejectsDuplicateRequestId) {
     EXPECT_EQ(duplicate_status.error_code(), grpc::StatusCode::ALREADY_EXISTS);
     EXPECT_EQ(duplicate_status.error_message(), "request already exists in deferred context map");
     ASSERT_TRUE(contexts->armTtl(3002, first, std::chrono::seconds(1)).ok());
+    EXPECT_FALSE(first->finishOperation());
     std::shared_ptr<DeferredPrefillContext> claimed;
     ASSERT_TRUE(contexts->take(3002, claimed).ok());
     EXPECT_EQ(claimed, first);
@@ -478,6 +814,7 @@ TEST(PrefillBatchRpcServerTest, StaleRollbackCannotRemoveAReplacementContext) {
     EXPECT_EQ(contexts->remove(3011, first.get()), nullptr);
 
     ASSERT_TRUE(contexts->armTtl(3011, second, std::chrono::seconds(1)).ok());
+    EXPECT_FALSE(second->finishOperation());
     std::shared_ptr<DeferredPrefillContext> claimed;
     ASSERT_TRUE(contexts->take(3011, claimed).ok());
     EXPECT_EQ(claimed, second);
@@ -489,6 +826,7 @@ TEST(PrefillBatchRpcServerTest, ConcurrentFetchAndRollbackHaveSingleOwner) {
     auto                  deferred = makeDeferred(server, 3012);
     ASSERT_TRUE(contexts->store(3012, deferred).ok());
     ASSERT_TRUE(contexts->armTtl(3012, deferred, std::chrono::seconds(1)).ok());
+    EXPECT_FALSE(deferred->finishOperation());
 
     std::atomic<bool>                       start{false};
     grpc::Status                            take_status;
@@ -521,6 +859,7 @@ TEST(PrefillBatchRpcServerTest, StopAcceptingPreservesPublishedContextsForFetch)
     auto                  deferred = makeDeferred(server, 3014);
     ASSERT_TRUE(contexts->store(3014, deferred).ok());
     ASSERT_TRUE(contexts->armTtl(3014, deferred, std::chrono::seconds(1)).ok());
+    EXPECT_FALSE(deferred->finishOperation());
 
     contexts->stopAccepting();
     auto rejected = makeDeferred(server, 3015);
@@ -553,6 +892,7 @@ TEST(PrefillBatchRpcServerTest, TakingContextCancelsItsTtlWithoutCancellingReque
 
     ASSERT_TRUE(contexts->store(3004, deferred).ok());
     ASSERT_TRUE(contexts->armTtl(3004, deferred, std::chrono::milliseconds(20)).ok());
+    EXPECT_FALSE(deferred->finishOperation());
     std::shared_ptr<DeferredPrefillContext> claimed;
     ASSERT_TRUE(contexts->take(3004, claimed).ok());
     ASSERT_EQ(claimed, deferred);
@@ -567,6 +907,7 @@ TEST(PrefillBatchRpcServerTest, TakingContextDoesNotLeakItsAlarm) {
 
     ASSERT_TRUE(contexts->store(3005, deferred).ok());
     ASSERT_TRUE(contexts->armTtl(3005, deferred, std::chrono::seconds(1)).ok());
+    EXPECT_FALSE(deferred->finishOperation());
     std::weak_ptr<grpc::Alarm>              alarm = deferred->ttl_alarm;
     std::shared_ptr<DeferredPrefillContext> claimed;
     ASSERT_TRUE(contexts->take(3005, claimed).ok());

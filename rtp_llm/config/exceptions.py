@@ -12,6 +12,20 @@ class ExceptionCategory(Enum):
     INTERNAL = "internal"
 
 
+class AdmissionRejectReason(IntEnum):
+    """Typed cause attached to a failed FlexLB admission decision.
+
+    Values intentionally match ``ScheduleFailureReasonPB``.  Keeping the
+    reason separate from ``ExceptionType`` lets 8430 distinguish queue
+    ordering causes without parsing scheduler error messages.
+    """
+
+    UNSPECIFIED = 0
+    HIGHER_PRIORITY_AHEAD = 1
+    SAME_PRIORITY_AHEAD = 2
+    RESOURCE_EXHAUSTED = 3
+
+
 class ExceptionType(IntEnum):
     def __new__(
         cls,
@@ -41,7 +55,8 @@ class ExceptionType(IntEnum):
     EXECUTION_EXCEPTION = 606
     EXCEEDS_KV_CACHE_MAX_LEN = 607, ExceptionCategory.TOO_LONG
 
-    # Error codes starting from 8000 can be retried
+    # Internal error-code range. Retryability is decided by the owning
+    # subsystem; terminal admission decisions in this range are not retried.
     CANCELLED = 8100, ExceptionCategory.CANCELLED
     OUT_OF_VOCAB_RANGE = 8101, ExceptionCategory.INVALID_OUTPUT
     OUTPUT_QUEUE_FULL = 8102, ExceptionCategory.CAPACITY
@@ -105,6 +120,9 @@ class ExceptionType(IntEnum):
     MASTER_NO_VIT_WORKER = 8405, ExceptionCategory.CAPACITY
     MASTER_INVALID_REQUEST = 8406, ExceptionCategory.BAD_REQUEST
     PRIORITY_PREEMPTED = 8429, ExceptionCategory.CAPACITY
+    PRIORITY_ADMISSION_REJECTED = 8430, ExceptionCategory.CAPACITY
+    RESOURCE_EXHAUSTED = 8431, ExceptionCategory.CAPACITY
+    ADMISSION_UNAVAILABLE = 8432, ExceptionCategory.CAPACITY
 
     # route error
     ROUTE_ERROR = 8500, ExceptionCategory.CAPACITY
@@ -142,7 +160,17 @@ class ExceptionType(IntEnum):
 
 
 class FtRuntimeException(Exception):
-    def __init__(self, exception_type: ExceptionType, message: str):
+    def __init__(
+        self,
+        exception_type: ExceptionType,
+        message: str,
+        admission_reject_reason: AdmissionRejectReason = (
+            AdmissionRejectReason.UNSPECIFIED
+        ),
+    ):
         self.exception_type = exception_type
         self.message = message
+        self.admission_reject_reason = AdmissionRejectReason(
+            admission_reject_reason
+        )
         super().__init__(self.message)
