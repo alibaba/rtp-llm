@@ -5,12 +5,14 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 
 using namespace std;
@@ -19,6 +21,11 @@ namespace {
 
 bool workerStatusSnapshotEnabled() {
     const char* env = std::getenv("RTP_LLM_WORKER_STATUS_SNAPSHOT");
+    return env != nullptr && std::strcmp(env, "1") == 0;
+}
+
+bool asyncCachePrepareEnabled() {
+    const char* env = std::getenv("RTP_LLM_ASYNC_PREPARE_CACHE");
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
@@ -53,6 +60,16 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      cp_force_single_prefill_,
                      max_inited_kv_cache_streams_,
                      worker_status_snapshot_enabled_);
+    if (asyncCachePrepareEnabled() && pd_sep_config_.role_type != RoleType::DECODE && parallelism_config.tp_rank == 0) {
+        try {
+            async_cache_prepare_enabled_ = true;
+            cache_prepare_thread_        = std::thread([this]() { cachePrepareLoop(); });
+            RTP_LLM_LOG_INFO("async cache prepare enabled");
+        } catch (const std::exception& e) {
+            async_cache_prepare_enabled_ = false;
+            RTP_LLM_LOG_WARNING("cache prepare worker start failed, use scheduler fallback: %s", e.what());
+        }
+    }
     if (worker_status_snapshot_enabled_) {
         publishWorkerStatusSnapshotLocked();
     }
@@ -81,12 +98,26 @@ absl::Status FIFOScheduler::stop() {
     {
         lock_guard<mutex> lock(lock_);
         stop_ = true;
+        if (!cache_prepare_thread_.joinable()) {
+            cancelStreams(waiting_streams_);
+            cancelStreams(loading_cache_streams_);
+            cancelStreams(running_streams_);
+            publishWorkerStatusSnapshotLocked();
+        }
+    }
+    cond_.notify_all();
+    if (!cache_prepare_thread_.joinable()) {
+        return absl::OkStatus();
+    }
+    cache_prepare_thread_.join();
+    {
+        lock_guard<mutex> lock(lock_);
         cancelStreams(waiting_streams_);
         cancelStreams(loading_cache_streams_);
         cancelStreams(running_streams_);
+        cache_prepare_blocked_stream_.reset();
         publishWorkerStatusSnapshotLocked();
     }
-    cond_.notify_all();
     return absl::OkStatus();
 }
 
@@ -213,9 +244,96 @@ void FIFOScheduler::accountBatchMetrics(const GenerateStreamPtr& new_stream) {
 }
 
 bool FIFOScheduler::waitPredicate() {
-    // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
-    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty();
+    if (!async_cache_prepare_enabled_) {
+        // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
+        return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
+               || !running_streams_.empty();
+    }
+    return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty();
+}
+
+void FIFOScheduler::cachePrepareLoop() {
+    cudaPreRun(static_cast<int>(getDeviceId()));
+    while (!stop_.load(std::memory_order_acquire)) {
+        std::vector<GenerateStreamPtr> streams;
+        GenerateStreamPtr              blocked_stream;
+        size_t                         inited_streams = 0;
+        {
+            std::unique_lock<std::mutex> lock(lock_);
+            cond_.wait(lock, [this]() {
+                if (stop_) {
+                    return true;
+                }
+                for (const auto& stream : waiting_streams_) {
+                    if (cache_prepare_blocked_stream_ && stream == cache_prepare_blocked_stream_) {
+                        return stream->hasError();
+                    }
+                    if (stream && !stream->hasEvent(StreamEvents::CachePrepared)) {
+                        return true;
+                    }
+                }
+                return false;
+            });
+            if (stop_) {
+                return;
+            }
+            if (cache_prepare_blocked_stream_ && cache_prepare_blocked_stream_->hasError()) {
+                cache_prepare_blocked_stream_.reset();
+            }
+            blocked_stream = cache_prepare_blocked_stream_;
+            streams.assign(waiting_streams_.begin(), waiting_streams_.end());
+            if (max_inited_kv_cache_streams_ > 0) {
+                inited_streams = countInitedKVCacheStreams();
+            }
+        }
+
+        bool has_pending = false;
+        bool changed     = false;
+        for (const auto& stream : streams) {
+            if (blocked_stream && stream == blocked_stream) {
+                break;
+            }
+            if (!stream || stream->hasEvent(StreamEvents::CachePrepared)) {
+                continue;
+            }
+            const bool already_inited = stream->curBlocksNum() > 0;
+            if (max_inited_kv_cache_streams_ > 0 && !already_inited && inited_streams >= max_inited_kv_cache_streams_) {
+                std::lock_guard<std::mutex> lock(lock_);
+                cache_prepare_blocked_stream_ = stream;
+                break;
+            }
+
+            CachePrepareResult result = CachePrepareResult::DONE;
+            try {
+                result = stream->prepareCache();
+            } catch (const std::exception& e) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, std::string("async cache prepare failed: ") + e.what());
+            } catch (...) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "async cache prepare failed with unknown exception");
+            }
+            if (stream->hasError() && !stream->hasEvent(StreamEvents::CachePrepared)) {
+                stream->reportEvent(StreamEvents::CachePrepared);
+            }
+            if (!already_inited && stream->curBlocksNum() > 0) {
+                ++inited_streams;
+            }
+            if (result == CachePrepareResult::LACK_MEM) {
+                std::lock_guard<std::mutex> lock(lock_);
+                cache_prepare_blocked_stream_ = stream;
+                break;
+            }
+            has_pending = has_pending || result == CachePrepareResult::WAIT;
+            changed     = changed || result == CachePrepareResult::DONE;
+        }
+        if (changed) {
+            std::lock_guard<std::mutex> lock(lock_);
+            schedule_trigger_ = true;
+            cond_.notify_all();
+        }
+        if (has_pending) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
 }
 
 // 通过 GenerateStateMachine 驱动每个 stream 的状态转移，状态变化的 stream 移入对应队列
@@ -261,6 +379,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
     struct GroupInfo {
         int64_t first_arrival_time = 0;
         int     count              = 0;
+        int     prepared_count     = 0;
     };
     std::unordered_map<int64_t, GroupInfo> request_group_info;
 
@@ -274,6 +393,9 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
                 info.first_arrival_time = stream->enqueueTime() / 1000;
             }
             info.count++;
+            if (!async_cache_prepare_enabled_ || stream->hasEvent(StreamEvents::CachePrepared)) {
+                info.prepared_count++;
+            }
         }
     }
 
@@ -283,13 +405,20 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
         auto& stream      = *it;
         bool  force_batch = stream->forceBatch();
 
+        // With async preparation, FIFO admission remains on the scheduler
+        // thread and uses the original post-reuse contextLength checks.  The
+        // only difference is that it never performs allocator/connector work.
+        if (async_cache_prepare_enabled_ && !stream->hasError() && !stream->hasEvent(StreamEvents::CachePrepared)) {
+            break;
+        }
+
         // Check if this stream can be scheduled based on batch group rules
         if (force_batch && stream->batchGroupId() != -1) {
             auto& info = request_group_info[stream->batchGroupId()];
             // Check timeout: if expired, treat as normal stream
             if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
                 force_batch = false;
-            } else if (info.count < stream->batchGroupSize()) {
+            } else if (info.count < stream->batchGroupSize() || info.prepared_count < stream->batchGroupSize()) {
                 // Group incomplete, skip this stream
                 it++;
                 continue;
@@ -384,18 +513,24 @@ void FIFOScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamS
 
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
+    const bool         async_cache_prepare = async_cache_prepare_enabled_;
     if (need_fill_fake_stream_) {
         cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
-
     schedule_trigger_ = false;
-
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
     evaluateAndUpdateStreams(loading_cache_streams_);
     // RUNNING -> DONE: error / finished
-    bool running_streams_changed = evaluateAndUpdateStreams(running_streams_);
+    const size_t running_streams_before  = running_streams_.size();
+    bool         running_streams_changed = evaluateAndUpdateStreams(running_streams_);
+    if (async_cache_prepare && cache_prepare_blocked_stream_) {
+        if (running_streams_.size() < running_streams_before) {
+            cache_prepare_blocked_stream_.reset();
+            cond_.notify_all();
+        }
+    }
 
     // WAITING -> RUNNING: can run
     // WAITING -> LOADING_CACHE: load cache ok
@@ -413,7 +548,6 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     if (waiting_streams_.size() < prev_waiting_size) {
         schedule_trigger_ = true;
     }
-
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     if (running_streams_changed) {

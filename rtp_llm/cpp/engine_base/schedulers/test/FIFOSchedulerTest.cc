@@ -585,12 +585,11 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
         query2->generate_config->num_return_sequences = 20;
         shared_ptr<GenerateStream> stream2 =
             make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
-        // In the new code, checkInputLength rejects at enqueue time
-        ASSERT_FALSE(scheduler.enqueue(stream2).ok());
-        ASSERT_TRUE(stream2->hasError());
-        ASSERT_EQ(stream2->stopReason(), "input len [7] * batch size [20] > max_batch_tokens_size [100]");
+        // max_batch_tokens_size is a scheduling constraint, not an enqueue-time input validation.
+        ASSERT_TRUE(scheduler.enqueue(stream2).ok());
+        ASSERT_FALSE(stream2->hasError());
         ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
-        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
         ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     }
 }
