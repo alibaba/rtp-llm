@@ -2,7 +2,7 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.utils.base_model_datatypes import AuxInfo
@@ -123,11 +123,25 @@ class GPTToolDefinition(BaseModel):
     function: GPTFunctionDefinition
 
 
+class GPTNamedToolChoiceFunction(BaseModel):
+    name: str
+
+
+class GPTNamedToolChoice(BaseModel):
+    type: Literal["function"]
+    function: GPTNamedToolChoiceFunction
+
+
+ToolChoice = Union[Literal["none", "auto", "required"], GPTNamedToolChoice]
+
+
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = None
     messages: List[ChatMessage]
     functions: Optional[List[GPTFunctionDefinition]] = None
     tools: Optional[List[GPTToolDefinition]] = None
+    tool_choice: Optional[ToolChoice] = None
+    parallel_tool_calls: bool = True
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     max_tokens: Optional[int] = None
@@ -160,6 +174,40 @@ class ChatCompletionRequest(BaseModel):
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
     _force_reasoning_from_rendered_prompt: Optional[bool] = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def validate_tool_choice(self):
+        choice = self.tool_choice
+        if choice == "required" and not self.tools:
+            raise ValueError("tool_choice 'required' requires at least one tool")
+        if isinstance(choice, GPTNamedToolChoice):
+            available_names = {
+                tool.function.name for tool in self.tools or []
+            }
+            if choice.function.name not in available_names:
+                raise ValueError(
+                    f"tool_choice references undefined function: {choice.function.name}"
+                )
+        if self.user_template and self.effective_tools():
+            raise ValueError("user_template does not support tool calling")
+        return self
+
+    def selected_tool_name(self) -> Optional[str]:
+        if isinstance(self.tool_choice, GPTNamedToolChoice):
+            return self.tool_choice.function.name
+        return None
+
+    def effective_tools(self) -> List[GPTToolDefinition]:
+        if self.tool_choice == "none":
+            return []
+        tools = list(self.tools or [])
+        selected_name = self.selected_tool_name()
+        if selected_name is not None:
+            return [tool for tool in tools if tool.function.name == selected_name]
+        return tools
+
+    def requires_tool_call(self) -> bool:
+        return self.tool_choice == "required" or self.selected_tool_name() is not None
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):

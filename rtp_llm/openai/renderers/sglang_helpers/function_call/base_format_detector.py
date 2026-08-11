@@ -35,6 +35,8 @@ def _forward_unknown_tools() -> bool:
 class BaseFormatDetector(ABC):
     """Base class providing two sets of interfaces: one-time and streaming incremental."""
 
+    atomic_tool_calls = False
+
     def __init__(self):
         # Streaming state management
         # Buffer for accumulating incomplete patterns that arrive across multiple streaming chunks
@@ -59,6 +61,10 @@ class BaseFormatDetector(ABC):
         # matching non-streaming behavior where the whole block is skipped.
         self._discarding_unknown_tool = False
         self._divergence_logged_tool_ids: set = set()
+        # Request policies such as a named/required tool choice or disabled
+        # parallel calls need recognized invalid blocks to fail instead of being
+        # silently discarded. Renderers opt in per request.
+        self.strict_tool_validation = False
 
         # Token configuration (override in subclasses)
         self.bot_token = ""
@@ -123,9 +129,19 @@ class BaseFormatDetector(ABC):
         action = orjson.loads(text)
         return StreamingParseResult(calls=self.parse_base_json(action, tools))
 
+    def detect_and_parse_truncated(
+        self, text: str, tools: List[Tool]
+    ) -> StreamingParseResult:
+        """Parse a final response that ended at a generation length boundary."""
+        return self.detect_and_parse(text, tools)
+
     def finalize_streaming(self, truncated: bool = False) -> StreamingParseResult:
         """Finalize detector-owned streaming state at the end of generation."""
         return StreamingParseResult()
+
+    def has_pending_tool_call(self) -> bool:
+        """Return whether a recognized tool block is still incomplete."""
+        return False
 
     def _ends_with_partial_token(self, buffer: str, bot_token: str) -> int:
         """

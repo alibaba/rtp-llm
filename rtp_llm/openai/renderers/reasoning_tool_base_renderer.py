@@ -47,6 +47,7 @@ class ReasoningToolStreamStatus(StreamStatus):
     detector: Optional[BaseFormatDetector] = None
     reasoning_parser: Optional[ReasoningParser] = None
     sglang_tools: Tuple[Tool, ...] = ()
+    tool_call_keys: set[Tuple[str, object]]
 
     def __init__(
         self,
@@ -58,9 +59,20 @@ class ReasoningToolStreamStatus(StreamStatus):
         super().__init__(request)
         self.generating_tool_call = False
         self.detector = detector
+        if self.detector is not None:
+            self.detector.strict_tool_validation = (
+                request.requires_tool_call() or not request.parallel_tool_calls
+            )
         self.reasoning_parser = reasoning_parser
+        self.tool_call_keys = set()
+        effective_tools = request.effective_tools()
+        detector_tools = (
+            list(request.tools or [])
+            if request.selected_tool_name() is not None
+            else effective_tools
+        )
         self.sglang_tools = (
-            tuple(rtp_tools_to_sglang_tools(request.tools or []))
+            tuple(rtp_tools_to_sglang_tools(detector_tools))
             if sglang_tools is None
             else sglang_tools
         )
@@ -119,12 +131,18 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         """创建状态列表"""
-        if request.tools or self.in_think_mode(request):
-            sglang_tools = tuple(rtp_tools_to_sglang_tools(request.tools or []))
+        effective_tools = request.effective_tools()
+        if effective_tools or self.in_think_mode(request):
+            detector_tools = (
+                list(request.tools or [])
+                if request.selected_tool_name() is not None
+                else effective_tools
+            )
+            sglang_tools = tuple(rtp_tools_to_sglang_tools(detector_tools))
             return [
                 ReasoningToolStreamStatus(
                     request,
-                    self._create_detector(request),
+                    self._create_detector(request) if effective_tools else None,
                     self._create_reasoning_parser(request),
                     sglang_tools,
                 )
@@ -155,6 +173,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         status.delta_output_string = (
             parse_result.normal_text + status.delta_output_string
         )
+        if status.request.requires_tool_call() and not status.tool_call_keys:
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                "model did not produce a required tool call",
+            )
 
     @override
     async def _flush_buffer(
@@ -216,12 +239,44 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         ):
             context.update(request.extra_configs.chat_template_kwargs)
 
+        # Request-level tool policy must win over arbitrary template kwargs.
+        context["tools"] = [
+            tool.model_dump(exclude_none=True, mode="json")
+            for tool in request.effective_tools()
+        ]
+        context["messages"] = self._apply_tool_policy_to_messages(
+            request, messages
+        )
         try:
             rendered_prompt = self._compiled_chat_template.render(**context)
             return rendered_prompt
         except Exception as e:
             logging.error(f"构建提示文本失败: {str(e)}")
             raise ValueError(f"Error rendering prompt template: {str(e)}")
+
+    def _apply_tool_policy_to_messages(
+        self, request: ChatCompletionRequest, messages: List[dict]
+    ) -> List[dict]:
+        instructions: List[str] = []
+        selected_name = request.selected_tool_name()
+        if selected_name is not None:
+            instructions.append(
+                f"You must call the `{selected_name}` tool. "
+                "Do not answer without that tool call."
+            )
+        elif request.tool_choice == "required":
+            instructions.append(
+                "You must call one or more of the provided tools. "
+                "Do not answer without a tool call."
+            )
+        if request.effective_tools() and not request.parallel_tool_calls:
+            instructions.append("Call at most one tool in this response.")
+        if not instructions:
+            return messages
+        return [
+            {"role": RoleEnum.system.value, "content": " ".join(instructions)},
+            *messages,
+        ]
 
     def _preprocess_messages(self, messages: List[dict]) -> List[dict]:
         """
@@ -499,20 +554,37 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
 
         if is_streaming:
             collected_deltas = []
-            for delta_text in normalizer.normalize_tokens(
-                status.prev_token_id, new_token_ids
-            ):
-                normalizer_yielded = True
-                token_delta = await self._process_single_token_delta(
-                    status,
-                    delta_text,
-                    output,
-                    stop_words_str,
-                    stop_word_slice_list,
-                    is_streaming=True,
+            policy_state = None
+            if isinstance(status, ReasoningToolStreamStatus):
+                policy_state = (
+                    set(status.tool_call_keys),
+                    status.generating_tool_call,
+                    status.finish_reason,
                 )
-                if token_delta is not None:
-                    collected_deltas.append(token_delta)
+            try:
+                for delta_text in normalizer.normalize_tokens(
+                    status.prev_token_id, new_token_ids
+                ):
+                    normalizer_yielded = True
+                    token_delta = await self._process_single_token_delta(
+                        status,
+                        delta_text,
+                        output,
+                        stop_words_str,
+                        stop_word_slice_list,
+                        is_streaming=True,
+                    )
+                    if token_delta is not None:
+                        collected_deltas.append(token_delta)
+                self._validate_parallel_tool_boundary(status)
+            except Exception:
+                if policy_state is not None:
+                    (
+                        status.tool_call_keys,
+                        status.generating_tool_call,
+                        status.finish_reason,
+                    ) = policy_state
+                raise
             return collected_deltas, normalizer_yielded
 
         # Non-streaming: accumulate all text first, then process once
@@ -531,6 +603,20 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             is_streaming=False,
         )
         return ([complete_delta] if complete_delta is not None else []), True
+
+    def _validate_parallel_tool_boundary(self, status: StreamStatus) -> None:
+        if (
+            isinstance(status, ReasoningToolStreamStatus)
+            and not status.request.parallel_tool_calls
+            and status.finish_reason != FinisheReason.length
+            and status.tool_call_keys
+            and status.detector is not None
+            and status.detector.has_pending_tool_call()
+        ):
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                "model produced parallel tool calls while parallel tool calls are disabled",
+            )
 
     async def _process_reasoning_and_tool_calls(
         self,
@@ -555,6 +641,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             status.sglang_tools,
             remaining_after_reasoning,
             is_streaming,
+            truncated=status.finish_reason == FinisheReason.length,
         )
 
         status.delta_output_string = remaining_after_tools
@@ -566,7 +653,15 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             return None
 
         if has_tool_calls:
+            self._record_tool_calls(status, tool_calls)
             status.generating_tool_call = True
+            if (
+                not status.request.parallel_tool_calls
+                and status.detector is not None
+                and status.detector.atomic_tool_calls
+                and status.finish_reason != FinisheReason.length
+            ):
+                status.finish_reason = FinisheReason.tool_calls
 
         remaining_content = (
             remaining_after_tools if is_streaming and remaining_after_tools else None
@@ -583,6 +678,39 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             output_length=output.aux_info.output_len,
             reuse_length=output.aux_info.reuse_len,
         )
+
+    def _record_tool_calls(
+        self, status: ReasoningToolStreamStatus, tool_calls: List[ToolCall]
+    ) -> None:
+        selected_name = status.request.selected_tool_name()
+        next_keys = set(status.tool_call_keys)
+        for tool_call in tool_calls:
+            call_name = tool_call.function.name
+            if selected_name is not None and call_name not in (None, selected_name):
+                raise FtRuntimeException(
+                    ExceptionType.EXECUTION_EXCEPTION,
+                    "model produced a tool call outside tool_choice",
+                )
+            if tool_call.index is not None:
+                call_key: Tuple[str, object] = ("index", tool_call.index)
+            elif tool_call.id is not None:
+                call_key = ("id", tool_call.id)
+            else:
+                call_key = ("name", call_name)
+            next_keys.add(call_key)
+
+        if not status.request.parallel_tool_calls:
+            has_pending_call = (
+                status.finish_reason != FinisheReason.length
+                and status.detector is not None
+                and status.detector.has_pending_tool_call()
+            )
+            if len(next_keys) > 1 or (next_keys and has_pending_call):
+                raise FtRuntimeException(
+                    ExceptionType.EXECUTION_EXCEPTION,
+                    "model produced parallel tool calls while parallel tool calls are disabled",
+                )
+        status.tool_call_keys = next_keys
 
     def _extract_reasoning_content(
         self,
@@ -613,6 +741,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         tools: Optional[Sequence[Tool]],
         text: str,
         is_streaming: bool,
+        truncated: bool = False,
     ) -> tuple[Optional[List[ToolCall]], str]:
         """
         Extract tool calls from text.
@@ -627,7 +756,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 parse_result = detector.parse_streaming_increment(text, tools)
             else:
                 cleaned_text = self._clean_stop_words(text)
-                parse_result = detector.detect_and_parse(cleaned_text, tools)
+                parse_result = (
+                    detector.detect_and_parse_truncated(cleaned_text, tools)
+                    if truncated
+                    else detector.detect_and_parse(cleaned_text, tools)
+                )
 
             tool_calls, remaining_text = streaming_parse_result_to_tool_calls(
                 parse_result

@@ -93,6 +93,17 @@ py_test(
 )
 
 py_test(
+    name = "glm_tool_choice_test",
+    srcs = [
+        "glm_tool_choice_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "stop_words_pipeline_test",
     srcs = [
         "stop_words_pipeline_test.py",

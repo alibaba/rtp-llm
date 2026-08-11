@@ -150,6 +150,8 @@ def parse_arguments(
 
 
 class Glm47MoeDetector(BaseFormatDetector):
+    atomic_tool_calls = True
+
     """
     Detector for GLM-4.7 and GLM-5 models.
     Assumes function call format:
@@ -274,9 +276,13 @@ class Glm47MoeDetector(BaseFormatDetector):
 
     def _should_drop_tool(self, func_name: str, tools: List[Tool]) -> bool:
         if not func_name:
+            if self.strict_tool_validation:
+                raise ToolParseError("tool call has an empty function name")
             logger.warning("Empty function name detected, skipping tool call")
             return True
         if func_name not in self._get_tool_indices(tools):
+            if self.strict_tool_validation:
+                raise ToolParseError(f"tool call uses undefined function: {func_name}")
             if _forward_unknown_tools():
                 return False
             logger.warning("Model attempted to call undefined function: %s", func_name)
@@ -390,6 +396,16 @@ class Glm47MoeDetector(BaseFormatDetector):
         return [committed]
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
+        return self._detect_and_parse(text, tools, truncated=False)
+
+    def detect_and_parse_truncated(
+        self, text: str, tools: List[Tool]
+    ) -> StreamingParseResult:
+        return self._detect_and_parse(text, tools, truncated=True)
+
+    def _detect_and_parse(
+        self, text: str, tools: List[Tool], truncated: bool
+    ) -> StreamingParseResult:
         """
         One-time parsing: Detects and parses tool calls in the provided text.
 
@@ -414,6 +430,8 @@ class Glm47MoeDetector(BaseFormatDetector):
                     self.eot_token, tool_start + len(self.bot_token)
                 )
                 if tool_end == -1:
+                    if truncated:
+                        break
                     raise ToolParseError("incomplete tool call")
                 block_end = tool_end + len(self.eot_token)
                 block = text[tool_start:block_end]
@@ -871,6 +889,9 @@ class Glm47MoeDetector(BaseFormatDetector):
             if not truncated:
                 raise ToolParseError("incomplete tool call")
         return StreamingParseResult(normal_text=partial_start)
+
+    def has_pending_tool_call(self) -> bool:
+        return self._pending_tool_buffer is not None or bool(self._buffer)
 
     def _parse_argument_pairs(
         self, pairs: List[Tuple[str, str]], func_name: str, tools: List[Tool]
