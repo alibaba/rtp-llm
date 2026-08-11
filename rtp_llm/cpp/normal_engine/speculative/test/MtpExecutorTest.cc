@@ -466,7 +466,7 @@ public:
 
         // Create MtpExecutor
         auto executor = std::make_unique<MtpExecutor>(params, propose_params, cache_manager);
-        const auto& draft_params = propose_params->getMtpEngineInitParams();
+        const auto& draft_params = propose_params->getEngineInitParams();
 
         // Create fake models
         GptModelInitParams target_model_params(
