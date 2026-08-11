@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from smoke.case_runner import CaseRunner
+from smoke.normal_comparer import AuxInfo, NormalComparer
 from smoke.task_info import TaskStates
+from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
 class FakeServerManager:
@@ -148,7 +150,10 @@ class KeepaliveTest(unittest.TestCase):
                 },
                 clear=False,
             ):
-                runner._keep_servers_alive({"good": good, "bad": bad})
+                with self.assertRaisesRegex(
+                    RuntimeError, "keepalive server shutdown failed.*bad"
+                ):
+                    runner._keep_servers_alive({"good": good, "bad": bad})
 
         self.assertEqual(good.stop_count, 1)
         self.assertEqual(bad.stop_count, 1)
@@ -213,6 +218,120 @@ class KeepaliveTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "mutually exclusive"):
                 CaseRunner._keepalive_enabled()
+
+
+class MagaServerManagerShutdownTest(unittest.TestCase):
+    @staticmethod
+    def make_manager(log_file: str):
+        manager = MagaServerManager(port="12345")
+        manager._log_file = log_file
+        manager._file_stream = open(log_file, "w")
+        return manager
+
+    def test_parent_owns_ordered_shutdown(self):
+        events = []
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        process.terminate.side_effect = lambda: events.append("parent-terminate")
+        child = Mock(pid=456)
+        child.is_running.return_value = False
+        parent = Mock()
+        parent.children.return_value = [child]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(os.path.join(temp_dir, "process.log"))
+            manager._server_process = process
+            with patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ):
+                self.assertTrue(manager.stop_server())
+
+        self.assertEqual(events, ["parent-terminate"])
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
+        self.assertEqual(manager.exit_code, 0)
+
+    def test_fatal_shutdown_log_fails_smoke(self):
+        process = Mock(pid=123)
+        process.poll.return_value = 0
+        parent = Mock()
+        parent.children.return_value = []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(os.path.join(temp_dir, "process.log"))
+            manager._file_stream.write("*** SIGABRT received at time=123 ***\n")
+            manager._server_process = process
+            with patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "SIGABRT"):
+                    manager.stop_server()
+
+    def test_timeout_uses_recursive_fallback_and_fails_smoke(self):
+        process = Mock(pid=123)
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            __import__("subprocess").TimeoutExpired("start_server", 1),
+            -9,
+        ]
+        child = Mock(pid=456)
+        child.is_running.side_effect = [True, False]
+        child.status.return_value = "running"
+        parent = Mock()
+        parent.children.return_value = [child]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = self.make_manager(os.path.join(temp_dir, "process.log"))
+            manager._server_process = process
+            with patch.dict(
+                os.environ, {"MAGA_SERVER_SHUTDOWN_TIMEOUT": "1"}, clear=False
+            ), patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.Process",
+                return_value=parent,
+            ), patch(
+                "rtp_llm.test.utils.maga_server_manager.psutil.wait_procs",
+                return_value=([], []),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "did not exit within 1s"):
+                    manager.stop_server()
+
+        child.terminate.assert_called_once()
+        process.kill.assert_called_once()
+
+
+class DiskReuseComparerTest(unittest.TestCase):
+    def test_disk_reuse_fields_are_optional_and_compared_when_present(self):
+        comparer = object.__new__(NormalComparer)
+        actual = AuxInfo(
+            disk_reuse_len=256,
+            prefill_disk_reuse_len=256,
+            decode_disk_reuse_len=0,
+        )
+
+        diffs = []
+        comparer._compare_aux_info(
+            AuxInfo(
+                disk_reuse_len=0,
+                prefill_disk_reuse_len=0,
+                decode_disk_reuse_len=0,
+            ),
+            actual,
+            diffs,
+        )
+        self.assertEqual(
+            diffs,
+            [
+                "aux_info.disk_reuse_len:\n    expect: 0\n    actual:  256",
+                "aux_info.prefill_disk_reuse_len:\n    expect: 0\n    actual:  256",
+            ],
+        )
+
+        optional_diffs = []
+        comparer._compare_aux_info(AuxInfo(), actual, optional_diffs)
+        self.assertEqual(optional_diffs, [])
 
 
 if __name__ == "__main__":

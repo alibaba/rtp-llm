@@ -4,19 +4,29 @@ import signal
 import threading
 import time
 from multiprocessing import Process
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set
 
 
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
 
-    def __init__(self, shutdown_timeout: int = 50, monitor_interval: int = 1):
+    def __init__(
+        self,
+        shutdown_timeout: int = 50,
+        monitor_interval: int = 1,
+        termination_ack_timeout: float = 10.0,
+    ):
         self.processes: List[Process] = []
         self.shutdown_requested = False
         self.terminated = False
         self.first_dead_time = 0
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
+        self.termination_ack_timeout = termination_ack_timeout
+        self.termination_ack_events: List[Optional[Any]] = []
+        self.termination_ack_failures: List[str] = []
+        self.expected_shutdown_exit_codes: List[FrozenSet[int]] = []
+        self.shutdown_signals_sent: List[bool] = []
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -39,19 +49,59 @@ class ProcessManager:
         )
         self.shutdown_requested = True
 
-    def set_processes(self, processes: List[Process]):
+    def set_processes(
+        self,
+        processes: List[Process],
+        termination_ack_events: Optional[List[Optional[Any]]] = None,
+        expected_shutdown_exit_codes: Optional[List[Set[int]]] = None,
+    ):
         """Set the processes to manage (replaces existing list)"""
         self.processes = processes if processes else []
+        self.termination_ack_failures = []
+        if termination_ack_events is None:
+            self.termination_ack_events = [None] * len(self.processes)
+        elif len(termination_ack_events) != len(self.processes):
+            raise ValueError("termination acknowledgement count must match processes")
+        else:
+            self.termination_ack_events = list(termination_ack_events)
 
-    def add_process(self, process: Process):
+        if expected_shutdown_exit_codes is None:
+            self.expected_shutdown_exit_codes = [frozenset()] * len(self.processes)
+        elif len(expected_shutdown_exit_codes) != len(self.processes):
+            raise ValueError("expected shutdown exit-code count must match processes")
+        else:
+            self.expected_shutdown_exit_codes = [
+                frozenset(exit_codes) for exit_codes in expected_shutdown_exit_codes
+            ]
+        self.shutdown_signals_sent = [False] * len(self.processes)
+
+    def add_process(
+        self,
+        process: Process,
+        expected_shutdown_exit_codes: Optional[Set[int]] = None,
+    ):
         """Add a single process to manage"""
         if process:
             self.processes.append(process)
+            self.termination_ack_events.append(None)
+            self.expected_shutdown_exit_codes.append(
+                frozenset(expected_shutdown_exit_codes or ())
+            )
+            self.shutdown_signals_sent.append(False)
 
-    def add_processes(self, processes: List[Process]):
+    def add_processes(
+        self,
+        processes: List[Process],
+        expected_shutdown_exit_codes: Optional[Set[int]] = None,
+    ):
         """Add multiple processes to manage"""
         if processes:
             self.processes.extend(processes)
+            self.termination_ack_events.extend([None] * len(processes))
+            self.expected_shutdown_exit_codes.extend(
+                [frozenset(expected_shutdown_exit_codes or ())] * len(processes)
+            )
+            self.shutdown_signals_sent.extend([False] * len(processes))
 
     def _terminate_processes(self):
         """Terminate all managed processes"""
@@ -59,14 +109,61 @@ class ProcessManager:
             return
 
         logging.info("Shutdown requested, terminating processes...")
+        if not self.termination_ack_events:
+            self.termination_ack_events = [None] * len(self.processes)
+        if len(self.shutdown_signals_sent) != len(self.processes):
+            self.shutdown_signals_sent = [False] * len(self.processes)
+        live_processes = [
+            (index, proc, self.termination_ack_events[index])
+            for index, proc in enumerate(self.processes)
+            if proc.is_alive()
+        ]
+        ack_processes = [item for item in live_processes if item[2] is not None]
+        remaining_processes = [item for item in live_processes if item[2] is None]
+
+        # Start the overall graceful-shutdown timer before the first signal so
+        # acknowledgement waits consume the same timeout budget as joins.
+        if self.first_dead_time == 0:
+            self.first_dead_time = time.time()
+
+        # Phase 1: every collective follower must see SIGTERM before we wait for
+        # any of them. Otherwise one slow follower can prevent a sibling from
+        # reaching its scheduler-stop boundary and serialize shutdown.
+        for index, proc, _ in ack_processes:
+            logging.info(f"Sending SIGTERM to process {proc.pid}")
+            proc.terminate()
+            self.shutdown_signals_sent[index] = True
+
+        ack_wait_budget = self.termination_ack_timeout
+        if self.shutdown_timeout != -1:
+            ack_wait_budget = min(ack_wait_budget, float(self.shutdown_timeout))
+        ack_deadline = self.first_dead_time + ack_wait_budget
+        for _, proc, ack_event in ack_processes:
+            logging.info(
+                "Waiting for shutdown-ready acknowledgement from process %s",
+                proc.pid,
+            )
+            remaining = max(0.0, ack_deadline - time.time())
+            if not ack_event.wait(remaining):
+                failure = (
+                    f"name={proc.name} pid={proc.pid} shutdown-ready "
+                    f"ack timed out after shared {ack_wait_budget}s deadline"
+                )
+                logging.error(failure)
+                self.termination_ack_failures.append(failure)
+
+        # Phase 2: only after every follower acknowledged (or the shared
+        # deadline expired) may collective leaders and independent ranks be
+        # signaled.
+        for index, proc, _ in remaining_processes:
+            logging.info(f"Sending SIGTERM to process {proc.pid}")
+            proc.terminate()
+            self.shutdown_signals_sent[index] = True
+        live_process_ids = {id(proc) for _, proc, _ in live_processes}
         for proc in self.processes:
-            if proc.is_alive():
-                logging.info(f"Sending SIGTERM to process {proc.pid}")
-                proc.terminate()
-            else:
+            if id(proc) not in live_process_ids:
                 logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
         self.terminated = True
-        self.first_dead_time = time.time()
 
     def _force_kill_processes(self):
         """Force kill processes after timeout"""
@@ -122,6 +219,37 @@ class ProcessManager:
                 logging.error(f"Error joining process {proc.pid}: {e}")
         logging.info("All processes joined")
 
+    def _unexpected_exit_statuses(self) -> List[str]:
+        """Return managed-process exits that were not part of clean shutdown."""
+        failures = list(self.termination_ack_failures)
+        for index, proc in enumerate(self.processes):
+            exit_code = proc.exitcode
+            is_alive = proc.is_alive()
+            if exit_code is None:
+                failures.append(
+                    f"name={proc.name} pid={proc.pid} exit_code=None "
+                    f"is_alive={is_alive}"
+                )
+                continue
+            if is_alive:
+                failures.append(
+                    f"name={proc.name} pid={proc.pid} exit_code={exit_code} "
+                    "is_alive=True"
+                )
+                continue
+            allowed_exit_codes = {0}
+            if (
+                self.shutdown_requested
+                and index < len(self.expected_shutdown_exit_codes)
+                and index < len(self.shutdown_signals_sent)
+                and self.shutdown_signals_sent[index]
+            ):
+                allowed_exit_codes.update(self.expected_shutdown_exit_codes[index])
+            if exit_code in allowed_exit_codes:
+                continue
+            failures.append(f"name={proc.name} pid={proc.pid} exit_code={exit_code}")
+        return failures
+
     def _monitor_processes_health(self):
         """Monitor process health and handle failures"""
         while self._is_any_process_alive():
@@ -150,16 +278,23 @@ class ProcessManager:
 
             time.sleep(self.monitor_interval)
 
-    def monitor_and_release_processes(self):
-        """Monitor all processes until completion or failure"""
+    def monitor_and_release_processes(self) -> bool:
+        """Monitor all processes and report whether every exit was expected."""
         if not self.processes:
             logging.info("No processes to monitor")
-            return
+            return True
 
         logging.info(f"Monitoring {len(self.processes)} processes")
         self._monitor_processes_health()
         self._join_all_processes()
+        exit_failures = self._unexpected_exit_statuses()
+        if exit_failures:
+            logging.error(
+                "Managed processes exited abnormally: %s", "; ".join(exit_failures)
+            )
+            return False
         logging.info("Process monitoring completed")
+        return True
 
     def graceful_shutdown(self):
         """Trigger graceful shutdown"""

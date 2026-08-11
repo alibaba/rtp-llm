@@ -18,6 +18,11 @@ private:
 public:
     ~NormalCacheStore();
 
+    // Stop worker/network resources while the process-wide metrics factory is
+    // still alive. Safe to call repeatedly; the destructor calls it as a
+    // fallback for owners that do not have an explicit shutdown path.
+    void stop();
+
 public:
     static std::shared_ptr<NormalCacheStore> createNormalCacheStore(const CacheStoreInitParams& params);
 
@@ -102,6 +107,7 @@ private:
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
     std::shared_mutex                                                                store_tasks_mutex_;
     std::unordered_map<std::shared_ptr<RequestBlockBuffer>, std::pair<CacheStoreStoreDoneCallback, std::function<void()>>> store_tasks_;
+    std::once_flag                                                                   stop_once_;
 };
 
 }  // namespace rtp_llm

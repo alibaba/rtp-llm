@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -203,6 +204,116 @@ class TestProcessManager(unittest.TestCase):
         self.manager._terminate_processes()
         self.assertEqual(self.manager.first_dead_time, old_time)
 
+    def test_terminate_processes_waits_for_shutdown_ready_ack(self):
+        """All collective followers are signaled before any ack wait completes."""
+        manager = ProcessManager(termination_ack_timeout=1.0)
+        calls = []
+        follower_1_signaled = threading.Event()
+        follower_2_signaled = threading.Event()
+        follower_1_ready = threading.Event()
+        follower_2_ready = threading.Event()
+        rank_1 = Mock(name="rank-1")
+        rank_1.is_alive.return_value = True
+        rank_1.pid = 101
+        rank_1.name = "rank-1"
+
+        def terminate_follower_1():
+            calls.append("rank-1")
+            follower_1_signaled.set()
+
+        rank_1.terminate.side_effect = terminate_follower_1
+        rank_2 = Mock(name="rank-2")
+        rank_2.is_alive.return_value = True
+        rank_2.pid = 102
+        rank_2.name = "rank-2"
+
+        def terminate_follower_2():
+            calls.append("rank-2")
+            follower_2_signaled.set()
+
+        rank_2.terminate.side_effect = terminate_follower_2
+        rank_0 = Mock(name="rank-0")
+        rank_0.is_alive.return_value = True
+        rank_0.pid = 100
+        rank_0.name = "rank-0"
+        rank_0.terminate.side_effect = lambda: calls.append("rank-0")
+        manager.set_processes(
+            [rank_1, rank_2, rank_0],
+            [follower_1_ready, follower_2_ready, None],
+        )
+
+        shutdown_thread = threading.Thread(target=manager._terminate_processes)
+        shutdown_thread.start()
+        self.assertTrue(follower_1_signaled.wait(timeout=1))
+        self.assertTrue(follower_2_signaled.wait(timeout=1))
+        time.sleep(0.3)  # Exceeds the removed 0.2s timing heuristic.
+        rank_0.terminate.assert_not_called()
+        self.assertGreater(manager.first_dead_time, 0)
+
+        follower_1_ready.set()
+        follower_2_ready.set()
+        shutdown_thread.join(timeout=1)
+
+        self.assertFalse(shutdown_thread.is_alive())
+        self.assertEqual(calls, ["rank-1", "rank-2", "rank-0"])
+        self.assertEqual(manager.shutdown_signals_sent, [True, True, True])
+
+    def test_shutdown_ready_ack_uses_one_shared_deadline(self):
+        manager = ProcessManager(
+            shutdown_timeout=1,
+            termination_ack_timeout=0.05,
+        )
+        followers = []
+        events = []
+        calls = []
+        for rank in (1, 2):
+            follower = Mock(name=f"rank-{rank}")
+            follower.name = f"rank-{rank}"
+            follower.pid = 100 + rank
+            follower.is_alive.return_value = True
+            follower.terminate.side_effect = lambda rank=rank: calls.append(
+                f"rank-{rank}"
+            )
+            followers.append(follower)
+            events.append(threading.Event())
+        leader = Mock(name="rank-0")
+        leader.name = "rank-0"
+        leader.pid = 100
+        leader.is_alive.return_value = True
+        leader.terminate.side_effect = lambda: calls.append("rank-0")
+        manager.set_processes(followers + [leader], events + [None])
+
+        begin = time.time()
+        manager._terminate_processes()
+        elapsed = time.time() - begin
+
+        self.assertLess(elapsed, 0.09)
+        self.assertEqual(calls, ["rank-1", "rank-2", "rank-0"])
+        self.assertEqual(len(manager.termination_ack_failures), 2)
+
+    def test_shutdown_ready_ack_timeout_is_reported(self):
+        manager = ProcessManager(termination_ack_timeout=0.01)
+        follower = Mock(name="rank-1")
+        follower.name = "rank-1"
+        follower.pid = 101
+        follower.is_alive.return_value = True
+        follower_ready = threading.Event()
+        manager.set_processes([follower], [follower_ready])
+
+        manager._terminate_processes()
+
+        self.assertEqual(len(manager.termination_ack_failures), 1)
+        self.assertIn(
+            "shutdown-ready ack timed out", manager.termination_ack_failures[0]
+        )
+        follower.is_alive.return_value = False
+        follower.exitcode = -signal.SIGTERM
+        manager.shutdown_requested = True
+        with patch.object(manager, "_monitor_processes_health"), patch.object(
+            manager, "_join_all_processes"
+        ):
+            self.assertFalse(manager.monitor_and_release_processes())
+
     def test_force_kill_processes(self):
         """Test force killing processes"""
         proc = multiprocessing.Process(target=dummy_worker, args=(10,))
@@ -221,7 +332,7 @@ class TestProcessManager(unittest.TestCase):
     def test_monitor_empty_processes(self):
         """Test monitoring with no processes"""
         with patch("logging.info") as mock_info:
-            self.manager.monitor_and_release_processes()
+            self.assertTrue(self.manager.monitor_and_release_processes())
             mock_info.assert_any_call("No processes to monitor")
 
     def test_monitor_normal_completion(self):
@@ -236,7 +347,7 @@ class TestProcessManager(unittest.TestCase):
             proc.start()
 
         # Monitor until completion
-        self.manager.monitor_and_release_processes()
+        self.assertTrue(self.manager.monitor_and_release_processes())
 
         # All processes should be done
         for proc in procs:
@@ -257,13 +368,88 @@ class TestProcessManager(unittest.TestCase):
 
         # Monitor - should detect crash and terminate all
         with patch("logging.error") as mock_error:
-            self.manager.monitor_and_release_processes()
+            self.assertFalse(self.manager.monitor_and_release_processes())
             mock_error.assert_called()
 
         # All processes should be terminated
         for proc in procs:
             self.assertFalse(proc.is_alive())
         self.assertTrue(self.manager.terminated)
+
+    def test_requested_sigterm_is_an_expected_exit(self):
+        """A manager-issued SIGTERM is expected for an opted-in frontend."""
+        proc = Mock(name="frontend")
+        proc.exitcode = -signal.SIGTERM
+        proc.name = "frontend"
+        proc.pid = 123
+        proc.is_alive.side_effect = [True, False]
+        self.manager.add_process(proc, expected_shutdown_exit_codes={-signal.SIGTERM})
+        self.manager.graceful_shutdown()
+
+        self.manager._terminate_processes()
+
+        proc.terminate.assert_called_once_with()
+        self.assertEqual(self.manager.shutdown_signals_sent, [True])
+        self.assertEqual(self.manager._unexpected_exit_statuses(), [])
+
+    def test_frontend_sigterm_before_manager_signal_is_reported(self):
+        """Frontend opt-in does not hide a signal the manager did not send."""
+        proc = Mock(name="frontend")
+        proc.exitcode = -signal.SIGTERM
+        proc.name = "frontend"
+        proc.pid = 124
+        proc.is_alive.return_value = False
+        self.manager.add_process(proc, expected_shutdown_exit_codes={-signal.SIGTERM})
+
+        self.manager.graceful_shutdown()
+
+        self.assertEqual(
+            self.manager._unexpected_exit_statuses(),
+            ["name=frontend pid=124 exit_code=-15"],
+        )
+
+    def test_backend_rank_sigterm_is_reported_during_requested_shutdown(self):
+        """Backend ranks must finish their signal handler and exit cleanly."""
+        proc = Mock(name="backend_rank_0")
+        proc.exitcode = -signal.SIGTERM
+        proc.name = "backend_rank_0"
+        proc.pid = 456
+        proc.is_alive.return_value = False
+        self.manager.add_process(proc)
+        self.manager.shutdown_requested = True
+
+        self.assertEqual(
+            self.manager._unexpected_exit_statuses(),
+            ["name=backend_rank_0 pid=456 exit_code=-15"],
+        )
+
+    def test_sigabrt_is_reported_even_during_requested_shutdown(self):
+        """A teardown-time crash must propagate through the owning manager."""
+        proc = Mock(name="backend_rank_0")
+        proc.exitcode = -signal.SIGABRT
+        proc.name = "backend_rank_0"
+        proc.pid = 456
+        proc.is_alive.return_value = False
+        self.manager.processes = [proc]
+        self.manager.shutdown_requested = True
+
+        self.assertEqual(
+            self.manager._unexpected_exit_statuses(),
+            ["name=backend_rank_0 pid=456 exit_code=-6"],
+        )
+
+    def test_monitor_reports_alive_process_with_no_exitcode(self):
+        proc = Mock(name="stuck-rank")
+        proc.exitcode = None
+        proc.name = "stuck-rank"
+        proc.pid = 789
+        proc.is_alive.return_value = True
+        self.manager.set_processes([proc])
+
+        with patch.object(self.manager, "_monitor_processes_health"), patch.object(
+            self.manager, "_join_all_processes"
+        ):
+            self.assertFalse(self.manager.monitor_and_release_processes())
 
     def test_monitor_with_shutdown_signal(self):
         """Test monitoring with shutdown signal"""

@@ -167,6 +167,12 @@ void RtpEmbeddingOp::initGrpcServer(int64_t                              embeddi
     grpc_server_->Wait();
 }
 
+void RtpEmbeddingOp::requestStop() {
+    if (!is_server_shutdown_ && embedding_engine_) {
+        THROW_IF_STATUS_ERROR(embedding_engine_->requestStop());
+    }
+}
+
 void RtpEmbeddingOp::stop() {
     if (embedding_rpc_service_) {
         embedding_rpc_service_->stop();
@@ -272,6 +278,7 @@ void registerRtpEmbeddingOp(const py::module& m) {
              py::arg("vit_config"),
              py::arg("mm_process_engine"))
         .def("stop", &RtpEmbeddingOp::stop)
+        .def("request_stop", &RtpEmbeddingOp::requestStop)
         .def("decode",
              &RtpEmbeddingOp::decode,
              py::call_guard<py::gil_scoped_release>(),

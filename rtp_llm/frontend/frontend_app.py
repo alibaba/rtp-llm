@@ -85,6 +85,7 @@ class FrontendApp(object):
         self.grpc_client = GrpcClientWrapper(
             self.server_config.rpc_server_port, dp_addresses=dp_addresses
         )
+        self._uvicorn_server: Optional[GracefulShutdownServer] = None
 
         logging.info(
             f"frontend app rank_id = {self.server_config.rank_id}, "
@@ -98,6 +99,14 @@ class FrontendApp(object):
         timeout_s = 3600
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
+            if self._uvicorn_server and self._uvicorn_server.should_exit:
+                logging.info(
+                    "Frontend shutdown requested while waiting for backend health, "
+                    "rank_id=%s frontend_server_id=%s",
+                    self.server_config.rank_id,
+                    self.server_config.frontend_server_id,
+                )
+                return
             try:
                 response = await self.grpc_client.post_request("health_check", {})
                 if response.get("status") == "ok":
@@ -114,6 +123,14 @@ class FrontendApp(object):
                     self.server_config.frontend_server_id,
                     e,
                 )
+            if self._uvicorn_server and self._uvicorn_server.should_exit:
+                logging.info(
+                    "Frontend shutdown requested after backend health check, "
+                    "rank_id=%s frontend_server_id=%s",
+                    self.server_config.rank_id,
+                    self.server_config.frontend_server_id,
+                )
+                return
             await asyncio.sleep(1)
         raise RuntimeError(
             "Backend health_check did not become ready within %ds" % timeout_s
@@ -153,12 +170,12 @@ class FrontendApp(object):
             f"Starting Uvicorn server on port {self.server_config.server_port} with timeout_keep_alive={timeout_keep_alive}"
         )
         try:
-            server = GracefulShutdownServer(config)
-            server.set_server(self.frontend_server)
+            self._uvicorn_server = GracefulShutdownServer(config)
+            self._uvicorn_server.set_server(self.frontend_server)
             # freeze all current tracked objects to reduce gc cost
             gc.collect()
             gc.freeze()
-            server.run()
+            self._uvicorn_server.run()
         except BaseException as e:
             raise e
 

@@ -19,6 +19,16 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     return grpc::Status::OK;
 }
 
+void RemoteRpcServer::stop() {
+    LocalRpcServer::stop();
+    // NormalEngine destruction releases MetricsReporter owners before its
+    // EngineBase cache resources. Stop cache-store ANet reporter threads now,
+    // after requests are drained but before that destruction order begins.
+    if (resource_.cache_store) {
+        resource_.cache_store->stop();
+    }
+}
+
 void RemoteRpcServer::initLocalHostInfo() {
     string local_id, local_ip, hostname;
     if (!autil::NetUtil::GetDefaultIp(local_ip) || local_ip.empty()) {

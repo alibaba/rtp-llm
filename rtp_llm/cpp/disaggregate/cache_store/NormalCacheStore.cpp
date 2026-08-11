@@ -18,16 +18,28 @@ constexpr int    kDevicePinRetryBackoffMs         = 1000;
 }  // namespace
 
 NormalCacheStore::~NormalCacheStore() {
-    if (thread_pool_) {
-        thread_pool_close_ = true;
-        thread_pool_->stop();
-        thread_pool_.reset();
-    }
+    stop();
+}
 
-    request_block_buffer_store_->stop();
-    messager_.reset();
-    request_block_buffer_store_.reset();
-    RTP_LLM_LOG_INFO("destory cache store done");
+void NormalCacheStore::stop() {
+    std::call_once(stop_once_, [this]() {
+        if (thread_pool_) {
+            thread_pool_close_ = true;
+            thread_pool_->stop();
+            thread_pool_.reset();
+        }
+
+        if (request_block_buffer_store_) {
+            request_block_buffer_store_->stop();
+        }
+        // TcpMessager owns the ANet reporters. Destroy it before the engine's
+        // MetricsReporter references and the process-wide KMonitor factory are
+        // released; otherwise its loop thread can race MetricsTagsManager
+        // destruction during shutdown.
+        messager_.reset();
+        request_block_buffer_store_.reset();
+        RTP_LLM_LOG_INFO("cache store stopped");
+    });
 }
 
 std::shared_ptr<NormalCacheStore> NormalCacheStore::createNormalCacheStore(const CacheStoreInitParams& params) {

@@ -204,6 +204,7 @@ class CaseRunner(object):
             "SMOKE_STOP_FILE", os.path.join(output_dir, "smoke_stop")
         )
         stop_event = threading.Event()
+        shutdown_errors = []
 
         def signal_handler(signum, _frame):
             logging.info("keepalive smoke received signal %s", signum)
@@ -290,6 +291,7 @@ class CaseRunner(object):
                     logging.warning(
                         "keepalive stop_server failed for role=%s: %s", role, exc
                     )
+                    shutdown_errors.append(f"role={role}: {exc}")
             if (
                 enable_remote_cache
                 and getattr(self, "remote_kvcm_server", None) is not None
@@ -298,11 +300,16 @@ class CaseRunner(object):
                     self.remote_kvcm_server.stop_server()
                 except Exception as exc:  # noqa: BLE001
                     logging.warning("keepalive remote KVCM stop failed: %s", exc)
+                    shutdown_errors.append(f"remote_kvcm: {exc}")
                 try:
                     self.remote_kvcm_server.copy_logs()
                 except Exception as exc:  # noqa: BLE001
                     logging.warning("keepalive remote KVCM log copy failed: %s", exc)
 
+        if shutdown_errors:
+            raise RuntimeError(
+                "keepalive server shutdown failed: " + "; ".join(shutdown_errors)
+            )
         return TaskStates()
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:

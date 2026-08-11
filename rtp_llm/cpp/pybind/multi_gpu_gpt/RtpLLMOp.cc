@@ -377,6 +377,12 @@ void RtpLLMOp::stop() {
     }
 }
 
+void RtpLLMOp::requestStop() {
+    if (!is_server_shutdown_ && model_rpc_service_) {
+        THROW_IF_STATUS_ERROR(model_rpc_service_->getEngine()->requestStop());
+    }
+}
+
 RtpLLMOp::~RtpLLMOp() {
     stop();
 }
@@ -408,6 +414,7 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
+        .def("request_stop", &RtpLLMOp::requestStop)
         .def("stop", &RtpLLMOp::stop);
 }
 

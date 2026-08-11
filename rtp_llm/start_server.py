@@ -1,6 +1,7 @@
 import logging
 import multiprocessing
 import os
+import signal
 import sys
 import time
 import traceback
@@ -386,17 +387,29 @@ def start_server(py_env_configs: PyEnvConfigs):
             frontend_process = start_frontend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
-            process_manager.add_processes(frontend_process)
+            # Frontends do not install a graceful SIGTERM handler. Record that
+            # manager-issued signal as expected for these processes only;
+            # backend managers, ranks, and VIT processes must still exit 0.
+            process_manager.add_processes(
+                frontend_process,
+                expected_shutdown_exit_codes={-signal.SIGTERM},
+            )
 
         if not process_manager.run_health_checks():
-            logging.error("[START_SERVER] Health checks failed")
-            raise Exception("Health checks failed")
+            if process_manager.shutdown_requested:
+                logging.info(
+                    "[START_SERVER] Shutdown requested while health checks were running"
+                )
+            else:
+                logging.error("[START_SERVER] Health checks failed")
+                raise Exception("Health checks failed")
 
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
         process_manager.graceful_shutdown()
     finally:
-        process_manager.monitor_and_release_processes()
+        if not process_manager.monitor_and_release_processes():
+            raise RuntimeError("one or more managed server processes exited abnormally")
 
 
 if __name__ == "__main__":
