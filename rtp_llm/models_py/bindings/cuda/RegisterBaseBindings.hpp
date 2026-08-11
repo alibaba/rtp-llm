@@ -24,6 +24,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3_tie_break.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 
 using namespace rtp_llm;
@@ -273,6 +274,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("lengths"),
                   py::arg("output"),
                   py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+    rtp_ops_m.def("topk_v3_tie_break",
+                  &topk_v3_tie_break,
+                  "GLM5 prefill stable ragged radix-select TopK",
+                  py::arg("scores"),
+                  py::arg("row_starts"),
+                  py::arg("row_ends"),
+                  py::arg("output"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
 

@@ -95,6 +95,10 @@ public:
 
     // total KV tokens for prefill ragged buffer allocation
     int64_t prefill_total_kv_tokens = 0;
+    // Maximum request-local KV length. This is prepared from the existing CPU
+    // length metadata and lets ragged kernels choose Register vs Streaming
+    // without a device-to-host reduction.
+    int64_t prefill_max_kv_len = 0;
 
     // schedule_metadata for deep_gemm
     torch::Tensor schedule_metadata;

@@ -73,6 +73,90 @@ class GetTopkRaggedCPZeroLocalTest(TestCase):
             with self.assertRaisesRegex(ValueError, "GLM5_INDEXER_TOPK_BACKEND"):
                 self._make_indexer_op()
 
+    def test_glm5_prefill_topk_backend_defaults_to_legacy_per_row(self):
+        with patch.dict("os.environ", {}, clear=True):
+            op = self._make_indexer_op()
+        self.assertEqual(op._prefill_topk_backend, "dsv4_per_row")
+
+    def test_glm5_prefill_topk_backend_enables_stable_v3_explicitly(self):
+        with patch.dict(
+            "os.environ",
+            {"GLM5_PREFILL_INDEXER_TOPK_BACKEND": "topk_v3_tie_break"},
+            clear=True,
+        ):
+            op = self._make_indexer_op()
+        self.assertEqual(op._prefill_topk_backend, "topk_v3_tie_break")
+
+    def test_glm5_prefill_topk_default_calls_legacy_per_row(self):
+        with patch.dict("os.environ", {}, clear=True):
+            op = self._make_indexer_op()
+            scores = torch.empty((2, 8), dtype=torch.float32)
+            row_starts = torch.tensor([0, 1], dtype=torch.int32)
+            row_ends = torch.tensor([8, 7], dtype=torch.int32)
+            output = torch.empty((2, 512), dtype=torch.int32)
+            with patch.object(
+                rtp_llm_ops, "dsv4_top_k_per_row_prefill"
+            ) as legacy_per_row, patch.object(
+                rtp_llm_ops, "topk_v3_tie_break"
+            ) as stable_v3:
+                op._run_prefill_topk(
+                    scores, row_starts, row_ends, output, max_seq_len=8
+                )
+
+        legacy_per_row.assert_called_once_with(
+            scores,
+            row_starts,
+            row_ends,
+            output,
+            scores.shape[0],
+            scores.stride(0),
+            scores.stride(1),
+            op.index_topk,
+            True,
+        )
+        stable_v3.assert_not_called()
+
+    def test_glm5_prefill_topk_env_calls_stable_v3(self):
+        with patch.dict(
+            "os.environ",
+            {"GLM5_PREFILL_INDEXER_TOPK_BACKEND": "topk_v3_tie_break"},
+            clear=True,
+        ):
+            op = self._make_indexer_op()
+            scores = torch.empty((2, 8), dtype=torch.float32)
+            row_starts = torch.tensor([0, 1], dtype=torch.int32)
+            row_ends = torch.tensor([8, 7], dtype=torch.int32)
+            output = torch.empty((2, 512), dtype=torch.int32)
+            with patch.object(
+                rtp_llm_ops, "dsv4_top_k_per_row_prefill"
+            ) as legacy_per_row, patch.object(
+                rtp_llm_ops, "topk_v3_tie_break"
+            ) as stable_v3:
+                op._run_prefill_topk(
+                    scores, row_starts, row_ends, output, max_seq_len=16
+                )
+
+        stable_v3.assert_called_once_with(
+            scores,
+            row_starts,
+            row_ends,
+            output,
+            op.index_topk,
+            scores.shape[1],
+        )
+        legacy_per_row.assert_not_called()
+
+    def test_glm5_prefill_topk_backend_rejects_invalid_value(self):
+        with patch.dict(
+            "os.environ",
+            {"GLM5_PREFILL_INDEXER_TOPK_BACKEND": "unknown"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "GLM5_PREFILL_INDEXER_TOPK_BACKEND"
+            ):
+                self._make_indexer_op()
+
     def test_prefill_topk_canonicalization_switch(self):
         with patch.dict(
             "os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}

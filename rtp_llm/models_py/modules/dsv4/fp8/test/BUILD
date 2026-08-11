@@ -5,7 +5,7 @@
 # for FlashMLA / DeepGEMM kernels.  BF16 path tests stay in the sibling
 # ``rtp_llm/models_py/modules/dsv4/test/`` directory.
 
-load("@rules_python//python:defs.bzl", "py_test")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
 _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -27,6 +27,7 @@ _DSV4_FP8_TESTS = [
     "test_dsv4_kv_cache",
     "test_dsv4_persistent_topk",
     "test_topk_v3",
+    "test_topk_v3_tie_break",
     "test_dsv4_top_k_per_row_prefill",
     "test_fused_compressor_meta_triton",
     "test_ring_write_mask",
@@ -47,6 +48,13 @@ _DSV4_FP8_TESTS = [
     "test_varlen_prefill_oracle",
     "test_workspace_prefill_varlen",
 ]
+
+py_binary(
+    name = "benchmark_topk_v3_tie_break",
+    srcs = ["benchmark_topk_v3_tie_break.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["manual"],
+)
 
 _DSV4_FP8_CPU_TESTS = [
     "test_attention_cp_prefill_paths",

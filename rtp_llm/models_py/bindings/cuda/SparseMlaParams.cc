@@ -128,12 +128,14 @@ void SparseMlaParams::fillParamsInternal(bool                 is_prefill,
         auto ks_ptr                  = ks_h_.data_ptr<int32_t>();
         auto ke_ptr                  = ke_h_.data_ptr<int32_t>();
 
-        int64_t offset   = 0;
-        int64_t k_offset = 0;
+        int64_t offset             = 0;
+        int64_t k_offset           = 0;
+        prefill_max_kv_len         = 0;
         for (int i = 0; i < batch_size; ++i) {
             const int32_t input_len  = input_lengths_ptr[i];
             const int32_t prefix_len = prefix_lengths_ptr ? prefix_lengths_ptr[i] : 0;
             const int32_t kv_len     = input_len + prefix_len;
+            prefill_max_kv_len       = std::max(prefill_max_kv_len, static_cast<int64_t>(kv_len));
 
             for (int j = 0; j < input_len; ++j) {
                 const int32_t seq_len_value     = kv_len - input_len + 1 + j;
@@ -715,6 +717,7 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def_readonly("target_verify_total_tokens", &SparseMlaParams::multi_token_decode_total_tokens_)
         .def_readonly("prefill_tokens_per_batch", &SparseMlaParams::prefill_tokens_per_batch_)
         .def_readonly("prefill_total_kv_tokens", &SparseMlaParams::prefill_total_kv_tokens)
+        .def_readonly("prefill_max_kv_len", &SparseMlaParams::prefill_max_kv_len)
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)
         .def(
             "fill_cp_plan_params",

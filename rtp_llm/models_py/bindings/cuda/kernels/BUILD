@@ -208,6 +208,25 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+# Stable ragged TopK for the GLM5 prefill indexer.  Kept separate from
+# topk_v3 so decode A/B baselines retain their original tie semantics.
+cc_library(
+    name = "topk_v3_tie_break",
+    srcs = ["topk_v3_tie_break.cu"],
+    hdrs = [
+        "topk_v3_tie_break.h",
+        "topk_v3_tie_break.cuh",
+    ],
+    deps = [
+        ":topk_v3",
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = glm5_indexer_topk_cuda_copts,
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "cuda_graph_prepare",
     srcs = ["cuda_graph_prepare.cu"],

@@ -253,6 +253,47 @@ class IndexerOp(nn.Module):
             else rtp_llm_ops.dsv4_persistent_topk
         )
 
+        prefill_topk_backend = os.environ.get(
+            "GLM5_PREFILL_INDEXER_TOPK_BACKEND", "dsv4_per_row"
+        ).strip().lower()
+        if prefill_topk_backend not in ("topk_v3_tie_break", "dsv4_per_row"):
+            raise ValueError(
+                "GLM5_PREFILL_INDEXER_TOPK_BACKEND must be "
+                "'topk_v3_tie_break' or 'dsv4_per_row', "
+                f"got {prefill_topk_backend!r}"
+            )
+        self._prefill_topk_backend = prefill_topk_backend
+
+    def _run_prefill_topk(
+        self,
+        logits: torch.Tensor,
+        row_starts: torch.Tensor,
+        row_ends: torch.Tensor,
+        output: torch.Tensor,
+        max_seq_len: int,
+    ) -> None:
+        if self._prefill_topk_backend == "topk_v3_tie_break":
+            rtp_llm_ops.topk_v3_tie_break(
+                logits,
+                row_starts,
+                row_ends,
+                output,
+                self.index_topk,
+                min(max(int(max_seq_len), 1), logits.shape[1]),
+            )
+            return
+        rtp_llm_ops.dsv4_top_k_per_row_prefill(
+            logits,
+            row_starts,
+            row_ends,
+            output,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            self.index_topk,
+            _fp8_prefill_topk_force_radix_sort(),
+        )
+
     def _head_dim_with_sf(self) -> int:
         return self.index_head_dim + self.index_head_dim // self.block_size * 4
 
@@ -825,6 +866,9 @@ class IndexerOp(nn.Module):
             return topk_result
         chunk_rows_env = _fp8_mqa_logits_chunk_rows()
         chunk_rows = num_rows if chunk_rows_env <= 0 else min(chunk_rows_env, num_rows)
+        prefill_max_kv_len = int(
+            getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
+        )
         row_start = 0
         while row_start < num_rows:
             row_end = min(row_start + chunk_rows, num_rows)
@@ -839,16 +883,12 @@ class IndexerOp(nn.Module):
             topk_part = logits.new_empty(
                 (logits.shape[0], self.index_topk), dtype=torch.int32
             )
-            rtp_llm_ops.dsv4_top_k_per_row_prefill(
+            self._run_prefill_topk(
                 logits,
                 fmha_params.ks[row_start:row_end],
                 fmha_params.ke[row_start:row_end],
                 topk_part,
-                logits.shape[0],
-                logits.stride(0),
-                logits.stride(1),
-                self.index_topk,
-                _fp8_prefill_topk_force_radix_sort(),
+                prefill_max_kv_len,
             )
             if _fp8_prefill_topk_canonicalize():
                 topk_part = _canonicalize_topk_indices(topk_part)
@@ -1007,6 +1047,9 @@ class IndexerOp(nn.Module):
         if not has_local_ids:
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
         kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+        prefill_max_kv_len = int(
+            getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
+        )
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -1037,16 +1080,12 @@ class IndexerOp(nn.Module):
                 topk_part = logits_p.new_empty(
                     (logits_p.shape[0], self.index_topk), dtype=torch.int32
                 )
-                rtp_llm_ops.dsv4_top_k_per_row_prefill(
+                self._run_prefill_topk(
                     logits_p,
                     ks[row_start:row_end],
                     ke[row_start:row_end],
                     topk_part,
-                    logits_p.shape[0],
-                    logits_p.stride(0),
-                    logits_p.stride(1),
-                    self.index_topk,
-                    _fp8_prefill_topk_force_radix_sort(),
+                    prefill_max_kv_len,
                 )
                 if _fp8_prefill_topk_canonicalize():
                     topk_part = _canonicalize_topk_indices(topk_part)
