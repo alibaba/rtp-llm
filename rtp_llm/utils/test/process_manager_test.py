@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -37,6 +38,44 @@ def signal_handler_worker(queue):
     signal.signal(signal.SIGTERM, handler)
     while running:
         time.sleep(0.1)
+
+
+def stubborn_descendant_worker(ready_event=None):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if ready_event is not None:
+        ready_event.set()
+    while True:
+        time.sleep(0.1)
+
+
+def stubborn_process_tree_root(queue):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    child = multiprocessing.Process(target=stubborn_descendant_worker)
+    child.start()
+    queue.put(child.pid)
+    while True:
+        time.sleep(0.1)
+
+
+def exiting_process_tree_root(queue):
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    ready_event = multiprocessing.Event()
+    child = multiprocessing.Process(
+        target=stubborn_descendant_worker, args=(ready_event,)
+    )
+    child.start()
+    ready_event.wait(timeout=5)
+    queue.put(child.pid)
+    while True:
+        time.sleep(0.1)
+
+
+def process_is_running(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as stat_file:
+            return stat_file.read().split()[2] != "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return False
 
 
 class TestProcessManager(unittest.TestCase):
@@ -218,6 +257,52 @@ class TestProcessManager(unittest.TestCase):
         proc.join(timeout=1)
         self.assertFalse(proc.is_alive())
 
+    def test_force_kill_processes_terminates_descendants(self):
+        queue = multiprocessing.Queue()
+        proc = multiprocessing.Process(target=stubborn_process_tree_root, args=(queue,))
+        proc.start()
+        child_pid = queue.get(timeout=5)
+        self.manager.add_process(proc)
+        self.manager.shutdown_timeout = 0.2
+        self.manager.monitor_interval = 0.05
+
+        try:
+            self.manager.graceful_shutdown()
+            self.manager.monitor_and_release_processes()
+
+            deadline = time.time() + 2
+            while process_is_running(child_pid) and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(process_is_running(child_pid))
+        finally:
+            if process_is_running(child_pid):
+                os.kill(child_pid, signal.SIGKILL)
+            queue.close()
+            queue.join_thread()
+
+    def test_shutdown_tracks_descendant_after_managed_parent_exits(self):
+        queue = multiprocessing.Queue()
+        proc = multiprocessing.Process(target=exiting_process_tree_root, args=(queue,))
+        proc.start()
+        child_pid = queue.get(timeout=5)
+        self.manager.add_process(proc)
+        self.manager.shutdown_timeout = 0.2
+        self.manager.monitor_interval = 0.05
+
+        try:
+            self.manager.graceful_shutdown()
+            self.manager.monitor_and_release_processes()
+
+            deadline = time.time() + 2
+            while process_is_running(child_pid) and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(process_is_running(child_pid))
+        finally:
+            if process_is_running(child_pid):
+                os.kill(child_pid, signal.SIGKILL)
+            queue.close()
+            queue.join_thread()
+
     def test_monitor_empty_processes(self):
         """Test monitoring with no processes"""
         with patch("logging.info") as mock_info:
@@ -305,7 +390,9 @@ class TestProcessManager(unittest.TestCase):
 
         self.manager.add_process(mock_proc)
         self.manager.terminated = True
-        self.manager.first_dead_time = time.time() - self.manager.shutdown_timeout - 1
+        self.manager.first_dead_time = (
+            time.monotonic() - self.manager.shutdown_timeout - 1
+        )
 
         # Should force kill
         with patch("os.kill") as mock_kill:
@@ -509,6 +596,27 @@ class TestProcessManagerHealthCheck(unittest.TestCase):
         # Health check should not be called since process is dead
         mock_check_fn.assert_not_called()
 
+    def test_health_check_worker_shutdown_is_cancellation(self):
+        mock_proc = Mock()
+        mock_proc.is_alive.return_value = True
+        mock_proc._mock_name = "mock_proc"
+        mock_check_fn = Mock(return_value=True)
+        self.manager.register_health_check(
+            processes=[mock_proc],
+            process_name="test_service",
+            check_ready_fn=mock_check_fn,
+        )
+        self.manager.graceful_shutdown()
+
+        with patch("logging.error") as mock_error:
+            self.manager._health_check_worker("test_service")
+
+        status = self.manager.health_check_status["test_service"]
+        self.assertFalse(status["ready"])
+        self.assertTrue(status["checked"])
+        mock_check_fn.assert_not_called()
+        mock_error.assert_not_called()
+
     def test_start_parallel_health_checks_no_registration(self):
         """Test starting parallel health checks with no registered checks"""
         with patch("logging.info") as mock_info:
@@ -641,6 +749,41 @@ class TestProcessManagerHealthCheck(unittest.TestCase):
 
         # Should fail because check didn't complete
         self.assertFalse(result)
+
+    def test_wait_for_health_checks_is_interruptible_by_shutdown(self):
+        check_entered = threading.Event()
+        release_check = threading.Event()
+        mock_proc = Mock()
+        mock_proc.is_alive.return_value = True
+        mock_proc._mock_name = "mock_proc"
+
+        def blocking_check():
+            check_entered.set()
+            release_check.wait(timeout=5)
+            return True
+
+        self.manager.register_health_check(
+            processes=[mock_proc],
+            process_name="blocking_service",
+            check_ready_fn=blocking_check,
+        )
+        self.manager.start_parallel_health_checks()
+        self.assertTrue(check_entered.wait(timeout=1))
+
+        try:
+            started_at = time.monotonic()
+            self.manager.graceful_shutdown()
+            with patch("logging.error") as mock_error:
+                result = self.manager.wait_for_health_checks()
+            elapsed = time.monotonic() - started_at
+
+            self.assertFalse(result)
+            self.assertLess(elapsed, 0.5)
+            mock_error.assert_not_called()
+        finally:
+            release_check.set()
+            for thread in self.manager.health_check_threads:
+                thread.join(timeout=1)
 
     def test_parallel_health_checks_multiple_processes(self):
         """Test health checks work correctly with multiple processes per service"""

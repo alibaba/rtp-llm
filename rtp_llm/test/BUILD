@@ -80,6 +80,17 @@ py_test(
 )
 
 py_test(
+    name = "start_server_health_test",
+    srcs = [
+        "start_server_health_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "reasoning_tool_parsing_test",
     srcs = [
         "reasoning_tool_parsing_test.py",

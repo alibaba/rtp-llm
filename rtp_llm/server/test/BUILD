@@ -54,3 +54,13 @@ py_test(
     ],
     timeout = "short",
 )
+
+py_test(
+    name = "backend_manager_test",
+    srcs = ["backend_manager_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+    timeout = "short",
+)

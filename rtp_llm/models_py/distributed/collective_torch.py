@@ -12,6 +12,7 @@ import torch.distributed
 
 from rtp_llm.models_py.distributed import rocm_rccl
 from rtp_llm.models_py.distributed.symm_mem import (
+    destroy_symm_mem_communicator,
     get_symm_mem_communicator,
     init_symm_mem_communicator,
 )
@@ -428,39 +429,65 @@ def destroy_distributed_environment():
     """
     global _group_map, _parallelism_config, _initialized
 
-    rank = torch.distributed.get_rank()
-    logging.info(f"[rank: {rank}] Destroying distributed environment")
+    distributed_initialized = torch.distributed.is_initialized()
+    rank = None
+    if distributed_initialized:
+        try:
+            rank = torch.distributed.get_rank()
+        except Exception:
+            logging.exception("Failed to get rank during distributed cleanup")
+    rank_prefix = f"[rank: {rank}] " if rank is not None else ""
+    logging.info("%sDestroying distributed environment", rank_prefix)
+    cleanup_errors = []
 
-    from rtp_llm.models_py.utils.arch import is_cuda
+    def cleanup(name, action):
+        try:
+            action()
+        except Exception as error:
+            logging.exception("Failed to clean up %s", name)
+            cleanup_errors.append((name, error))
 
-    if is_cuda():
-        from rtp_llm.models_py.distributed.user_buffers import (
-            destroy_user_buffers_communicator,
-        )
+    def cleanup_user_buffers():
+        from rtp_llm.models_py.utils.arch import is_cuda
 
-        destroy_user_buffers_communicator()
+        if is_cuda():
+            from rtp_llm.models_py.distributed.user_buffers import (
+                destroy_user_buffers_communicator,
+            )
 
-    try:
-        import librtp_compute_ops
+            destroy_user_buffers_communicator()
 
+    def clear_comm_ops():
+        try:
+            import librtp_compute_ops
+        except ImportError:
+            return
         if hasattr(librtp_compute_ops, "clear_comm_ops"):
             librtp_compute_ops.clear_comm_ops()
-    except ImportError:
-        pass
 
-    # Clean up ROCm RCCL capture comm before destroying process groups,
-    # so that re-init will bootstrap a fresh communicator instead of
-    # reusing the stale one from the destroyed environment.
-    if rocm_rccl.is_available_runtime():
-        rocm_rccl.destroy_capture_comm()
+    def cleanup_rocm_capture_comm():
+        if rocm_rccl.is_available_runtime():
+            rocm_rccl.destroy_capture_comm()
 
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
-    _group_map.clear()
-    logging.info(f"[rank: {rank}] Distributed environment destroyed")
-    _parallelism_config = None
-    _initialized = False
-    gc.collect()
+    try:
+        cleanup("user buffers", cleanup_user_buffers)
+        cleanup("symmetric-memory communicator", destroy_symm_mem_communicator)
+        cleanup("C++ communication callbacks", clear_comm_ops)
+        cleanup("ROCm capture communicator", cleanup_rocm_capture_comm)
+        if distributed_initialized:
+            cleanup("torch process group", torch.distributed.destroy_process_group)
+    finally:
+        _group_map.clear()
+        _parallelism_config = None
+        _initialized = False
+        gc.collect()
+
+    logging.info("%sDistributed environment destroyed", rank_prefix)
+    if cleanup_errors:
+        failed_steps = ", ".join(name for name, _ in cleanup_errors)
+        raise RuntimeError(
+            f"Distributed environment cleanup failed during: {failed_steps}"
+        ) from cleanup_errors[0][1]
 
 
 def _get_group(group: Group) -> torch.distributed.ProcessGroup:

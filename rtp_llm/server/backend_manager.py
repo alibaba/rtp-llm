@@ -1,7 +1,6 @@
 import gc
 import logging
 import threading
-import time
 from typing import Any, Dict, Optional, Union
 
 from pydantic import BaseModel
@@ -14,7 +13,10 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.distribute.distributed_server import DistributedServer, get_world_info
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
-from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
+from rtp_llm.models_py.distributed.collective_torch import (
+    destroy_distributed_environment,
+    init_distributed_environment,
+)
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.fuser import _nfs_manager
 
@@ -23,8 +25,24 @@ StreamObjectType = Union[Dict[str, Any], BaseModel]
 USAGE_HEADER = "USAGE"
 
 
+def _reset_deepep_wrapper() -> None:
+    from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
+
+    DeepEPWrapper.reset()
+
+
+def _reset_moriep_wrapper() -> None:
+    from rtp_llm.models_py.distributed.moriep_wrapper import MoriEPWrapper
+
+    MoriEPWrapper.reset()
+
+
 class BackendManager(object):
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(
+        self,
+        py_env_configs: PyEnvConfigs,
+        shutdown_requested: Optional[threading.Event] = None,
+    ):
         self.py_env_configs = py_env_configs
         self._access_logger = AccessLogger(
             get_log_path(),
@@ -39,7 +57,12 @@ class BackendManager(object):
         if py_env_configs.parallelism_config.world_rank == 0:
             kmonitor.init()
         self.engine: Optional[BaseEngine] = None
-        self._shutdown_requested = threading.Event()
+        self._shutdown_requested = shutdown_requested or threading.Event()
+        self._stop_lock = threading.Lock()
+        self._stopped = False
+        self._stop_error: Optional[RuntimeError] = None
+        self._gc_frozen = False
+        self._owns_distributed_environment = False
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -51,6 +74,7 @@ class BackendManager(object):
         )
 
         if engine_config.parallelism_config.world_size > 1:
+            self._owns_distributed_environment = True
             init_distributed_environment(
                 engine_config.parallelism_config,
                 nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
@@ -156,12 +180,10 @@ class BackendManager(object):
         # freeze all current tracked objects to reduce gc cost
         gc.collect()
         gc.freeze()
-        logging.info("BackendManager entering serve_forever loop")
-        while not self._shutdown_requested.is_set():
-            time.sleep(0.1)  # Check shutdown flag more frequently
-        logging.info("Shutdown requested, stopping BackendManager...")
-        self.stop()
-        logging.info("BackendManager stopped successfully")
+        self._gc_frozen = True
+        logging.info("BackendManager waiting for shutdown request")
+        self._shutdown_requested.wait()
+        logging.info("BackendManager shutdown requested")
 
     def request_shutdown(self):
         """Request graceful shutdown of the backend manager"""
@@ -170,12 +192,57 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
-        if isinstance(self.engine, BaseEngine):
-            _nfs_manager.unmount_all()
-            logging.info("all nfs paths unmounted")
-            self.engine.stop()
+        with self._stop_lock:
+            if self._stopped:
+                if self._stop_error is not None:
+                    raise self._stop_error
+                return
+
+            cleanup_errors = []
+
+            def cleanup(name, action):
+                try:
+                    action()
+                except Exception as error:
+                    logging.exception("Failed to clean up %s", name)
+                    cleanup_errors.append((name, error))
+
+            if self._gc_frozen:
+                cleanup("frozen garbage collector state", gc.unfreeze)
+                self._gc_frozen = False
+
+            engine = self.engine
+            self.engine = None
+            if isinstance(engine, BaseEngine):
+                cleanup("engine", engine.stop)
+            del engine
+            cleanup("engine object graph", gc.collect)
+
+            cleanup("MoriEP wrapper", _reset_moriep_wrapper)
+            cleanup("DeepEP wrapper", _reset_deepep_wrapper)
+            if self._owns_distributed_environment:
+                cleanup("distributed environment", destroy_distributed_environment)
+                self._owns_distributed_environment = False
+
+            distributed_server = self._distributed_server
+            self._distributed_server = None
+            if distributed_server is not None:
+                cleanup("distributed server", distributed_server.stop)
+            del distributed_server
+
+            cleanup("NFS mounts", _nfs_manager.unmount_all)
+            self._stopped = True
+
+            if cleanup_errors:
+                failed_steps = ", ".join(name for name, _ in cleanup_errors)
+                self._stop_error = RuntimeError(
+                    f"BackendManager cleanup failed during: {failed_steps}"
+                )
+                raise self._stop_error from cleanup_errors[0][1]
 
     def ready(self):
+        if self._shutdown_requested.is_set() or self._stopped:
+            return False
         if isinstance(self.engine, BaseEngine):
             return self.engine.ready()
         return True

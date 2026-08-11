@@ -365,10 +365,7 @@ class DeepEPWrapper:
 
     @classmethod
     def reset(cls) -> None:
-        """Reset DeepEP singleton state (for testing only).
-
-        Warning: This should only be used in tests.
-        """
+        """Release the DeepEP singleton during shutdown or test teardown."""
         with cls._lock:
             if cls._instance is not None:
                 cls._instance._destroy_buffer()

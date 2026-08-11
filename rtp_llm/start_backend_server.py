@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from multiprocessing import Process
@@ -39,6 +40,10 @@ def local_rank_start(
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     backend_manager = None
+    shutdown_requested = threading.Event()
+    startup_status_sent = False
+    pipe_closed = False
+    body_error = None
     logging.info(f"[PROCESS_START]Start local rank process")
     start_time = time.time()
     from rtp_llm.server.backend_manager import BackendManager
@@ -47,16 +52,11 @@ def local_rank_start(
     logging.info(f"import BackendManager took {time.time()- start_time:.2f}s")
 
     def signal_handler(signum, frame):
-        logging.info(
-            f"Local rank received signal {signum}, shutting down gracefully..."
-        )
-        if backend_manager is not None:
-            try:
-                backend_manager.request_shutdown()
-            except Exception as e:
-                logging.error(f"Error during backend manager shutdown: {e}")
+        shutdown_requested.set()
 
     # Setup signal handlers for graceful shutdown
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -76,7 +76,10 @@ def local_rank_start(
         if py_env_configs.parallelism_config.world_size > 1:
             setproctitle(f"rtp_llm_rank-{local_rank}")
         set_global_controller(global_controller)
-        backend_manager = BackendManager(py_env_configs)
+        backend_manager = BackendManager(py_env_configs, shutdown_requested)
+        if shutdown_requested.is_set():
+            logging.info("Shutdown requested before backend initialization")
+            return
         backend_manager.start()
         logging.info("Backend server initialized successfully, sending ready status")
 
@@ -89,7 +92,9 @@ def local_rank_start(
                         "message": f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
                     }
                 )
+                startup_status_sent = True
                 pipe_writer.close()
+                pipe_closed = True
             except Exception as e:
                 logging.warning(f"Failed to send success status via pipe: {e}")
 
@@ -98,20 +103,43 @@ def local_rank_start(
         backend_manager.serve_forever()
 
     except BaseException as e:
+        body_error = e
         error_msg = f"start server error: {e}"
         error_trace = traceback.format_exc()
         logging.error(f"{error_msg}, trace: {error_trace}")
 
         # Send startup failure message
-        if pipe_writer is not None:
+        if pipe_writer is not None and not startup_status_sent and not pipe_closed:
             try:
                 pipe_writer.send(
                     {"status": "failed", "message": error_msg, "traceback": error_trace}
                 )
                 pipe_writer.close()
+                pipe_closed = True
             except Exception as pipe_error:
                 logging.warning(f"Failed to send error status via pipe: {pipe_error}")
-        raise e
+        raise
+    finally:
+        cleanup_error = None
+        if backend_manager is not None:
+            try:
+                backend_manager.stop()
+            except BaseException as error:
+                logging.exception("Failed to stop BackendManager")
+                cleanup_error = error
+            backend_manager = None
+
+        if pipe_writer is not None and not pipe_closed:
+            try:
+                pipe_writer.close()
+            except Exception as pipe_error:
+                logging.warning(f"Failed to close startup status pipe: {pipe_error}")
+
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        signal.signal(signal.SIGINT, previous_sigint_handler)
+
+        if cleanup_error is not None and body_error is None:
+            raise cleanup_error
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:

@@ -4,7 +4,9 @@ import signal
 import threading
 import time
 from multiprocessing import Process
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
+
+import psutil
 
 
 class ProcessManager:
@@ -17,6 +19,8 @@ class ProcessManager:
         self.first_dead_time = 0
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
+        self._shutdown_processes: Dict[int, Tuple[psutil.Process, float]] = {}
+        self._shutdown_process_order: List[int] = []
 
         # Health check related attributes
         self.health_check_processes: List[Process] = []
@@ -24,6 +28,7 @@ class ProcessManager:
         self.health_check_threads: List[threading.Thread] = []
         self.health_check_status: Dict[str, dict] = {}  # process_name -> status
         self.health_check_lock = threading.Lock()
+        self._shutdown_event = threading.Event()
 
         self._setup_signal_handlers()
 
@@ -38,6 +43,7 @@ class ProcessManager:
             f"Process manager received signal {signum}, initiating shutdown..."
         )
         self.shutdown_requested = True
+        self._shutdown_event.set()
 
     def set_processes(self, processes: List[Process]):
         """Set the processes to manage (replaces existing list)"""
@@ -58,6 +64,7 @@ class ProcessManager:
         if self.terminated:
             return
 
+        self._snapshot_process_trees()
         logging.info("Shutdown requested, terminating processes...")
         for proc in self.processes:
             if proc.is_alive():
@@ -66,15 +73,83 @@ class ProcessManager:
             else:
                 logging.info(f"proc.name [{proc.name}] pid[{proc.pid}] is not alived")
         self.terminated = True
-        self.first_dead_time = time.time()
+        self.first_dead_time = time.monotonic()
+
+    def _remember_shutdown_process(self, process: psutil.Process) -> None:
+        try:
+            create_time = process.create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return
+
+        if process.pid not in self._shutdown_processes:
+            self._shutdown_process_order.append(process.pid)
+        self._shutdown_processes[process.pid] = (process, create_time)
+
+    def _snapshot_process_trees(self) -> None:
+        """Remember process identities before parents can exit and orphan children."""
+        for managed_process in self.processes:
+            try:
+                if managed_process.pid is None or not managed_process.is_alive():
+                    continue
+                root = psutil.Process(managed_process.pid)
+                descendants = root.children(recursive=True)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+            self._remember_shutdown_process(root)
+            for descendant in descendants:
+                self._remember_shutdown_process(descendant)
+
+    @staticmethod
+    def _tracked_process_is_alive(
+        tracked_process: Tuple[psutil.Process, float]
+    ) -> bool:
+        process, create_time = tracked_process
+        try:
+            if process.create_time() != create_time:
+                return False
+            return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+
+    def _is_any_shutdown_process_alive(self) -> bool:
+        return any(
+            self._tracked_process_is_alive(process)
+            for process in self._shutdown_processes.values()
+        )
 
     def _force_kill_processes(self):
         """Force kill processes after timeout"""
         logging.warning(
             f"Graceful shutdown timeout ({self.shutdown_timeout}s), force killing..."
         )
+        self._snapshot_process_trees()
+        root_pids = {proc.pid for proc in self.processes if proc.pid is not None}
+        killed_processes = []
+        killed_pids = set()
+
+        for pid in reversed(self._shutdown_process_order):
+            tracked_process = self._shutdown_processes.get(pid)
+            if tracked_process is None or not self._tracked_process_is_alive(
+                tracked_process
+            ):
+                continue
+            process, _ = tracked_process
+            process_type = "process" if pid in root_pids else "descendant process"
+            logging.warning(f"Force killing {process_type} {pid}")
+            try:
+                process.kill()
+                if pid not in root_pids:
+                    killed_processes.append(process)
+                killed_pids.add(pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        if killed_processes:
+            psutil.wait_procs(killed_processes, timeout=1)
+
         for proc in self.processes:
-            if proc.is_alive():
+            if proc.is_alive() and proc.pid not in killed_pids:
                 logging.warning(f"Force killing process {proc.pid}")
                 try:
                     os.kill(proc.pid, signal.SIGKILL)
@@ -110,13 +185,13 @@ class ProcessManager:
             if self.first_dead_time > 0:
                 deadline = self.first_dead_time + self.shutdown_timeout
             else:
-                deadline = time.time() + self.shutdown_timeout
+                deadline = time.monotonic() + self.shutdown_timeout
 
         for proc in self.processes:
             try:
                 timeout = None
                 if deadline is not None:
-                    timeout = max(0.1, deadline - time.time())
+                    timeout = max(0.1, deadline - time.monotonic())
                 proc.join(timeout)
             except Exception as e:
                 logging.error(f"Error joining process {proc.pid}: {e}")
@@ -124,7 +199,17 @@ class ProcessManager:
 
     def _monitor_processes_health(self):
         """Monitor process health and handle failures"""
-        while self._is_any_process_alive():
+        while True:
+            if not self.terminated:
+                self._snapshot_process_trees()
+
+            direct_process_alive = self._is_any_process_alive()
+            shutdown_process_alive = (
+                self.terminated and self._is_any_shutdown_process_alive()
+            )
+            if not direct_process_alive and not shutdown_process_alive:
+                break
+
             # Check shutdown signal
             if self.shutdown_requested and not self.terminated:
                 self._terminate_processes()
@@ -135,7 +220,7 @@ class ProcessManager:
                     if not proc.is_alive():
                         logging.error(f"Process {proc.pid} died unexpectedly")
                 if self.first_dead_time == 0:
-                    self.first_dead_time = time.time()
+                    self.first_dead_time = time.monotonic()
                 logging.error("Some processes died unexpectedly, terminating all...")
                 self._terminate_processes()
 
@@ -143,7 +228,7 @@ class ProcessManager:
             if (
                 self.terminated
                 and self.shutdown_timeout != -1
-                and (time.time() - self.first_dead_time) > self.shutdown_timeout
+                and (time.monotonic() - self.first_dead_time) > self.shutdown_timeout
             ):
                 self._force_kill_processes()
                 break
@@ -164,6 +249,7 @@ class ProcessManager:
     def graceful_shutdown(self):
         """Trigger graceful shutdown"""
         self.shutdown_requested = True
+        self._shutdown_event.set()
 
     def register_health_check(
         self,
@@ -210,6 +296,14 @@ class ProcessManager:
         check_ready_fn = config["check_ready_fn"]
 
         while True:
+            if self.shutdown_requested:
+                with self.health_check_lock:
+                    self.health_check_status[process_name]["ready"] = False
+                    self.health_check_status[process_name]["checked"] = True
+                logging.info(
+                    f"{process_name} health check cancelled by shutdown request"
+                )
+                return
             if not self.is_available():
                 with self.health_check_lock:
                     self.health_check_status[process_name]["ready"] = False
@@ -227,13 +321,19 @@ class ProcessManager:
             try:
                 if check_ready_fn():
                     with self.health_check_lock:
-                        self.health_check_status[process_name]["ready"] = True
+                        ready = not self.shutdown_requested
+                        self.health_check_status[process_name]["ready"] = ready
                         self.health_check_status[process_name]["checked"] = True
+                    if not ready:
+                        logging.info(
+                            f"{process_name} health check cancelled by shutdown request"
+                        )
+                        return
                     logging.info(f"{process_name} is ready")
                     return
             except Exception as e:
                 logging.debug(f"{process_name} health check exception: {str(e)}")
-            time.sleep(retry_interval)
+            self._shutdown_event.wait(retry_interval)
 
     def start_parallel_health_checks(self):
         """
@@ -276,8 +376,30 @@ class ProcessManager:
             f"Waiting for {len(self.health_check_threads)} health checks to complete..."
         )
 
-        for thread in self.health_check_threads:
-            thread.join(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self.shutdown_requested:
+                logging.info("Health checks cancelled by shutdown request")
+                return False
+
+            active_thread = next(
+                (thread for thread in self.health_check_threads if thread.is_alive()),
+                None,
+            )
+            if active_thread is None:
+                break
+
+            wait_timeout = 0.1
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                wait_timeout = min(wait_timeout, remaining)
+            active_thread.join(timeout=wait_timeout)
+
+        if self.shutdown_requested:
+            logging.info("Health checks cancelled by shutdown request")
+            return False
 
         # Check results
         all_ready = True

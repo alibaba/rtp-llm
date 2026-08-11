@@ -240,6 +240,11 @@ class TorchSymmMemCommunicator:
         out.copy_(buf_out.view(self.world_size, *shard.shape))
         return out
 
+    def close(self) -> None:
+        self.disabled = True
+        self.buffer = None
+        self.group = None
+
 
 # Use lazy initialization instead of module-level initialization
 _symm_mem_comm: Optional[TorchSymmMemCommunicator] = None
@@ -269,3 +274,12 @@ def get_symm_mem_communicator() -> Optional[TorchSymmMemCommunicator]:
     """Get or initialize TorchSymmMemCommunicator (lazy initialization)."""
     global _symm_mem_comm
     return _symm_mem_comm
+
+
+def destroy_symm_mem_communicator() -> None:
+    """Release the global communicator before its process group is destroyed."""
+    global _symm_mem_comm
+    communicator = _symm_mem_comm
+    _symm_mem_comm = None
+    if communicator is not None:
+        communicator.close()

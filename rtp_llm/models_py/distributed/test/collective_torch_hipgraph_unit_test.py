@@ -3,12 +3,13 @@ import sys
 import unittest
 import unittest.mock
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
 from rtp_llm.models_py.distributed import collective_torch as ct
 from rtp_llm.models_py.distributed import rocm_rccl as hr
+from rtp_llm.models_py.distributed import symm_mem as sm
 
 
 class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
@@ -27,6 +28,89 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         hr._rccl_lib = self._orig_rccl_lib
         hr._hipgraph_allgather_outputs.clear()
         hr._hipgraph_allgather_outputs.update(self._orig_cache)
+
+    def test_destroy_uninitialized_environment_is_idempotent(self):
+        fake_ops = SimpleNamespace(clear_comm_ops=Mock())
+        ct._group_map["stale"] = object()
+        ct._parallelism_config = object()
+        ct._initialized = True
+
+        with patch.dict(sys.modules, {"librtp_compute_ops": fake_ops}), patch(
+            "torch.distributed.is_initialized", return_value=False
+        ), patch(
+            "rtp_llm.models_py.utils.arch.is_cuda", return_value=False
+        ), patch.object(
+            hr, "is_available_runtime", return_value=False
+        ):
+            ct.destroy_distributed_environment()
+            ct.destroy_distributed_environment()
+
+        self.assertEqual(fake_ops.clear_comm_ops.call_count, 2)
+        self.assertEqual(ct._group_map, {})
+        self.assertIsNone(ct._parallelism_config)
+        self.assertFalse(ct._initialized)
+
+    def test_destroy_clears_callbacks_before_process_group(self):
+        events = []
+        fake_ops = SimpleNamespace(
+            clear_comm_ops=Mock(side_effect=lambda: events.append("callbacks"))
+        )
+
+        with patch.dict(sys.modules, {"librtp_compute_ops": fake_ops}), patch(
+            "torch.distributed.is_initialized", return_value=True
+        ), patch(
+            "torch.distributed.get_rank", return_value=3
+        ), patch(
+            "torch.distributed.destroy_process_group",
+            side_effect=lambda: events.append("process_group"),
+        ), patch(
+            "rtp_llm.models_py.utils.arch.is_cuda", return_value=False
+        ), patch.object(
+            hr, "is_available_runtime", return_value=False
+        ):
+            ct.destroy_distributed_environment()
+
+        self.assertEqual(events, ["callbacks", "process_group"])
+
+    def test_destroy_continues_after_symmetric_memory_cleanup_error(self):
+        events = []
+        fake_ops = SimpleNamespace(
+            clear_comm_ops=Mock(side_effect=lambda: events.append("callbacks"))
+        )
+
+        with patch.dict(sys.modules, {"librtp_compute_ops": fake_ops}), patch(
+            "torch.distributed.is_initialized", return_value=True
+        ), patch(
+            "torch.distributed.get_rank", return_value=3
+        ), patch(
+            "torch.distributed.destroy_process_group",
+            side_effect=lambda: events.append("process_group"),
+        ), patch(
+            "rtp_llm.models_py.utils.arch.is_cuda", return_value=False
+        ), patch.object(
+            ct,
+            "destroy_symm_mem_communicator",
+            side_effect=RuntimeError("symmetric memory cleanup failed"),
+        ), patch.object(
+            hr, "is_available_runtime", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "symmetric-memory"):
+                ct.destroy_distributed_environment()
+
+        self.assertEqual(events, ["callbacks", "process_group"])
+        self.assertEqual(ct._group_map, {})
+        self.assertIsNone(ct._parallelism_config)
+        self.assertFalse(ct._initialized)
+
+    def test_destroy_symmetric_memory_communicator_is_idempotent(self):
+        communicator = Mock()
+        sm._symm_mem_comm = communicator
+
+        sm.destroy_symm_mem_communicator()
+        sm.destroy_symm_mem_communicator()
+
+        communicator.close.assert_called_once_with()
+        self.assertIsNone(sm.get_symm_mem_communicator())
 
     def test_should_use_hipgraph_capture_rccl(self):
         hr._is_rocm_runtime = True

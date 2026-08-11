@@ -369,6 +369,14 @@ class DistributedServer(object):
             f"DistributedServer started, rank: {pc.world_rank},  size: {pc.world_size}, master {master_url}"
         )
 
+    def stop(self) -> None:
+        """Release the TCPStore owner. Safe to call more than once."""
+        store = getattr(self, "store", None)
+        if store is not None:
+            self.store = None
+            del store
+        self._initialized = False
+
 
 def get_ip(leader_address: str) -> str:
     try:

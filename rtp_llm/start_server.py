@@ -28,14 +28,19 @@ setup_logging()
 def check_server_health(server_port):
     try:
         response = requests.get(f"http://localhost:{server_port}/health", timeout=60)
-        if response.status_code == 200 and response.json().get("status", "") == "ok":
+        payload = response.json()
+        healthy = response.status_code == 200 and (
+            payload == "ok"
+            or (isinstance(payload, dict) and payload.get("status", "") == "ok")
+        )
+        if healthy:
             logging.info(
                 f"{server_port}/health, response status_code = {response.status_code}, text = {response.text}, len = {len(response.text)}"
             )
             return True
-        else:
-            return False
-    except BaseException as e:
+        return False
+    except Exception as e:
+        logging.debug(f"{server_port}/health check failed: {e}")
         return False
 
 
@@ -389,8 +394,13 @@ def start_server(py_env_configs: PyEnvConfigs):
             process_manager.add_processes(frontend_process)
 
         if not process_manager.run_health_checks():
-            logging.error("[START_SERVER] Health checks failed")
-            raise Exception("Health checks failed")
+            if process_manager.shutdown_requested:
+                logging.info(
+                    "[START_SERVER] Health checks cancelled by shutdown request"
+                )
+            else:
+                logging.error("[START_SERVER] Health checks failed")
+                raise Exception("Health checks failed")
 
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
