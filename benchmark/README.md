@@ -30,3 +30,41 @@ test vllm-0.2.6 whl and rtp-llm
 
 more test data are on the way!
 
+## Streaming tool-call stress
+
+`benchmark_tool_call.py` sends request-scoped tool arguments through the OpenAI
+streaming endpoint. The default profile requires one named tool call per request;
+it checks request isolation, stream termination, chunk structure, tool-call
+arguments, call ID uniqueness, and model semantics. A deterministic fraction of
+requests is cancelled after dispatch, and `/worker_status` is compared before and
+after the recovery window.
+
+```bash
+python3 benchmark/benchmark_tool_call.py \
+    --base-url http://127.0.0.1:30000/v1 \
+    --model model-name \
+    --requests 1000 \
+    --concurrency 32 \
+    --cancel-rate 0.1 \
+    --output tool_call_stress.json
+```
+
+Use a separate run to require two tool calls in one response and validate the
+parallel-call protocol:
+
+```bash
+python3 benchmark/benchmark_tool_call.py \
+    --base-url http://127.0.0.1:30000/v1 \
+    --model model-name \
+    --requests 1000 \
+    --concurrency 32 \
+    --tool-choice required \
+    --parallel-tool-calls \
+    --output parallel_tool_call_stress.json
+```
+
+Structural and semantic failures return a non-zero exit code by default. The
+reported `throughput_rps` and latency percentiles include only fully successful
+non-cancelled requests; `attempted_rps` includes the complete offered workload.
+`--allow-semantic-errors` is available only when semantic mismatches should be
+reported without failing the process.
