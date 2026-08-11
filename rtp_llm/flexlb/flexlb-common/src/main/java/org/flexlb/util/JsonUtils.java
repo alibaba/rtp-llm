@@ -94,6 +94,15 @@ public class JsonUtils {
         }
     }
 
+    public static <T> T toObjectOrNull(String text, Class<T> clazz) {
+        ObjectReader reader = MAPPER.readerFor(clazz);
+        try {
+            return reader.readValue(text);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
     /**
      * Convert byte array to a java object.
      *
