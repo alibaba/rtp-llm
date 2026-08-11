@@ -93,7 +93,10 @@ class BaseFormatDetector(ABC):
         results = []
         for i, act in enumerate(action):
             name = act.get("name")
-            if not (name and name in tool_indices):
+            if not name:
+                logger.warning("Model attempted to call a function with an empty name")
+                continue
+            if name not in tool_indices:
                 logger.warning(f"Model attempted to call undefined function: {name}")
                 if not _forward_unknown_tools():
                     continue

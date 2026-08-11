@@ -273,6 +273,9 @@ class Glm47MoeDetector(BaseFormatDetector):
         return func_name, raw_arguments
 
     def _should_drop_tool(self, func_name: str, tools: List[Tool]) -> bool:
+        if not func_name:
+            logger.warning("Empty function name detected, skipping tool call")
+            return True
         if func_name not in self._get_tool_indices(tools):
             if _forward_unknown_tools():
                 return False

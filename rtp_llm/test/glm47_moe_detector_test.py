@@ -1275,6 +1275,19 @@ class TestGlm47MoeDetectorUnknownTools(unittest.TestCase):
         self.assertEqual([call.name for call in stream.calls], ["get_time"])
         self.assertEqual([call.name for call in non_stream.calls], ["get_time"])
 
+    def test_malformed_empty_name_does_not_block_following_valid_tool(self):
+        os.environ["RTP_LLM_FORWARD_UNKNOWN_TOOLS"] = "true"
+        text = (
+            "<tool_call><arg_key>missing_value</arg_key></tool_call>"
+            "<tool_call>get_time</tool_call>"
+        )
+
+        stream = Glm47MoeDetector().parse_streaming_increment(text, self.tools)
+        non_stream = Glm47MoeDetector().detect_and_parse(text, self.tools)
+
+        self.assertEqual([call.name for call in stream.calls], ["get_time"])
+        self.assertEqual([call.name for call in non_stream.calls], ["get_time"])
+
     def test_forwarded_malformed_unknown_is_terminal(self):
         os.environ["RTP_LLM_FORWARD_UNKNOWN_TOOLS"] = "true"
         text = "<tool_call>unknown<arg_key>missing_value</arg_key></tool_call>"
@@ -1283,6 +1296,93 @@ class TestGlm47MoeDetectorUnknownTools(unittest.TestCase):
             Glm47MoeDetector().parse_streaming_increment(text, self.tools)
         with self.assertRaisesRegex(ToolParseError, "malformed tool arguments"):
             Glm47MoeDetector().detect_and_parse(text, self.tools)
+
+    def test_streaming_unknown_tool_can_be_forwarded_explicitly(self):
+        os.environ["RTP_LLM_FORWARD_UNKNOWN_TOOLS"] = "true"
+        text = "<tool_call>custom_tool</tool_call>"
+        detector = Glm47MoeDetector()
+        result = detector.parse_streaming_increment(text, self.tools)
+
+        self.assertEqual([call.name for call in result.calls if call.name], ["custom_tool"])
+        self.assertEqual(
+            "".join(call.parameters for call in result.calls if call.parameters), "{}"
+        )
+
+    def test_forwarded_unknown_tool_preserves_following_tool_index(self):
+        os.environ["RTP_LLM_FORWARD_UNKNOWN_TOOLS"] = "true"
+        text = (
+            "<tool_call>custom_tool<arg_key>value</arg_key>"
+            "<arg_value>sample</arg_value></tool_call>"
+            "<tool_call>get_time</tool_call>"
+        )
+
+        detector = Glm47MoeDetector()
+        result = detector.parse_streaming_increment(text, self.tools)
+
+        name_calls = [call for call in result.calls if call.name]
+        self.assertEqual(
+            [(call.tool_index, call.name) for call in name_calls],
+            [(0, "custom_tool"), (1, "get_time")],
+        )
+        merged = merge_tool_call_deltas(result.calls)
+        self.assertEqual(json.loads(merged[0]["parameters"]), {"value": "sample"})
+        self.assertEqual(json.loads(merged[1]["parameters"]), {})
+        self.assertEqual(detector._buffer, "")
+
+    def test_empty_tool_name_does_not_block_following_valid_tool(self):
+        os.environ["RTP_LLM_FORWARD_UNKNOWN_TOOLS"] = "true"
+        malformed = "<tool_call></tool_call>"
+        valid = "<tool_call>get_time</tool_call>"
+
+        detector = Glm47MoeDetector()
+        single_result = detector.parse_streaming_increment(malformed + valid, self.tools)
+        single_name_calls = [call for call in single_result.calls if call.name]
+        self.assertEqual(
+            [(call.tool_index, call.name) for call in single_name_calls],
+            [(0, "get_time")],
+        )
+        self.assertEqual(
+            "".join(
+                call.parameters for call in single_result.calls if call.parameters
+            ),
+            "{}",
+        )
+        self.assertEqual(single_result.normal_text, "")
+        self.assertEqual(detector._buffer, "")
+        self.assertEqual(detector.current_tool_id, 1)
+        self.assertEqual(len(detector.prev_tool_call_arr), 1)
+        self.assertEqual(len(detector.streamed_args_for_tool), 1)
+
+        detector = Glm47MoeDetector()
+        prefix_result = detector.parse_streaming_increment("<tool_call>", self.tools)
+        self.assertEqual(prefix_result.calls, [])
+        self.assertEqual(prefix_result.normal_text, "")
+        self.assertEqual(detector.current_tool_id, -1)
+        self.assertEqual(detector.prev_tool_call_arr, [])
+        self.assertEqual(detector.streamed_args_for_tool, [])
+
+        suffix_result = detector.parse_streaming_increment(
+            "</tool_call>" + valid, self.tools
+        )
+        suffix_name_calls = [call for call in suffix_result.calls if call.name]
+        self.assertEqual(
+            [(call.tool_index, call.name) for call in suffix_name_calls],
+            [(0, "get_time")],
+        )
+        self.assertEqual(suffix_result.normal_text, "")
+        self.assertEqual(detector._buffer, "")
+        self.assertEqual(detector.current_tool_id, 1)
+        self.assertEqual(len(detector.prev_tool_call_arr), 1)
+        self.assertEqual(len(detector.streamed_args_for_tool), 1)
+
+        non_stream_result = Glm47MoeDetector().detect_and_parse(
+            malformed + valid, self.tools
+        )
+        self.assertEqual(
+            [(call.tool_index, call.name) for call in non_stream_result.calls],
+            [(0, "get_time")],
+        )
+        self.assertEqual(non_stream_result.normal_text, "")
 
 
 
