@@ -2,6 +2,7 @@ import asyncio
 from unittest import IsolatedAsyncioTestCase, main
 from unittest.mock import MagicMock, patch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.frontend.frontend_server import FrontendServer
 
 
@@ -20,12 +21,12 @@ class _Response:
         return self
 
     async def __anext__(self):
-        if self._error is not None and not self._error_raised:
-            self._error_raised = True
-            raise self._error
         try:
             return next(self._values)
         except StopIteration:
+            if self._error is not None and not self._error_raised:
+                self._error_raised = True
+                raise self._error
             raise StopAsyncIteration
 
 
@@ -126,6 +127,27 @@ class FrontendSseDoneTest(IsolatedAsyncioTestCase):
         self.assertIn("injected", chunks[0])
         self.assertEqual(server.complete_response_calls, 0)
         self.assertEqual(len(server._access_logger.errors), 1)
+
+    async def test_tool_parse_error_after_chunk_emits_606_without_done(self):
+        response = _Response(
+            [_Chunk()],
+            error=FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION, "incomplete tool call"
+            ),
+        )
+
+        server, chunks = await self._collect({"stream": True}, response)
+
+        self.assertEqual(chunks[0], 'data: {"id":"chunk"}\r\n\r\n')
+        self.assertIn('"error_code": 606', chunks[1])
+        self.assertIn('"error_code_str": "606_EXECUTION_EXCEPTION"', chunks[1])
+        self.assertIn('"message": "incomplete tool call"', chunks[1])
+        self.assertNotIn("[DONE]", "".join(chunks))
+        self.assertNotIn("<tool_call>", "".join(chunks))
+        self.assertNotIn("Traceback", chunks[1])
+        self.assertEqual(server.complete_response_calls, 0)
+        self.assertEqual(len(server._access_logger.errors), 1)
+        self.assertEqual(server._global_controller.decrement_calls, 1)
 
     async def test_collect_error_does_not_emit_success_done(self):
         response = _Response([_Chunk()])

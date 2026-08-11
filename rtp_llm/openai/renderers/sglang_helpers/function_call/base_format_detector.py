@@ -23,6 +23,10 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.utils import (
 logger = logging.getLogger(__name__)
 
 
+class ToolParseError(Exception):
+    """A tool block was recognized but could not be parsed atomically."""
+
+
 def _forward_unknown_tools() -> bool:
     """Check if unknown tool calls should be forwarded instead of dropped."""
     return os.environ.get("RTP_LLM_FORWARD_UNKNOWN_TOOLS", "").lower() == "true"
@@ -115,6 +119,10 @@ class BaseFormatDetector(ABC):
         """
         action = orjson.loads(text)
         return StreamingParseResult(calls=self.parse_base_json(action, tools))
+
+    def finalize_streaming(self, truncated: bool = False) -> StreamingParseResult:
+        """Finalize detector-owned streaming state at the end of generation."""
+        return StreamingParseResult()
 
     def _ends_with_partial_token(self, buffer: str, bot_token: str) -> int:
         """

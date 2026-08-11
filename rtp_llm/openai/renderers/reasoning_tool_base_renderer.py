@@ -8,6 +8,7 @@ from typing import List, Optional, Sequence, Tuple
 from jinja2 import BaseLoader, Environment
 from typing_extensions import override
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
@@ -22,6 +23,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
     RenderedInputs,
     RendererParams,
     StreamStatus,
+    ThinkStatus,
 )
 from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
     rtp_tools_to_sglang_tools,
@@ -30,6 +32,7 @@ from rtp_llm.openai.renderers.sglang_helpers.format_convert_helper import (
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
+    ToolParseError,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
 from rtp_llm.openai.renderers.sglang_helpers.token_normalizer import (
@@ -129,6 +132,43 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             ]
         else:
             return [StreamStatus(request) for _ in range(n)]
+
+    def _finalize_tool_detector(self, status: StreamStatus) -> None:
+        if not isinstance(status, ReasoningToolStreamStatus) or not status.detector:
+            return
+
+        try:
+            parse_result = status.detector.finalize_streaming(
+                truncated=status.finish_reason == FinisheReason.length
+            )
+        except ToolParseError as error:
+            logging.error("工具调用解析失败: %s", error)
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION, str(error)
+            ) from error
+
+        if parse_result.calls:
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                "tool parser committed calls during finalization",
+            )
+        status.delta_output_string = (
+            parse_result.normal_text + status.delta_output_string
+        )
+
+    @override
+    async def _flush_buffer(
+        self,
+        buffer_list: List[StreamStatus],
+        stop_words_str: List[str],
+        is_streaming: bool,
+        think_status_list: List[ThinkStatus],
+    ):
+        for status in buffer_list:
+            self._finalize_tool_detector(status)
+        return await super()._flush_buffer(
+            buffer_list, stop_words_str, is_streaming, think_status_list
+        )
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
@@ -598,8 +638,13 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                     tool_call.index = i
 
             return tool_calls, remaining_text
+        except ToolParseError as error:
+            logging.error("工具调用解析失败: %s", error)
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION, str(error)
+            ) from error
         except Exception as e:
-            logging.error(f"工具调用解析失败: {e}, 当前文本: {text}")
+            logging.error("工具调用解析失败: %s", e)
             return None, text
 
     def _clean_stop_words(self, text: str) -> str:

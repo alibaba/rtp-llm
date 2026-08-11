@@ -3,11 +3,14 @@ import json
 import logging
 import re
 from enum import Enum
+from io import StringIO
 from typing import Any, Dict, List, Optional, Tuple
 
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import Tool
 from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector import (
     BaseFormatDetector,
+    ToolParseError,
+    _forward_unknown_tools,
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
@@ -171,6 +174,8 @@ class Glm47MoeDetector(BaseFormatDetector):
         self._streamed_raw_length = 0
         self._tool_call_completed = False  # Track if tool call has been completed
         self._arguments_closed = False
+        self._pending_tool_buffer: Optional[StringIO] = None
+        self._pending_tool_tail = ""
         self._reset_streaming_state()
 
     def _reset_streaming_state(self) -> None:
@@ -191,6 +196,196 @@ class Glm47MoeDetector(BaseFormatDetector):
         """Check if the text contains a glm-4.5 / glm-4.6 format tool call."""
         return self.bot_token in text
 
+    def _parse_argument_text_strict(
+        self, raw_arguments: str, func_name: str, tools: List[Tool]
+    ) -> Dict[str, Any]:
+        if not raw_arguments:
+            return {}
+
+        pairs: List[Tuple[str, str]] = []
+        cursor = 0
+        arg_key_start = "<arg_key>"
+        arg_key_end = "</arg_key>"
+        arg_value_start = "<arg_value>"
+        arg_value_end = "</arg_value>"
+
+        while cursor < len(raw_arguments):
+            cursor = self._skip_argument_spacing(raw_arguments, cursor)
+            if cursor == len(raw_arguments):
+                break
+            if not raw_arguments.startswith(arg_key_start, cursor):
+                raise ToolParseError("malformed tool arguments")
+            key_start = cursor + len(arg_key_start)
+            key_end = raw_arguments.find(arg_key_end, key_start)
+            if key_end == -1:
+                raise ToolParseError("malformed tool arguments")
+            arg_key = raw_arguments[key_start:key_end]
+            if not arg_key.strip():
+                raise ToolParseError("malformed tool arguments")
+
+            cursor = self._skip_argument_spacing(
+                raw_arguments, key_end + len(arg_key_end)
+            )
+            if not raw_arguments.startswith(arg_value_start, cursor):
+                raise ToolParseError("malformed tool arguments")
+            value_start = cursor + len(arg_value_start)
+            value_end = raw_arguments.find(arg_value_end, value_start)
+            if value_end == -1:
+                raise ToolParseError("malformed tool arguments")
+            pairs.append((arg_key, raw_arguments[value_start:value_end]))
+            cursor = value_end + len(arg_value_end)
+
+        if not pairs:
+            raise ToolParseError("malformed tool arguments")
+
+        try:
+            return self._parse_argument_pairs(pairs, func_name, tools)
+        except ToolParseError:
+            raise
+        except Exception as error:
+            raise ToolParseError("failed to parse tool arguments") from error
+
+    @staticmethod
+    def _skip_argument_spacing(text: str, cursor: int) -> int:
+        while cursor < len(text):
+            if text[cursor].isspace():
+                cursor += 1
+            elif text.startswith("\\n", cursor):
+                cursor += 2
+            else:
+                break
+        return cursor
+
+    def _split_complete_tool_block(self, block: str) -> Tuple[str, str]:
+        if not block.startswith(self.bot_token) or not block.endswith(self.eot_token):
+            raise ToolParseError("malformed tool call")
+
+        body = block[len(self.bot_token) : -len(self.eot_token)]
+        arguments_start = body.find("<arg_key>")
+        if arguments_start == -1:
+            func_name = body.strip()
+            raw_arguments = ""
+        else:
+            func_name = body[:arguments_start].strip()
+            raw_arguments = body[arguments_start:].strip()
+        if "<" in func_name or ">" in func_name:
+            raise ToolParseError("malformed tool call")
+        return func_name, raw_arguments
+
+    def _should_drop_tool(self, func_name: str, tools: List[Tool]) -> bool:
+        if func_name not in self._get_tool_indices(tools):
+            if _forward_unknown_tools():
+                return False
+            logger.warning("Model attempted to call undefined function: %s", func_name)
+            return True
+        return False
+
+    def _parse_tool_action(
+        self, func_name: str, raw_arguments: str, tools: List[Tool]
+    ) -> Dict[str, Any]:
+        arguments = self._parse_argument_text_strict(
+            raw_arguments, func_name, tools
+        )
+        try:
+            json.dumps(arguments, ensure_ascii=False, allow_nan=False)
+        except Exception as error:
+            raise ToolParseError("failed to parse tool arguments") from error
+        return {"name": func_name, "parameters": arguments}
+
+    def _parse_complete_tool_block(
+        self, block: str, tools: List[Tool]
+    ) -> Dict[str, Any]:
+        func_name, raw_arguments = self._split_complete_tool_block(block)
+        return self._parse_tool_action(func_name, raw_arguments, tools)
+
+    def _reset_pending_tool(self) -> None:
+        self._pending_tool_buffer = None
+        self._pending_tool_tail = ""
+        self._last_arguments = ""
+        self.current_tool_name_sent = False
+        self._streamed_raw_length = 0
+        self._reset_streaming_state()
+
+    def _abort_pending_tool(self) -> None:
+        self._reset_pending_tool()
+        self.current_tool_id = (
+            len(self.prev_tool_call_arr) if self.prev_tool_call_arr else -1
+        )
+        del self.streamed_args_for_tool[len(self.prev_tool_call_arr) :]
+
+    def _append_pending_tool(
+        self, text: str, cursor: int
+    ) -> Tuple[Optional[str], int]:
+        """Append once and scan only the new boundary for the closing tag."""
+        if self._pending_tool_buffer is None:
+            self._pending_tool_buffer = StringIO()
+            self._pending_tool_tail = ""
+
+        tail_size = len(self.eot_token) - 1
+        bridge_size = min(tail_size, len(text) - cursor)
+        bridge = self._pending_tool_tail + text[cursor : cursor + bridge_size]
+        bridge_end = bridge.find(self.eot_token)
+        if bridge_end != -1:
+            block_end = (
+                cursor
+                + bridge_end
+                + len(self.eot_token)
+                - len(self._pending_tool_tail)
+            )
+        else:
+            end_pos = text.find(self.eot_token, cursor)
+            block_end = end_pos + len(self.eot_token) if end_pos != -1 else -1
+
+        if block_end == -1:
+            segment = text[cursor:]
+            self._pending_tool_buffer.write(segment)
+            if len(segment) >= tail_size:
+                self._pending_tool_tail = segment[-tail_size:]
+            else:
+                self._pending_tool_tail = (
+                    self._pending_tool_tail + segment
+                )[-tail_size:]
+            return None, len(text)
+
+        if block_end <= cursor:
+            raise ToolParseError("inconsistent tool parser state")
+        self._pending_tool_buffer.write(text[cursor:block_end])
+        block = self._pending_tool_buffer.getvalue()
+        self._pending_tool_buffer = None
+        self._pending_tool_tail = ""
+        return block, block_end
+
+    def _commit_tool_block(
+        self, block: str, tools: List[Tool]
+    ) -> List[ToolCallItem]:
+        func_name, raw_arguments = self._split_complete_tool_block(block)
+        if self._should_drop_tool(func_name, tools):
+            self._reset_pending_tool()
+            return []
+        action = self._parse_tool_action(func_name, raw_arguments, tools)
+        next_tool_id = 0 if self.current_tool_id == -1 else self.current_tool_id
+        committed_calls = self.parse_base_json(
+            action, tools, start_index=next_tool_id
+        )
+        if not committed_calls:
+            self._reset_pending_tool()
+            return []
+        if (
+            len(committed_calls) != 1
+            or next_tool_id != len(self.prev_tool_call_arr)
+            or next_tool_id != len(self.streamed_args_for_tool)
+        ):
+            raise ToolParseError("inconsistent tool parser state")
+
+        committed = committed_calls[0]
+        self.prev_tool_call_arr.append(
+            {"name": committed.name, "arguments": action["parameters"]}
+        )
+        self.streamed_args_for_tool.append(committed.parameters)
+        self.current_tool_id = next_tool_id + 1
+        self._reset_pending_tool()
+        return [committed]
+
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """
         One-time parsing: Detects and parses tool calls in the provided text.
@@ -202,51 +397,40 @@ class Glm47MoeDetector(BaseFormatDetector):
         if self.bot_token not in text:
             return StreamingParseResult(normal_text=text, calls=[])
 
-        # Extract all normal text (before, between, and after tool calls)
-        normal_text_parts = []
-        last_end = 0
-
-        # Find all tool call matches
-        for match in re.finditer(self.func_call_regex, text, re.DOTALL):
-            # Add text before this tool call
-            if match.start() > last_end:
-                normal_text_parts.append(text[last_end : match.start()])
-            last_end = match.end()
-
-        # Add any remaining text after the last tool call
-        if last_end < len(text):
-            normal_text_parts.append(text[last_end:])
-
-        # Combine all normal text parts
-        normal_text = "".join(normal_text_parts).strip()
-
-        # Parse tool calls
-        match_result_list = re.findall(self.func_call_regex, text, re.DOTALL)
-        calls = []
+        normal_text_parts: List[str] = []
+        calls: List[ToolCallItem] = []
+        cursor = 0
         try:
-            for match_result in match_result_list:
-                # Get function name
-                func_detail = self.func_detail_regex.search(match_result)
-                if func_detail is None:
-                    continue
-                func_name = func_detail.group(1) if func_detail.group(1) else ""
-                func_args = func_detail.group(2) if func_detail.group(2) else ""
-                arguments = {}
-                if func_args:
-                    pairs = self.func_arg_regex.findall(func_args)
-                    # Parse arguments using shared method
-                    arguments = self._parse_argument_pairs(pairs, func_name, tools)
-
-                # construct match_result for parse_base_json
-                match_result = {"name": func_name, "parameters": arguments}
-                calls.extend(
-                    self.parse_base_json(match_result, tools, start_index=len(calls))
+            while cursor < len(text):
+                tool_start = text.find(self.bot_token, cursor)
+                if tool_start == -1:
+                    normal_text_parts.append(text[cursor:])
+                    break
+                normal_text_parts.append(text[cursor:tool_start])
+                tool_end = text.find(
+                    self.eot_token, tool_start + len(self.bot_token)
                 )
-            return StreamingParseResult(normal_text=normal_text, calls=calls)
-        except Exception as e:
-            logger.error(f"Error in detect_and_parse: {e}", exc_info=True)
-            # return the normal text if parsing fails
-            return StreamingParseResult(normal_text=text)
+                if tool_end == -1:
+                    raise ToolParseError("incomplete tool call")
+                block_end = tool_end + len(self.eot_token)
+                block = text[tool_start:block_end]
+                func_name, raw_arguments = self._split_complete_tool_block(block)
+                if not self._should_drop_tool(func_name, tools):
+                    action = self._parse_tool_action(
+                        func_name, raw_arguments, tools
+                    )
+                    calls.extend(
+                        self.parse_base_json(action, tools, start_index=len(calls))
+                    )
+                cursor = block_end
+
+            return StreamingParseResult(
+                normal_text="".join(normal_text_parts).strip(), calls=calls
+            )
+        except ToolParseError:
+            raise
+        except Exception as error:
+            raise ToolParseError("failed to parse tool call") from error
 
     def _get_value_type(self, func_name: str, key: str, tools: List[Tool]) -> str:
         """Get parameter type from tool definition, with fallback to auto-detection.
@@ -616,126 +800,74 @@ class Glm47MoeDetector(BaseFormatDetector):
     ) -> StreamingParseResult:
         """
         Streaming incremental parsing tool calls for GLM-4.5 and GLM-4.6 format.
-        Uses a state machine to convert XML to JSON incrementally for true character-by-character streaming.
-        Outputs JSON increments immediately as XML data arrives.
+        Buffers each tool block until it is complete and valid, then commits one
+        canonical JSON delta. This prevents malformed output from leaking a partial
+        structured call that cannot be rolled back by the client.
         """
-        self._buffer += new_text
-        current_text = self._buffer
-
-        # Check if we have a tool call
-        has_tool_call = self.bot_token in current_text
-
-        if not has_tool_call:
-            # Check if buffer could be the start of a tool call
-            # Keep buffer if it could be a partial match of bot_token
-            is_potential_start = any(
-                self.bot_token.startswith(current_text[-i:])
-                for i in range(1, min(len(current_text), len(self.bot_token)) + 1)
-            )
-
-            if not is_potential_start:
-                # Not a potential tool call, return as normal text
-                # Must return the entire buffer (current_text), not just new_text,
-                # because buffer may contain previously accumulated characters like '<'
-                # that turned out not to be part of a tool call
-                output_text = current_text
-                self._buffer = ""
-                if self.eot_token in output_text:
-                    output_text = output_text.replace(self.eot_token, "")
-                return StreamingParseResult(normal_text=output_text)
-            else:
-                # Could be start of tool call, keep buffering
-                return StreamingParseResult(normal_text="", calls=[])
-
-        # Extract any text before the first bot_token and return it as normal_text
-        normal_text = ""
-        first_bot_token_idx = current_text.find(self.bot_token)
-        if first_bot_token_idx > 0:
-            normal_text = current_text[:first_bot_token_idx]
-            current_text = current_text[first_bot_token_idx:]
-            # Update buffer to only include from the bot token onwards
-            self._buffer = current_text
-
-        if not hasattr(self, "_tool_indices"):
-            self._tool_indices = self._get_tool_indices(tools)
-
+        current_text = self._buffer + new_text
+        self._buffer = ""
+        normal_text_parts: list[str] = []
         calls: list[ToolCallItem] = []
-        try:
-            # Try to match a partial or complete tool call
-            # Use a single flexible regex pattern that handles all cases
-            partial_match = re.search(
-                r"<tool_call>(.*?)(?:(<arg_key.*?))?(?:(</tool_call>)|$)",
-                current_text,
-                re.DOTALL,
-            )
 
-            if not partial_match:
-                return StreamingParseResult(normal_text=normal_text, calls=[])
+        # A decode step can contain several complete tool calls. Pending blocks use an
+        # append-only buffer so an argument streamed in tiny pieces is copied once.
+        cursor = 0
+        while cursor < len(current_text) or self._pending_tool_buffer is not None:
+            try:
+                if self._pending_tool_buffer is not None:
+                    block, cursor = self._append_pending_tool(current_text, cursor)
+                    if block is None:
+                        break
+                    calls.extend(self._commit_tool_block(block, tools))
+                    continue
 
-            # Extract match groups using helper method
-            func_name, func_args_raw, is_tool_end = self._extract_match_groups(
-                partial_match
-            )
-
-            # Initialize tool call state if needed (keeping existing logic)
-            if self.current_tool_id == -1:
-                self.current_tool_id = 0
-                self.prev_tool_call_arr = []
-                self.streamed_args_for_tool = [""]
-                self._streamed_raw_length = 0
-                self.current_tool_name_sent = False  # Reset for new tool call
-                self._reset_streaming_state()
-            # Check if this is a continuation of an existing tool call or a new one
-            elif not self.current_tool_name_sent:
-                # Only increment tool_id if we're truly starting a NEW tool call
-                # Don't increment if this is just the first time we're processing
-                # a tool call that was received in the buffer
-                # The key insight: only increment when we've COMPLETED a previous tool call
-                # and now see another bot_token in new_text
-                pass  # Remove the problematic auto-increment logic
-
-            # Ensure tracking arrays are large enough (keeping existing logic)
-            while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                self.prev_tool_call_arr.append({})
-            while len(self.streamed_args_for_tool) <= self.current_tool_id:
-                self.streamed_args_for_tool.append("")
-
-            # Determine if function name is complete by checking for <arg_key> in the full text
-            # This is important for streaming scenarios where args come in later chunks
-            has_arg_key = "<arg_key" in current_text
-
-            # Send tool name if needed
-            tool_name_item = self._send_tool_name_if_needed(
-                func_name, has_arg_key, is_tool_end
-            )
-            if tool_name_item:
-                calls.append(tool_name_item)
-
-            # Process streaming arguments if tool name has been sent
-            if self.current_tool_name_sent:
-                arg_item = self._process_arguments_streaming(
-                    func_name, func_args_raw, tools
-                )
-                if arg_item:
-                    calls.append(arg_item)
-
-                # Finalize tool call if end token is encountered
-                if is_tool_end == self.eot_token and not self._tool_call_completed:
-                    finalize_calls = self._finalize_tool_call(
-                        func_name,
-                        func_args_raw,
-                        tools,
-                        partial_match.end(),
-                        current_text,
+                first_bot_token_idx = current_text.find(self.bot_token, cursor)
+                if first_bot_token_idx == -1:
+                    remaining = current_text[cursor:]
+                    partial_length = self._ends_with_partial_token(
+                        remaining, self.bot_token
                     )
-                    calls.extend(finalize_calls)
-                    return StreamingParseResult(normal_text=normal_text, calls=calls)
+                    if partial_length:
+                        normal_text_parts.append(
+                            remaining[:-partial_length].replace(self.eot_token, "")
+                        )
+                        self._buffer = remaining[-partial_length:]
+                    else:
+                        normal_text_parts.append(
+                            remaining.replace(self.eot_token, "")
+                        )
+                    break
 
-        except Exception as e:
-            logger.error(f"Error in parse_streaming_increment: {e}", exc_info=True)
-            return StreamingParseResult(normal_text=current_text)
+                if first_bot_token_idx > cursor:
+                    normal_text_parts.append(
+                        current_text[cursor:first_bot_token_idx].replace(
+                            self.eot_token, ""
+                        )
+                    )
+                self._pending_tool_buffer = StringIO()
+                self._pending_tool_tail = ""
+                cursor = first_bot_token_idx
+            except ToolParseError:
+                self._buffer = ""
+                self._abort_pending_tool()
+                raise
+            except Exception as error:
+                self._buffer = ""
+                self._abort_pending_tool()
+                raise ToolParseError("failed to parse tool call") from error
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        return StreamingParseResult(
+            normal_text="".join(normal_text_parts), calls=calls
+        )
+
+    def finalize_streaming(self, truncated: bool = False) -> StreamingParseResult:
+        partial_start = self._buffer
+        self._buffer = ""
+        if self._pending_tool_buffer is not None:
+            self._abort_pending_tool()
+            if not truncated:
+                raise ToolParseError("incomplete tool call")
+        return StreamingParseResult(normal_text=partial_start)
 
     def _parse_argument_pairs(
         self, pairs: List[Tuple[str, str]], func_name: str, tools: List[Tool]
