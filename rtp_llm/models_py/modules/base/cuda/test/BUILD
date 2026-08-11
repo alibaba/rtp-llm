@@ -39,6 +39,13 @@ py_test (
 )
 
 py_test (
+    name = "fused_bias_gelu_test",
+    srcs = ["fused_bias_gelu_test.py"],
+    deps = py_test_deps,
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test (
     name = "select_topk_op_test",
     srcs = ["select_topk_op_test.py"],
     deps = py_test_deps,

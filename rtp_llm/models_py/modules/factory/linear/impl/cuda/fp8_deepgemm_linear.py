@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 class CudaFp8DeepGEMMLinear(LinearBase):
     """CUDA FP8 DeepGEMM quantized Linear"""
 
+    supports_deferred_bias = True
+
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
 
@@ -171,6 +173,14 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     def forward(
         self, input: torch.Tensor, out: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        return self._forward_impl(input, out, apply_bias=True)
+
+    def _forward_impl(
+        self,
+        input: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
         # Check input dtype - only accept bfloat16
         if input.dtype != torch.bfloat16 and input.dtype != torch.float8_e4m3fn:
             error_msg = f"Input tensor dtype must be bfloat16 or float8_e4m3fn, got {input.dtype}"
@@ -259,6 +269,18 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             c=None,
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
-        if self.bias is not None:
+        if apply_bias and self.bias is not None:
             output.add_(self.bias.to(output.dtype))
+        return output
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(input, apply_bias=False)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        output = self.forward_without_bias(input)
+        if self.bias is None:
+            return torch.nn.functional.gelu(output)
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        rtp_llm_ops.fused_bias_gelu(output, self.bias.to(output.dtype))
         return output
