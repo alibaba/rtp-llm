@@ -29,6 +29,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 )
 from rtp_llm.openai.renderers.sglang_helpers.function_call.core_types import (
     StreamingParseResult,
+    ToolCallItem,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import (
     Qwen3Detector,
@@ -39,7 +40,7 @@ from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
 
 class ToolStatusInitializationTest(IsolatedAsyncioTestCase):
     @staticmethod
-    def _request() -> ChatCompletionRequest:
+    def _request(logprobs: bool = False) -> ChatCompletionRequest:
         return ChatCompletionRequest(
             messages=[ChatMessage(role=RoleEnum.user, content="test")],
             tools=[
@@ -51,6 +52,7 @@ class ToolStatusInitializationTest(IsolatedAsyncioTestCase):
                     )
                 )
             ],
+            logprobs=logprobs,
         )
 
     @staticmethod
@@ -102,6 +104,92 @@ class ToolStatusInitializationTest(IsolatedAsyncioTestCase):
         self.assertIs(statuses[0].detector, detectors[0])
         self.assertIs(statuses[1].detector, detectors[1])
         self.assertIsNot(statuses[0].detector, statuses[1].detector)
+
+    async def test_tool_parsing_preserves_logprobs(self):
+        request = self._request(logprobs=True)
+        detector = Mock(spec=BaseFormatDetector)
+        detector.parse_streaming_increment.return_value = StreamingParseResult(
+            calls=[ToolCallItem(tool_index=0, name="lookup", parameters="{}")]
+        )
+        renderer = self._renderer([detector])
+
+        with patch(
+            "rtp_llm.openai.renderers.reasoning_tool_base_renderer."
+            "rtp_tools_to_sglang_tools",
+            return_value=[Mock(name="converted_tool")],
+        ):
+            (status,) = await renderer._create_status_list(1, request)
+
+        self.assertIsInstance(status, ReasoningToolStreamStatus)
+        status.delta_output_string = "<tool_call>lookup</tool_call>"
+
+        renderer._process_reasoning_and_tool_calls = (
+            ReasoningToolBaseRenderer._process_reasoning_and_tool_calls.__get__(
+                renderer
+            )
+        )
+        renderer._extract_reasoning_content = (
+            ReasoningToolBaseRenderer._extract_reasoning_content.__get__(renderer)
+        )
+        renderer._extract_tool_calls_content = (
+            ReasoningToolBaseRenderer._extract_tool_calls_content.__get__(renderer)
+        )
+        renderer._split_reasoning_text_and_content = (
+            CustomChatRenderer._split_reasoning_text_and_content.__get__(renderer)
+        )
+
+        renderer.tokenizer = Mock()
+        renderer.tokenizer.decode.return_value = "x"
+        renderer._generate_log_probs = CustomChatRenderer._generate_log_probs.__get__(
+            renderer
+        )
+
+        aux_info = AuxInfo()
+        aux_info.input_len = 1
+        aux_info.output_len = 1
+        aux_info.reuse_len = 0
+        output = Mock(spec=GenerateOutput)
+        output.aux_info = aux_info
+        output.output_ids = torch.tensor([1])
+        output.all_probs = torch.tensor([0.1, 0.9])
+
+        delta = await renderer._process_reasoning_and_tool_calls(
+            status, output, is_streaming=True
+        )
+        self.assertIsNotNone(delta)
+        self.assertEqual(delta.output_str.tool_calls[0].function.name, "lookup")
+        self.assertEqual(delta.logprobs.token, "x")
+        self.assertAlmostEqual(
+            delta.logprobs.logprob, torch.log(torch.tensor(0.9)).item()
+        )
+        detector.parse_streaming_increment.assert_called_once_with(
+            "<tool_call>lookup</tool_call>", status.sglang_tools
+        )
+
+        response = await CustomChatRenderer._generate_stream_response(
+            renderer, [delta], [ThinkStatus(is_streaming=True)]
+        )
+        self.assertEqual(
+            response.choices[0].delta.tool_calls[0].function.name, "lookup"
+        )
+        self.assertEqual(response.choices[0].logprobs.content, [delta.logprobs])
+
+    async def test_reasoning_parser_is_not_disabled_by_logprobs(self):
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="test")],
+            logprobs=True,
+        )
+        reasoning_parser = Mock(spec=ReasoningParser)
+        renderer = self._renderer([None])
+        renderer.in_think_mode.return_value = True
+        renderer._create_reasoning_parser.return_value = reasoning_parser
+
+        (status,) = await renderer._create_status_list(1, request)
+
+        self.assertIsInstance(status, ReasoningToolStreamStatus)
+        self.assertIsNone(status.detector)
+        self.assertIs(status.reasoning_parser, reasoning_parser)
+        self.assertEqual(status.sglang_tools, ())
 
 
 class ProcessReasoningAndToolCallsTest(IsolatedAsyncioTestCase):

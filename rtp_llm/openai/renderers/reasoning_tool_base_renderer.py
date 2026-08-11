@@ -116,7 +116,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         """创建状态列表"""
-        if (request.tools or self.in_think_mode(request)) and not request.logprobs:
+        if request.tools or self.in_think_mode(request):
             sglang_tools = tuple(rtp_tools_to_sglang_tools(request.tools or []))
             return [
                 ReasoningToolStreamStatus(
@@ -128,7 +128,6 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 for _ in range(n)
             ]
         else:
-            # logprobs模式下使用普通StreamStatus
             return [StreamStatus(request) for _ in range(n)]
 
     @override
