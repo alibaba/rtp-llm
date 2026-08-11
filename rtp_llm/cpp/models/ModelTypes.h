@@ -101,11 +101,11 @@ using GptModelInputShapeHints = std::array<int64_t, GptModelInputIndex::gptModel
 // Bit positions for `tensorDeviceMap`. Only fields that participate in the
 // MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
 enum GptModelInputDeviceBit : uint32_t {
-    kDeviceBitComboTokens      = 1u << 0,
-    kDeviceBitInputLengths     = 1u << 1,
-    kDeviceBitSequenceLengths  = 1u << 2,
-    kDeviceBitPrefixLengths    = 1u << 3,
-    kDeviceBitLmOutputIndexes  = 1u << 4,
+    kDeviceBitComboTokens          = 1u << 0,
+    kDeviceBitInputLengths         = 1u << 1,
+    kDeviceBitSequenceLengths      = 1u << 2,
+    kDeviceBitPrefixLengths        = 1u << 3,
+    kDeviceBitLmOutputIndexes = 1u << 4,
 };
 
 GptModelInputShapeHints       getModelInputShapeHints(const GptModelInputs& inputs);
@@ -135,6 +135,15 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+
+    // DSpARK's serial Markov correction runs after proposal CUDA-graph
+    // replay. Implemented by the Python-backed draft model that owns the
+    // Markov weights.
+    virtual torch::Tensor dsparkMarkovLogits(const torch::Tensor& base_logits,
+                                             const torch::Tensor& previous_tokens,
+                                             bool                 previous_is_draft) {
+        throw std::runtime_error("model does not implement DSpARK Markov logits");
+    }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).

@@ -313,16 +313,20 @@ enum SpeculativeType {
 };
 
 struct SpeculativeExecutionConfig {
-    std::string     model_type                    = "";
-    SpeculativeType type                          = SP_TYPE_NONE;
-    int64_t         sp_min_token_match            = 2;
-    int64_t         sp_max_token_match            = 2;
-    std::string     tree_decode_config            = "";
-    int64_t         gen_num_per_cycle             = 1;
-    bool            force_stream_sample           = false;
-    bool            force_score_context_attention = true;
-    std::string     quantization                  = "";
-    std::string     checkpoint_path               = "";
+    std::string     model_type         = "";
+    SpeculativeType type               = SP_TYPE_NONE;
+    int64_t         sp_min_token_match = 2;
+    int64_t         sp_max_token_match = 2;
+    std::string     tree_decode_config = "";
+    int64_t         gen_num_per_cycle  = 1;
+    // DSpARK proposal sampling: "greedy" emits argmax tokens and uses an
+    // implicit point-mass q; "probabilistic" reuses the request's standard
+    // temperature/top-k/top-p kernel and forwards that same q to rejection.
+    std::string draft_sample_method           = "greedy";
+    bool        force_stream_sample           = false;
+    bool        force_score_context_attention = true;
+    std::string quantization                  = "";
+    std::string checkpoint_path               = "";
     // DSpARK noise/mask token used to build each fixed-width draft block.
     // Filled from the draft checkpoint by ModelFactory.
     int64_t         sp_dspark_mask_token_id       = -1;

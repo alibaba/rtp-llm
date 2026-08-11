@@ -75,8 +75,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     paged-cache injection, FlashMLA non-causal top-k indices and the
     ``mtp.*`` checkpoint weights.
 
-    Output ``draft_tokens`` is ``[B, gamma]``; the rejection-sampling q is
-    reconstructed engine-side as a point mass on the emitted tokens.
+    Proposal forward emits ``draft_logits [B, gamma, vocab]``. The executor
+    applies the serial Markov correction and framework sampler after CUDA
+    graph replay.
     """
 
     # Draft side: carries the capture ids for the shared-buffer row-width
@@ -160,6 +161,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             aux_feature_dim=len(self._dspark_target_layer_ids) * int(self._v4_args.dim),
             hidden_dim=int(self._v4_args.dim),
             vocab_size=int(self._v4_args.vocab_size),
+            draft_sample_method=str(
+                getattr(model_config, "dspark_draft_sample_method", "greedy")
+            ),
         )
         # Model-level weights are attached by ``_load_extra_weights`` after
         # the inherited V4Transformer has consumed the per-layer dictionaries.
@@ -168,12 +172,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
 
         logging.info(
             "[DeepSeekV4DSparkModel] fixed gamma=%d noise=%d target_layers=%s "
-            "markov_rank=%d window=%d",
+            "markov_rank=%d window=%d draft_sample_method=%s",
             self._gen_num_per_cycle,
             self._dspark_noise_token_id,
             self._dspark_target_layer_ids,
             self._dspark_markov_rank,
             int(self._v4_args.window_size),
+            self._dspark_draft_sample_method,
         )
 
     # ------------------------------------------------------------------

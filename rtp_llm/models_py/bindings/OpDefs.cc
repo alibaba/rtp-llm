@@ -198,11 +198,8 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
-        .def(pybind11::init<torch::Tensor,
-                            torch::Tensor,
-                            PyAttentionInputs,
-                            BertEmbeddingInputs,
-                            rtp_llm::DSparkCallPhase>(),
+        .def(pybind11::
+                 init<torch::Tensor, torch::Tensor, PyAttentionInputs, BertEmbeddingInputs, rtp_llm::DSparkCallPhase>(),
              pybind11::arg("input_ids")             = torch::empty(0),
              pybind11::arg("input_hiddens")         = torch::empty(0),
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
@@ -213,8 +210,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
-        .def_readwrite(
-            "dspark_call_phase", &PyModelInputs::dspark_call_phase, "Explicit DSpARK proposal/commit phase");
+        .def_readwrite("dspark_call_phase", &PyModelInputs::dspark_call_phase, "Explicit DSpARK proposal/commit phase");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -239,7 +235,7 @@ void registerPyOpDefs(pybind11::module& m) {
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
         .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
-        .def_readwrite("draft_tokens", &PyModelOutputs::draft_tokens, "Optional [batch, gamma] DSpARK draft tokens");
+        .def_readwrite("draft_logits", &PyModelOutputs::draft_logits, "Optional [batch, gamma, vocab] DSpARK logits");
 }
 
 }  // namespace torch_ext

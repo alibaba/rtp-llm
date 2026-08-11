@@ -13,13 +13,16 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
 class _TinyProposer(DSparkProposerMixin):
     """Smallest possible DSparkProposerMixin subclass for the sampling tail."""
 
-    def __init__(self, *, width: int, vocab: int, rank: int):
+    def __init__(
+        self, *, width: int, vocab: int, rank: int, sample_method: str = "greedy"
+    ):
         self.init_dspark_proposer(
             width=width,
             noise_token_id=1,
             aux_feature_dim=8,
             hidden_dim=4,
             vocab_size=vocab,
+            draft_sample_method=sample_method,
         )
         torch.manual_seed(7)
         self.w1 = torch.randn(vocab, rank)
@@ -149,8 +152,8 @@ class ProposerContractTest(unittest.TestCase):
         )
         outputs = proposer.dspark_empty_outputs(2, torch.device("cpu"))
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
-        self.assertEqual(tuple(outputs.draft_tokens.shape), (2, 3))
-        self.assertEqual(outputs.draft_tokens.dtype, torch.int32)
+        self.assertEqual(tuple(outputs.draft_logits.shape), (2, 3, 17))
+        self.assertEqual(outputs.draft_logits.dtype, torch.float32)
 
     def test_hooks_require_subclass_implementation(self) -> None:
         proposer = DSparkProposerMixin()
@@ -243,7 +246,13 @@ class _ProposeProposer(_TinyProposer):
         self.seen_base = None
 
     def forward_query_block(
-        self, query_ids, query_positions, prefix_lengths, active_requests, inputs, fmha_impl
+        self,
+        query_ids,
+        query_positions,
+        prefix_lengths,
+        active_requests,
+        inputs,
+        fmha_impl,
     ):
         self.query_call = (query_ids, query_positions, prefix_lengths, active_requests)
         return torch.zeros(query_ids.numel(), 4)
@@ -281,7 +290,9 @@ class ProposeStepTest(unittest.TestCase):
             torch.tensor([7, 0], dtype=torch.int32),
         )
 
-        outputs = self.proposer.run_propose_step(inputs, fmha_impl=None, device=self.device)
+        outputs = self.proposer.run_propose_step(
+            inputs, fmha_impl=None, device=self.device
+        )
 
         query_ids, positions, prefix, active = self.proposer.query_call
         self.assertEqual(query_ids[:, 0].tolist(), anchors.tolist())
@@ -290,10 +301,7 @@ class ProposeStepTest(unittest.TestCase):
         self.assertEqual(positions[1].tolist(), [0, 1, 2, 3, 4])
         # Zero-prefix rows are CUDA-graph padding, not live requests.
         self.assertEqual(active.tolist(), [True, False])
-        expected = self.proposer._sample_sequential_markov(
-            self.proposer.seen_base, anchors
-        )
-        self.assertTrue(torch.equal(outputs.draft_tokens, expected))
+        torch.testing.assert_close(outputs.draft_logits, self.proposer.seen_base)
 
     def test_rejects_wrong_token_count(self) -> None:
         inputs = _propose_inputs(
@@ -320,11 +328,13 @@ class ProposeStepTest(unittest.TestCase):
             torch.zeros(0, dtype=torch.int32),
         )
 
-        outputs = self.proposer.run_propose_step(inputs, fmha_impl=None, device=self.device)
+        outputs = self.proposer.run_propose_step(
+            inputs, fmha_impl=None, device=self.device
+        )
 
         # Empty DP ranks must still execute the collective attention layers.
         self.assertIsNotNone(self.proposer.query_call)
-        self.assertEqual(outputs.draft_tokens.shape[0], 0)
+        self.assertEqual(outputs.draft_logits.shape[0], 0)
 
 
 if __name__ == "__main__":

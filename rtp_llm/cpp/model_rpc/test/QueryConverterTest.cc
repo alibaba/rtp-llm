@@ -86,14 +86,16 @@ TEST_F(QueryConverterTest, testTransOutput) {
     }
     GenerateOutputs outputs;
     GenerateOutput  res;
-    res.output_ids            = output_token_ids;
-    res.finished              = true;
-    res.aux_info.cost_time_us = 1000;
-    res.aux_info.iter_count   = 9;
-    res.aux_info.input_len    = 8;
-    res.aux_info.output_len   = 7;
-    auto hidden_states_tensor = torch::empty({3, 2}, torch::kFloat32);
-    auto hidden_states_data   = hidden_states_tensor.data_ptr<float>();
+    res.output_ids                                   = output_token_ids;
+    res.finished                                     = true;
+    res.aux_info.cost_time_us                        = 1000;
+    res.aux_info.iter_count                          = 9;
+    res.aux_info.input_len                           = 8;
+    res.aux_info.output_len                          = 7;
+    res.aux_info.speculative_draft_rounds            = 4;
+    res.aux_info.speculative_accepted_tokens_per_pos = {3, 2, 1};
+    auto hidden_states_tensor                        = torch::empty({3, 2}, torch::kFloat32);
+    auto hidden_states_data                          = hidden_states_tensor.data_ptr<float>();
     for (int i = 0; i < 6; ++i) {
         hidden_states_data[i] = i;
     }
@@ -109,6 +111,11 @@ TEST_F(QueryConverterTest, testTransOutput) {
     EXPECT_EQ(aux_info_pb.iter_count(), 9);
     EXPECT_EQ(aux_info_pb.input_len(), 8);
     EXPECT_EQ(aux_info_pb.output_len(), 7);
+    EXPECT_EQ(aux_info_pb.speculative_draft_rounds(), 4);
+    EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos_size(), 3);
+    EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos(0), 3);
+    EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos(1), 2);
+    EXPECT_EQ(aux_info_pb.speculative_accepted_tokens_per_pos(2), 1);
     auto output_ids_pb = output_pb.output_ids();
     ASSERT_EQ(output_ids_pb.data_type(), TensorPB_DataType::TensorPB_DataType_INT32);
     ASSERT_EQ(output_ids_pb.shape_size(), 3);

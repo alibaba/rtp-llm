@@ -4,7 +4,7 @@ DSpark evaluates one runtime-fixed query block ``[anchor, noise, ...]`` per
 round and corrects the resulting base logits left-to-right with a low-rank
 Markov bias.  :class:`DSparkProposerMixin` owns everything identical across model
 families — the engine input contract, query-block geometry, committed-row
-mapping and the greedy Markov sampling tail — as an add-on base class::
+mapping and the Markov sampling tail — as an add-on base class::
 
     class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model): ...
 
@@ -28,11 +28,9 @@ are request-major):
   committed sequence length immediately before the query block. No
   feature input — the block reads the committed feature KV.
 
-The greedy sampling tail reproduces the reference proposer numerics exactly:
-``softmax(base + bias)`` then ``argmax`` per step, the sampled token feeding
-the next step's Markov bias.  Stochastic (Gumbel) draft sampling is
-intentionally not implemented yet; it extends the tail without changing the
-hook surface.
+The model forward returns unsampled base logits.  The executor invokes the
+Markov sampling tail after CUDA-graph replay, so RNG and categorical sampling
+remain outside the captured model graph.
 """
 
 from __future__ import annotations
@@ -147,6 +145,7 @@ class DSparkProposerMixin:
         aux_feature_dim: int,
         hidden_dim: int,
         vocab_size: int,
+        draft_sample_method: str = "greedy",
     ) -> None:
         if int(width) <= 0:
             raise ValueError(f"DSpark width must be positive, got {width}")
@@ -167,6 +166,12 @@ class DSparkProposerMixin:
         self._dspark_aux_feature_dim = int(aux_feature_dim)
         self._dspark_hidden_dim = int(hidden_dim)
         self._dspark_vocab_size = int(vocab_size)
+        self._dspark_draft_sample_method = str(draft_sample_method).lower()
+        if self._dspark_draft_sample_method not in ("greedy", "probabilistic"):
+            raise ValueError(
+                "DSpark draft_sample_method must be 'greedy' or "
+                f"'probabilistic', got {draft_sample_method!r}"
+            )
         self.markov_head: Optional[DSparkMarkovHead] = None
 
     # ------------------------------------------------------------------
@@ -255,8 +260,10 @@ class DSparkProposerMixin:
                 device=device,
             )
         )
-        outputs.draft_tokens = torch.zeros(
-            (batch_size, width), dtype=torch.int32, device=device
+        outputs.draft_logits = torch.zeros(
+            (batch_size, width, self._dspark_vocab_size),
+            dtype=torch.float32,
+            device=device,
         )
         return outputs
 
@@ -417,28 +424,29 @@ class DSparkProposerMixin:
             return self.dspark_empty_outputs(0, device)
 
         normalized, base_logits = self.compute_draft_logits(hidden)
-        draft_tokens = self._sample_sequential_markov(base_logits, anchors)
         outputs = PyModelOutputs(normalized)
-        outputs.draft_tokens = draft_tokens
+        outputs.draft_logits = base_logits.float().contiguous()
         return outputs
+
+    def dspark_markov_logits(
+        self,
+        base_logits: torch.Tensor,
+        previous_tokens: torch.Tensor,
+        previous_is_draft: bool,
+    ) -> torch.Tensor:
+        """Apply one Markov transition outside the model CUDA graph."""
+        if self.markov_head is None:
+            raise RuntimeError("DSpark markov head is not loaded")
+        if previous_is_draft:
+            previous_tokens = self.map_draft_to_target(previous_tokens)
+        return (base_logits + self.markov_head.bias(previous_tokens)).float()
 
     def _sample_sequential_markov(
         self,
         base_logits: torch.Tensor,
         anchor_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """Run the left-to-right greedy Markov correction chain.
-
-        Numerics follow the reference proposer exactly: per step the argmax
-        over ``base + bias`` (softmax is monotone, so it never changes the
-        argmax) becomes both the proposal token and the next step's Markov
-        input.  No host synchronization occurs.
-
-        The proposal is deterministic, so its q distribution is the point
-        mass on the emitted token; rejection sampling receives that one-hot
-        from the engine (built C++-side) instead of a full-vocabulary
-        softmax materialized here.
-        """
+        """Reference greedy Markov chain used by focused model tests."""
         if self.markov_head is None:
             raise RuntimeError("DSpark markov head is not loaded")
         if base_logits.dim() != 3:
@@ -460,9 +468,11 @@ class DSparkProposerMixin:
         previous = anchor_ids
         tokens = []
         for step in range(width):
-            logits = base_logits[:, step] + self.markov_head.bias(previous)
-            next_token = torch.argmax(logits.float(), dim=-1)
+            logits = self.dspark_markov_logits(
+                base_logits[:, step], previous, previous_is_draft=step > 0
+            )
+            next_token = torch.argmax(logits, dim=-1)
             tokens.append(next_token.to(torch.int32))
-            previous = self.map_draft_to_target(next_token)
+            previous = next_token
 
         return torch.stack(tokens, dim=1).contiguous()

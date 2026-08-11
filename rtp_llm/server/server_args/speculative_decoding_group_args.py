@@ -84,6 +84,16 @@ def init_speculative_decoding_group_args(parser, sp_config):
     )
 
     speculative_decoding_group.add_argument(
+        "--sp_draft_sample_method",
+        env_name="SP_DRAFT_SAMPLE_METHOD",
+        bind_to=(sp_config, "draft_sample_method"),
+        type=str,
+        choices=("greedy", "probabilistic"),
+        default="greedy",
+        help="DSpARK draft proposal sampling method.",
+    )
+
+    speculative_decoding_group.add_argument(
         "--force_stream_sample",
         env_name="FORCE_STREAM_SAMPLE",
         bind_to=(sp_config, "force_stream_sample"),

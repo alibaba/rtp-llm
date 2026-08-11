@@ -33,7 +33,25 @@ class DSparkRuntimeConfigTest(unittest.TestCase):
         )
 
         self.assertEqual(sp_config.sp_dspark_mask_token_id, 128799)
+        self.assertEqual(sp_config.draft_sample_method, "greedy")
+        self.assertEqual(draft_config.dspark_draft_sample_method, "greedy")
         self.assertEqual(target_config.capture_aux_hidden_layer_ids, [40, 41, 42])
+
+    def test_probabilistic_draft_sample_method_is_wired_to_draft_model(self):
+        sp_config, target_config, draft_config = self._configs(gamma=3)
+        sp_config.draft_sample_method = "Probabilistic"
+
+        ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
+
+        self.assertEqual(sp_config.draft_sample_method, "probabilistic")
+        self.assertEqual(draft_config.dspark_draft_sample_method, "probabilistic")
+
+    def test_rejects_unknown_draft_sample_method(self):
+        sp_config, target_config, draft_config = self._configs(gamma=3)
+        sp_config.draft_sample_method = "invalid"
+
+        with self.assertRaisesRegex(ValueError, "draft_sample_method"):
+            ModelFactory._setup_dspark_configs(sp_config, target_config, draft_config)
 
     def test_gen_num_per_cycle_must_be_positive(self):
         sp_config, target_config, draft_config = self._configs(gamma=0)

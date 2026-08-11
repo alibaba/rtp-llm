@@ -836,6 +836,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("sp_max_token_match", &SpeculativeExecutionConfig::sp_max_token_match)
         .def_readwrite("tree_decode_config", &SpeculativeExecutionConfig::tree_decode_config)
         .def_readwrite("gen_num_per_cycle", &SpeculativeExecutionConfig::gen_num_per_cycle)
+        .def_readwrite("draft_sample_method", &SpeculativeExecutionConfig::draft_sample_method)
         .def_readwrite("force_stream_sample", &SpeculativeExecutionConfig::force_stream_sample)
         .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention)
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
@@ -854,10 +855,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.force_score_context_attention,
                                       self.quantization,
                                       self.checkpoint_path,
-                                      self.sp_dspark_mask_token_id);
+                                      self.sp_dspark_mask_token_id,
+                                      self.draft_sample_method);
             },
             [](py::tuple t) {
-                if (t.size() != 10 && t.size() != 11)
+                if (t.size() != 10 && t.size() != 11 && t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -873,6 +875,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.checkpoint_path               = t[9].cast<std::string>();
                     if (t.size() == 11) {
                         c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
+                    } else if (t.size() == 12) {
+                        c.sp_dspark_mask_token_id = t[10].cast<int64_t>();
+                        c.draft_sample_method     = t[11].cast<std::string>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
