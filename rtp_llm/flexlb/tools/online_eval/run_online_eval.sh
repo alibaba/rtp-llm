@@ -65,6 +65,10 @@ GRADIENT_MAX_SPEED="${GRADIENT_MAX_SPEED:-1000}"
 GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
 SCHEDULE_ONLY="${SCHEDULE_ONLY:-0}"
 LOOP="${LOOP:-0}"
+# Send mode is a pure pass-through (single env-var layer): empty SEND_MODE
+# means JavaLoadClient's built-in default (replay), identical to before.
+SEND_MODE="${SEND_MODE:-}"
+SEND_MODE_QPS="${SEND_MODE_QPS:-}"
 PUSHGATEWAY_URL="${PUSHGATEWAY_URL:-}"
 LOAD_CLIENT_WORKERS="${LOAD_CLIENT_WORKERS:-8}"
 LOAD_CLIENT_START_DELAY_SECONDS="${LOAD_CLIENT_START_DELAY_SECONDS:-10}"
@@ -238,7 +242,7 @@ PY
 
 assert_no_concurrent_flexlb_test() {
   local matches
-  matches="$(pgrep -af 'flexlb_load_client\.py|mock_engine_shard_launcher\.py|flexlb-api-[^ ]*\.jar|flexlb-mock-engine-[^ ]*\.jar' || true)"
+  matches="$(pgrep -af 'flexlb_load_client\.py|mock_engine_shard_launcher\.py|flexlb-api-[^ ]*\.jar|flexlb-mock-engine-[^ ]*\.jar|org\.flexlb\.mockengine\.JavaLoadClient' || true)"
   if [[ -n "${matches}" ]]; then
     echo "Concurrent FlexLB performance processes detected on the host:" >&2
     echo "${matches}" >&2
@@ -612,41 +616,8 @@ print(int(time.time() * 1000 + float(sys.argv[1]) * 1000))
 PY
 )"
 echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
+echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
 
-CLIENT_ARGS=(
-  "${TRACE_FILE}"
-  --flexlb-http-addr "${FLEXLB_HTTP_ADDR}"
-  --replay-speed "${REPLAY_SPEED}"
-  --duration-s "${DURATION_S}"
-  --limit "${LIMIT}"
-  --max-concurrency "${MAX_CONCURRENCY}"
-  --timeout-ms "${TIMEOUT_MS}"
-  --sla-ttft-ms "${SLA_TTFT_MS}"
-  --zero-output-policy "${ZERO_OUTPUT_POLICY}"
-  --output-dir "${RUN_DIR}/load_client"
-  --start-at-epoch-ms "${CLIENT_START_EPOCH_MS}"
-)
-if [[ "${SCHEDULE_ONLY}" == "1" ]]; then
-  CLIENT_ARGS+=(--schedule-only)
-fi
-if [[ "${LOOP}" == "1" ]]; then
-  CLIENT_ARGS+=(--loop)
-fi
-if [[ -n "${RESPONSE_TIMEOUT:-}" ]]; then
-  CLIENT_ARGS+=(--response-timeout "${RESPONSE_TIMEOUT}")
-fi
-if [[ -n "${PUSHGATEWAY_URL}" ]]; then
-  CLIENT_ARGS+=(--pushgateway-url "${PUSHGATEWAY_URL}")
-fi
-if [[ -n "${MAX_INPUT_LEN}" && "${MAX_INPUT_LEN}" != "0" ]]; then
-  CLIENT_ARGS+=(--max-input-len "${MAX_INPUT_LEN}")
-fi
-if [[ -n "${MAX_OUTPUT_LEN}" && "${MAX_OUTPUT_LEN}" != "0" ]]; then
-  CLIENT_ARGS+=(--max-output-len "${MAX_OUTPUT_LEN}")
-fi
-if [[ "${GRADIENT}" == "1" ]]; then
-  CLIENT_ARGS+=(--gradient --gradient-max-speed "${GRADIENT_MAX_SPEED}" --gradient-start-speed "${GRADIENT_START_SPEED}")
-fi
 # Launch one load client instance. Args: output_dir, num_shards, shard_index,
 # max_concurrency, skip_server_latency (0/1). JavaLoadClient is env-var
 # configured (see JavaLoadClient.Config.fromEnv); all client parameters are
@@ -677,6 +648,8 @@ launch_load_client() {
     "ZERO_OUTPUT_POLICY=${ZERO_OUTPUT_POLICY}" \
     "SCHEDULE_ONLY=${SCHEDULE_ONLY}" \
     "LOOP=${LOOP}" \
+    "SEND_MODE=${SEND_MODE}" \
+    "SEND_MODE_QPS=${SEND_MODE_QPS}" \
     "N_CHANNELS=${FLEXLB_N_CHANNELS}" \
     "EVENT_LOOP_THREADS=${EVENT_LOOP_THREADS:-}" \
     "START_AT_EPOCH_MS=${CLIENT_START_EPOCH_MS}" \
@@ -697,20 +670,16 @@ launch_load_client() {
 }
 
 if [[ "${LOAD_CLIENT_WORKERS}" -le 1 ]]; then
-  PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" "${CLIENT_ARGS[@]}" | tee "${RUN_DIR}/client.stdout"
+  mkdir -p "${RUN_DIR}/load_client"
+  launch_load_client "${RUN_DIR}/load_client" 1 0 "${MAX_CONCURRENCY}" 0 \
+    | tee "${RUN_DIR}/client.stdout"
 else
   mkdir -p "${RUN_DIR}/load_client"
   curl -fsS -X POST "http://${FLEXLB_HTTP_ADDR}/rtp_llm/server_latency/reset" >/dev/null
   SHARD_MAX_CONCURRENCY=$(( (MAX_CONCURRENCY + LOAD_CLIENT_WORKERS - 1) / LOAD_CLIENT_WORKERS ))
   for ((shard = 0; shard < LOAD_CLIENT_WORKERS; shard++)); do
     shard_dir="${RUN_DIR}/load_client/shard_${shard}"
-    PYTHONDONTWRITEBYTECODE=1 "${PYTHON_BIN}" "${SCRIPT_DIR}/flexlb_load_client.py" \
-      "${CLIENT_ARGS[@]}" \
-      --output-dir "${shard_dir}" \
-      --num-shards "${LOAD_CLIENT_WORKERS}" \
-      --shard-index "${shard}" \
-      --max-concurrency "${SHARD_MAX_CONCURRENCY}" \
-      --skip-server-latency \
+    launch_load_client "${shard_dir}" "${LOAD_CLIENT_WORKERS}" "${shard}" "${SHARD_MAX_CONCURRENCY}" 1 \
       >"${RUN_DIR}/client_shard_${shard}.stdout" 2>&1 &
     CLIENT_PIDS+=("$!")
   done
@@ -797,8 +766,17 @@ validity_checks = {
     "master_completion_matches_success": server.get("completion_count", 0) == success_count,
     "client_pacing_p99_within_limit": pacing["p99"] <= pacing_limit_ms,
 }
+# Uniform send-mode fields are propagated from the shard summaries so the
+# aggregated report shows the arrival process (fields absent in replay mode).
+send_mode_fields = {}
+if shards and shards[0].get("send_mode") == "uniform":
+    send_mode_fields = {
+        key: shards[0].get(key)
+        for key in ("send_mode", "target_qps", "per_shard_qps", "uniform_interval_ms")
+    }
 summary = {
     "load_client_workers": worker_count,
+    **send_mode_fields,
     "sent_task_count": sent_task_count,
     "actual_rpc_start_count": actual_rpc_start_count,
     "recorded_result_count": recorded_result_count,

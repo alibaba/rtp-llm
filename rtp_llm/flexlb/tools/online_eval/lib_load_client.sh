@@ -122,6 +122,8 @@ JAVA_LOAD_CLIENT_ENV_VARS=(
   ENABLE_FALLBACK
   ENDPOINTS_FILE
   DRY_RUN
+  SEND_MODE
+  SEND_MODE_QPS
 )
 
 # run_java_load_client VAR=value [VAR=value ...]
