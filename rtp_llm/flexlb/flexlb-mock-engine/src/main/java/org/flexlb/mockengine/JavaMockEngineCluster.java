@@ -16,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -107,12 +109,32 @@ public final class JavaMockEngineCluster {
             int prefillRunning = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                     .mapToInt(service -> service.activePrefillBatches.get()).sum();
+            // Running-request companion to prefill_running (batches): total requests
+            // inside running prefill batches, summed over prefill engines.
+            int prefillRunningReqs = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                    .mapToInt(service -> service.activePrefillRequests.get()).sum();
             int decodeWaiting = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
                     .mapToInt(FastRpcService::decodePendingQueueSize).sum();
             int decodeRunning = services.values().stream()
                     .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
                     .mapToInt(service -> service.activeDecodeRequests.get()).sum();
+            // Decode balance summary: per-engine running min/max (mean is derivable
+            // as decode_running / n_decode) plus the peak single-engine wait queue,
+            // symmetric with max_prefill_waiting.
+            int decodeRunMin = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .mapToInt(service -> service.activeDecodeRequests.get()).min().orElse(0);
+            int decodeRunMax = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .mapToInt(service -> service.activeDecodeRequests.get()).max().orElse(0);
+            int maxDecodeWaiting = services.values().stream()
+                    .filter(service -> service.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .mapToInt(FastRpcService::decodePendingQueueSize).max().orElse(0);
+            // Decode completion window since the previous sample: count + execution
+            // time p50/p95/max (end minus running-start of completed decode requests).
+            ClusterStats.DecodeWindow decodeWindow = stats.drainDecodeWindow();
             long prefillBatches = stats.prefillBatches.sum();
             double avgBatchSize = prefillBatches == 0
                     ? 0.0 : stats.prefillBatchRequests.sum() / (double) prefillBatches;
@@ -122,21 +144,28 @@ public final class JavaMockEngineCluster {
             long heapUsedMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
             long heapMaxMb = runtime.maxMemory() / (1024 * 1024);
             System.out.printf(
-                    "java_mock_stats enqueue_rpcs=%d enqueued_requests=%d status_rpcs=%d cache_rpcs=%d "
+                    "java_mock_stats ts_epoch_ms=%d enqueue_rpcs=%d enqueued_requests=%d status_rpcs=%d cache_rpcs=%d "
                             + "prefill_batches=%d avg_batch_size=%.2f max_batch_size=%d "
                             + "avg_batch_ms=%.2f max_batch_ms=%d prefill_waiting=%d prefill_running=%d "
+                            + "prefill_running_reqs=%d "
                             + "max_prefill_waiting=%d decode_waiting=%d decode_running=%d "
+                            + "decode_run_min=%d decode_run_max=%d max_decode_waiting=%d "
+                            + "decode_done=%d decode_exec_p50=%d decode_exec_p95=%d decode_exec_max=%d "
                             + "heap_used_mb=%d heap_max_mb=%d "
                             + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d%n",
+                    System.currentTimeMillis(),
                     stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
                     stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
                     prefillBatches, avgBatchSize, stats.maxPrefillBatchSize.get(),
                     avgBatchMs, stats.maxPrefillBatchExecutionMs.get(),
-                    prefillWaiting, prefillRunning, maxPrefillWaiting, decodeWaiting, decodeRunning,
+                    prefillWaiting, prefillRunning, prefillRunningReqs,
+                    maxPrefillWaiting, decodeWaiting, decodeRunning,
+                    decodeRunMin, decodeRunMax, maxDecodeWaiting,
+                    decodeWindow.count(), decodeWindow.p50Ms(), decodeWindow.p95Ms(), decodeWindow.maxMs(),
                     heapUsedMb, heapMaxMb,
                     stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum());
         },
-                5, 5, TimeUnit.SECONDS);
+                config.statsIntervalMs, config.statsIntervalMs, TimeUnit.MILLISECONDS);
 
         scheduler.scheduleAtFixedRate(() -> {
             for (FastRpcService service : services.values()) {
@@ -154,6 +183,14 @@ public final class JavaMockEngineCluster {
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             controlServer.stop();
+            // Drain BEFORE killing the scheduler: cancel every in-flight request
+            // through the existing cancel() bookkeeping so counters net to zero
+            // and checkLeakDrain stops evaluating. Without this, requests whose
+            // simulated completion (up to ~90s for long decodes) has not fired
+            // yet were reported as LEAK DETECTED during test teardown.
+            for (FastRpcService service : services.values()) {
+                service.drainAndShutdown();
+            }
             scheduler.shutdownNow();
             for (FastRpcService service : services.values()) {
                 service.shutdown();
@@ -161,10 +198,11 @@ public final class JavaMockEngineCluster {
             shutdown(serversByPort, bossGroup, workerGroup);
         }, "java-mock-engine-shutdown"));
 
-        System.out.printf("Java mock engine ready: prefill=%d decode=%d ports=%d-%d eventLoops=%d performance=%s completionThreads=%d%n",
+        System.out.printf("Java mock engine ready: prefill=%d decode=%d ports=%d-%d eventLoops=%d performance=%s completionThreads=%d statsIntervalMs=%d%n",
                 config.nPrefill, config.nDecode, config.baseGrpcPort,
                 config.baseGrpcPort + config.nPrefill + config.nDecode - 1,
-                config.eventLoopThreads, config.performanceFile, config.completionThreads);
+                config.eventLoopThreads, config.performanceFile, config.completionThreads,
+                config.statsIntervalMs);
         System.out.printf("HTTP control server listening on port %d%n", config.baseGrpcPort - 1);
         new CountDownLatch(1).await();
     }
@@ -348,6 +386,14 @@ public final class JavaMockEngineCluster {
         private final AtomicInteger pendingRequests = new AtomicInteger();
         private final AtomicInteger waitingPrefillRequests = new AtomicInteger();
         private final AtomicInteger activePrefillBatches = new AtomicInteger();
+        // Requests inside RUNNING prefill batches (a batch may hold several
+        // requests). Incremented by shapes.size() when a batch reserves a running
+        // slot (admission or pending-queue drain), decremented by the same amount
+        // in the batch completion callback — NOT derivable as pendingRequests −
+        // waitingPrefillRequests because cancel() decrements pendingRequests for
+        // a queued request immediately while waitingPrefillRequests is only
+        // adjusted at drain time. Feeds java_mock_stats prefill_running_reqs.
+        private final AtomicInteger activePrefillRequests = new AtomicInteger();
         private final AtomicInteger activeDecodeRequests = new AtomicInteger();
         // ── Decode wait queue + hard concurrency gate (change 1) ──
         // Pending decode requests waiting for a concurrency slot. Drained by the
@@ -377,6 +423,10 @@ public final class JavaMockEngineCluster {
         private volatile FaultInjectionConfig faultConfig = FaultInjectionConfig.builder().build();
         private final AtomicInteger enqueueCount = new AtomicInteger();
         private volatile boolean stopped = false;
+        // Set once by drainAndShutdown(): rejects new admissions and disables
+        // checkLeakDrain so shutdown-time in-flight requests are not misreported
+        // as leaks. Never reset (the process is exiting).
+        private volatile boolean shuttingDown = false;
         private final AtomicBoolean leakDetected = new AtomicBoolean(false);
         private final AtomicLong lastEnqueueTime = new AtomicLong(System.nanoTime());
         private final AtomicLong acceptedCount = new AtomicLong();
@@ -792,13 +842,14 @@ public final class JavaMockEngineCluster {
          * nothing was claimed (no pendingRequests/waitingPrefillRequests/
          * runningTasks residue) and the caller must reject the batch's requests.
          *
-         * <p>The cap (performance JSON {@code prefill.max_waiting_batches},
-         * default 4, <= 0 = unbounded) bounds QUEUED batches only — running
-         * batches never count toward it. Derivation: batches run FIFO, so the
-         * k-th queued batch starts after k × batch_ms; with SLO ≈ 1000 ms and
-         * ~150 ms prefill execution the wait budget is ~850 ms, and n = 4 keeps
-         * the deepest wait at 600 ms (750 ms total, ~25% headroom). Rule of
-         * thumb: n ≈ SLO_ms / batch_ms − 1.
+         * <p>The cap (performance JSON {@code prefill.max_waiting_batches})
+         * bounds QUEUED batches only — running batches never count toward it.
+         * Semantics: {@code cap >= 0} is enforced; {@code cap == 0} is
+         * zero-waiting fail-fast — a batch is accepted only when the engine is
+         * idle (activePrefillBatches < maxPrefillConcurrency), otherwise
+         * rejected immediately; absent in JSON or negative = unbounded (legacy).
+         * Sizing a positive cap: batches run FIFO, so the k-th queued batch
+         * starts after k × batch_ms — rule of thumb n ≈ SLO_ms / batch_ms − 1.
          *
          * <p>Independent of the fault-injection {@code queue_depth_limit} gate in
          * enqueueBatch: that one is request-level (pendingRequests, waiting +
@@ -811,6 +862,12 @@ public final class JavaMockEngineCluster {
             if (shapes.isEmpty()) {
                 return true;
             }
+            // Shutdown drain in progress — reject before claiming any counter so
+            // a racing enqueue (entry stopped-check passed pre-drain) leaves no
+            // residue behind the drain's cancel sweep.
+            if (shuttingDown) {
+                return false;
+            }
             // Hard gate on maxPrefillConcurrency (change 2): a batch is either admitted
             // immediately (occupies a concurrency slot) or parked in the pending
             // queue until a running batch finishes. activePrefillBatches is reserved
@@ -819,6 +876,7 @@ public final class JavaMockEngineCluster {
             synchronized (prefillQueueLock) {
                 if (activePrefillBatches.get() < maxPrefillConcurrency) {
                     activePrefillBatches.incrementAndGet();
+                    activePrefillRequests.addAndGet(shapes.size());
                     pendingRequests.addAndGet(shapes.size());
                     for (MockPerformanceModel.RequestShape shape : shapes) {
                         runningTasks.put(shape.input().getRequestId(),
@@ -827,7 +885,10 @@ public final class JavaMockEngineCluster {
                     }
                 } else {
                     int cap = performance.maxWaitingPrefillBatches();
-                    if (cap > 0 && prefillPendingQueue.size() >= cap) {
+                    // cap >= 0 is enforced: with cap=0 (zero-waiting fail-fast) any
+                    // batch arriving while the engine is busy is rejected here;
+                    // negative/absent = unbounded (legacy).
+                    if (cap >= 0 && prefillPendingQueue.size() >= cap) {
                         // Waiting-queue cap hit — reject before claiming anything.
                         return false;
                     }
@@ -933,6 +994,10 @@ public final class JavaMockEngineCluster {
                     }
                 }
                 activePrefillBatches.decrementAndGet();
+                // Mirror the addAndGet(shapes.size()) made when this batch reserved
+                // its running slot (admission or drain). Cancelled members stay
+                // counted until the batch finishes — the batch keeps executing.
+                activePrefillRequests.addAndGet(-shapes.size());
                 pendingRequests.addAndGet(-activeCount);
                 // Drain one pending batch under the same lock that guards admission,
                 // handing this completion's freed slot to a queued batch atomically.
@@ -956,6 +1021,7 @@ public final class JavaMockEngineCluster {
                             continue;
                         }
                         activePrefillBatches.incrementAndGet();
+                        activePrefillRequests.addAndGet(candidate.shapes().size());
                         waitingPrefillRequests.addAndGet(-candidate.shapes().size());
                         nextBatch = prefillPendingQueue.pollFirst();
                         break;
@@ -1012,6 +1078,13 @@ public final class JavaMockEngineCluster {
         private boolean scheduleDecodeCompletion(MockPerformanceModel.RequestShape shape, long batchId,
                 LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue) {
             long requestId = shape.input().getRequestId();
+            // Shutdown drain in progress — reject before the putIfAbsent claim so
+            // a cross-engine prefill hand-off racing the drain cannot re-populate
+            // runningTasks after the cancel sweep. The caller degrades exactly
+            // like pending-queue backpressure (no residue on this engine).
+            if (shuttingDown) {
+                return false;
+            }
             // Guard: never schedule the same requestId twice on this engine.
             EngineRpcService.TaskInfoPB existing = runningTasks.putIfAbsent(
                     requestId,
@@ -1103,6 +1176,12 @@ public final class JavaMockEngineCluster {
                     }
                 }
                 recordCompletion(shape, batchId, executionMs, 0);
+                if (wasRunning) {
+                    // Feed the per-sample decode completion window (java_mock_stats
+                    // decode_done / decode_exec_*). Cancelled-while-queued requests
+                    // (wasRunning=false) never executed, so they are excluded.
+                    stats.recordDecodeDone(executionMs);
+                }
                 boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                 recordLifecycleEnd(requestId, alreadyCancelled);
                 if (!alreadyCancelled) {
@@ -1234,6 +1313,13 @@ public final class JavaMockEngineCluster {
         }
 
         void checkLeakDrain(long graceWindowNanos) {
+            // Shutdown drain in progress: remaining in-flight requests are being
+            // cancelled deliberately, not leaking — a non-zero count here is
+            // teardown noise, so never set leak_detected. Runtime leak detection
+            // (below) is unchanged while the engine is live.
+            if (shuttingDown) {
+                return;
+            }
             long timeSinceLastEnqueue = System.nanoTime() - lastEnqueueTime.get();
             if (timeSinceLastEnqueue < graceWindowNanos) {
                 return;
@@ -1277,6 +1363,61 @@ public final class JavaMockEngineCluster {
         }
 
         /**
+         * Graceful-stop drain for process shutdown: reject new admissions and
+         * cancel every in-flight request through the existing {@link #cancel}
+         * bookkeeping (verified idempotent against racing completion callbacks
+         * via the runningTasks remove-guard), so pendingRequests /
+         * activeDecodeRequests / activeKvTokens / waitingPrefillRequests and
+         * both pending queues net to zero without waiting for the simulated
+         * completions (up to ~90s for long decodes) to fire. Called from the
+         * JVM shutdown hook; completes in milliseconds.
+         *
+         * <p>Counters owned by RUNNING prefill batch completions
+         * (activePrefillBatches / activePrefillRequests) are left to their
+         * already-scheduled ms-scale callbacks — cancel() intentionally never
+         * touches them, and with {@link #shuttingDown} set they can no longer
+         * trip checkLeakDrain.
+         */
+        void drainAndShutdown() {
+            shuttingDown = true;
+            stopped = true; // same rejection semantics as the control-plane /stop_engine
+            // Cancel sweep. A pass can promote queued decode tasks into running
+            // slots (cancel's slot hand-off) and a racing cross-engine hand-off
+            // may slip in before the shuttingDown guard was observed, so retry
+            // a bounded number of passes until runningTasks is empty.
+            for (int pass = 0; pass < 3 && !runningTasks.isEmpty(); pass++) {
+                for (Long requestId : List.copyOf(runningTasks.keySet())) {
+                    cancel(requestId);
+                }
+            }
+            // Queued prefill batches: cancel() removed every member's
+            // runningTasks entry (and decremented pendingRequests) but by design
+            // leaves the batch parked for the completion drain, which will never
+            // fire once the scheduler stops. Drop dead batches with the same
+            // anyAlive bookkeeping as the completion drain; any member still
+            // alive (raced past the sweep) goes through cancel() first so no
+            // counter is decremented twice.
+            synchronized (prefillQueueLock) {
+                while (!prefillPendingQueue.isEmpty()) {
+                    PrefillPendingBatch batch = prefillPendingQueue.pollFirst();
+                    for (MockPerformanceModel.RequestShape shape : batch.shapes()) {
+                        if (runningTasks.containsKey(shape.input().getRequestId())) {
+                            cancel(shape.input().getRequestId());
+                        }
+                    }
+                    waitingPrefillRequests.addAndGet(-batch.shapes().size());
+                }
+            }
+            // Decode queue is emptied by the cancel sweep (queued tasks always
+            // have a runningTasks entry); clear any dead leftovers, mirroring
+            // the drain's skip-cancelled check. Dead entries carry no counters.
+            synchronized (decodeQueueLock) {
+                decodePendingQueue.removeIf(
+                        t -> !runningTasks.containsKey(t.shape().input().getRequestId()));
+            }
+        }
+
+        /**
          * Shut down the dedicated response-polling executor.
          */
         void shutdown() {
@@ -1300,6 +1441,7 @@ public final class JavaMockEngineCluster {
         MockPerformanceModel getPerformance() { return performance; }
         int getRunningCount() { return runningTasks.size(); }
         int getWaitingCount() { return waitingPrefillRequests.get(); }
+        int getActivePrefillRequestCount() { return activePrefillRequests.get(); }
         long getAcceptedCount() { return acceptedCount.get(); }
         long getCompletedCount() { return completedCount.get(); }
         long getCancelledCount() { return cancelledCount.get(); }
@@ -1307,6 +1449,11 @@ public final class JavaMockEngineCluster {
         long getCacheKeyCount() { return cache.snapshotKeys().size(); }
         long getCacheEvictions() { return cache.evictions(); }
         boolean isLeakDetected() { return leakDetected.get(); }
+        boolean isShuttingDown() { return shuttingDown; }
+        int getActiveDecodeCount() { return activeDecodeRequests.get(); }
+        int getActivePrefillBatchCount() { return activePrefillBatches.get(); }
+        int getDecodePendingQueueDepth() { return decodePendingQueueSize(); }
+        int getPrefillPendingQueueDepth() { return prefillPendingQueueSize(); }
         Map<Long, String> getRequestStates() { return requestStates; }
 
         /**
@@ -1563,6 +1710,63 @@ public final class JavaMockEngineCluster {
             maxPrefillBatchSize.accumulateAndGet(batchSize, Math::max);
             maxPrefillBatchExecutionMs.accumulateAndGet(executionMs, Math::max);
         }
+
+        // ---- Decode completion window (drained on every java_mock_stats tick) ----
+        // A bounded reservoir keeps p50/p95 approximation cheap under load: exact
+        // count/max are always tracked, samples beyond the cap replace a random
+        // slot (unbiased reservoir sampling). Guarded by decodeWindowLock only —
+        // one short critical section per decode completion and per stats tick.
+        private static final int DECODE_WINDOW_SAMPLE_CAP = 8192;
+        private final Object decodeWindowLock = new Object();
+        private final long[] decodeWindowSamples = new long[DECODE_WINDOW_SAMPLE_CAP];
+        private long decodeWindowCount;
+        private long decodeWindowMaxMs;
+        private int decodeWindowSize;
+
+        void recordDecodeDone(long executionMs) {
+            synchronized (decodeWindowLock) {
+                decodeWindowCount++;
+                decodeWindowMaxMs = Math.max(decodeWindowMaxMs, executionMs);
+                if (decodeWindowSize < DECODE_WINDOW_SAMPLE_CAP) {
+                    decodeWindowSamples[decodeWindowSize++] = executionMs;
+                } else {
+                    long slot = ThreadLocalRandom.current().nextLong(decodeWindowCount);
+                    if (slot < DECODE_WINDOW_SAMPLE_CAP) {
+                        decodeWindowSamples[(int) slot] = executionMs;
+                    }
+                }
+            }
+        }
+
+        DecodeWindow drainDecodeWindow() {
+            long count;
+            long maxMs;
+            long[] samples;
+            synchronized (decodeWindowLock) {
+                count = decodeWindowCount;
+                maxMs = decodeWindowMaxMs;
+                samples = Arrays.copyOf(decodeWindowSamples, decodeWindowSize);
+                decodeWindowCount = 0;
+                decodeWindowMaxMs = 0;
+                decodeWindowSize = 0;
+            }
+            if (samples.length == 0) {
+                return new DecodeWindow(count, 0, 0, maxMs);
+            }
+            Arrays.sort(samples);
+            return new DecodeWindow(count,
+                    samples[percentileIndex(samples.length, 0.50)],
+                    samples[percentileIndex(samples.length, 0.95)],
+                    maxMs);
+        }
+
+        private static int percentileIndex(int size, double quantile) {
+            return Math.max(0, Math.min(size - 1, (int) Math.ceil(quantile * size) - 1));
+        }
+
+        /** Decode completions since the previous stats sample, with execution-time summary. */
+        record DecodeWindow(long count, long p50Ms, long p95Ms, long maxMs) {
+        }
     }
 
     static final class Config {
@@ -1584,6 +1788,7 @@ public final class JavaMockEngineCluster {
         long totalKvTokens = DEFAULT_TOTAL_KV_TOKENS;
         int blockSize = 0;
         int decodeMaxConcurrency = DEFAULT_DECODE_MAX_CONCURRENCY;
+        int statsIntervalMs = 5000;
 
         static Config parse(String[] args) {
             Config config = new Config();
@@ -1611,6 +1816,7 @@ public final class JavaMockEngineCluster {
                     case "--total-kv-tokens" -> config.totalKvTokens = Long.parseLong(value);
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
+                    case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
                 }
             }
@@ -1631,6 +1837,9 @@ public final class JavaMockEngineCluster {
             }
             if (config.decodeMaxConcurrency < 1) {
                 throw new IllegalArgumentException("--decode-max-concurrency must be >= 1");
+            }
+            if (config.statsIntervalMs < 1) {
+                throw new IllegalArgumentException("--stats-interval-ms must be >= 1");
             }
             return config;
         }

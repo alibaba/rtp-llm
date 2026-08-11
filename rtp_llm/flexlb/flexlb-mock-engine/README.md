@@ -10,7 +10,7 @@ A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU i
 - **HTTP control**: 11 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /metrics)
 - **Inflight leak detection**: 30s periodic check with 60s grace period
 - **KV cache modeling**: LRU cache with prefix matching, pressure simulation
-- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches`, default 4, with backpressure rejection), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
+- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches`, default 0 = zero-waiting fail-fast, with backpressure rejection), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
 
 ## Quick Start
 
@@ -32,7 +32,7 @@ bash run_online_eval.sh
 | prefill.fixed_ms | null | Fixed prefill latency (bypasses formula) |
 | prefill.min_ms | null | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast |
 | prefill.scale | 1.0 | Prefill-specific multiplier |
-| prefill.max_waiting_batches | 4 | Cap on queued (not-running) prefill batches per engine; excess enqueues are rejected (backpressure). Rule of thumb: n ≈ SLO_ms / batch_ms − 1 (e.g. SLO 1000 ms, batch 150 ms → 4, deepest wait 600 ms + 150 ms execution leaves ~25% headroom). For 1x-scale runs where a batch takes ~330–400 ms, lower to 1–2. <= 0 disables the cap (unbounded queue) |
+| prefill.max_waiting_batches | 0 | Cap on queued (not-running) prefill batches per engine; excess enqueues are rejected (backpressure). `0` (shipped default) = zero-waiting fail-fast: a batch is accepted only when the engine is idle (a `max_prefill_concurrency` slot is free), otherwise rejected immediately. Positive n allows up to n queued batches — rule of thumb: n ≈ SLO_ms / batch_ms − 1 (e.g. SLO 1000 ms, batch 150 ms → 4, deepest wait 600 ms + 150 ms execution leaves ~25% headroom); for 1x-scale runs where a batch takes ~330–400 ms, use 1–2. Absent field or negative = unbounded queue (legacy behavior) |
 | decode.scale | 1.0 | Decode-specific multiplier |
 | decode.step_ms_by_batch | [[1,1.0],...] | Per-step latency by batch size |
 | decode.per_token_ms | null | Fixed per-token decode latency (ms); when set, overrides step_ms_by_batch curve (e.g. 45.0 ≈ DeepSeek V3 ~22 tok/s) |
@@ -61,27 +61,44 @@ The control server listens on `baseGrpcPort - 1` of the mock cluster.
 under overload the engine rejects excess requests with backpressure rather than
 queuing unbounded. Use `/set_queue_depth` to override at runtime.
 
-**Prefill waiting-queue cap**: `prefill.max_waiting_batches` (default 4) bounds the
+**Prefill waiting-queue cap**: `prefill.max_waiting_batches` bounds the
 number of QUEUED prefill batches per engine — running batches never count toward the
-cap. When the queue is full, `enqueueBatch` returns a per-request error
+cap. Semantics: `cap >= 0` is enforced; the shipped default `0` is zero-queue
+fail-fast mode — the engine accepts a batch only when it is idle (a concurrency
+slot is free) and rejects immediately otherwise, so requests never wait in the
+engine; absent field or negative = unbounded (legacy). When the queue is full,
+`enqueueBatch` returns a per-request error
 (`prefill waiting queue full (backpressure): waiting=N cap=M`) and `generateStreamCall`
 fails the stream, so the master sees an explicit rejection instead of a silent
 timeout. This gate is batch-level and independent of the request-level fault-injection
 `queue_depth_limit` check at the RPC entry; both stack.
 
 **Queue metrics — four-state naming and units**: the periodic `java_mock_stats` log
-line reports symmetric P/D queue states:
+line (interval configurable via `--stats-interval-ms`, default 5000 ms; the
+`run_online_eval.sh` env passthrough is `JAVA_MOCK_STATS_INTERVAL_MS`) reports
+symmetric P/D queue states:
 
 | Field | Unit | Meaning |
 |-------|------|---------|
+| `ts_epoch_ms` | epoch ms | Sampling wall-clock timestamp (`System.currentTimeMillis()`), aligns with client `send_start_epoch_ms` |
 | `prefill_waiting` | requests | Queued (not running) prefill requests, sum over prefill engines |
 | `prefill_running` | batches | Running prefill batches (a batch may hold several requests), sum |
+| `prefill_running_reqs` | requests | Requests inside running prefill batches, sum over prefill engines (running-request companion to `prefill_running`) |
 | `max_prefill_waiting` | requests | Peak single-engine queued prefill requests |
 | `decode_waiting` | requests | Queued (not running) decode requests, sum over decode engines |
 | `decode_running` | requests | Running decode requests, sum |
+| `decode_run_min` | requests | Min single-engine running decode requests (mean = `decode_running` / n_decode) |
+| `decode_run_max` | requests | Max single-engine running decode requests |
+| `max_decode_waiting` | requests | Peak single-engine queued decode requests (symmetric with `max_prefill_waiting`) |
+| `decode_done` | requests | Decode requests completed since the previous sample (window counter) |
+| `decode_exec_p50` | ms | Window p50 of decode execution time (end − running-start; bounded reservoir approximation) |
+| `decode_exec_p95` | ms | Window p95 of decode execution time |
+| `decode_exec_max` | ms | Window max of decode execution time (exact) |
 
 The old `prefill_pending` (waiting + running mixed) and `max_prefill_pending` fields
-are gone. `/snapshot` additionally exposes `prefill_waiting_batches` per prefill
+are gone. All other pre-existing fields are unchanged (additive-only evolution).
+`/snapshot` additionally exposes a top-level `ts_epoch_ms` (sampling timestamp) and
+`prefill_waiting_batches` per prefill
 engine — the queued BATCH count, i.e. the same unit as `prefill.max_waiting_batches`
 (the `waiting` snapshot field counts requests).
 
@@ -170,6 +187,8 @@ entirely through environment variables (`Config.fromEnv`):
 | ENABLE_FALLBACK | false | Enable fallback prefill via ENDPOINTS_FILE |
 | ENDPOINTS_FILE | "" | endpoints.json written by JavaMockEngineCluster |
 | DRY_RUN | false | Parse and validate only, no traffic |
+| SEND_MODE | replay | Arrival process: replay (trace ts pacing) / uniform (fixed interval) |
+| SEND_MODE_QPS | 0 | uniform mode total target QPS (per shard = QPS / NUM_SHARDS) |
 
 ## Architecture
 

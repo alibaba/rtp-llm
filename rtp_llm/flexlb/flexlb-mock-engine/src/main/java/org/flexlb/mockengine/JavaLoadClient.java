@@ -146,7 +146,11 @@ public final class JavaLoadClient {
         // shard: request_ids are deterministic hashes of sourceRid, so without
         // slicing every shard replays the identical trace and the master rejects
         // all but the first arrival of each rid as "duplicate request_id".
-        if (!config.loop) {
+        // Uniform send mode reuses the loop-mode record semantics (shard slice
+        // only, wall-clock duration, total sent cap): request bodies still come
+        // from cycling the trace shard, only the arrival process changes.
+        boolean cyclic = config.loop || config.isUniform();
+        if (!cyclic) {
             records = filterAndShard(records, config.durationS, config.limit,
                     config.numShards, config.shardIndex);
         } else {
@@ -164,6 +168,14 @@ public final class JavaLoadClient {
         System.out.println("loaded " + records.size() + " requests from " + config.traceFile
                 + " (shard=" + config.shardIndex + "/" + config.numShards + ")");
 
+        if (config.isUniform()) {
+            double perShardQps = config.sendModeQps / config.numShards;
+            System.out.println(String.format(
+                    "send mode: uniform — target_qps=%.3f, per_shard_qps=%.3f "
+                            + "(interval %.3fms), trace timestamps ignored",
+                    config.sendModeQps, perShardQps, 1000.0 / perShardQps));
+        }
+
         if (config.enableFallback && !config.endpointsFile.isEmpty()) {
             loadFallbackEndpoints(config.endpointsFile);
         }
@@ -176,11 +188,14 @@ public final class JavaLoadClient {
         long firstTsMs = records.get(0).tsMs;
         long traceSpanMs = Math.max(records.get(records.size() - 1).tsMs - firstTsMs, 1);
 
-        if (config.gradient && config.durationS <= 0) {
+        if (config.gradient && config.isUniform()) {
+            System.out.println("WARNING: GRADIENT is ignored in uniform send mode");
+        }
+        if (config.gradient && !config.isUniform() && config.durationS <= 0) {
             System.out.println("WARNING: GRADIENT requires DURATION_S > 0, "
                     + "falling back to fixed replay_speed");
         }
-        if (config.gradient && config.durationS > 0) {
+        if (config.gradient && !config.isUniform() && config.durationS > 0) {
             int startSpeed = Math.max(1, config.gradientStartSpeed);
             System.out.println("gradient mode: speed will increase from " + startSpeed
                     + "x to " + config.gradientMaxSpeed + "x over "
@@ -206,10 +221,14 @@ public final class JavaLoadClient {
         List<Future<RequestResult>> futures = new ArrayList<>();
         int sentCount = 0;
         int loopIdx = 0;
+        // Per-shard uniform interval: total target rate SEND_MODE_QPS is split
+        // evenly across NUM_SHARDS instances.
+        double uniformIntervalS = config.isUniform()
+                ? config.numShards / config.sendModeQps : 0.0;
 
         while (true) {
             for (TraceRecord record : records) {
-                if (config.loop && config.durationS > 0) {
+                if (cyclic && config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
                         break;
                     }
@@ -221,7 +240,7 @@ public final class JavaLoadClient {
                 // Parity with Python: gradient mode ramps speed linearly from
                 // start to max over the duration window.
                 double currentSpeed;
-                if (config.gradient && config.durationS > 0) {
+                if (config.gradient && !config.isUniform() && config.durationS > 0) {
                     double elapsedS = (System.nanoTime() - replayStartedNanos) / 1_000_000_000.0;
                     currentSpeed = gradientSpeed(elapsedS, config.durationS,
                             config.gradientStartSpeed, config.gradientMaxSpeed);
@@ -237,7 +256,17 @@ public final class JavaLoadClient {
                 }
 
                 double dueSeconds = 0;
-                if (currentSpeed > 0 && record.tsMs > 0) {
+                if (config.isUniform()) {
+                    // Uniform arrival process: the ideal send schedule is
+                    // t0 + i*interval, paced with the same sleep-until-due
+                    // mechanism as replay so pacing_lag_ms stays meaningful.
+                    dueSeconds = sentCount * uniformIntervalS;
+                    long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
+                    long sleepNanos = dueNanos - System.nanoTime();
+                    if (sleepNanos > 0) {
+                        Thread.sleep(sleepNanos / 1_000_000, (int) (sleepNanos % 1_000_000));
+                    }
+                } else if (currentSpeed > 0 && record.tsMs > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
                     dueSeconds = (record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
@@ -247,7 +276,7 @@ public final class JavaLoadClient {
                     }
                 }
 
-                if (config.loop && config.durationS > 0) {
+                if (cyclic && config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
                         break;
                     }
@@ -265,7 +294,7 @@ public final class JavaLoadClient {
                 sentTotal.set(sentCount);
             }
 
-            if (!config.loop) {
+            if (!cyclic) {
                 break;
             }
             if (config.durationS > 0
@@ -1118,6 +1147,15 @@ public final class JavaLoadClient {
                 ? Math.round(results.size() / sendDurationS * 1000) / 1000.0 : 0.0);
         summary.put("actual_send_qps", actualRpcQps);
         summary.set("pacing_lag_ms", summarizeLatencies(pacingLags).toJson());
+        if (config.isUniform()) {
+            // Only emitted in uniform mode so the replay summary stays
+            // byte-identical to the pre-uniform format.
+            summary.put("send_mode", "uniform");
+            summary.put("target_qps", config.sendModeQps);
+            summary.put("per_shard_qps", config.sendModeQps / config.numShards);
+            summary.put("uniform_interval_ms",
+                    Math.round(1000.0 * config.numShards / config.sendModeQps * 1000) / 1000.0);
+        }
 
         ObjectNode peakQps = MAPPER.createObjectNode();
         for (int windowMs : List.of(1, 10, 100, 1000)) {
@@ -1621,6 +1659,8 @@ public final class JavaLoadClient {
         final boolean enableFallback;
         final String endpointsFile;
         final boolean dryRun;
+        final String sendMode;
+        final double sendModeQps;
 
         Config(String traceFile, String targetAddr, String grpcTarget,
                int durationS, int maxConcurrency, double replaySpeed,
@@ -1632,7 +1672,8 @@ public final class JavaLoadClient {
                String model, String apiKey, boolean fetchResponseEnabled,
                boolean gradient, int gradientStartSpeed, int gradientMaxSpeed,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
-               boolean enableFallback, String endpointsFile, boolean dryRun) {
+               boolean enableFallback, String endpointsFile, boolean dryRun,
+               String sendMode, double sendModeQps) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
@@ -1666,6 +1707,20 @@ public final class JavaLoadClient {
             this.enableFallback = enableFallback;
             this.endpointsFile = endpointsFile;
             this.dryRun = dryRun;
+            this.sendMode = sendMode;
+            this.sendModeQps = sendModeQps;
+            if (!"replay".equals(sendMode) && !"uniform".equals(sendMode)) {
+                throw new IllegalArgumentException(
+                        "SEND_MODE must be 'replay' or 'uniform', got '" + sendMode + "'");
+            }
+            if ("uniform".equals(sendMode) && sendModeQps <= 0) {
+                throw new IllegalArgumentException(
+                        "SEND_MODE=uniform requires SEND_MODE_QPS > 0 (total target QPS)");
+            }
+        }
+
+        boolean isUniform() {
+            return "uniform".equals(sendMode);
         }
 
         static Config fromEnv() {
@@ -1716,7 +1771,9 @@ public final class JavaLoadClient {
                     env("PUSHGATEWAY_URL", ""),
                     envBool("ENABLE_FALLBACK", false),
                     env("ENDPOINTS_FILE", ""),
-                    envBool("DRY_RUN", false)
+                    envBool("DRY_RUN", false),
+                    env("SEND_MODE", "replay"),
+                    envDouble("SEND_MODE_QPS", 0.0)
             );
         }
 
@@ -1754,6 +1811,8 @@ public final class JavaLoadClient {
             System.out.println("  PUSHGATEWAY_URL=" + pushgatewayUrl);
             System.out.println("  ENABLE_FALLBACK=" + enableFallback);
             System.out.println("  ENDPOINTS_FILE=" + endpointsFile);
+            System.out.println("  SEND_MODE=" + sendMode);
+            System.out.println("  SEND_MODE_QPS=" + sendModeQps);
             System.out.println("=====================================");
         }
 

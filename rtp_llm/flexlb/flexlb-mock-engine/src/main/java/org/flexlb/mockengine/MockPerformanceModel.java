@@ -16,15 +16,13 @@ final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     /**
-     * Default cap on queued (not running) prefill batches per engine, JSON
-     * "prefill.max_waiting_batches". Derivation: prefill batches run FIFO, so the
-     * k-th queued batch waits k × batch_ms before it starts. With SLO ≈ 1000 ms
-     * and a prefill execution of ~150 ms the wait budget is SLO − execution ≈
-     * 850 ms; n = 4 bounds the deepest wait at 4 × 150 = 600 ms (750 ms total),
-     * leaving ~25% headroom. Rule of thumb: n ≈ SLO_ms / batch_ms − 1.
-     * Values <= 0 disable the cap (unbounded queue, legacy behavior).
+     * Sentinel for "no cap" on queued prefill batches: JSON
+     * "prefill.max_waiting_batches" absent or negative means unbounded queue
+     * (legacy behavior). A value of 0 is the strictest cap: zero-waiting
+     * fail-fast — a batch is only accepted when the engine is idle
+     * (a prefill concurrency slot is free), otherwise rejected immediately.
      */
-    static final int DEFAULT_MAX_WAITING_PREFILL_BATCHES = 4;
+    static final int UNBOUNDED_MAX_WAITING_PREFILL_BATCHES = -1;
 
     private volatile int blockSize;
     private final double sleepScale;
@@ -35,7 +33,7 @@ final class MockPerformanceModel {
     // "absent in JSON → no floor".
     private final Double prefillMinMs;
     // Cap on queued (not running) prefill batches from JSON "prefill.max_waiting_batches".
-    // <= 0 disables the cap; defaults to DEFAULT_MAX_WAITING_PREFILL_BATCHES when absent.
+    // >= 0 is enforced (0 = zero-waiting fail-fast); absent or negative = unbounded.
     private final int maxWaitingPrefillBatches;
     private final PrefillTimeFormula prefillFormula;
     private final List<DecodePoint> decodePoints;
@@ -86,8 +84,11 @@ final class MockPerformanceModel {
         double prefillScale = prefill.path("scale").asDouble(1.0);
         Double fixedPrefillMs = prefill.has("fixed_ms") ? prefill.get("fixed_ms").asDouble() : null;
         Double prefillMinMs = prefill.has("min_ms") ? prefill.get("min_ms").asDouble() : null;
-        int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
-                .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
+        // Absent field = unbounded (backward compat for configs written before the
+        // cap existed); the shipped performance JSONs set 0 (zero-waiting fail-fast).
+        int maxWaitingPrefillBatches = prefill.has("max_waiting_batches")
+                ? prefill.get("max_waiting_batches").asInt()
+                : UNBOUNDED_MAX_WAITING_PREFILL_BATCHES;
 
         String formulaSource = loadPrefillFormula(masterConfigFile);
         PrefillTimeFormula formula = formulaSource == null ? null : PrefillTimeFormula.parse(formulaSource);
@@ -201,7 +202,9 @@ final class MockPerformanceModel {
 
     /**
      * Cap on queued (not running) prefill batches per engine
-     * (JSON "prefill.max_waiting_batches", default 4). <= 0 means unbounded.
+     * (JSON "prefill.max_waiting_batches"). >= 0 is enforced — 0 means
+     * zero-waiting fail-fast (accept only when a concurrency slot is free);
+     * absent in JSON or negative means unbounded (legacy behavior).
      */
     int maxWaitingPrefillBatches() {
         return maxWaitingPrefillBatches;

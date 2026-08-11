@@ -23,6 +23,16 @@ After completion, the important outputs are:
 - `load_client/report.md`
 - `mock_engine.log`
 - `flexlb.log`
+- `master_counters_timeseries.txt`: per-second master `arrival_count` /
+  `completion_count` samples (`ts_epoch_ms=... arrival_count=... completion_count=...`
+  lines, polled from `GET /rtp_llm/server_latency` during the load window;
+  interval via `MASTER_COUNTER_POLL_INTERVAL_S`, default 1s).
+
+The mock engine's periodic `java_mock_stats` line in `mock_engine.log` carries a
+leading `ts_epoch_ms` field for cross-source time alignment; its cadence is
+controlled by `JAVA_MOCK_STATS_INTERVAL_MS` (default 5000, passed through to the
+cluster's `--stats-interval-ms`). See `flexlb-mock-engine/README.md` for the
+full field dictionary.
 
 Common overrides:
 
