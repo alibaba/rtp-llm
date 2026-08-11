@@ -7,6 +7,16 @@
 
 namespace rtp_llm {
 
+TcpMessager::~TcpMessager() {
+    stop();
+}
+
+void TcpMessager::stop() {
+    // ARPC keeps a raw service pointer, so the server teardown must finish first.
+    tcp_server_.reset();
+    service_.reset();
+}
+
 bool TcpMessager::init(MessagerInitParams params) {
     init_params_ = params;
 

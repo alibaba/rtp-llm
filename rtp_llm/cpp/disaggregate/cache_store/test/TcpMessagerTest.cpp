@@ -126,4 +126,30 @@ TEST_F(TcpMessagerTest, testSendLoadRequest_sendRequestFailed) {
     mutex.unlock();
 }
 
+TEST_F(TcpMessagerTest, testDestructionKeepsRegisteredServiceAliveUntilServerShutdownCompletes) {
+    auto buffer_store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    auto messager     = std::make_shared<TcpMessager>(memory_util_, buffer_store, metrics_reporter_);
+    auto service      = std::make_shared<TcpCacheStoreServiceImpl>(memory_util_,
+                                                                   buffer_store,
+                                                                   metrics_reporter_,
+                                                                   messager->timer_manager_,
+                                                                   messager->locked_block_buffer_manager_,
+                                                                   nullptr);
+
+    messager->service_ = service;
+    std::weak_ptr<TcpCacheStoreServiceImpl> weak_service = service;
+    service.reset();
+
+    bool service_alive_after_server_shutdown = false;
+    messager->tcp_server_ = std::shared_ptr<TcpServer>(new TcpServer(), [&](TcpServer* server) {
+        delete server;
+        service_alive_after_server_shutdown = !weak_service.expired();
+    });
+
+    messager.reset();
+
+    EXPECT_TRUE(service_alive_after_server_shutdown);
+    EXPECT_TRUE(weak_service.expired());
+}
+
 }  // namespace rtp_llm
