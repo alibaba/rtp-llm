@@ -6,6 +6,7 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
@@ -146,17 +147,32 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
     const size_t rows = B * static_cast<size_t>(P + 1);
     RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid spec logits runner task");
 
+    std::vector<const ActiveProcessor*> eligible_items;
+    eligible_items.reserve(task.active.size());
     std::vector<size_t> active_stream_indices;
     std::vector<bool>   active_stream_seen(B, false);
     for (const auto& item : task.active) {
         if (!item.processor || !item.processor->isSpecVerifyEligible()) {
-            return {};
+            // The stream behind this processor already failed (e.g. grammar
+            // rejected a token) or opted out of spec verify. Leave its mask
+            // rows all-allow and its cap untouched instead of dropping the
+            // whole batch artifact: the stream error terminates that request
+            // on its own, and other streams still need their verify masks.
+            ++result.skipped_ineligible_processors;
+            RTP_LLM_LOG_WARNING("spec logits verify skips ineligible processor, stream=%lu processor_idx=%zu",
+                                item.stream_id,
+                                item.processor_idx);
+            continue;
         }
         RTP_LLM_CHECK_WITH_INFO(item.stream_idx < B, "spec logits processor stream index out of range");
+        eligible_items.push_back(&item);
         if (!active_stream_seen[item.stream_idx]) {
             active_stream_seen[item.stream_idx] = true;
             active_stream_indices.push_back(item.stream_idx);
         }
+    }
+    if (eligible_items.empty()) {
+        return result;
     }
     std::sort(active_stream_indices.begin(), active_stream_indices.end());
     const size_t active_streams = active_stream_indices.size();
@@ -177,7 +193,8 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::buildInline(const L
 
     const size_t proc_words = static_cast<size_t>(P + 1) * W;
     auto*        proc_mask  = processor_bitmask_cpu_.data_ptr<int32_t>();
-    for (const auto& item : task.active) {
+    for (const auto* item_ptr : eligible_items) {
+        const auto& item = *item_ptr;
         std::fill_n(proc_mask, proc_words, SpecLogitsProcessor::kBitmaskAllowAll);
 
         SpecLogitsProcessorRequest request;

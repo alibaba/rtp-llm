@@ -77,6 +77,43 @@ TEST(GrammarLogitsProcessorTest, ProcessMasksDisallowedTokens) {
     EXPECT_EQ(inputs.logits[0][static_cast<int>('b')].item<float>(), BaseLogitsProcessor::neg_inf);
 }
 
+TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceReportsRejectedToken) {
+    auto backend = makeBackend();
+    auto compiled = backend
+                        .compileNow({"json",
+                                     R"({
+  "$ref": "#/definitions/Self",
+  "definitions": {
+    "Self": {"$ref": "#/definitions/Self"}
+  }
+})"})
+                        .compiled;
+    ASSERT_TRUE(compiled);
+
+    auto matcher  = backend.createMatcher(compiled, false, std::nullopt);
+    bool reported = false;
+    auto processor = std::make_shared<GrammarLogitsProcessor>(
+        matcher,
+        /*eos_token_id=*/0,
+        [&reported](ErrorCode error_code, const std::string& message, bool) {
+            reported = error_code == ErrorCode::INVALID_PARAMS
+                       && message.find("parser rejected token") != std::string::npos;
+        });
+
+    SamplerInputs inputs;
+    inputs.logits        = torch::zeros({1, 128}, torch::kFloat32);
+    inputs.finished_mask = torch::zeros({1}, torch::kBool);
+    processor->process(inputs, 0, 1);
+
+    for (int token_id = 0; token_id < 128; ++token_id) {
+        EXPECT_EQ(inputs.logits[0][token_id].item<float>(), BaseLogitsProcessor::neg_inf);
+    }
+
+    processor->updateStatus(torch::tensor({{static_cast<int32_t>('{')}}, torch::kInt32), 1);
+    EXPECT_TRUE(reported);
+    EXPECT_FALSE(processor->isSpecVerifyEligible());
+}
+
 TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesMatcherToTerminal) {
     auto backend  = makeBackend();
     auto compiled = backend.compileNow({"regex", "a"}).compiled;

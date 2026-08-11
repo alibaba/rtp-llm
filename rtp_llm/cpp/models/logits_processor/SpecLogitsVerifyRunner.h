@@ -41,6 +41,10 @@ public:
         std::shared_ptr<torch::Event>      ready_event;
         std::shared_ptr<torch::Event>      consumed_event;
         bool                               has_active_processor = false;
+        // Processors skipped because isSpecVerifyEligible() was false at build
+        // time (e.g. grammar already reported an error on that stream). Their
+        // mask rows stay all-allow and their cap stays at propose_step.
+        size_t                             skipped_ineligible_processors = 0;
         std::vector<SpecLogitsProcessorId> applied_processors;
 
         // Keep H2D sources alive until ready_event has completed. The runner
