@@ -14,10 +14,12 @@
 #include <iomanip>
 #include <cstdlib>
 #include <cstdio>
+#include <algorithm>
 #include <mutex>
 #include <atomic>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #elif USING_ROCM
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
 #endif
@@ -64,6 +66,22 @@ static std::once_flag    g_init_flag;
 static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
+
+#if USING_CUDA
+struct MemoryTraceState {
+    bool             active{false};
+    c10::DeviceIndex device_id{0};
+    int64_t          baseline_allocated_bytes{0};
+    int64_t          baseline_reserved_bytes{0};
+};
+
+static std::mutex       g_memory_trace_mutex;
+static MemoryTraceState g_memory_trace_state;
+
+size_t positiveDelta(int64_t value, int64_t baseline) {
+    return value > baseline ? static_cast<size_t>(value - baseline) : 0;
+}
+#endif
 }  // anonymous namespace
 
 // ============================================================
@@ -356,6 +374,17 @@ ExecStatus getGpuExecStatus() {
 #if USING_CUDA
     auto error = cudaMemGetInfo(&mem.free_bytes, &total_bytes);
     RTP_LLM_CHECK(error == cudaSuccess);
+
+    std::lock_guard<std::mutex> lock(g_memory_trace_mutex);
+    if (g_memory_trace_state.active) {
+        const auto allocator_stats =
+            c10::cuda::CUDACachingAllocator::getDeviceStats(g_memory_trace_state.device_id);
+        const auto allocated_peak = positiveDelta(allocator_stats.allocated_bytes[0].peak,
+                                                  g_memory_trace_state.baseline_allocated_bytes);
+        const auto reserved_peak  = positiveDelta(allocator_stats.reserved_bytes[0].peak,
+                                                 g_memory_trace_state.baseline_reserved_bytes);
+        mem.max_consumed_bytes    = std::max(allocated_peak, reserved_peak);
+    }
 #elif USING_ROCM
     hipMemGetInfo(&mem.free_bytes, &total_bytes);
 #endif
@@ -370,12 +399,33 @@ torch::Device getTorchCudaDevice() {
     return torch::Device(torch::kCUDA);
 }
 
-namespace {
-static bool g_trace_memory = false;
+void setTraceMemory(bool trace_memory) {
+#if USING_CUDA
+    std::lock_guard<std::mutex> lock(g_memory_trace_mutex);
+    if (!trace_memory) {
+        g_memory_trace_state = {};
+        return;
+    }
+    if (g_memory_trace_state.active) {
+        return;
+    }
+
+    const auto device_id = static_cast<c10::DeviceIndex>(g_device_id);
+    const auto stats     = c10::cuda::CUDACachingAllocator::getDeviceStats(device_id);
+    c10::cuda::CUDACachingAllocator::resetPeakStats(device_id);
+    g_memory_trace_state = {true, device_id, stats.allocated_bytes[0].current, stats.reserved_bytes[0].current};
+#else
+    (void)trace_memory;
+#endif
 }
 
-void setTraceMemory(bool trace_memory) {
-    g_trace_memory = trace_memory;
+bool isTraceMemoryEnabled() {
+#if USING_CUDA
+    std::lock_guard<std::mutex> lock(g_memory_trace_mutex);
+    return g_memory_trace_state.active;
+#else
+    return false;
+#endif
 }
 
 // === Copy ops ===

@@ -21,6 +21,17 @@ cc_test(
 )
 
 cc_test(
+    name = "exec_ops_memory_trace_test",
+    srcs = ["ExecOpsMemoryTraceTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    tags = ["manual"],
+)
+
+cc_test(
     name = "distributed_comm_test",
     deps = [
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",

@@ -44,6 +44,46 @@ void releaseHostMemoryCache() {
     RTP_LLM_LOG_DEBUG("malloc_trim not available on this platform");
 #endif
 }
+
+class MemoryTraceScope {
+public:
+    MemoryTraceScope() {
+        RTP_LLM_CHECK_WITH_INFO(!rtp_llm::isTraceMemoryEnabled(),
+                                "warmup memory tracing cannot be nested with an existing trace");
+    }
+
+    void start() {
+        if (active_) {
+            return;
+        }
+        rtp_llm::setTraceMemory(true);
+        active_ = true;
+    }
+
+    void stop() {
+        if (!active_) {
+            return;
+        }
+        rtp_llm::setTraceMemory(false);
+        active_ = false;
+    }
+
+    ~MemoryTraceScope() noexcept {
+        try {
+            stop();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("failed to stop warmup memory tracing: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to stop warmup memory tracing with an unknown error");
+        }
+    }
+
+    MemoryTraceScope(const MemoryTraceScope&)            = delete;
+    MemoryTraceScope& operator=(const MemoryTraceScope&) = delete;
+
+private:
+    bool active_ = false;
+};
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -326,7 +366,8 @@ WarmUpResult NormalEngine::runWarmUp(const EngineInitParams&                    
     const RoleType warm_up_role =
         mode == preRunMode::prefill_warm_up ? RoleType::PREFILL : RoleType::DECODE;
     size_t max_consumed = 0;
-    rtp_llm::setTraceMemory(true);
+    MemoryTraceScope trace_scope;
+    trace_scope.start();
     try {
         const bool needs_cache = propose_params_ != nullptr || mode == preRunMode::decode_warm_up;
         auto cache_manager = needs_cache ? createWarmUpCacheManager(params) : nullptr;
@@ -338,10 +379,9 @@ WarmUpResult NormalEngine::runWarmUp(const EngineInitParams&                    
         cudaSyncAndCheck();
         max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
         executor_.reset();
-        rtp_llm::setTraceMemory(false);
+        trace_scope.stop();
     } catch (...) {
         executor_.reset();
-        rtp_llm::setTraceMemory(false);
         throw;
     }
     c10::cuda::CUDACachingAllocator::emptyCache();
