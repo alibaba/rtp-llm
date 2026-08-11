@@ -544,7 +544,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                              = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 1;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 2;
     PDSepConfig         pd_sep_config;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
