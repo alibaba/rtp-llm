@@ -316,4 +316,4 @@ class DeepSeekV32MTPForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)

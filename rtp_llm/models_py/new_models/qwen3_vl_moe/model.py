@@ -50,7 +50,7 @@ class Qwen3VLMoeForCausalLM(Qwen3VLMultimodalMixin, Qwen3MoeForCausalLM):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)
 
 
 __all__ = ["Qwen3VLMoeForCausalLM"]
