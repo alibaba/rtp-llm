@@ -803,7 +803,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            if is_deep_gemm_e8m0_used():
+            # Online SM100/SM120 loading can already produce the final packed
+            # UE8M0 representation directly from source weights.  Legacy/pre-quantized
+            # inputs still arrive with floating-point block scales and require
+            # the old dequantize/requantize conversion here.
+            if is_deep_gemm_e8m0_used() and scale_weight.dtype != torch.int32:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )
@@ -868,9 +872,39 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             tensor_source, layer_id, device, load_config
         )
 
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+            is_deep_gemm_e8m0_used,
+        )
+
+        is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
+        direct_ue8m0 = (
+            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+        )
+        if direct_ue8m0 and self.group_size != 128:
+            raise ValueError(
+                "SM100/SM120 DeepGEMM packed UE8M0 requires group_size=128, "
+                f"got {self.group_size} for {self.kernel.name}"
+            )
+
         res = {}
         scale = None
-        if self.scale:
+        if direct_ue8m0:
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+                quant_weight_ue8m0_packed,
+            )
+
+            source_weight = kernel.get(self.kernel.name)
+            if source_weight.dim() != 2:
+                raise ValueError(
+                    "Direct packed UE8M0 dense weight quantization requires a "
+                    f"2D tensor, got {tuple(source_weight.shape)} for "
+                    f"{self.kernel.name}"
+                )
+            source_weight = source_weight.T
+            quant_kernel, scale = quant_weight_ue8m0_packed(
+                source_weight.contiguous().to(device)
+            )
+        elif self.scale:
             quant_kernel, scale = per_block_cast_to_fp8(
                 kernel.get(self.kernel.name), self.group_size
             )
@@ -881,13 +915,16 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
 
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
-        elif quant_kernel.dim() == 2:
+        elif quant_kernel.dim() == 2 and not direct_ue8m0:
             quant_kernel = quant_kernel.T
 
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 else scale
-            res.update({self.scale.name: scale.contiguous().to(device)})
+            scale = scale.T if scale.dim() == 2 and not direct_ue8m0 else scale
+            # Packed UE8M0 scales intentionally use a non-contiguous TMA
+            # layout (stride(-2) == 1).  Do not normalize that layout here.
+            scale = scale.to(device) if direct_ue8m0 else scale.contiguous().to(device)
+            res.update({self.scale.name: scale})
 
         return res
 
