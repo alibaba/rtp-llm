@@ -29,6 +29,66 @@
 namespace rtp_llm {
 
 template<typename T>
+__global__ void addBiasGelu(T* output, const T* bias, size_t numel, size_t hidden_size) {
+    const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= numel) {
+        return;
+    }
+    const float x = static_cast<float>(output[index]) + static_cast<float>(bias[index % hidden_size]);
+    output[index] = static_cast<T>(0.5f * x * (1.0f + erff(x * 0.7071067811865475f)));
+}
+
+#if USING_CUDA
+__device__ __forceinline__ float exactGelu(float x) {
+    return 0.5f * x * (1.0f + erff(x * 0.7071067811865475f));
+}
+
+template<typename T>
+__global__ void addBiasGeluVector2(T* output, const T* bias, size_t pair_count, size_t hidden_pairs) {
+    const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= pair_count) {
+        return;
+    }
+    if constexpr (std::is_same_v<T, half>) {
+        half2  value_pair = reinterpret_cast<half2*>(output)[index];
+        half2  bias_pair  = reinterpret_cast<const half2*>(bias)[index % hidden_pairs];
+        float2 value      = __half22float2(value_pair);
+        float2 bias_value = __half22float2(bias_pair);
+        reinterpret_cast<half2*>(output)[index] =
+            __floats2half2_rn(exactGelu(value.x + bias_value.x), exactGelu(value.y + bias_value.y));
+    } else {
+        __nv_bfloat162 value_pair = reinterpret_cast<__nv_bfloat162*>(output)[index];
+        __nv_bfloat162 bias_pair  = reinterpret_cast<const __nv_bfloat162*>(bias)[index % hidden_pairs];
+        float2         value      = __bfloat1622float2(value_pair);
+        float2         bias_value = __bfloat1622float2(bias_pair);
+        reinterpret_cast<__nv_bfloat162*>(output)[index] =
+            __floats2bfloat162_rn(exactGelu(value.x + bias_value.x), exactGelu(value.y + bias_value.y));
+    }
+}
+#endif
+
+template<typename T>
+void invokeAddBiasGelu(T* output, const T* bias, size_t numel, size_t hidden_size, cudaStream_t stream) {
+    if (numel == 0) {
+        return;
+    }
+    constexpr int block_size = 256;
+#if USING_CUDA
+    constexpr uintptr_t vector_alignment = 2 * sizeof(T);
+    const bool          pointers_aligned = (reinterpret_cast<uintptr_t>(output) % vector_alignment == 0)
+                                  && (reinterpret_cast<uintptr_t>(bias) % vector_alignment == 0);
+    if (numel % 2 == 0 && hidden_size % 2 == 0 && pointers_aligned) {
+        const size_t pair_count = numel / 2;
+        const int    grid_size  = static_cast<int>((pair_count + block_size - 1) / block_size);
+        addBiasGeluVector2<<<grid_size, block_size, 0, stream>>>(output, bias, pair_count, hidden_size / 2);
+        return;
+    }
+#endif
+    const int grid_size = static_cast<int>((numel + block_size - 1) / block_size);
+    addBiasGelu<<<grid_size, block_size, 0, stream>>>(output, bias, numel, hidden_size);
+}
+
+template<typename T>
 __global__ void
 addBiasSoftMax(T* logits, const T* bias, const int* end_ids, const bool* finished, const int n_padded, const int n) {
     int  bid    = blockIdx.x;
@@ -101,6 +161,11 @@ template void invokeAddBiasSoftMax(float*       logits,
                                    const int    n_padded,
                                    const int    n,
                                    cudaStream_t stream);
+
+template void invokeAddBiasGelu(half* output, const half* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
+
+template void invokeAddBiasGelu(
+    __nv_bfloat16* output, const __nv_bfloat16* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
 
 template void invokeAddBiasSoftMax(half*        logits,
                                    const half*  bias,

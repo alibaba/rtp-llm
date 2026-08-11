@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/common/RtpNorm.h"
+#include "rtp_llm/models_py/bindings/common/kernels/activation_kernels.h"
 #include <cstdint>
 #include <iostream>
 #include <type_traits>
@@ -8,6 +9,26 @@ using namespace std;
 namespace th = torch;
 using namespace rtp_llm;
 namespace torch_ext {
+void fused_bias_gelu(at::Tensor& input, at::Tensor& bias) {
+    CHECK_INPUT(input);
+    CHECK_INPUT(bias);
+    CHECK_DIM(2, input);
+    TORCH_CHECK(bias.dim() == 1 || (bias.dim() == 2 && bias.size(0) == 1),
+                "bias must have shape [hidden_size] or [1, hidden_size]");
+    CHECK_EQ(input.device(), bias.device());
+    CHECK_EQ(input.scalar_type(), bias.scalar_type());
+    CHECK_EQ(input.size(1), bias.numel());
+    StreamType stream = GET_CURRENT_STREAM();
+    DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
+        invokeAddBiasGelu(static_cast<c_type*>(input.data_ptr()),
+                          static_cast<c_type*>(bias.data_ptr()),
+                          input.numel(),
+                          input.size(1),
+                          stream);
+        return true;
+    });
+}
+
 void layernorm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, at::Tensor& beta, double eps) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
@@ -50,16 +71,25 @@ void fused_add_layernorm(
     CHECK_EQ(residual.device(), device);
     CHECK_EQ(weight.device(), device);
     CHECK_EQ(beta.device(), device);
+    CHECK_EQ(residual.scalar_type(), input.scalar_type());
+    CHECK_EQ(weight.scalar_type(), input.scalar_type());
+    CHECK_EQ(beta.scalar_type(), input.scalar_type());
     CHECK_DIM(2, input);     // input: (batch_size, hidden_size)
     CHECK_DIM(2, residual);  // input: (batch_size, hidden_size)
     CHECK_DIM(1, weight);    // weight: (hidden_size)
     CHECK_DIM(1, beta);      // weight: (hidden_size)
     CHECK_EQ(input.size(1), weight.size(0));
+    CHECK_EQ(input.size(0), residual.size(0));
+    CHECK_EQ(input.size(1), residual.size(1));
+    CHECK_EQ(input.size(1), beta.size(0));
     // for bert model, bias is none
     if (bias.numel() != 0) {
         CHECK_INPUT(bias);
         CHECK_EQ(bias.device(), device);
-        CHECK_DIM(1, bias);  // weight: (hidden_size)
+        CHECK_EQ(bias.scalar_type(), input.scalar_type());
+        TORCH_CHECK(bias.dim() == 1 || (bias.dim() == 2 && bias.size(0) == 1),
+                    "bias must have shape [hidden_size] or [1, hidden_size]");
+        CHECK_EQ(input.size(1), bias.numel());
     }
     unsigned int batch_size  = input.size(0);
     unsigned int hidden_size = input.size(1);
