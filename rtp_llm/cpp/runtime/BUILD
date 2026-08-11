@@ -101,6 +101,7 @@ cc_library(
     copts = copts(),
     alwayslink = True,
     visibility = [
+        "//rtp_llm/cpp/comm/test:__pkg__",
         "//rtp_llm/cpp/pybind:__pkg__",
         "//rtp_llm/models_py/bindings/core:__pkg__",
     ],

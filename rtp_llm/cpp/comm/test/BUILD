@@ -7,6 +7,7 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/comm:collective_backend_impl",
         "//rtp_llm/cpp/comm:collective_backend_pybind_hdrs",
+        "//rtp_llm/cpp/runtime:cuda_runtime_impl",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
     copts = copts(),
