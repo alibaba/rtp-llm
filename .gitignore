@@ -83,6 +83,3 @@ docs/index/dist/
 # Local analysis reports
 *_analysis_report.md
 *.whl
-
-# Local remote-development operation ledgers
-/.tmp/rtp-remote-dev-operations/
