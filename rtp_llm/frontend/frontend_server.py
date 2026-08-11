@@ -30,6 +30,7 @@ from rtp_llm.structure.request_extractor import request_id_field_name
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.base_model_datatypes import RequestDeadlineAnchor
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyException,
     get_global_controller,
@@ -276,6 +277,7 @@ class FrontendServer(object):
         self, request: ChatCompletionRequest, raw_request: Request
     ):
         sequence = self._global_controller.increment() % 4096  # 12 bits
+        request_deadline_anchor = RequestDeadlineAnchor.now()
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
             self.py_env_configs.server_config.server_port,
@@ -286,7 +288,7 @@ class FrontendServer(object):
         def generate_call():
             assert self._openai_endpoint != None
             response = self._openai_endpoint.chat_completion(
-                request_id, request, raw_request
+                request_id, request, raw_request, request_deadline_anchor
             )
             assert isinstance(
                 response, CompleteResponseAsyncGenerator
@@ -310,6 +312,7 @@ class FrontendServer(object):
         from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
 
         sequence = self._global_controller.increment() % 4096
+        request_deadline_anchor = RequestDeadlineAnchor.now()
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
             self.py_env_configs.server_config.server_port,
@@ -319,7 +322,7 @@ class FrontendServer(object):
         try:
             assert self._openai_endpoint is not None
             responses = await self._openai_endpoint.batch_chat_completion(
-                request_id, request
+                request_id, request, request_deadline_anchor
             )
             return ORJSONResponse(
                 content=BatchChatCompletionResponse(

@@ -44,6 +44,10 @@ from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
+from rtp_llm.utils.base_model_datatypes import (
+    RequestDeadlineAnchor,
+    initialize_request_deadlines,
+)
 
 
 class OpenaiEndpoint(object):
@@ -504,7 +508,11 @@ class OpenaiEndpoint(object):
         return rendered_input
 
     def chat_completion(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+        request_deadline_anchor: Optional[RequestDeadlineAnchor] = None,
     ) -> CompleteResponseAsyncGenerator:
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
@@ -538,6 +546,7 @@ class OpenaiEndpoint(object):
             generate_config,
             self.backend_rpc_server_visitor,
             chat_request,
+            request_deadline_anchor,
         )
 
         return self._complete_stream_response(
@@ -547,7 +556,12 @@ class OpenaiEndpoint(object):
             chat_request.model or self.model_name,
         )
 
-    def _prepare_chat_input(self, request_id: int, chat_request):
+    def _prepare_chat_input(
+        self,
+        request_id: int,
+        chat_request,
+        request_deadline_anchor: Optional[RequestDeadlineAnchor] = None,
+    ):
         import torch
 
         from rtp_llm.utils.base_model_datatypes import GenerateInput
@@ -568,6 +582,12 @@ class OpenaiEndpoint(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
         )
+        if request_deadline_anchor is not None:
+            initialize_request_deadlines(
+                gen_input,
+                request_deadline_anchor.monotonic_s,
+                request_deadline_anchor.unix_ms,
+            )
         return gen_input, generate_config
 
     async def _render_single_output(self, outputs, chat_request, generate_config):
@@ -593,7 +613,12 @@ class OpenaiEndpoint(object):
             chat_request.model or self.model_name,
         )
 
-    async def batch_chat_completion(self, base_request_id: int, batch_request) -> list:
+    async def batch_chat_completion(
+        self,
+        base_request_id: int,
+        batch_request,
+        request_deadline_anchor: Optional[RequestDeadlineAnchor] = None,
+    ) -> list:
         inputs = []
         all_configs = []
         for i, chat_request in enumerate(batch_request.requests):
@@ -603,7 +628,7 @@ class OpenaiEndpoint(object):
                 )
             chat_request.stream = False
             gen_input, generate_config = self._prepare_chat_input(
-                base_request_id + i, chat_request
+                base_request_id + i, chat_request, request_deadline_anchor
             )
             generate_config.is_streaming = False
             inputs.append(gen_input)

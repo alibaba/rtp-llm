@@ -50,6 +50,19 @@ class VitParameters:
     eval_model_size = None
 
 
+@dataclass(frozen=True)
+class RequestDeadlineAnchor:
+    monotonic_s: float
+    unix_ms: int
+
+    @classmethod
+    def now(cls) -> "RequestDeadlineAnchor":
+        return cls(
+            monotonic_s=current_monotonic_time_s(),
+            unix_ms=current_unix_time_ms(),
+        )
+
+
 # single batch prompt input
 @dataclass
 class GenerateInput:

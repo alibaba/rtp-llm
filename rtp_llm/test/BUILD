@@ -145,6 +145,17 @@ py_test(
 )
 
 py_test(
+    name = "frontend_deadline_anchor_test",
+    srcs = [
+        "frontend_deadline_anchor_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "openai_endpoint_collect_response_test",
     srcs = [
         "openai_endpoint_collect_response_test.py",

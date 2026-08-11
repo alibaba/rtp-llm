@@ -39,6 +39,8 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
     MMUrlType,
+    RequestDeadlineAnchor,
+    initialize_request_deadlines,
 )
 from rtp_llm.utils.util import has_overlap_kmp
 from rtp_llm.utils.word_util import (
@@ -436,21 +438,27 @@ class CustomChatRenderer:
         generate_config: GenerateConfig,
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
+        request_deadline_anchor: Optional[RequestDeadlineAnchor] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
         input_id_tensor = torch.Tensor(input_ids).int().unsqueeze(0)
-        output_generator: AsyncGenerator[GenerateOutputs, None] = (
-            await backend_rpc_server_visitor.enqueue(
-                GenerateInput(
-                    request_id=request_id,
-                    token_ids=input_id_tensor,
-                    mm_inputs=mm_inputs,
-                    generate_config=generate_config,
-                    tokenizer=self.tokenizer,
-                    token_type_ids=token_type_ids,
-                )
+        generate_input = GenerateInput(
+            request_id=request_id,
+            token_ids=input_id_tensor,
+            mm_inputs=mm_inputs,
+            generate_config=generate_config,
+            tokenizer=self.tokenizer,
+            token_type_ids=token_type_ids,
+        )
+        if request_deadline_anchor is not None:
+            initialize_request_deadlines(
+                generate_input,
+                request_deadline_anchor.monotonic_s,
+                request_deadline_anchor.unix_ms,
             )
+        output_generator: AsyncGenerator[GenerateOutputs, None] = (
+            await backend_rpc_server_visitor.enqueue(generate_input)
         )
 
         # 处理非流式请求的合并逻辑
