@@ -703,6 +703,71 @@ StreamState GenerateStream::moveToNext() {
     return state;
 }
 
+CachePrepareResult GenerateStream::prepareCache() {
+    checkTimeout();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (generate_status_->error_info.hasError()) {
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+    if (generate_status_->hasEvent(StreamEvents::CachePrepared)) {
+        return CachePrepareResult::DONE;
+    }
+
+    if (!generate_status_->hasEvent(StreamEvents::LoadInitiated)) {
+        recordWaitLatency();
+        auto status = stream_cache_resource_->initKVBlock(reserve_step_);
+        if (!status.ok()) {
+            if (absl::IsUnavailable(status)) {
+                return CachePrepareResult::LACK_MEM;
+            }
+            generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
+            generate_status_->reportEvent(StreamEvents::CachePrepared);
+            return CachePrepareResult::DONE;
+        }
+        const bool loading = stream_cache_resource_->asyncLoadCache();
+        generate_status_->reportEvent(StreamEvents::LoadInitiated);
+        if (loading) {
+            recordLoadingCacheStartTime();
+            return CachePrepareResult::WAIT;
+        }
+        // Match the synchronous first WAITING transition: when no connector
+        // load is needed, non-DECODE roles run with the initial allocation and
+        // do not perform an extra incrKVBlock.
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    } else if (!stream_cache_resource_->loadCacheDone()) {
+        return CachePrepareResult::WAIT;
+    }
+    recordLoadingCacheDoneTime();
+
+    if (generate_status_->error_info.hasError()) {
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+
+    // PREFILL context streams already own all blocks needed by their single
+    // context pass. Decode/fallback streams need the same top-up that the
+    // synchronous WAITING transition performs.
+    if (!(stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+          && stream_cache_resource_->isContextStream())) {
+        auto status = stream_cache_resource_->incrKVBlock(reserve_step_);
+        if (!status.ok()) {
+            // incrKVBlock() in this branch still reports retryable allocator
+            // pressure as InternalError("malloc failed"). Keep this check in
+            // sync with StreamCacheResource until it exposes MallocStatus.
+            if (status.message() == "malloc failed") {
+                return CachePrepareResult::LACK_MEM;
+            }
+            generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
+            generate_status_->reportEvent(StreamEvents::CachePrepared);
+            return CachePrepareResult::DONE;
+        }
+    }
+    generate_status_->reportEvent(StreamEvents::CachePrepared);
+    return CachePrepareResult::DONE;
+}
+
 bool GenerateStream::hasError() const {
     return generate_status_->error_info.hasError();
 }

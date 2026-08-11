@@ -172,6 +172,7 @@ public:
         GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
         Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
         NeedRemoteGenerate = 1 << 4,  // 需要远程生成
+        CachePrepared      = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
     };
 
     void append(EventType event) {
