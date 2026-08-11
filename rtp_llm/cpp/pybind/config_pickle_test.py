@@ -50,7 +50,7 @@ class GrammarConfigPickleTest(unittest.TestCase):
         self.assertTrue(restored.constrained_json_disable_any_whitespace)
         self.assertEqual(restored.num_workers, 3)
         self.assertEqual(restored.tokenizer_info_json, "tokenizer-info")
-        self.assertEqual(restored.compiler_cache_bytes, 1024 * 1024 * 1024)
+        self.assertEqual(restored.compiler_cache_bytes, 512 * 1024 * 1024)
         self.assertFalse(restored.terminate_without_stop_token)
         self.assertFalse(hasattr(restored, "override_stop_tokens"))
 

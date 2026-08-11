@@ -337,11 +337,11 @@ class BaseModel(object):
             self.model_config.special_tokens.eos_token_id = int(eos_token_id)
 
     def build_grammar_tokenizer_info(self) -> str:
-        # Grammar tokenizer metadata is a startup-time compatibility contract, not
-        # an optional per-request optimization.  Fail fast below if it cannot be
-        # built: accepting ordinary requests with empty metadata would defer an
-        # unsupported tokenizer or missing stop-token configuration until the
-        # first grammar request reaches the engine.
+        # Non-empty metadata enables the engine's optional structured-output backend.
+        # A tokenizer wrapper without a real tokenizer leaves the backend disabled;
+        # Dash-SC rejects only requests that actually ask for structured output.
+        # Other metadata construction failures remain startup errors because they
+        # indicate an invalid tokenizer/backend compatibility contract.
         try:
             return build_model_grammar_tokenizer_info_json(
                 self.tokenizer,

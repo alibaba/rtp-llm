@@ -638,6 +638,9 @@ whl_reqs = [
     "aiohttp",
     "json5",
     "jsonschema==4.26.0",
+    # xgrammar 0.2.5 constrains transformers<5; leave the wheel lower-bounded so
+    # pip can select 0.2.3 with the wheel's transformers==5.2.0 requirement.
+    "xgrammar>=0.2.3",
     "dashscope>=1.11.0",
     "jieba",
     "openai",

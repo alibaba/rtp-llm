@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, call, patch
 
 import xgrammar as xgr
 
+from rtp_llm.config.grammar_constraint import GrammarConstraint
 from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
 from rtp_llm.dash_sc.inference.grammar_validator import (
     GrammarCompilationError,
@@ -41,6 +42,23 @@ class GrammarValidatorResponseFormatTest(unittest.TestCase):
 
         compiled_schema = self.validator._compile_in_worker.call_args.args[1]
         self.assertEqual(json.loads(compiled_schema), schema)
+
+    def test_empty_and_boolean_json_schemas_reach_compiler(self) -> None:
+        schemas = ({}, True, False)
+
+        for schema in schemas:
+            with self.subTest(schema=schema):
+                self.assertTrue(
+                    self.validator.validate_constraint(
+                        GrammarConstraint("json_schema", schema)
+                    )
+                )
+
+        compiled_schemas = [
+            json.loads(mock_call.args[1])
+            for mock_call in self.validator._compile_in_worker.call_args_list
+        ]
+        self.assertEqual(compiled_schemas, list(schemas))
 
     def test_regex_and_ebnf_use_matching_compiler_entry_points(self) -> None:
         self.assertTrue(
@@ -91,7 +109,7 @@ class GrammarValidatorResponseFormatTest(unittest.TestCase):
 
     def test_missing_grammar_payload_is_rejected_without_compile(self) -> None:
         for response_format in (
-            {"type": "json_schema", "json_schema": {}},
+            {"type": "json_schema"},
             {"type": "regex"},
             {"type": "ebnf", "grammar": ""},
             {"type": "unknown"},
@@ -142,22 +160,14 @@ class GrammarValidatorResponseFormatTest(unittest.TestCase):
 
 
 class GrammarValidatorBackendTest(unittest.TestCase):
-    def test_build_backend_ignores_serialization_version(self) -> None:
+    def test_worker_build_backend_deserializes_python_tokenizer_info(self) -> None:
         xgrammar = MagicMock()
         tokenizer_info = object()
         backend = object()
-        xgrammar.TokenizerInfo.return_value = tokenizer_info
+        xgrammar.TokenizerInfo.deserialize_json.return_value = tokenizer_info
         xgrammar.GrammarCompiler.return_value = backend
         validator = GrammarValidator.__new__(GrammarValidator)
-        validator._tokenizer_info_json = json.dumps(
-            {
-                "__VERSION__": 15,
-                "decoded_vocab": ["", "a"],
-                "vocab_size": 123456,
-                "stop_token_ids": [2],
-                "add_prefix_space": True,
-            }
-        )
+        validator._tokenizer_info_json = "tokenizer-info"
         validator._compile_threads = 4
         validator._cache_limit_bytes = 1024
 
@@ -165,13 +175,8 @@ class GrammarValidatorBackendTest(unittest.TestCase):
             result = validator._build_backend()
 
         self.assertIs(result, backend)
-        xgrammar.TokenizerInfo.deserialize_json.assert_not_called()
-        xgrammar.TokenizerInfo.assert_called_once_with(
-            ["", "a"],
-            xgrammar.VocabType.RAW,
-            vocab_size=123456,
-            stop_token_ids=[2],
-            add_prefix_space=True,
+        xgrammar.TokenizerInfo.deserialize_json.assert_called_once_with(
+            "tokenizer-info"
         )
         xgrammar.GrammarCompiler.assert_called_once_with(
             tokenizer_info,
@@ -202,14 +207,23 @@ class GrammarValidatorCompileExceptionTest(unittest.TestCase):
                 self.assertFalse(retire_worker)
                 self.assertEqual(message, str(error))
 
-    def test_resource_exhaustion_is_rejected_and_worker_is_retired(self) -> None:
-        for error in (MemoryError("out of memory"), RuntimeError("std::bad_alloc")):
-            with self.subTest(error_type=type(error).__name__):
-                status, retire_worker, message = _compile_exception_reply(error)
+    def test_memory_error_is_rejected_and_worker_is_retired(self) -> None:
+        error = MemoryError("out of memory")
 
-                self.assertIs(status, _WorkerStatus.INVALID)
-                self.assertTrue(retire_worker)
-                self.assertEqual(message, str(error))
+        status, retire_worker, message = _compile_exception_reply(error)
+
+        self.assertIs(status, _WorkerStatus.INVALID)
+        self.assertTrue(retire_worker)
+        self.assertEqual(message, str(error))
+
+    def test_user_controlled_bad_alloc_text_does_not_retire_worker(self) -> None:
+        error = RuntimeError("Cannot find field bad_alloc")
+
+        status, retire_worker, message = _compile_exception_reply(error)
+
+        self.assertIs(status, _WorkerStatus.INVALID)
+        self.assertFalse(retire_worker)
+        self.assertEqual(message, str(error))
 
 
 class GrammarValidatorSandboxTest(unittest.TestCase):

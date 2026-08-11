@@ -33,9 +33,9 @@ from typing import Any
 
 import grpc
 import torch
+import xgrammar as xgr
 
 from rtp_llm.config.grammar_constraint import GrammarConstraint
-from rtp_llm.config.grammar_tokenizer_info import build_grammar_tokenizer_info_json
 from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import LLMFinishReason, SamplingParams
@@ -548,16 +548,13 @@ async def _run(args: argparse.Namespace) -> int:
         input_ids = input_ids.tolist()
     input_ids = [int(token_id) for token_id in input_ids]
 
-    eos_token_id = tokenizer.eos_token_id
-    if isinstance(eos_token_id, (list, tuple)):
-        eos_token_id = eos_token_id[0] if eos_token_id else None
     grammar_config = GrammarConfig()
     grammar_config.num_workers = args.compiler_threads
-    grammar_config.tokenizer_info_json = build_grammar_tokenizer_info_json(
+    tokenizer_info = xgr.TokenizerInfo.from_huggingface(
         tokenizer.get_real_tokenizer(),
-        model_vocab_size=int(tokenizer.config_json.get("vocab_size") or 0),
-        stop_token_ids=[] if eos_token_id is None else [int(eos_token_id)],
+        vocab_size=int(tokenizer.config_json.get("vocab_size") or 0) or None,
     )
+    grammar_config.tokenizer_info_json = tokenizer_info.serialize_json()
     init_started = time.perf_counter()
     validator = _TimedGrammarValidator(
         grammar_config,

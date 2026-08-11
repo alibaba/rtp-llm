@@ -17,9 +17,6 @@ import time
 import traceback
 from typing import TYPE_CHECKING, List, Optional
 
-from rtp_llm.config.grammar_tokenizer_info import (
-    build_model_grammar_tokenizer_info_json,
-)
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.response_format import normalize_think_tag
@@ -613,14 +610,16 @@ class DashScApp:
                     ),
                 )
                 grammar_config = self.py_env_configs.grammar_config
-                grammar_config.tokenizer_info_json = (
-                    build_model_grammar_tokenizer_info_json(base_tok, model_config)
+                grammar_validator = (
+                    GrammarValidator(
+                        grammar_config,
+                        self.py_env_configs.grammar_admission_config,
+                        tokenizer=base_tok,
+                        model_config=model_config,
+                    )
                     if model_config.task_type == TaskType.LANGUAGE_MODEL
-                    else ""
-                )
-                grammar_validator = GrammarValidator(
-                    grammar_config,
-                    self.py_env_configs.grammar_admission_config,
+                    and base_tok.get_real_tokenizer() is not None
+                    else None
                 )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,

@@ -1929,6 +1929,19 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_args[0].value, schema)
         self.assertEqual(call_args[1], "srv-1")
 
+    async def test_request_without_grammar_constraint_skips_validator(self) -> None:
+        validator = MagicMock(spec=GrammarValidator)
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, grammar_validator=validator
+        )
+        req = self._valid_infer_request()
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        validator.validate_constraint.assert_not_called()
+
     async def test_invalid_response_format_compile_is_rejected_before_enqueue(
         self,
     ) -> None:

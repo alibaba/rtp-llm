@@ -6,8 +6,9 @@ inside the prefill EngineCore (a separate process) and can never reach the clien
 over the PD protocol -- the request just hangs and 504s. We turn a bad grammar into
 a clean HTTP 4xx at admission, before dispatch.
 
-Every request runs cheap shape checks first, then trial-compiles in a spawned worker
-pool. An uncatchable SIGSEGV/OOM therefore only kills the worker, never DashLLM.
+Every structured-output request runs cheap shape checks first, then trial-compiles in
+a spawned worker pool. An uncatchable SIGSEGV/OOM therefore only kills the worker,
+never DashLLM.
 
 The trial compile only needs a classified answer, so the compiled grammar is never
 shipped. Repeat specs with deterministic answers are served from an LRU; transient
@@ -67,7 +68,9 @@ def _with_request_id(message: str) -> str:
 
 
 def _is_resource_exhaustion(error: BaseException) -> bool:
-    return isinstance(error, MemoryError) or "bad_alloc" in str(error).lower()
+    # Compiler diagnostics can echo user-controlled schema text. Classify only
+    # by exception type so a field named "bad_alloc" cannot retire a worker.
+    return isinstance(error, MemoryError)
 
 
 def _compile_exception_reply(error: Exception) -> tuple[_WorkerStatus, bool, str]:
@@ -103,13 +106,37 @@ class GrammarValidator:
         self,
         grammar_config: GrammarConfig,
         admission_config: GrammarAdmissionConfig | None = None,
+        *,
+        tokenizer: Any | None = None,
+        model_config: Any | None = None,
     ) -> None:
         if admission_config is None:
             admission_config = GrammarAdmissionConfig()
-        self._initialize_compiler(grammar_config)
+        if (tokenizer is None) != (model_config is None):
+            raise ValueError("tokenizer and model_config must be provided together")
+        tokenizer_info = (
+            self._build_tokenizer_info(tokenizer, model_config)
+            if tokenizer is not None
+            else None
+        )
+        tokenizer_info_json = (
+            tokenizer_info.serialize_json()
+            if tokenizer_info is not None
+            else str(grammar_config.tokenizer_info_json)
+        )
+        if not tokenizer_info_json:
+            raise ValueError("grammar validation requires a real tokenizer")
+        self._initialize_compiler(
+            grammar_config,
+            tokenizer_info_json,
+            tokenizer_info=tokenizer_info,
+        )
         # GrammarConfig has an explicit pickle contract and is sent to spawned workers
         # directly, keeping the EngineCore and admission compiler settings on one type.
+        # Tokenizer metadata is passed separately because Dash-SC builds it from its own
+        # tokenizer instead of mutating the shared GrammarConfig as an implicit side channel.
         self._worker_grammar_config = grammar_config
+        self._worker_tokenizer_info_json = tokenizer_info_json
         # Per sandbox-worker memory headroom beyond the spawned process's initialized
         # Python/xgrammar/compiler baseline. Applied only in the worker: a pathological
         # grammar kills/rejects that worker while the DashLLM parent replaces it.
@@ -164,7 +191,7 @@ class GrammarValidator:
         kind = "json" if constraint.name == "json_schema" else constraint.name
         return self._check_grammar(kind, constraint.value)
 
-    def validate_json(self, schema: str | dict, request_id: str = "") -> bool:
+    def validate_json(self, schema: str | dict | bool, request_id: str = "") -> bool:
         _req_ctx.rid = request_id
         return self._check_grammar("json", schema)
 
@@ -297,7 +324,12 @@ class GrammarValidator:
                 )
             )
 
-    def _initialize_compiler(self, grammar_config: GrammarConfig) -> None:
+    def _initialize_compiler(
+        self,
+        grammar_config: GrammarConfig,
+        tokenizer_info_json: str | None = None,
+        tokenizer_info: Any | None = None,
+    ) -> None:
         """Build the compiler state shared by the parent compatibility check and workers."""
         self._disable_any_whitespace = bool(
             grammar_config.constrained_json_disable_any_whitespace
@@ -305,10 +337,30 @@ class GrammarValidator:
         self._compile_threads = max(1, int(grammar_config.num_workers))
         config_cache_bytes = int(grammar_config.compiler_cache_bytes)
         self._cache_limit_bytes = config_cache_bytes if config_cache_bytes > 0 else -1
-        self._tokenizer_info_json = str(grammar_config.tokenizer_info_json)
+        self._tokenizer_info_json = (
+            tokenizer_info_json
+            if tokenizer_info_json is not None
+            else str(grammar_config.tokenizer_info_json)
+        )
         # Fail service startup if the configured xgrammar/tokenizer pair is unusable.
         # Spawned workers independently build the same backend before announcing ready.
-        self._backend = self._build_backend()
+        self._backend = self._build_backend(tokenizer_info)
+
+    def _build_tokenizer_info(self, tokenizer: Any, model_config: Any) -> Any:
+        """Build admission tokenizer state directly with the Python xgrammar API."""
+        xgr = self._xgrammar()
+        if xgr is None:
+            raise RuntimeError(
+                "GrammarValidator requires xgrammar for compile/sandbox validation"
+            )
+        real_tokenizer = tokenizer.get_real_tokenizer()
+        if real_tokenizer is None:
+            raise ValueError("grammar validation requires a real tokenizer")
+        model_vocab_size = int(model_config.vocab_size or 0)
+        return xgr.TokenizerInfo.from_huggingface(
+            real_tokenizer,
+            vocab_size=model_vocab_size or None,
+        )
 
     def _compile(self, kind: str, spec_str: str) -> None:
         """Trial-compile directly with xgrammar. Raises on a catchable error; may SIGSEGV
@@ -343,8 +395,8 @@ class GrammarValidator:
         else:
             raise ValueError(f"unsupported compile kind {kind!r}")
 
-    def _build_backend(self) -> Any:
-        """Build a compiler from the same serialized TokenizerInfo as EngineCore.
+    def _build_backend(self, tokenizer_info: Any | None = None) -> Any:
+        """Build a compiler from Python xgrammar tokenizer state.
 
         Raises on failure so compile/sandbox cannot silently become shape-only.
         """
@@ -354,17 +406,10 @@ class GrammarValidator:
                 "GrammarValidator requires xgrammar for compile/sandbox validation"
             )
         try:
-            # The native engine and Python wheel may use different xgrammar
-            # serialization versions. The fields needed to rebuild TokenizerInfo
-            # are stable, so avoid the version-gated deserialize_json path.
-            serialized_info = json.loads(self._tokenizer_info_json)
-            tokenizer_info = xgr.TokenizerInfo(
-                serialized_info["decoded_vocab"],
-                xgr.VocabType.RAW,
-                vocab_size=serialized_info["vocab_size"],
-                stop_token_ids=serialized_info["stop_token_ids"],
-                add_prefix_space=serialized_info["add_prefix_space"],
-            )
+            if tokenizer_info is None:
+                tokenizer_info = xgr.TokenizerInfo.deserialize_json(
+                    self._tokenizer_info_json
+                )
             return xgr.GrammarCompiler(
                 tokenizer_info,
                 max_threads=self._compile_threads,
@@ -592,6 +637,7 @@ class GrammarValidator:
                 args=(
                     child_conn,
                     self._worker_grammar_config,
+                    self._worker_tokenizer_info_json,
                     self._worker_memory_limit_bytes,
                 ),
                 name="grammar-sandbox-worker",
@@ -713,6 +759,18 @@ class GrammarValidator:
             return None
         return payload
 
+    @staticmethod
+    def _as_json_schema(payload: str | dict | bool) -> dict | bool | None:
+        """Parse a Draft 7 schema, including its empty-object and boolean forms."""
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, RecursionError):
+                return None
+        if not isinstance(payload, (dict, bool)):
+            return None
+        return payload
+
     # -- shape checks (pure; never build/compile a grammar) ----------------- #
 
     @staticmethod
@@ -742,13 +800,13 @@ class GrammarValidator:
         return False
 
     @staticmethod
-    def validate_json_schema(json_schema: str | dict) -> bool:
+    def validate_json_schema(json_schema: str | dict | bool) -> bool:
         """Return whether the schema parses and is valid Draft 7 JSON Schema.
 
         Feature support is checked by the native xgrammar trial compile at the
         ``compile`` and ``sandbox`` levels.
         """
-        schema = GrammarValidator._as_nonempty_dict(json_schema)
+        schema = GrammarValidator._as_json_schema(json_schema)
         if schema is None:
             return False
         try:
@@ -854,6 +912,7 @@ class GrammarValidator:
 def _spawned_sandbox_worker(
     conn: Any,
     grammar_config: GrammarConfig,
+    tokenizer_info_json: str,
     worker_memory_limit_bytes: int,
 ) -> None:
     """Spawn entry point: construct all Python/xgrammar state inside the child."""
@@ -861,7 +920,7 @@ def _spawned_sandbox_worker(
         # Do not call GrammarValidator.__init__ here: the public validator always owns a
         # sandbox pool, while a worker only needs its local compiler and request loop.
         validator = GrammarValidator.__new__(GrammarValidator)
-        validator._initialize_compiler(grammar_config)
+        validator._initialize_compiler(grammar_config, tokenizer_info_json)
         validator._worker_memory_limit_bytes = worker_memory_limit_bytes
     except BaseException as e:
         try:

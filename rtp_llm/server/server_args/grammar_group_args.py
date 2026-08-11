@@ -48,7 +48,7 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config=Non
         env_name="GRAMMAR_COMPILER_CACHE_BYTES",
         bind_to=(grammar_config, "compiler_cache_bytes"),
         type=int,
-        default=1024 * 1024 * 1024,
+        default=512 * 1024 * 1024,
         help=(
             "Byte cap on the internal compiled-grammar cache. Set <=0 for unlimited."
         ),
