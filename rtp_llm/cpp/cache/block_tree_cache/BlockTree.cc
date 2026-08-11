@@ -117,7 +117,8 @@ bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tie
 }
 
 BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                              cache_keys,
-                                            const std::vector<std::vector<GroupSetResource>>& resources) {
+                                            const std::vector<std::vector<GroupSetResource>>& resources,
+                                            bool                                              collect_path) {
     BlockTreeInsertResult result;
     if (resources.size() != cache_keys.size()) {
         RTP_LLM_LOG_WARNING("key/resource size mismatch, keys=%zu resources=%zu", cache_keys.size(), resources.size());
@@ -144,14 +145,17 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         }
     }
 
-    return insertNodeImpl(cache_keys, resources, /*enable_hard_stop=*/true);
+    return insertNodeImpl(cache_keys, resources, /*enable_hard_stop=*/true, collect_path);
 }
 
-BlockTreeInsertResult BlockTree::insertNodeImpl(
-    const CacheKeysType&                              cache_keys,
-    const std::vector<std::vector<GroupSetResource>>& resources,
-    bool                                               enable_hard_stop) {
+BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&                              cache_keys,
+                                                const std::vector<std::vector<GroupSetResource>>& resources,
+                                                bool                                              enable_hard_stop,
+                                                bool                                              collect_path) {
     BlockTreeInsertResult result;
+    if (collect_path) {
+        result.path.reserve(cache_keys.size());
+    }
 
     TreeNode* current                = root_.get();
     size_t    inserted_prefix_length = 0;
@@ -197,6 +201,18 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(
                     }
                 }
                 if (!full_path_ready) {
+                    if (collect_path) {
+                        current = child;
+                        result.path.push_back(current);
+                        for (size_t path_index = i + 1; path_index < cache_keys.size(); ++path_index) {
+                            auto path_it = current->children.find(cache_keys[path_index]);
+                            if (path_it == current->children.end()) {
+                                break;
+                            }
+                            current = path_it->second;
+                            result.path.push_back(current);
+                        }
+                    }
                     break;
                 }
             }
@@ -237,6 +253,9 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(
                 ++result.accepted_resource_count;
             }
             result.inserted_nodes.push_back(current);
+        }
+        if (collect_path) {
+            result.path.push_back(current);
         }
         inserted_prefix_length = i + 1;
     }

@@ -4,8 +4,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
@@ -64,11 +66,22 @@ struct BlockTreeCacheReuseTimeMetricsSnapshot {
     int64_t        hit_entry_age_max_ms{0};
 };
 
-struct BlockTreeTransferBytesSnapshot {
+struct BlockTreeTransferBytesKey {
     std::string pool_name;
-    std::string group_type;
-    size_t      transfer_bytes{0};
+    CacheGroupType group_type{CacheGroupType::FULL};
+
+    bool operator==(const BlockTreeTransferBytesKey& other) const {
+        return pool_name == other.pool_name && group_type == other.group_type;
+    }
 };
+
+struct BlockTreeTransferBytesKeyHash {
+    size_t operator()(const BlockTreeTransferBytesKey& key) const {
+        return std::hash<std::string>{}(key.pool_name) ^ (static_cast<size_t>(key.group_type) << 1);
+    }
+};
+
+using BlockTreeTransferBytes = std::unordered_map<BlockTreeTransferBytesKey, size_t, BlockTreeTransferBytesKeyHash>;
 
 class BlockTreeCacheMetricsReporter final {
 public:
@@ -88,17 +101,20 @@ public:
                                 const std::vector<GroupSetPtr>&        group_sets) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
-    void    reportTransferFinished(CacheTransferOperation operation,
-                                   Tier                   source_tier,
-                                   Tier                   target_tier,
-                                   size_t                 block_count,
-                                   int64_t                begin_time_us,
-                                   bool                   success,
-                                   const std::vector<BlockTreeTransferBytesSnapshot>& transfer_bytes);
+    void    reportTransferFinished(CacheTransferOperation        operation,
+                                   Tier                          source_tier,
+                                   Tier                          target_tier,
+                                   size_t                        block_count,
+                                   int64_t                       begin_time_us,
+                                   bool                          success,
+                                   const BlockTreeTransferBytes& transfer_bytes);
     void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
-    void accumulateTransferBytes(const TransferDescriptor& desc,
-                                 const GroupSetPtr& group_set,
-                                 std::vector<BlockTreeTransferBytesSnapshot>& transfer_bytes) const;
+    void    accumulateTransferBytes(const TransferDescriptor& desc,
+                                    const GroupSetPtr&        group_set,
+                                    BlockTreeTransferBytes&   transfer_bytes) const;
+    void    accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
+                                    const std::vector<GroupSetPtr>&        group_sets,
+                                    BlockTreeTransferBytes&                transfer_bytes) const;
 
 private:
     static constexpr size_t kOperationCount = 3;

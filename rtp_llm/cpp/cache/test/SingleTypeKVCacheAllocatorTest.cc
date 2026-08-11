@@ -118,7 +118,8 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
     } else {
         resources[0][0].disk_slot = source_block;
     }
-    const BlockTreeInsertResult insert_result = cache.tree()->insertNode(CacheKeysType{key}, resources);
+    const BlockTreeInsertResult insert_result =
+        cache.tree()->insertNode(CacheKeysType{key}, resources, /*collect_path=*/false);
     EXPECT_EQ(insert_result.inserted_nodes.size(), 1u);
     group->releaseSingleBlock(source_tier, source_block, BlockRefType::BLOCK_CACHE);
     return source_block;

@@ -224,6 +224,24 @@ TEST_F(BlockTreeCacheTest, CollectReuseTimeMetricsAggregatesPerTierAndGroupType)
     EXPECT_EQ(snapshots[0].hit_entry_age_max_ms, 10);
 }
 
+TEST_F(BlockTreeCacheTest, AccumulateTransferBytesAggregatesDescriptors) {
+    const std::vector<GroupSetPtr>&       group_sets  = cache_->groupSets();
+    const DeviceBlockPoolPtr&             device_pool = group_sets[0]->devicePools()[0];
+    const std::vector<TransferDescriptor> descs       = {
+        TransferDescriptor::deviceToHost(0, {1}, 10),
+        TransferDescriptor::deviceToHost(0, {2}, 11),
+    };
+    BlockTreeTransferBytes transfer_bytes;
+
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.accumulateTransferBytes(descs, group_sets, transfer_bytes);
+
+    ASSERT_EQ(transfer_bytes.size(), 1u);
+    const auto bytes_it = transfer_bytes.find({device_pool->poolName(), CacheGroupType::FULL});
+    ASSERT_NE(bytes_it, transfer_bytes.end());
+    EXPECT_EQ(bytes_it->second, 2 * device_pool->blockSizeBytes());
+}
+
 TEST_F(BlockTreeCacheTest, InsertPublishesAndShutdownRetiresDeviceBlockMapping) {
     const GroupSetPtr      group_set = cache_->groupSets()[0];
     constexpr BlockIdxType block_id  = 42;
@@ -1686,7 +1704,7 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
     resources[0][0].host_block = first_source;
     resources[0][1].host_block = second_source;
-    const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources);
+    const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources, /*collect_path=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);
 
@@ -1794,7 +1812,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = source_block;
-    const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources);
+    const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources, /*collect_path=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);
     const size_t source_ref_before = host_pool->refCount(source_block);
@@ -1880,7 +1898,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(2));
     resources[0][0].device_blocks = {resident_block};
     resources[0][1].host_block    = host_block;
-    const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources);
+    const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources, /*collect_path=*/false);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     releaseLowerTierSeedRefs(cache->groupSets(), resources);
     unreferenceDeviceBlocksForTest(*resident_group, resident_holder, BlockRefType::BLOCK_CACHE);

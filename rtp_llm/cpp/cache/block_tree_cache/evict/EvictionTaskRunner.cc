@@ -114,7 +114,7 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor& evictor, const BlockTreeEvict
                                       && std::all_of(copy_results.cascade_success.begin(),
                                                      copy_results.cascade_success.end(),
                                                      [](bool success) { return success; });
-        std::vector<BlockTreeTransferBytesSnapshot> transfer_bytes;
+        BlockTreeTransferBytes transfer_bytes;
         if (copy_results.primary_success) {
             metrics_reporter_->accumulateTransferBytes(
                 plan.primary_desc, group_sets_[plan.primary_desc.group_set_id], transfer_bytes);

@@ -398,7 +398,7 @@ bool insertGroupSetResources(BlockTreeCache&                                   c
     if (tree == nullptr) {
         return false;
     }
-    const BlockTreeInsertResult insert_result = tree->insertNode(cache_keys, resources);
+    const BlockTreeInsertResult insert_result = tree->insertNode(cache_keys, resources, /*collect_path=*/false);
     releaseLowerTierSeedRefs(tree->groupSets(), resources);
     cache.evictor_.onInsertCommitted(insert_result);
     return !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();

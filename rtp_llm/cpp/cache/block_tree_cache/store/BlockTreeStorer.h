@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -12,7 +11,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/store/StoreTaskRunner.h"
 
 namespace rtp_llm {
 
@@ -40,19 +39,7 @@ public:
     void stopAdmissionLocked();
 
 private:
-    struct StoreTask {
-        struct Entry {
-            size_t                    key_index{0};
-            size_t                    group_set_id{0};
-            std::vector<BlockIdxType> source_device_blocks;
-            BlockIdxType              target_block{NULL_BLOCK_IDX};
-        };
-
-        Tier                            target_tier{Tier::NONE};
-        CacheKeysType                   cache_keys;
-        std::vector<Entry>              entries;
-        std::vector<TransferDescriptor> descriptors;
-    };
+    using StoreTask    = StoreTaskRunner::Task;
     using StoreTaskPtr = std::shared_ptr<StoreTask>;
 
     void   publishDeviceLocked(const CacheKeysType&                              cache_keys,
@@ -63,13 +50,13 @@ private:
     void   runStoreTask(const StoreTaskPtr& task);
     void   settleTask(const StoreTask& task, bool copy_success);
     size_t settleLocked(const StoreTask& task, bool publish);
-    void   releaseSourceLocked(const GroupSet& group_set, const StoreTask::Entry& entry);
 
     BlockTree*                     tree_;
     BlockTreeEvictor&              evictor_;
     BlockTransferDispatcher*       transfer_dispatcher_;
     BlockTreeTaskPool*             task_pool_;
     BlockTreeCacheMetricsReporter& metrics_reporter_;
+    StoreTaskRunner                store_task_runner_;
     std::mutex&                    mutex_;
     int                            host_timeout_ms_{0};
     int                            disk_timeout_ms_{0};

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -16,7 +15,6 @@ namespace rtp_llm {
 namespace {
 
 using DeviceCandidateBlocks = std::unordered_map<const IBlockPool*, std::unordered_set<BlockIdxType>>;
-using TransferBytesByPool   = std::map<std::pair<std::string, std::string>, size_t>;
 
 constexpr std::array<Tier, 3>           kMetricTiers      = {Tier::DEVICE, Tier::HOST, Tier::DISK};
 constexpr std::array<CacheGroupType, 3> kMetricGroupTypes = {
@@ -101,39 +99,6 @@ DeviceCandidateBlocks collectDeviceCandidateBlocks(const std::vector<GroupSetPtr
 size_t deviceCandidateBlockCount(const DeviceCandidateBlocks& candidate_blocks, const IBlockPool* pool) {
     const DeviceCandidateBlocks::const_iterator candidates_it = candidate_blocks.find(pool);
     return candidates_it == candidate_blocks.end() ? 0 : candidates_it->second.size();
-}
-
-void accumulateTransferBytesByPool(const TransferDescriptor& desc,
-                                   const GroupSetPtr&        group_set,
-                                   TransferBytesByPool&      transfer_bytes_by_pool) {
-    assert(group_set != nullptr);
-    const std::string group_type = metricCacheGroupTypeName(group_set->groupType());
-    auto              add        = [&](const IBlockPool& pool, size_t bytes) {
-        transfer_bytes_by_pool[{pool.poolName(), group_type}] += bytes;
-    };
-
-    if (desc.source_tier == Tier::DEVICE) {
-        const std::vector<DeviceBlockPoolPtr>& pools = group_set->devicePools();
-        assert(desc.source_blocks.size() == pools.size());
-        for (size_t pool_index = 0; pool_index < pools.size(); ++pool_index) {
-            if (pools[pool_index] != nullptr && !isNullBlockIdx(desc.source_blocks[pool_index])) {
-                add(*pools[pool_index], pools[pool_index]->blockSizeBytes());
-            }
-        }
-        return;
-    }
-
-    size_t source_block_count = 0;
-    for (BlockIdxType block : desc.source_blocks) {
-        if (!isNullBlockIdx(block)) {
-            ++source_block_count;
-        }
-    }
-    if (desc.source_tier == Tier::HOST && group_set->hostPool() != nullptr) {
-        add(*group_set->hostPool(), source_block_count * group_set->hostPool()->blockSizeBytes());
-    } else if (desc.source_tier == Tier::DISK && group_set->diskPool() != nullptr) {
-        add(*group_set->diskPool(), source_block_count * group_set->diskPool()->blockSizeBytes());
-    }
 }
 
 }  // namespace
@@ -407,14 +372,13 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperat
     return begin_time_us;
 }
 
-void BlockTreeCacheMetricsReporter::reportTransferFinished(
-    CacheTransferOperation operation,
-    Tier source_tier,
-    Tier target_tier,
-    size_t block_count,
-    int64_t begin_time_us,
-    bool success,
-    const std::vector<BlockTreeTransferBytesSnapshot>& transfer_bytes) {
+void BlockTreeCacheMetricsReporter::reportTransferFinished(CacheTransferOperation        operation,
+                                                           Tier                          source_tier,
+                                                           Tier                          target_tier,
+                                                           size_t                        block_count,
+                                                           int64_t                       begin_time_us,
+                                                           bool                          success,
+                                                           const BlockTreeTransferBytes& transfer_bytes) {
     if (metrics_reporter_ == nullptr) {
         return;
     }
@@ -435,11 +399,11 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(
     collector.in_flight   = in_flight;
     collector.success     = success;
     collector.transfer_bytes.reserve(transfer_bytes.size());
-    for (const BlockTreeTransferBytesSnapshot& snapshot : transfer_bytes) {
+    for (const auto& transfer_bytes_entry : transfer_bytes) {
         RtpLLMCacheTransferMetricsCollector::TransferBytesEntry entry;
-        entry.pool_name      = snapshot.pool_name;
-        entry.group_type     = snapshot.group_type;
-        entry.transfer_bytes = static_cast<int64_t>(snapshot.transfer_bytes);
+        entry.pool_name      = transfer_bytes_entry.first.pool_name;
+        entry.group_type     = metricCacheGroupTypeName(transfer_bytes_entry.first.group_type);
+        entry.transfer_bytes = static_cast<int64_t>(transfer_bytes_entry.second);
         collector.transfer_bytes.push_back(std::move(entry));
     }
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
@@ -475,26 +439,27 @@ void BlockTreeCacheMetricsReporter::reportStoreBlocks(Tier target_tier, const ch
     metrics_reporter_->report<RtpLLMTierStoreMetrics, RtpLLMTierStoreMetricsCollector>(nullptr, &collector);
 }
 
-void BlockTreeCacheMetricsReporter::accumulateTransferBytes(
-    const TransferDescriptor& desc,
-    const GroupSetPtr& group_set,
-    std::vector<BlockTreeTransferBytesSnapshot>& transfer_bytes) const {
-    if (group_set == nullptr) {
-        return;
-    }
-
-    TransferBytesByPool transfer_bytes_by_pool;
-    accumulateTransferBytesByPool(desc, group_set, transfer_bytes_by_pool);
-    for (const std::pair<const std::pair<std::string, std::string>, size_t>& entry : transfer_bytes_by_pool) {
-        std::vector<BlockTreeTransferBytesSnapshot>::iterator snapshot_it = std::find_if(
-            transfer_bytes.begin(), transfer_bytes.end(), [&](const BlockTreeTransferBytesSnapshot& snapshot) {
-                return snapshot.pool_name == entry.first.first && snapshot.group_type == entry.first.second;
-            });
-        if (snapshot_it == transfer_bytes.end()) {
-            transfer_bytes.push_back({entry.first.first, entry.first.second, entry.second});
-        } else {
-            snapshot_it->transfer_bytes += entry.second;
+void BlockTreeCacheMetricsReporter::accumulateTransferBytes(const TransferDescriptor& desc,
+                                                            const GroupSetPtr&        group_set,
+                                                            BlockTreeTransferBytes&   transfer_bytes) const {
+    if (desc.source_tier == Tier::DEVICE) {
+        for (const DeviceBlockPoolPtr& pool : group_set->devicePools()) {
+            transfer_bytes[{pool->poolName(), group_set->groupType()}] += pool->blockSizeBytes();
         }
+    } else if (desc.source_tier == Tier::HOST) {
+        transfer_bytes[{group_set->hostPool()->poolName(), group_set->groupType()}] +=
+            group_set->hostPool()->blockSizeBytes();
+    } else {
+        transfer_bytes[{group_set->diskPool()->poolName(), group_set->groupType()}] +=
+            group_set->diskPool()->blockSizeBytes();
+    }
+}
+
+void BlockTreeCacheMetricsReporter::accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
+                                                            const std::vector<GroupSetPtr>&        group_sets,
+                                                            BlockTreeTransferBytes& transfer_bytes) const {
+    for (const TransferDescriptor& desc : descs) {
+        accumulateTransferBytes(desc, group_sets[desc.group_set_id], transfer_bytes);
     }
 }
 

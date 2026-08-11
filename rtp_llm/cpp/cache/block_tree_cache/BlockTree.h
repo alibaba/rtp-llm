@@ -22,6 +22,7 @@ struct ReusableGroupLocation {
 using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>;
 
 struct BlockTreeInsertResult {
+    std::vector<TreeNode*>                                 path;
     std::vector<TreeNode*>                                 inserted_nodes;
     std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
@@ -38,7 +39,8 @@ public:
     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
 
     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
-                                     const std::vector<std::vector<GroupSetResource>>& resources);
+                                     const std::vector<std::vector<GroupSetResource>>& resources,
+                                     bool                                              collect_path);
 
     bool      isRemovable(TreeNode* node) const;
     TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
@@ -62,7 +64,8 @@ private:
 
     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
-                                         bool enable_hard_stop);
+                                         bool                                              enable_hard_stop,
+                                         bool                                              collect_path);
 
     void      removeNode(TreeNode* node);
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);

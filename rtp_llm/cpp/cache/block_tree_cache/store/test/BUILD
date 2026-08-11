@@ -36,3 +36,12 @@ cc_test(
     deps = test_deps,
     env = {},
 )
+
+cc_test(
+    name = "store_task_runner_test",
+    testonly = True,
+    srcs = ["StoreTaskRunnerTest.cc"],
+    copts = test_copts,
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
+    env = {},
+)
