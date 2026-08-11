@@ -53,6 +53,7 @@ def _build_decode_inputs(
     values: dict[str, int],
     batch_size: int = 2,
     is_target_verify: bool = False,
+    table_width: int = 1,
 ) -> PyModelInputs:
     inputs = PyModelInputs()
     inputs.input_ids = torch.arange(batch_size, dtype=torch.int32, device="cuda")
@@ -87,7 +88,7 @@ def _build_decode_inputs(
     attention_inputs.context_total_kv_length = batch_size
     attention_inputs.total_tokens = batch_size
     attention_inputs.kv_cache_kernel_block_id = torch.zeros(
-        (batch_size, 1), dtype=torch.int32
+        (batch_size, table_width), dtype=torch.int32
     )
     attention_inputs.kv_cache_kernel_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id.cuda()
@@ -205,6 +206,63 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             runner,
             _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
             52,
+        )
+
+    def test_decode_tagged_table_uses_owner_rounding_before_kernel_expansion(
+        self,
+    ) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedBlockTableModel(),
+            HIDDEN_SIZE,
+            1025,
+            1024,
+            256,
+            [2],
+            GROUP_TAGS,
+            False,
+            [1024, 1024],
+            [256, 256],
+        )
+
+        # ceil(1025 / 1024) owner rows * (1024 / 256) kernel rows = 8.
+        # Rounding directly at kernel granularity would allocate only 5 rows.
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(
+                GROUP_TAGS,
+                {"full": 2, "aux": 1},
+                table_width=8,
+            ),
+            18,
+        )
+
+    def test_decode_tagged_table_uses_shared_rectangular_owner_width(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedBlockTableModel(),
+            HIDDEN_SIZE,
+            9,
+            4,
+            4,
+            [2],
+            GROUP_TAGS,
+            False,
+            [8, 4],
+            [8, 4],
+        )
+
+        # Runtime hybrid inputs are rectangular: the 4-token group needs three
+        # owner rows, so the 8-token group also exposes a three-column tagged
+        # view even though its own sequence coverage would need only two rows.
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(
+                GROUP_TAGS,
+                {"full": 2, "aux": 1},
+                table_width=3,
+            ),
+            18,
         )
 
     def test_duplicate_capture_tag_is_rejected(self) -> None:

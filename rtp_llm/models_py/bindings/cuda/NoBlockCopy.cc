@@ -340,7 +340,12 @@ bool execBatchedMemoryCopy(const BatchedMemoryCopyParams& params) {
         RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed: tiles=%zu, error=%s", dsts.size(), cudaGetErrorString(err));
         return false;
     }
-    check_cuda_error();
+    // cudaStreamSynchronize already reports deferred errors from this batch.
+    // Do not call check_cuda_error() here: in DEBUG mode it performs a
+    // device-wide synchronize and can wait on unrelated TP/NCCL work.
+    if (Logger::getEngineLogger().isDebugMode()) {
+        check_cuda_value(cudaGetLastError());
+    }
     return true;
 #else
     RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy unavailable: CUDART_VERSION=%d", CUDART_VERSION);

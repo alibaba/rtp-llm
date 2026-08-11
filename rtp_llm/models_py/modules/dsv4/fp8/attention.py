@@ -43,7 +43,7 @@ from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
 # Validated by test_fused_rmsnorm_rope.py (bf16 <=1-ULP + 1.25-1.75x).
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.attn_type import TAG_BY_ATTN_TYPE
+from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV, TAG_BY_ATTN_TYPE
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
@@ -1133,7 +1133,9 @@ class AttentionFP8(nn.Module):
         bytes_per_entry = vec_dim * vec_dtype.itemsize
         if bytes_per_entry <= 0 or stride_bytes < bytes_per_entry:
             return None
-        eb = stride_bytes // bytes_per_entry
+        eb = self._pool_entries_per_block(attn_type)
+        if eb <= 0 or eb * bytes_per_entry > stride_bytes:
+            return None
         useful_bytes = eb * bytes_per_entry
         # Reinterpret as uint8 [num_blocks, stride_bytes] so we can slice
         # exact useful-byte span, then cast to vec_dtype + flatten to
@@ -1177,7 +1179,9 @@ class AttentionFP8(nn.Module):
         bytes_per_entry = vec_dim
         if bytes_per_entry <= 0 or stride_bytes < bytes_per_entry:
             return None
-        eb = stride_bytes // bytes_per_entry
+        eb = self._pool_entries_per_block(attn_type)
+        if eb <= 0 or eb * bytes_per_entry > stride_bytes:
+            return None
         raw_u8 = base.view(torch.uint8)
         num_blocks = int(raw_u8.shape[0])
         # as_strided: dim-0 stride = stride_bytes (jump over per-block
@@ -1246,7 +1250,25 @@ class AttentionFP8(nn.Module):
         bytes_per_entry = vec_dim * vec_dtype.itemsize
         if bytes_per_entry <= 0:
             return 0
-        return stride_bytes // bytes_per_entry
+        stride_entries = stride_bytes // bytes_per_entry
+        # Opaque INDEXER_KV rows can carry trailing bytes from the shared
+        # physical-pool stride.  Those bytes are padding, not packed indexer
+        # entries.  The cache topology exposes the useful kernel-row width in
+        # raw tokens; divide it by the indexer's compression ratio and retain
+        # ``stride_bytes`` only as the dim-0 address step in
+        # ``_pool_view_3d_fp8``.
+        if attn_type == INDEXER_KV and self.indexer is not None:
+            kernel_tokens = int(layer_kv.seq_size_per_block)
+            compress_ratio = int(self.indexer.compress_ratio)
+            if (
+                kernel_tokens > 0
+                and compress_ratio > 0
+                and kernel_tokens % compress_ratio == 0
+            ):
+                useful_entries = kernel_tokens // compress_ratio
+                if useful_entries <= stride_entries:
+                    return useful_entries
+        return stride_entries
 
     def _prefill_paged_write_kv(
         self,

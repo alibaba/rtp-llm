@@ -4,7 +4,12 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, SWA_KV, TAG_BY_ATTN_TYPE
+from rtp_llm.models_py.modules.dsv4.attn_type import (
+    HCA_KV,
+    INDEXER_KV,
+    SWA_KV,
+    TAG_BY_ATTN_TYPE,
+)
 from rtp_llm.models_py.modules.dsv4.decode.forward import build_paged_pool_specs
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_kernel_block_table_tokens_per_block,
@@ -104,17 +109,23 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
 
     def test_build_paged_pool_specs_uses_dsv4_pool_tokens(self) -> None:
         class FakeKVCache:
-            group_tags = [TAG_BY_ATTN_TYPE[HCA_KV], TAG_BY_ATTN_TYPE[SWA_KV]]
+            group_tags = [
+                TAG_BY_ATTN_TYPE[HCA_KV],
+                TAG_BY_ATTN_TYPE[INDEXER_KV],
+                TAG_BY_ATTN_TYPE[SWA_KV],
+            ]
 
             def get_seq_size_per_block(self, tag: str) -> int:
                 return {
                     TAG_BY_ATTN_TYPE[HCA_KV]: 2048,
+                    TAG_BY_ATTN_TYPE[INDEXER_KV]: 2048,
                     TAG_BY_ATTN_TYPE[SWA_KV]: 1024,
                 }[tag]
 
             def get_kernel_seq_size_per_block(self, tag: str) -> int:
                 return {
                     TAG_BY_ATTN_TYPE[HCA_KV]: 128,
+                    TAG_BY_ATTN_TYPE[INDEXER_KV]: 1024,
                     TAG_BY_ATTN_TYPE[SWA_KV]: 256,
                 }[tag]
 
@@ -124,6 +135,8 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
             def _pool_entries_per_block(self, attn_type: int) -> int:
                 if int(attn_type) == int(HCA_KV):
                     return 1
+                if int(attn_type) == int(INDEXER_KV):
+                    return 64
                 if int(attn_type) == int(SWA_KV):
                     return 32
                 return 0
@@ -134,13 +147,14 @@ class PoolSlotMappingSplitTest(unittest.TestCase):
         class FakeV4:
             layers = [FakeLayer()]
 
-        specs = build_paged_pool_specs(FakeKVCache(), FakeV4(), max_seq_len=256)
+        specs = build_paged_pool_specs(FakeKVCache(), FakeV4(), max_seq_len=2048)
 
         self.assertEqual(specs[int(HCA_KV)][1], 128)
+        self.assertEqual(specs[int(INDEXER_KV)][1], 1024)
         self.assertEqual(specs[int(SWA_KV)][1], 1024)
-        self.assertEqual(specs[int(HCA_KV)][2], 3)
+        self.assertEqual(specs[int(HCA_KV)][2], 17)
+        self.assertEqual(specs[int(INDEXER_KV)][2], 9)
         self.assertEqual(specs[int(SWA_KV)][2], 3)
-
     def test_require_pool_tokens_per_block_rejects_unknown_region(self) -> None:
         class FakeKVCache:
             group_tags = ["unknown"]
