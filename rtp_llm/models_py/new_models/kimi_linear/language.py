@@ -22,9 +22,14 @@ from rtp_llm.models_py.layers.linear import (
     RowParallelLinear,
 )
 from rtp_llm.models_py.layers.norm import RMSResNorm
+from rtp_llm.models_py.model_desc.block_map import (
+    get_group_tags_for_layers,
+    get_primary_attention_inputs,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_layer,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
-from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.new_models.deepseek_v3.attention import DeepSeekV32MlaAttention
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
     checkpoint_path,
@@ -35,7 +40,6 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
 from rtp_llm.models_py.new_models.deepseek_v3.moe import DeepSeekV32MoEBlock
-from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.ops import HybridAttentionType, RopeStyle
@@ -1078,6 +1082,7 @@ class KimiLinearForCausalLM(GptModelBase):
             # references after a model-wide device or dtype migration.
             self._mla_kernel_layout = None
             self._ensure_mla_kernel_layout()
+            self.weight = self._mla_kernel_layout
         return result
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> None:
@@ -1136,18 +1141,22 @@ class KimiLinearForCausalLM(GptModelBase):
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
     ) -> Any:
         self._ensure_mla_kernel_layout()
-        return AttnImplFactory.get_fmha_impl(
-            self.config,
-            self.parallelism_config,
-            self._mla_kernel_layout,
-            inputs.attention_inputs,
-            self.fmha_config,
-            is_cuda_graph,
+        self.weight = self._mla_kernel_layout
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+
+    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+        if self.kv_cache is None:
+            return None
+        full_attention_layers = (
+            layer_idx
+            for layer_idx, layer in enumerate(self.layers)
+            if not layer.is_linear
         )
+        return get_group_tags_for_layers(self.kv_cache, full_attention_layers)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         hidden_states = self.embed_tokens(inputs.input_ids)
-        attention_inputs = inputs.attention_inputs
+        attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         prefill_metadata = None
@@ -1165,14 +1174,21 @@ class KimiLinearForCausalLM(GptModelBase):
         )
         residual = torch.zeros_like(hidden_states)
         for index, layer in enumerate(self.layers):
-            select_block_map_for_layer(attention_inputs, index)
+            layer_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, index
+            )
+            layer_fmha_impl = (
+                None
+                if layer.is_linear
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, index)
+            )
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 self.kv_cache.get_layer_cache(index) if self.kv_cache else None,
-                attention_inputs,
+                layer_attention_inputs,
                 metadata,
             )
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)
