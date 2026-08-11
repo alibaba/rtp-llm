@@ -619,6 +619,27 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(wrapper._dp_stubs[address].SleepServing.await_count, 2)
             self.assertEqual(wrapper._dp_stubs[address].WakeUpServing.await_count, 2)
 
+    async def test_sleep_and_wake_up_report_action_latency(self):
+        from rtp_llm.metrics import GaugeMetrics
+        from rtp_llm.utils import grpc_client_wrapper
+
+        wrapper, _ = self._build_wrapper()
+        wrapper._sleep_serving_locked = AsyncMock(return_value={"status": "ok"})
+        wrapper._wake_up_serving_locked = AsyncMock(return_value={"status": "ok"})
+
+        with patch.object(
+            grpc_client_wrapper, "_report_metric_if_ready"
+        ) as report_metric:
+            self.assertEqual(await wrapper.sleep_serving({}), {"status": "ok"})
+            self.assertEqual(await wrapper.wake_up_serving(), {"status": "ok"})
+
+        self.assertEqual(report_metric.call_count, 2)
+        sleep_call, wake_up_call = report_metric.call_args_list
+        self.assertEqual(sleep_call.args[0], GaugeMetrics.SLEEP_ACTION_RT_METRIC)
+        self.assertGreaterEqual(sleep_call.args[1], 0)
+        self.assertEqual(wake_up_call.args[0], GaugeMetrics.WAKE_UP_ACTION_RT_METRIC)
+        self.assertGreaterEqual(wake_up_call.args[1], 0)
+
     async def test_sleep_commit_cancellation_is_absorbed_and_reaches_sleeping(self):
         # Regression: once commit starts the device-memory release is
         # irreversible. If the driving request is cancelled mid-commit (a stray

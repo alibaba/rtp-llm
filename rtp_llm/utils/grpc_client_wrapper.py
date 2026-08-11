@@ -632,6 +632,7 @@ class GrpcClientWrapper:
         # authoritative outcome and a failure is handled as an incident, so a
         # single grep-able log line per call is the useful signal (no QPS metric).
         duration_ms = time.time() * 1000 - start_time
+        _report_metric_if_ready(GaugeMetrics.SLEEP_ACTION_RT_METRIC, duration_ms)
         if "error" in result:
             logging.warning(
                 "sleep action failed in %.0fms: %s (grpc_status=%s)",
@@ -826,6 +827,7 @@ class GrpcClientWrapper:
                 finally:
                     self._release_lifecycle_lease(lease_record)
         duration_ms = time.time() * 1000 - start_time
+        _report_metric_if_ready(GaugeMetrics.WAKE_UP_ACTION_RT_METRIC, duration_ms)
         if "error" in result:
             logging.warning(
                 "wake_up action failed in %.0fms: %s (grpc_status=%s)",
