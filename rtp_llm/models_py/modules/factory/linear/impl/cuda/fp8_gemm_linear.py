@@ -18,6 +18,7 @@ class CudaFp8GEMMLinear(LinearBase):
     """CUDA FP8 GEMM wrapper."""
 
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
+    supports_deferred_bias = True
 
     @classmethod
     def can_handle(
@@ -140,3 +141,13 @@ class CudaFp8GEMMLinear(LinearBase):
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        if not self._should_use_flashinfer(input):
+            return self._deepgemm_linear.forward_without_bias(input)
+        return self._flashinfer_linear.forward_without_bias(input)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        if not self._should_use_flashinfer(input):
+            return self._deepgemm_linear.forward_with_bias_gelu(input)
+        return self._flashinfer_linear.forward_with_bias_gelu(input)
