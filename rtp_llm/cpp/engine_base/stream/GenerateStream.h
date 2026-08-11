@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <optional>
@@ -82,6 +83,7 @@ using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorSt
 class GenerateStream;
 
 using GenerateStreamPtr = std::shared_ptr<GenerateStream>;
+using OutputCancellationCheck = std::function<bool()>;
 
 enum class RemoteGenerateWaitResult {
     Handoff,
@@ -129,7 +131,7 @@ public:
         return is_fake_stream_;
     }
 
-    virtual ErrorResult<GenerateOutputs> nextOutput() = 0;
+    virtual ErrorResult<GenerateOutputs> nextOutput(const OutputCancellationCheck& is_cancelled = {}) = 0;
     virtual bool                         hasOutput() {
         return false;
     }

@@ -28,7 +28,7 @@ public:
     }
 
     bool                         hasOutput() override;
-    ErrorResult<GenerateOutputs> nextOutput() override;
+    ErrorResult<GenerateOutputs> nextOutput(const OutputCancellationCheck& is_cancelled = {}) override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
 
 private:

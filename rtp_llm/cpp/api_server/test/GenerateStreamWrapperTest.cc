@@ -44,7 +44,7 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
     EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
 
     GenerateOutputs outputs;
-    EXPECT_CALL(*mock_stream, nextOutput())
+    EXPECT_CALL(*mock_stream, nextOutput(_))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty")));
 

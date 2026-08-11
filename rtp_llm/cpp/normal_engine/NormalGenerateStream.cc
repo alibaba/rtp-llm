@@ -2,13 +2,24 @@
 
 namespace rtp_llm {
 
-ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(const OutputCancellationCheck& is_cancelled) {
     // TODO(xinfei.sxf) 某些case下会出现1s的等待
     while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
         checkTimeout();
+        if (hasError()) {
+            return statusInfo();
+        }
+        if (is_cancelled && is_cancelled()) {
+            reportError(ErrorCode::CANCELLED, "output wait cancelled");
+            return statusInfo();
+        }
         generate_outputs_queue_.waitNotEmpty();
     }
     if (hasError()) {
+        return statusInfo();
+    }
+    if (is_cancelled && is_cancelled()) {
+        reportError(ErrorCode::CANCELLED, "output wait cancelled");
         return statusInfo();
     }
     if (generate_outputs_queue_.isEmpty()) {

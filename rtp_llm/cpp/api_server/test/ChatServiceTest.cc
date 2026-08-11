@@ -159,7 +159,7 @@ TEST_F(ChatServiceTest, ChatCompletions_ThrowException) {
 
     // outputs.generate_outputs 为空, 模拟抛出异常的情况
     GenerateOutputs outputs;
-    EXPECT_CALL(*mock_stream, nextOutput()).WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))));
+    EXPECT_CALL(*mock_stream, nextOutput(_)).WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))));
 
     // EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric)
     //     .WillOnce(Invoke([](const std::string& source, int error_code) {
@@ -282,7 +282,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
     outputs.generate_outputs.push_back(output);
 
     // nextOutput 第一次正常返回, 第二次返回错误
-    EXPECT_CALL(*mock_stream, nextOutput())
+    EXPECT_CALL(*mock_stream, nextOutput(_))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty")));
 

@@ -1,6 +1,10 @@
 
 #include "gtest/gtest.h"
 
+#include <atomic>
+#include <chrono>
+#include <future>
+
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -91,6 +95,54 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
+}
+
+TEST_F(GenerateStreamTest, testNextOutputConsumesCancellationWhileWaitingForFirstToken) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4});
+
+    std::atomic<bool> cancelled{false};
+    std::promise<void> predicate_seen;
+    std::once_flag     predicate_seen_once;
+    auto               wait_result = std::async(std::launch::async, [&]() {
+        return stream->nextOutput([&]() {
+            const bool observed_cancel = cancelled.load(std::memory_order_acquire);
+            std::call_once(predicate_seen_once, [&]() { predicate_seen.set_value(); });
+            return observed_cancel;
+        });
+    });
+
+    const bool entered_wait =
+        predicate_seen.get_future().wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    cancelled.store(true, std::memory_order_release);
+    if (!entered_wait) {
+        stream->reportError(ErrorCode::CANCELLED, "test cleanup before wait");
+    }
+
+    const auto ready = wait_result.wait_for(std::chrono::milliseconds(2500));
+    if (ready != std::future_status::ready) {
+        stream->reportError(ErrorCode::CANCELLED, "test cleanup");
+        EXPECT_EQ(wait_result.wait_for(std::chrono::milliseconds(2500)), std::future_status::ready);
+    }
+    EXPECT_TRUE(entered_wait);
+    ASSERT_EQ(ready, std::future_status::ready);
+
+    const auto result = wait_result.get();
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(GenerateStreamTest, testNextOutputPreservesExistingErrorOverCancellation) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3, 4});
+    stream->reportError(ErrorCode::GENERATE_TIMEOUT, "request timed out");
+
+    const auto result = stream->nextOutput([]() { return true; });
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
 }
 
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {

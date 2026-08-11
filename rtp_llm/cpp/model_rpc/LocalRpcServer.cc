@@ -88,7 +88,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
     // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
     // 如果流有错误，应该停止消费输出
     while (stream->isActive() || stream->hasOutput()) {
-        const auto result = stream->nextOutput();
+        const auto result = stream->nextOutput([context]() { return context != nullptr && context->IsCancelled(); });
         if (!result.ok()) {
             if (result.status().code() != ErrorCode::FINISHED) {
                 setWaitResult(RemoteGenerateWaitResult::Error);
@@ -164,7 +164,8 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
             return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
         }
-        const auto output_result = stream->nextOutput();
+        const auto output_result =
+            stream->nextOutput([context]() { return context != nullptr && context->IsCancelled(); });
         if (!output_result.ok()) {
             if (output_result.status().code() != ErrorCode::FINISHED) {
                 return output_result.status();

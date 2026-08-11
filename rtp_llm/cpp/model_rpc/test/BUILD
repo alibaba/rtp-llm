@@ -110,6 +110,13 @@ test_deps = [
     "@havenask//aios/autil:zlib",
 ] + torch_deps() + device_impl_target()
 
+cc_test(
+    name = "local_rpc_output_cancellation_test",
+    srcs = ["LocalRpcOutputCancellationTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)
+
 # cc_test(
 #     name = "model_rpc_server_test",
 #     srcs = [
