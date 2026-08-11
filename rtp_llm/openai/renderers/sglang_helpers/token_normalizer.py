@@ -134,7 +134,7 @@ class TokenNormalizer:
         find where the incomplete portion starts and only count the complete part.
 
         We do this by iteratively decoding shorter prefixes of prev_token_ids
-        until we find one that produces complete UTF-8 (no replacement characters).
+        until we find one that no longer ends with a replacement character.
 
         IMPORTANT: We must check token boundaries, not just strip \uFFFD from the
         end, because the character(s) before \uFFFD may also be part of the
@@ -151,22 +151,25 @@ class TokenNormalizer:
 
         prev_decoded = self.tokenizer.decode(prev_token_ids)
 
-        # If no replacement character, everything was yielded
-        if "\uFFFD" not in prev_decoded:
+        # Only a replacement character at the end represents an incomplete
+        # trailing UTF-8 sequence that has not been yielded yet. A replacement
+        # character earlier in the string can come from a context window that
+        # starts on a UTF-8 continuation token; text after it is still complete
+        # and has already been yielded.
+        if not prev_decoded.endswith("\uFFFD"):
             return len(prev_decoded)
 
-        # There's an incomplete sequence. We need to find the last COMPLETE token.
-        # Iterate backwards through the tokens to find the longest prefix
-        # that decodes without any replacement characters.
+        # There's an incomplete trailing sequence. Iterate backwards to find the
+        # longest prefix whose trailing UTF-8 sequence is complete.
         for split_point in range(len(prev_token_ids) - 1, -1, -1):
             prefix_tokens = prev_token_ids[:split_point]
             if not prefix_tokens:
                 return 0
             prefix_decoded = self.tokenizer.decode(prefix_tokens)
-            if "\uFFFD" not in prefix_decoded:
+            if not prefix_decoded.endswith("\uFFFD"):
                 return len(prefix_decoded)
 
-        # All tokens produce incomplete output
+        # Every prefix ends with incomplete output.
         return 0
 
     def _try_resolve_with_future_tokens(
