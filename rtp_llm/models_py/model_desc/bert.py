@@ -74,17 +74,27 @@ class BertDecoderLayer(nn.Module):
         )
 
         residual = hidden_states
-        hidden_states = self.self_attn(
+        hidden_states, attention_bias = self.self_attn.forward_without_output_bias(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
         )
-        hidden_states = self.input_layernorm(hidden_states, residual, empty_bias)
+        hidden_states = self.input_layernorm(
+            hidden_states,
+            residual,
+            (
+                attention_bias.to(hidden_states.dtype)
+                if attention_bias is not None
+                else empty_bias
+            ),
+        )
 
         residual = hidden_states
-        hidden_states = self.mlp(hidden_states)
+        hidden_states, ffn_bias = self.mlp.forward_without_output_bias(hidden_states)
         hidden_states = self.post_attention_layernorm(
-            hidden_states, residual, empty_bias
+            hidden_states,
+            residual,
+            ffn_bias.to(hidden_states.dtype) if ffn_bias is not None else empty_bias,
         )
         return hidden_states
 
