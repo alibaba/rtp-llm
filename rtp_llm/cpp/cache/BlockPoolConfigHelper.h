@@ -50,11 +50,6 @@ public:
             RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%zu] is null", i);
             RTP_LLM_CHECK_WITH_INFO(
                 mtp_sub_config->groupNums() > 0, "MTP module %zu cache groups must not be empty", i);
-            RTP_LLM_CHECK_WITH_INFO(mtp_sub_config->block_num == cache_config.block_num,
-                                    "MTP module %zu block_num=%u must match main block_num=%u",
-                                    i,
-                                    mtp_sub_config->block_num,
-                                    cache_config.block_num);
 
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
@@ -78,13 +73,18 @@ public:
             const auto         mtp_scale_stride_bytes = mtp_sub_config->is_sparse ?
                                                             mtp_sub_config->kv_scale_stride_bytes :
                                                             mtp_sub_config->kvScaleStrideBytesForGroup(real_mtp_gid);
+            // TP synchronization updates the shared pool count on the main
+            // config. Keep MTP-specific topology/stride data while sizing all
+            // shared layouts with that synchronized count.
+            CacheConfig mtp_layout_cache_config = *mtp_sub_config;
+            mtp_layout_cache_config.block_num   = cache_config.block_num;
             MemoryLayoutConfig mtp_layout =
                 createMemoryLayoutConfig(false,
                                          mtp_layer_num,
                                          mtp_kv_stride_bytes,
                                          mtp_scale_stride_bytes,
                                          mtp_spec,
-                                         *mtp_sub_config,
+                                         mtp_layout_cache_config,
                                          mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid),
                                          mtp_sub_config->seqSizePerBlockForGroup(real_mtp_gid),
                                          mtp_sub_config->kernelBlocksPerKvBlockForGroup(real_mtp_gid));
