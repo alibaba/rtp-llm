@@ -6,12 +6,21 @@
 
 namespace rtp_llm {
 
+namespace {
+
+// Preserve the legacy effective TTL: currentTimeUs() compared against
+// 1000 * 60 * 60 microseconds, which is 3600 milliseconds.
+constexpr auto kExpiredRequestCacheKeepTime = std::chrono::milliseconds(3600);
+
+}  // namespace
+
 RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUtil>& memory_util):
     memory_util_(memory_util) {}
 
 void RequestBlockBufferStore::stop() {
     std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
     auto                                tmp_buffers = std::move(request_cache_map_);
+    expired_request_caches_.clear();
     lock.unlock();
 
     // avoid deadlock
@@ -195,27 +204,25 @@ void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid
     std::shared_ptr<RequestBlockBuffer> request_block_buffer;
     {
         std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
-        auto                                iter = request_cache_map_.find(requestid);
-        if (iter != request_cache_map_.end()) {
-            request_block_buffer          = iter->second;
-            request_cache_map_[requestid] = nullptr;
+
+        const auto expiration_cutoff = ExpirationClock::now() - kExpiredRequestCacheKeepTime;
+        while (!expired_request_caches_.empty() && expired_request_caches_.front().second < expiration_cutoff) {
+            const auto& expired_request = expired_request_caches_.front();
+            auto        iter            = request_cache_map_.find(expired_request.first);
+            if (iter != request_cache_map_.end() && iter->second == nullptr) {
+                request_cache_map_.erase(iter);
+            }
+            expired_request_caches_.pop_front();
+        }
+
+        auto iter = request_cache_map_.find(requestid);
+        if (iter != request_cache_map_.end() && iter->second != nullptr) {
+            request_block_buffer = std::move(iter->second);
+            expired_request_caches_.emplace_back(requestid, ExpirationClock::now());
         }
     }
     if (request_block_buffer) {
         request_block_buffer->notifyRequestDone();
-    }
-
-    {
-        std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
-        for (int i = expired_request_caches_.size() - 1; i >= 0; i--) {
-            if (currentTimeUs() - expired_request_caches_[i].second > 1000 * 60 * 60) {
-                request_cache_map_.erase(expired_request_caches_[i].first);
-                expired_request_caches_.pop_back();
-            } else {
-                break;
-            }
-        }
-        expired_request_caches_.push_back({requestid, currentTimeUs()});
     }
 }
 

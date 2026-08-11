@@ -153,4 +153,68 @@ TEST_F(RequestBlockBufferStoreTest, testAfterDelRequestBlockBuffer) {
         [](bool success, const std::vector<std::shared_ptr<BlockBuffer>>& blocks) { EXPECT_FALSE(success); }));
 }
 
+TEST_F(RequestBlockBufferStoreTest, testExpiredRequestCachesCleanedFromOldest) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    for (const auto& request_id : {"old-request", "fresh-request"}) {
+        ASSERT_TRUE(store->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>(request_id)));
+        store->delRequestBlockBuffer(request_id);
+    }
+    ASSERT_EQ(2, store->expired_request_caches_.size());
+
+    store->expired_request_caches_.front().second =
+        RequestBlockBufferStore::ExpirationClock::now() - std::chrono::milliseconds(3601);
+    ASSERT_TRUE(store->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>("trigger-request")));
+    store->delRequestBlockBuffer("trigger-request");
+
+    EXPECT_EQ(store->request_cache_map_.end(), store->request_cache_map_.find("old-request"));
+    EXPECT_NE(store->request_cache_map_.end(), store->request_cache_map_.find("fresh-request"));
+    EXPECT_NE(store->request_cache_map_.end(), store->request_cache_map_.find("trigger-request"));
+    ASSERT_EQ(2, store->expired_request_caches_.size());
+    EXPECT_EQ("fresh-request", store->expired_request_caches_.front().first);
+    EXPECT_EQ("trigger-request", store->expired_request_caches_.back().first);
+}
+
+TEST_F(RequestBlockBufferStoreTest, testStaleDeletionDoesNotRemoveReusedRequest) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    ASSERT_TRUE(store->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>("reused-request")));
+    store->delRequestBlockBuffer("reused-request");
+    ASSERT_EQ(1, store->expired_request_caches_.size());
+    store->expired_request_caches_.front().second =
+        RequestBlockBufferStore::ExpirationClock::now() - std::chrono::milliseconds(3601);
+
+    store->delRequestBlockBuffer("cleanup-trigger");
+    ASSERT_EQ(store->request_cache_map_.end(), store->request_cache_map_.find("reused-request"));
+    ASSERT_TRUE(store->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>("reused-request")));
+
+    store->expired_request_caches_.emplace_back(
+        "reused-request", RequestBlockBufferStore::ExpirationClock::now() - std::chrono::milliseconds(3601));
+    store->delRequestBlockBuffer("cleanup-trigger");
+    auto reused_iter = store->request_cache_map_.find("reused-request");
+    ASSERT_NE(store->request_cache_map_.end(), reused_iter);
+    EXPECT_NE(nullptr, reused_iter->second);
+    EXPECT_TRUE(store->expired_request_caches_.empty());
+}
+
+TEST_F(RequestBlockBufferStoreTest, testDuplicateAndUnknownDeletionDoNotCreateExtraTombstones) {
+    auto store        = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    int  notify_count = 0;
+    ASSERT_TRUE(store->setRequestBlockBufferWatchFunc(
+        "request", [&notify_count](bool success, const std::vector<std::shared_ptr<BlockBuffer>>&) {
+            EXPECT_FALSE(success);
+            ++notify_count;
+        }));
+
+    store->delRequestBlockBuffer("request");
+    store->delRequestBlockBuffer("request");
+    store->delRequestBlockBuffer("unknown-request");
+
+    EXPECT_EQ(1, notify_count);
+    ASSERT_EQ(1, store->expired_request_caches_.size());
+    EXPECT_EQ("request", store->expired_request_caches_.front().first);
+    auto request_iter = store->request_cache_map_.find("request");
+    ASSERT_NE(store->request_cache_map_.end(), request_iter);
+    EXPECT_EQ(nullptr, request_iter->second);
+    EXPECT_EQ(store->request_cache_map_.end(), store->request_cache_map_.find("unknown-request"));
+}
+
 }  // namespace rtp_llm

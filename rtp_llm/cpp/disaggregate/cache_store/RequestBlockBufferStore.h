@@ -1,9 +1,11 @@
 #pragma once
 
-#include <unordered_map>
-#include <shared_mutex>
 #include <atomic>
+#include <chrono>
+#include <deque>
 #include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
 #include <functional>
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
@@ -43,11 +45,13 @@ private:
     bool copyBlock(const std::shared_ptr<BlockBuffer>& dst, const std::shared_ptr<BlockBuffer>& src);
 
 private:
+    using ExpirationClock = std::chrono::steady_clock;
+
     std::shared_ptr<MemoryUtil> memory_util_;
 
     mutable std::shared_mutex                                            request_cache_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<RequestBlockBuffer>> request_cache_map_;
-    std::vector<std::pair<std::string, int64_t>>                         expired_request_caches_;
+    std::deque<std::pair<std::string, ExpirationClock::time_point>>      expired_request_caches_;
 
     std::shared_mutex                                             buffer_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<BlockBuffer>> buffer_map_;
