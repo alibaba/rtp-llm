@@ -113,6 +113,28 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createContextStream({1, 2, 3});
+    stream->generate_input_->generate_config->max_new_tokens = 10;
+
+    auto sp_output_buffer                = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_output_buffer->tokens             = torch::tensor({7, -1}, torch::kInt32).reshape({1, 2});
+    sp_output_buffer->propose_tokens_gpu = torch::tensor({9}, torch::kInt32).to(torch::kCUDA);
+    stream->setSPOutputBuffer(sp_output_buffer);
+
+    StreamSpecUpdateInfo update_info{torch::tensor({{4}}, torch::kInt32),
+                                     1,
+                                     -1,
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor()};
+    stream->specUpdate(update_info);
+
+    ASSERT_TRUE(stream->getSPOutputBuffer()->propose_tokens_gpu.defined());
+    EXPECT_EQ(stream->getSPOutputBuffer()->propose_tokens_gpu.cpu().item<int32_t>(), 9);
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
