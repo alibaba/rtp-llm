@@ -530,6 +530,11 @@ class BaseModel(object):
             raise ValueError(
                 "force_cpu_load_weights is not supported by this newloader slice"
             )
+        if self.model_config.eplb_config.enable_eplb():
+            raise ValueError(
+                "EPLB is not supported by this newloader slice; disable EPLB "
+                "or use the legacy loader"
+            )
         device_resource_config = getattr(self, "device_resource_config", None)
         if getattr(device_resource_config, "enable_layer_micro_batch", 0) != 0:
             raise ValueError(
