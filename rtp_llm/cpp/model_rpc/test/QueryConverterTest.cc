@@ -300,7 +300,112 @@ TEST_F(QueryConverterTest, TransTensorPB_NonContiguous) {
 TEST_F(QueryConverterTest, TransTensorPB_UnsupportedType) {
     torch::Tensor tensor = torch::ones({1}, torch::kInt64);
     TensorPB      tensor_pb;
+    tensor_pb.add_shape(7);
+    tensor_pb.set_fp32_data(std::string(sizeof(float), '\0'));
+
     EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, tensor), std::runtime_error);
+    ASSERT_EQ(tensor_pb.shape_size(), 1);
+    EXPECT_EQ(tensor_pb.shape(0), 7);
+    EXPECT_EQ(tensor_pb.fp32_data().size(), sizeof(float));
+}
+
+TEST_F(QueryConverterTest, TransTensorRejectsOversizedPayload) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP32);
+    tensor_pb.add_shape(1);
+    tensor_pb.set_fp32_data(std::string(2 * sizeof(float), '\0'));
+
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::invalid_argument);
+}
+
+TEST_F(QueryConverterTest, TransTensorRejectsTruncatedAndUnexpectedPayloads) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP32);
+    tensor_pb.add_shape(2);
+    tensor_pb.set_fp32_data(std::string(sizeof(float), '\0'));
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::invalid_argument);
+
+    tensor_pb.set_fp32_data(std::string(2 * sizeof(float), '\0'));
+    tensor_pb.set_int32_data(std::string(2 * sizeof(int32_t), '\0'));
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::invalid_argument);
+}
+
+TEST_F(QueryConverterTest, TransTensorRejectsInvalidShape) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP16);
+    tensor_pb.add_shape(-1);
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::invalid_argument);
+
+    tensor_pb.clear_shape();
+    tensor_pb.add_shape(std::numeric_limits<int64_t>::max());
+    tensor_pb.add_shape(2);
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::invalid_argument);
+}
+
+TEST_F(QueryConverterTest, TransTensorAcceptsScalarAndZeroSizedShape) {
+    TensorPB scalar_pb;
+    scalar_pb.set_data_type(TensorPB::INT32);
+    const int32_t value = 42;
+    scalar_pb.set_int32_data(&value, sizeof(value));
+
+    const auto scalar = QueryConverter::transTensor(scalar_pb);
+    EXPECT_EQ(scalar.dim(), 0);
+    EXPECT_EQ(scalar.item<int32_t>(), value);
+
+    TensorPB empty_pb;
+    empty_pb.set_data_type(TensorPB::BF16);
+    empty_pb.add_shape(2);
+    empty_pb.add_shape(0);
+    empty_pb.add_shape(3);
+
+    const auto empty = QueryConverter::transTensor(empty_pb);
+    EXPECT_EQ(empty.sizes(), torch::IntArrayRef({2, 0, 3}));
+    EXPECT_EQ(empty.numel(), 0);
+}
+
+TEST_F(QueryConverterTest, TransTensorPBClearsReusedMessage) {
+    TensorPB tensor_pb;
+    tensor_pb.add_shape(9);
+    tensor_pb.set_fp32_data(std::string(sizeof(float), '\0'));
+
+    const auto tensor = torch::tensor({7, 8}, torch::kInt32);
+    QueryConverter::transTensorPB(&tensor_pb, tensor);
+
+    ASSERT_EQ(tensor_pb.shape_size(), 1);
+    EXPECT_EQ(tensor_pb.shape(0), 2);
+    EXPECT_TRUE(tensor_pb.fp32_data().empty());
+    EXPECT_EQ(tensor_pb.int32_data().size(), 2 * sizeof(int32_t));
+    EXPECT_TRUE(torch::equal(QueryConverter::transTensor(tensor_pb), tensor));
+}
+
+TEST_F(QueryConverterTest, TransTensorPBRoundTripsZeroSizedTensor) {
+    const auto tensor = torch::empty({2, 0, 3}, torch::kBFloat16);
+    TensorPB  tensor_pb;
+
+    QueryConverter::transTensorPB(&tensor_pb, tensor);
+
+    ASSERT_EQ(tensor_pb.shape_size(), 3);
+    EXPECT_EQ(tensor_pb.shape(0), 2);
+    EXPECT_EQ(tensor_pb.shape(1), 0);
+    EXPECT_EQ(tensor_pb.shape(2), 3);
+    EXPECT_TRUE(tensor_pb.bf16_data().empty());
+    const auto restored = QueryConverter::transTensor(tensor_pb);
+    EXPECT_EQ(restored.sizes(), tensor.sizes());
+    EXPECT_EQ(restored.scalar_type(), tensor.scalar_type());
+}
+
+TEST_F(QueryConverterTest, TransTensorPBFailureLeavesReusedMessageUnchanged) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::INT32);
+    tensor_pb.add_shape(1);
+    const int32_t value = 17;
+    tensor_pb.set_int32_data(&value, sizeof(value));
+    const auto original = tensor_pb.SerializeAsString();
+
+    const auto meta_tensor =
+        torch::empty({2}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kMeta));
+    EXPECT_THROW(QueryConverter::transTensorPB(&tensor_pb, meta_tensor), std::exception);
+    EXPECT_EQ(tensor_pb.SerializeAsString(), original);
 }
 
 }  // namespace rtp_llm
