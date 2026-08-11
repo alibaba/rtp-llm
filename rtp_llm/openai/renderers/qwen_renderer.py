@@ -71,8 +71,7 @@ class QwenStreamStatus(StreamStatus):
         super().__init__(request)
 
     def update_result(self):
-        self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
-        self.last_output_ids = self.output_ids
+        super().update_result()
         self.responded_string = self.total_output_string[: -len("\nAction:")]
 
     @property
@@ -99,6 +98,7 @@ class QwenStreamStatusSync(StreamStatusSync):
         super().__init__(request)
 
     def update_result(self):
+        super().update_result()
         self.responded_string = self.total_output_string[: -len("\nAction:")]
 
     @property
@@ -454,10 +454,17 @@ class QwenRenderer(CustomChatRenderer):
             )
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
+        output_token_limit = self._effective_output_token_limit(
+            output.aux_info.input_len, max_new_tokens
+        )
         status.update_output(
             output,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._remove_stop_word_ids, output_token_limit=output_token_limit
+            ),
+            output_token_limit,
+            self._find_token_stop_end,
         )
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
         if (len(status.total_output_string)) and (
@@ -504,7 +511,7 @@ class QwenRenderer(CustomChatRenderer):
                     status.delta_output_string,
                     await self._generate_log_probs(status, output),
                     status.input_token_length,
-                    status.output_token_length,
+                    status.reported_output_length(output.aux_info.output_len),
                     status.reuse_length,
                 )
         return await self._create_empty_delta(output.aux_info)
@@ -558,7 +565,9 @@ class QwenRenderer(CustomChatRenderer):
                         function_message,
                         await self._generate_log_probs(status, status.output),
                         status.input_token_length,
-                        status.output_token_length,
+                        status.reported_output_length(
+                            status.output.aux_info.output_len
+                        ),
                         status.reuse_length,
                     )
                 )
@@ -573,7 +582,9 @@ class QwenRenderer(CustomChatRenderer):
                         trunc_string,
                         await self._generate_log_probs(status, status.output),
                         status.input_token_length,
-                        status.output_token_length,
+                        status.reported_output_length(
+                            status.output.aux_info.output_len
+                        ),
                         status.reuse_length,
                     )
                 )
@@ -609,11 +620,18 @@ class QwenRenderer(CustomChatRenderer):
             )
         if status.finish_reason != None:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+        output_token_limit = self._effective_output_token_limit(
+            input_len, max_new_tokens
+        )
         status.update_output_sync(
             output_ids,
             input_len,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._remove_stop_word_ids, output_token_limit=output_token_limit
+            ),
+            output_token_limit,
+            self._find_token_stop_end,
         )
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
         if (len(status.total_output_string)) and (
@@ -662,7 +680,7 @@ class QwenRenderer(CustomChatRenderer):
                         status, all_probs, output_ids
                     ),
                     input_length=input_len,
-                    output_length=output_len,
+                    output_length=status.reported_output_length(output_len),
                     reuse_length=reuse_len,
                 )
         return self._create_empty_delta_sync(input_len, output_len, reuse_len)
@@ -724,7 +742,7 @@ class QwenRenderer(CustomChatRenderer):
                         function_message,
                         self._generate_log_probs_sync(status, all_probs, output_ids),
                         input_len,
-                        output_len,
+                        status.reported_output_length(output_len),
                         reuse_len,
                     )
                 )
@@ -739,7 +757,7 @@ class QwenRenderer(CustomChatRenderer):
                         trunc_string,
                         self._generate_log_probs_sync(status, all_probs, output_ids),
                         input_len,
-                        output_len,
+                        status.reported_output_length(output_len),
                         reuse_len,
                     )
                 )

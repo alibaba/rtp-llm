@@ -93,42 +93,125 @@ def _get_think_config(generate_env_config):
 
 
 class StreamStatus:
-    index: int = 0
+    index: int
     request: ChatCompletionRequest
-    output: Optional[GenerateOutput] = None
-    output_ids: List[int] = []
-    output_ids_list: List[int] = []
-    last_output_ids: List[int] = []
-    last_token_length: int = 0
-    finish_reason = None
-    tokenizer = None
-    responded_string = ""
-    delta_output_string = ""
+    output: Optional[GenerateOutput]
+    output_ids: List[int]
+    output_ids_list: List[int]
+    last_output_ids: List[int]
+    last_token_length: int
+    processed_token_count: int
+    output_rewound: bool
+    output_token_limit: Optional[int]
+    raw_chunk_start: int
+    raw_chunk_length: int
+    visible_output_length: int
+    visible_chunk_length: int
+    pending_stop_text: str
+    pending_stop_token_cursor: int
+    finish_reason: Optional[FinisheReason]
+    tokenizer: Optional[BaseTokenizer]
+    responded_string: str
+    delta_output_string: str
 
     def __init__(self, request: ChatCompletionRequest):
+        self.index = 0
         self.request = request
+        self.output = None
+        self.output_ids = []
+        self.output_ids_list = []
+        self.last_output_ids = []
+        self.last_token_length = 0
+        self.processed_token_count = 0
+        self.output_rewound = False
+        self.output_token_limit = None
+        self.raw_chunk_start = 0
+        self.raw_chunk_length = 0
+        self.visible_output_length = 0
+        self.visible_chunk_length = 0
+        self.pending_stop_text = ""
+        self.pending_stop_token_cursor = 0
+        self.finish_reason = None
+        self.tokenizer = None
+        self.responded_string = ""
+        self.delta_output_string = ""
 
     def update_output(
         self,
         output: GenerateOutput,
         check_finish_func,
         remove_stop_word_ids_func,
+        output_token_limit: Optional[int] = None,
+        stop_word_end_func=None,
     ):
         self.index += 1
         self.output = output
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
-        self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
+        self.raw_chunk_start = len(self.output_ids_list)
+        self.raw_chunk_length = len(delta_output_ids)
+        self.output_token_limit = output_token_limit
+        self.output_ids_list.extend(delta_output_ids)
         self.finish_reason = check_finish_func(
             self.output_ids_list, self.input_token_length
         )
         self.output_ids = remove_stop_word_ids_func(
             self.output_ids_list, delta_output_ids
         )
+        self.output_rewound = len(self.output_ids) < self.processed_token_count
+        raw_output_length = len(self.output_ids_list)
+        visible_output_length = (
+            raw_output_length
+            if output_token_limit is None
+            else min(raw_output_length, max(output_token_limit, 0))
+        )
+        if len(self.output_ids) < visible_output_length:
+            self.finish_reason = FinisheReason.stop
+            if stop_word_end_func is not None:
+                stop_word_end = stop_word_end_func(
+                    self.output_ids_list,
+                    len(self.output_ids),
+                    visible_output_length,
+                )
+                if stop_word_end is not None:
+                    visible_output_length = min(visible_output_length, stop_word_end)
+        elif (
+            output_token_limit is not None
+            and raw_output_length >= output_token_limit
+        ):
+            self.finish_reason = FinisheReason.length
+        self.visible_output_length = visible_output_length
+        self.visible_chunk_length = min(
+            self.raw_chunk_length,
+            max(0, visible_output_length - self.raw_chunk_start),
+        )
 
     def update_result(self):
-        self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
-        self.last_output_ids = self.output_ids
+        self.advance_output_cursor(len(self.output_ids) - self.processed_token_count)
         self.responded_string += self.delta_output_string
+
+    def advance_output_cursor(self, context_length: int) -> None:
+        self.processed_token_count = len(self.output_ids)
+        self.last_token_length = min(
+            max(context_length, 0), self.processed_token_count
+        )
+        if self.last_token_length:
+            self.last_output_ids = self.output_ids[-self.last_token_length :]
+        else:
+            self.last_output_ids = []
+
+    def reported_output_length(self, output_length: int) -> int:
+        return min(output_length, self.visible_output_length)
+
+    def cap_visible_output_length(self, output_length: int) -> None:
+        self.visible_output_length = min(self.visible_output_length, output_length)
+        self.visible_chunk_length = min(
+            self.raw_chunk_length,
+            max(0, self.visible_output_length - self.raw_chunk_start),
+        )
+
+    @property
+    def output_was_clipped(self) -> bool:
+        return self.visible_chunk_length < self.raw_chunk_length
 
     @property
     def output_token_length(self):
@@ -144,11 +227,11 @@ class StreamStatus:
 
     @property
     def prev_token_id(self):
-        return self.last_output_ids[-self.last_token_length :]
+        return self.last_output_ids
 
     @property
     def tokens_to_decode(self):
-        return self.prev_token_id + self.output_ids[len(self.last_output_ids) :]
+        return self.prev_token_id + self.output_ids[self.processed_token_count :]
 
     def __str__(self):
         return (
@@ -159,6 +242,9 @@ class StreamStatus:
             f"output_ids={self.output_ids}, "
             f"last_output_ids={self.last_output_ids}, "
             f"last_token_length={self.last_token_length}, "
+            f"processed_token_count={self.processed_token_count}, "
+            f"visible_output_length={self.visible_output_length}, "
+            f"visible_chunk_length={self.visible_chunk_length}, "
             f"finish_reason={self.finish_reason}, "
             f"tokenizer={self.tokenizer}, "
             f"responded_string={self.responded_string!r}, "
@@ -167,47 +253,129 @@ class StreamStatus:
 
 
 class StreamStatusSync:
-    index: int = 0
+    index: int
     request: ChatCompletionRequest
-    output_ids: torch.Tensor = torch.empty(0, dtype=torch.int32)
-    last_output_ids: List[int] = []
-    output_ids_list: List[int] = []
-    last_token_length: int = 0
-    finish_reason = None
-    tokenizer = None
-    responded_string = ""
-    delta_output_string = ""
+    output_ids: List[int]
+    last_output_ids: List[int]
+    output_ids_list: List[int]
+    last_token_length: int
+    processed_token_count: int
+    output_rewound: bool
+    output_token_limit: Optional[int]
+    raw_chunk_start: int
+    raw_chunk_length: int
+    visible_output_length: int
+    visible_chunk_length: int
+    pending_stop_text: str
+    pending_stop_token_cursor: int
+    finish_reason: Optional[FinisheReason]
+    tokenizer: Optional[BaseTokenizer]
+    responded_string: str
+    delta_output_string: str
 
     def __init__(self, request: ChatCompletionRequest):
+        self.index = 0
         self.request = request
+        self.output_ids = []
+        self.last_output_ids = []
+        self.output_ids_list = []
+        self.last_token_length = 0
+        self.processed_token_count = 0
+        self.output_rewound = False
+        self.output_token_limit = None
+        self.raw_chunk_start = 0
+        self.raw_chunk_length = 0
+        self.visible_output_length = 0
+        self.visible_chunk_length = 0
+        self.pending_stop_text = ""
+        self.pending_stop_token_cursor = 0
+        self.finish_reason = None
+        self.tokenizer = None
+        self.responded_string = ""
+        self.delta_output_string = ""
 
     def update_output_sync(
         self,
-        output_ids,
-        input_len,
+        output_ids: torch.Tensor,
+        input_len: int,
         check_finish_func,
         remove_stop_word_ids_func,
+        output_token_limit: Optional[int] = None,
+        stop_word_end_func=None,
     ):
         self.index += 1
-        delta_output_ids = output.output_ids.cpu().flatten().tolist()
-        self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
+        delta_output_ids = output_ids.cpu().flatten().tolist()
+        self.raw_chunk_start = len(self.output_ids_list)
+        self.raw_chunk_length = len(delta_output_ids)
+        self.output_token_limit = output_token_limit
+        self.output_ids_list.extend(delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
         self.output_ids = remove_stop_word_ids_func(
             self.output_ids_list, delta_output_ids
         )
+        self.output_rewound = len(self.output_ids) < self.processed_token_count
+        raw_output_length = len(self.output_ids_list)
+        visible_output_length = (
+            raw_output_length
+            if output_token_limit is None
+            else min(raw_output_length, max(output_token_limit, 0))
+        )
+        if len(self.output_ids) < visible_output_length:
+            self.finish_reason = FinisheReason.stop
+            if stop_word_end_func is not None:
+                stop_word_end = stop_word_end_func(
+                    self.output_ids_list,
+                    len(self.output_ids),
+                    visible_output_length,
+                )
+                if stop_word_end is not None:
+                    visible_output_length = min(visible_output_length, stop_word_end)
+        elif (
+            output_token_limit is not None
+            and raw_output_length >= output_token_limit
+        ):
+            self.finish_reason = FinisheReason.length
+        self.visible_output_length = visible_output_length
+        self.visible_chunk_length = min(
+            self.raw_chunk_length,
+            max(0, visible_output_length - self.raw_chunk_start),
+        )
 
     def update_result(self):
-        self.last_token_length = len(self.output_ids) - len(self.last_output_ids)
-        self.last_output_ids = self.output_ids
+        self.advance_output_cursor(len(self.output_ids) - self.processed_token_count)
         self.responded_string += self.delta_output_string
+
+    def advance_output_cursor(self, context_length: int) -> None:
+        self.processed_token_count = len(self.output_ids)
+        self.last_token_length = min(
+            max(context_length, 0), self.processed_token_count
+        )
+        if self.last_token_length:
+            self.last_output_ids = self.output_ids[-self.last_token_length :]
+        else:
+            self.last_output_ids = []
+
+    def reported_output_length(self, output_length: int) -> int:
+        return min(output_length, self.visible_output_length)
+
+    def cap_visible_output_length(self, output_length: int) -> None:
+        self.visible_output_length = min(self.visible_output_length, output_length)
+        self.visible_chunk_length = min(
+            self.raw_chunk_length,
+            max(0, self.visible_output_length - self.raw_chunk_start),
+        )
+
+    @property
+    def output_was_clipped(self) -> bool:
+        return self.visible_chunk_length < self.raw_chunk_length
 
     @property
     def prev_token_id(self):
-        return self.last_output_ids[-self.last_token_length :]
+        return self.last_output_ids
 
     @property
     def tokens_to_decode(self):
-        return self.prev_token_id + self.output_ids[len(self.last_output_ids) :]
+        return self.prev_token_id + self.output_ids[self.processed_token_count :]
 
 
 @dataclass
@@ -553,6 +721,23 @@ class CustomChatRenderer:
             multimodal_lengths=aux_info.multimodal_lengths,
         )
 
+    def _project_aux_info(
+        self, status: StreamStatus, aux_info: AuxInfo
+    ) -> AuxInfo:
+        projected = copy.deepcopy(aux_info)
+        projected.output_len = status.reported_output_length(aux_info.output_len)
+        if status.output_was_clipped:
+            projected.step_output_len = min(
+                aux_info.step_output_len, status.visible_chunk_length
+            )
+            projected.softmax_probs = aux_info.softmax_probs[
+                : status.visible_chunk_length
+            ]
+            # A cumulative score cannot be reconstructed after dropping a raw suffix.
+            projected.cum_log_probs = []
+            projected.beam_responses = []
+        return projected
+
     async def _generate_log_probs(
         self, status: StreamStatus, output: Optional[GenerateOutput]
     ) -> Optional[ChatCompletionTokenLogprob]:
@@ -564,7 +749,12 @@ class CustomChatRenderer:
         output_id = output.output_ids
         if output_id == None:
             return None
-        selected_id = output_id[-1].item()
+        flat_output_ids = output_id.flatten()
+        if flat_output_ids.numel() != 1:
+            raise RuntimeError(
+                "logprobs are not supported for multi-token output chunks"
+            )
+        selected_id = flat_output_ids[-1].item()
         if all_probs == None:
             raise Exception(
                 "all_probs is None when logprobs is true. There should be a internal bug."
@@ -582,7 +772,7 @@ class CustomChatRenderer:
         chat_logprob = ChatCompletionTokenLogprob(
             token=selected_token,
             bytes=list(selected_token.encode("utf-8", errors="replace")),
-            logprob=all_probs[output_id].log().item(),
+            logprob=all_probs[selected_id].log().item(),
             top_logprobs=[],
         )
         for i in range(prob_return_num):
@@ -598,6 +788,43 @@ class CustomChatRenderer:
         logging.debug("chat_logprob: %s", chat_logprob.model_dump_json(indent=4))
 
         return chat_logprob
+
+    def _project_generate_output(
+        self,
+        status: StreamStatus,
+        output: GenerateOutput,
+        generate_config: GenerateConfig,
+    ) -> GenerateOutput:
+        output_ids = getattr(output, "output_ids", None)
+        raw_chunk_length = output_ids.numel() if output_ids is not None else 0
+        output_was_clipped = status.visible_chunk_length < raw_chunk_length
+        if output_was_clipped and (
+            (
+                generate_config.return_hidden_states
+                and output.hidden_states is not None
+            )
+            or (
+                generate_config.return_all_hidden_states
+                and output.all_hidden_states is not None
+            )
+            or (generate_config.return_logits and output.logits is not None)
+        ):
+            raise RuntimeError(
+                "cannot project hidden states or logits from a clipped output chunk"
+            )
+
+        if not (
+            output_was_clipped
+            and generate_config.return_output_ids
+            and output_ids is not None
+        ):
+            return output
+
+        projected = copy.copy(output)
+        projected.output_ids = output_ids.narrow(
+            -1, 0, min(status.visible_chunk_length, output_ids.size(-1))
+        )
+        return projected
 
     async def _generate_extra_outputs(
         self, output: GenerateOutput, generate_config: GenerateConfig
@@ -680,6 +907,10 @@ class CustomChatRenderer:
             )
             if len(truncated) < len(delta_string):
                 status.finish_reason = FinisheReason.stop
+                self._cap_status_at_string_stop(status, stop_words_str)
+                if isinstance(status, (StreamStatus, StreamStatusSync)):
+                    status.pending_stop_text = ""
+                    status.pending_stop_token_cursor = 0
 
         # Check if should buffer (only if didn't truncate at complete stop word)
         # In non-streaming mode, never buffer since all tokens arrive at once
@@ -688,6 +919,20 @@ class CustomChatRenderer:
             and status.finish_reason != FinisheReason.stop
             and is_truncated(truncated, stop_word_slice_list, is_streaming, True)
         )
+        if isinstance(status, (StreamStatus, StreamStatusSync)):
+            if should_buffer:
+                partial_suffixes = [
+                    stop_slice
+                    for stop_slice in stop_word_slice_list
+                    if stop_slice and truncated.endswith(stop_slice)
+                ]
+                status.pending_stop_text = max(
+                    partial_suffixes, key=len, default=""
+                )
+                status.pending_stop_token_cursor = status.processed_token_count
+            elif status.finish_reason != FinisheReason.stop:
+                status.pending_stop_text = ""
+                status.pending_stop_token_cursor = 0
 
         return truncated, should_buffer
 
@@ -702,10 +947,17 @@ class CustomChatRenderer:
     ) -> OutputDelta:
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
+        output_token_limit = self._effective_output_token_limit(
+            output.aux_info.input_len, max_new_tokens
+        )
         status.update_output(
             output,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._remove_stop_word_ids, output_token_limit=output_token_limit
+            ),
+            output_token_limit,
+            self._find_token_stop_end,
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
@@ -737,7 +989,9 @@ class CustomChatRenderer:
                 output_str=status.delta_output_string,
                 logprobs=await self._generate_log_probs(status, output),
                 input_length=output.aux_info.input_len,
-                output_length=output.aux_info.output_len,
+                output_length=status.reported_output_length(
+                    output.aux_info.output_len
+                ),
                 reuse_length=output.aux_info.reuse_len,
             )
             status.delta_output_string = ""
@@ -901,7 +1155,7 @@ class CustomChatRenderer:
                     trunc_string,
                     await self._generate_log_probs(buffer, buffer.output),
                     aux_info.input_len,
-                    aux_info.output_len,
+                    buffer.reported_output_length(aux_info.output_len),
                     aux_info.reuse_len,
                     multimodal_lengths=aux_info.multimodal_lengths,
                 )
@@ -942,8 +1196,14 @@ class CustomChatRenderer:
                 input_token_length = buffer.output.aux_info.input_len
                 reuse_length = buffer.output.aux_info.reuse_len
                 multimodal_lengths = buffer.output.aux_info.multimodal_lengths
-                aux_info = buffer.output.aux_info if request.aux_info else None
-            output_token_length += buffer.output.aux_info.output_len
+                aux_info = (
+                    self._project_aux_info(buffer, buffer.output.aux_info)
+                    if request.aux_info
+                    else None
+                )
+            output_token_length += buffer.reported_output_length(
+                buffer.output.aux_info.output_len
+            )
         return StreamResponseObject(
             choices=[
                 ChatCompletionResponseStreamChoice(
@@ -1023,7 +1283,7 @@ class CustomChatRenderer:
             if len(outputs.generate_outputs) != nums_output:
                 raise Exception(
                     f"output num {len(outputs.generate_outputs)} != nums_output {nums_output}"
-                )
+            )
             delta_list: List[OutputDelta] = []
             for status, output in zip(status_list, outputs.generate_outputs):
                 delta = await self._update_single_status(
@@ -1034,9 +1294,24 @@ class CustomChatRenderer:
                     stop_word_slice_list,
                     generate_config.is_streaming,
                 )
+                projected_output = output
+                if isinstance(status, StreamStatus):
+                    delta.output_length = status.reported_output_length(
+                        delta.output_length
+                    )
+                    if (
+                        status.output_was_clipped
+                        and generate_config.return_cum_log_probs
+                    ):
+                        raise RuntimeError(
+                            "cannot project cumulative log probabilities from a clipped output chunk"
+                        )
+                    projected_output = self._project_generate_output(
+                        status, output, generate_config
+                    )
                 if delta.extra_outputs is None:
                     delta.extra_outputs = await self._generate_extra_outputs(
-                        output, generate_config
+                        projected_output, generate_config
                     )
                 delta_list.append(delta)
             yield await self._generate_stream_response(delta_list, think_status_list)
@@ -1073,7 +1348,12 @@ class CustomChatRenderer:
         output_id = output_ids
         if output_id == None:
             return None
-        selected_id = output_id[-1].item()
+        flat_output_ids = output_id.flatten()
+        if flat_output_ids.numel() != 1:
+            raise RuntimeError(
+                "logprobs are not supported for multi-token output chunks"
+            )
+        selected_id = flat_output_ids[-1].item()
         if all_probs == None:
             raise Exception(
                 "all_probs is None when logprobs is true. There should be a internal bug."
@@ -1091,7 +1371,7 @@ class CustomChatRenderer:
         chat_logprob = ChatCompletionTokenLogprob(
             token=selected_token,
             bytes=list(selected_token.encode("utf-8", errors="replace")),
-            logprob=all_probs[output_id].log().item(),
+            logprob=all_probs[selected_id].log().item(),
             top_logprobs=[],
         )
         for i in range(prob_return_num):
@@ -1123,11 +1403,18 @@ class CustomChatRenderer:
     ) -> OutputDelta:
         if status.finish_reason != None:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
+        output_token_limit = self._effective_output_token_limit(
+            input_len, max_new_tokens
+        )
         status.update_output_sync(
             output_ids,
             input_len,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._remove_stop_word_ids, output_token_limit=output_token_limit
+            ),
+            output_token_limit,
+            self._find_token_stop_end,
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
@@ -1159,7 +1446,7 @@ class CustomChatRenderer:
                 output_str=status.delta_output_string,
                 logprobs=self._generate_log_probs_sync(status, all_probs, output_ids),
                 input_length=input_len,
-                output_length=output_len,
+                output_length=status.reported_output_length(output_len),
                 reuse_length=reuse_len,
             )
             status.delta_output_string = ""
@@ -1249,7 +1536,7 @@ class CustomChatRenderer:
                     trunc_string,
                     self._generate_log_probs_sync(buffer, all_probs, output_ids),
                     input_len,
-                    output_len,
+                    buffer.reported_output_length(output_len),
                     reuse_len,
                 )
             )
@@ -1275,7 +1562,7 @@ class CustomChatRenderer:
             if i == 0:
                 input_token_length = input_len
                 reuse_length = reuse_len
-            output_token_length += output_len
+            output_token_length += buffer.reported_output_length(output_len)
         return StreamResponseObject(
             choices=[
                 ChatCompletionResponseStreamChoice(
@@ -1337,20 +1624,20 @@ class CustomChatRenderer:
             all_probs_list,
             output_ids_list,  # GenerateOutput
         ):
-            delta_list.append(
-                self._update_single_status_sync(
-                    status,
-                    input_len,
-                    output_len,
-                    reuse_len,
-                    all_probs,
-                    output_ids,
-                    max_new_tokens,
-                    stop_words_str,
-                    stop_word_slice_list,
-                    is_streaming,
-                )
+            delta = self._update_single_status_sync(
+                status,
+                input_len,
+                output_len,
+                reuse_len,
+                all_probs,
+                output_ids,
+                max_new_tokens,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
             )
+            delta.output_length = status.reported_output_length(delta.output_length)
+            delta_list.append(delta)
         stream_response = self._generate_stream_response_sync(delta_list)
         chat_response = ChatCompletionStreamResponse(
             choices=stream_response.choices,
@@ -1428,20 +1715,20 @@ class CustomChatRenderer:
             all_probs_list,
             output_ids_list,  # GenerateOutput
         ):
-            delta_list.append(
-                self._update_single_status_sync(
-                    status,
-                    input_len,
-                    output_len,
-                    reuse_len,
-                    all_probs,
-                    output_ids,
-                    max_new_tokens,
-                    stop_words_str,
-                    stop_word_slice_list,
-                    is_streaming,
-                )
+            delta = self._update_single_status_sync(
+                status,
+                input_len,
+                output_len,
+                reuse_len,
+                all_probs,
+                output_ids,
+                max_new_tokens,
+                stop_words_str,
+                stop_word_slice_list,
+                is_streaming,
             )
+            delta.output_length = status.reported_output_length(delta.output_length)
+            delta_list.append(delta)
         stream_response = self._generate_stream_response_sync(delta_list)
         return stream_response
 
@@ -1581,8 +1868,79 @@ class CustomChatRenderer:
                 return FinisheReason.stop
         return None
 
+    def _effective_output_token_limit(
+        self, input_token_length: int, max_new_tokens: int
+    ) -> int:
+        output_limit = max(0, self.max_seq_len - input_token_length)
+        if max_new_tokens > 0:
+            output_limit = min(output_limit, max_new_tokens)
+        return output_limit
+
+    def _find_token_stop_end(
+        self,
+        output_ids: List[int],
+        stop_start: int,
+        visible_output_length: int,
+    ) -> Optional[int]:
+        if stop_start < 0 or stop_start >= visible_output_length:
+            return None
+
+        matching_ends = []
+        if output_ids[stop_start] == self.eos_token_id:
+            matching_ends.append(stop_start + 1)
+
+        stop_word_ids_list_all = (
+            self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
+        )
+        for stop_word_ids in stop_word_ids_list_all:
+            if not stop_word_ids:
+                continue
+            stop_end = stop_start + len(stop_word_ids)
+            if (
+                stop_end <= visible_output_length
+                and output_ids[stop_start:stop_end] == stop_word_ids
+            ):
+                matching_ends.append(stop_end)
+
+        return min(matching_ends) if matching_ends else None
+
+    def _cap_status_at_string_stop(
+        self,
+        status,
+        stop_words_str: List[str],
+    ) -> None:
+        if not isinstance(status, (StreamStatus, StreamStatusSync)):
+            return
+
+        stop_words = [word for word in stop_words_str if word]
+        new_token_ids = status.output_ids[status.processed_token_count :]
+        if not stop_words or not new_token_ids:
+            return
+
+        pending_stop_text = (
+            status.pending_stop_text
+            if status.processed_token_count > status.pending_stop_token_cursor
+            else ""
+        )
+        previous_token_ids = status.prev_token_id
+        decoded_previous = self.tokenizer.decode(previous_token_ids)
+        for token_count in range(1, len(new_token_ids) + 1):
+            decoded = self.tokenizer.decode(
+                previous_token_ids + new_token_ids[:token_count]
+            )
+            delta_string = decoded[len(decoded_previous) :]
+            candidate_string = pending_stop_text + delta_string
+            if any(stop_word in candidate_string for stop_word in stop_words):
+                status.cap_visible_output_length(
+                    status.processed_token_count + token_count
+                )
+                return
+
     def _remove_stop_word_ids(
-        self, output_ids: List[int], delta_output_ids: List[int]
+        self,
+        output_ids: List[int],
+        delta_output_ids: List[int],
+        output_token_limit: Optional[int] = None,
     ) -> List[int]:
         """
         Truncate token sequence at FIRST occurrence of stop word (eos or stop_word_ids).
@@ -1592,15 +1950,20 @@ class CustomChatRenderer:
         for speculative sampling (MTP) where multiple tokens are generated at once.
 
         Args:
-            output_ids: Complete output token sequence to truncate
-            delta_output_ids: New tokens in this chunk (unused in current implementation)
+            output_ids: Complete output token sequence to truncate.
+            delta_output_ids: Exact suffix appended in this update. When it matches,
+                only the old/new boundary is scanned; an empty or mismatched suffix
+                falls back to a full scan.
+            output_token_limit: Maximum visible output-token count. Tokens after this
+                boundary are ignored. A stop completing exactly at the boundary wins
+                the tie over length; a stop after it cannot affect the result.
 
         Returns:
             Truncated output_ids list, with everything from first stop word removed
 
         Behavior:
-            1. Check for eos_token_id anywhere in sequence, truncate at first occurrence
-            2. Check for stop_word_ids sequences, truncate at first occurrence
+            1. Treat the accepted prefix as already checked on the incremental path
+            2. Check EOS and stop sequences that touch the newly appended suffix
             3. If multiple stop words found, truncate at the earliest position
 
         Why this is needed:
@@ -1616,21 +1979,50 @@ class CustomChatRenderer:
             self.get_all_extra_stop_word_ids_list() + self.stop_words_id_list
         )
 
-        # Find earliest position of any stop token (EOS or stop word sequence)
-        min_stop_pos = len(output_ids)
+        # A previous update could not have left a complete stop sequence in the
+        # accepted prefix. Only matches touching the new suffix can be new.
+        new_token_count = 0
+        if (
+            delta_output_ids
+            and len(delta_output_ids) <= len(output_ids)
+            and output_ids[-len(delta_output_ids) :] == delta_output_ids
+        ):
+            new_token_count = len(delta_output_ids)
+        previous_length = len(output_ids) - new_token_count if new_token_count else 0
 
-        # Check for eos token position
-        if self.eos_token_id in output_ids:
-            eos_pos = output_ids.index(self.eos_token_id)
+        visible_output_length = (
+            len(output_ids)
+            if output_token_limit is None
+            else min(len(output_ids), max(output_token_limit, 0))
+        )
+
+        # Find earliest position of any stop token (EOS or stop word sequence).
+        min_stop_pos = visible_output_length
+        scan_start = min(previous_length, visible_output_length)
+
+        try:
+            eos_pos = output_ids.index(
+                self.eos_token_id, scan_start, visible_output_length
+            )
             min_stop_pos = min(min_stop_pos, eos_pos)
+        except ValueError:
+            pass
 
-        # Check for stop word sequences - find first occurrence of each
+        # Include the old suffix that can form a cross-chunk match, but never
+        # rescan the accepted history.
         for stop_word_ids in stop_word_ids_list_all:
             if not stop_word_ids:
                 continue
             stop_len = len(stop_word_ids)
-            # Scan through output_ids to find first occurrence
-            for i in range(len(output_ids) - stop_len + 1):
+            stop_scan_start = (
+                max(0, previous_length - stop_len + 1)
+                if new_token_count
+                else 0
+            )
+            for i in range(
+                min(stop_scan_start, visible_output_length),
+                visible_output_length - stop_len + 1,
+            ):
                 if output_ids[i : i + stop_len] == stop_word_ids:
                     min_stop_pos = min(min_stop_pos, i)
                     break

@@ -121,6 +121,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """创建Resoning解析器，子类可选实现"""
         return None
 
+    def _create_reasoning_parser_from_rendered_prompt(
+        self, request: ChatCompletionRequest, rendered_prompt: str
+    ) -> Optional[ReasoningParser]:
+        return self._create_reasoning_parser(request)
+
     @override
     def should_process_think(self, request: ChatCompletionRequest):
         # 避免在父类中也处理Think
@@ -128,7 +133,10 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
 
     @override
     async def _create_status_list(
-        self, n: int, request: ChatCompletionRequest
+        self,
+        n: int,
+        request: ChatCompletionRequest,
+        rendered_prompt: Optional[str] = None,
     ) -> List[StreamStatus]:
         """创建状态列表"""
         effective_tools = request.effective_tools()
@@ -143,7 +151,13 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 ReasoningToolStreamStatus(
                     request,
                     self._create_detector(request) if effective_tools else None,
-                    self._create_reasoning_parser(request),
+                    (
+                        self._create_reasoning_parser(request)
+                        if rendered_prompt is None
+                        else self._create_reasoning_parser_from_rendered_prompt(
+                            request, rendered_prompt
+                        )
+                    ),
                     sglang_tools,
                 )
                 for _ in range(n)
@@ -358,7 +372,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 output_str=status.delta_output_string,
                 logprobs=await self._generate_log_probs(status, output),
                 input_length=output.aux_info.input_len,
-                output_length=output.aux_info.output_len,
+                output_length=status.reported_output_length(
+                    output.aux_info.output_len
+                ),
                 reuse_length=output.aux_info.reuse_len,
             )
             status.delta_output_string = ""
@@ -459,10 +475,17 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     ) -> OutputDelta:
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
+        output_token_limit = self._effective_output_token_limit(
+            output.aux_info.input_len, max_new_tokens
+        )
         status.update_output(
             output,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
-            self._remove_stop_word_ids,
+            functools.partial(
+                self._remove_stop_word_ids, output_token_limit=output_token_limit
+            ),
+            output_token_limit,
+            self._find_token_stop_end,
         )
 
         # NOTE: With multi-token stop words (e.g., tokenized from extra_stop_words),
@@ -473,9 +496,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         # 1) realign `last_output_ids` to the truncated output,
         # 2) drop any buffered stop-word prefix from `delta_output_string`,
         # otherwise `_flush_buffer()` may leak partial stop words.
-        if len(status.output_ids) < len(status.last_output_ids):
+        if status.output_rewound:
             status.finish_reason = FinisheReason.stop
-            status.last_output_ids = status.output_ids
+            status.advance_output_cursor(0)
             if stop_word_slice_list and status.delta_output_string:
                 longest_suffix = ""
                 for slice_candidate in stop_word_slice_list:
@@ -503,7 +526,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             return await self._create_empty_delta(output.aux_info)
 
         # Extract new token IDs from this iteration
-        new_token_ids = status.output_ids[len(status.last_output_ids) :]
+        new_token_ids = status.output_ids[status.processed_token_count :]
         normalizer = TokenNormalizer(self.tokenizer)
 
         collected_deltas, normalizer_yielded = await self._process_normalized_tokens(
@@ -522,11 +545,10 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         # If normalizer didn't yield anything (buffered for \uFFFD resolution),
         # don't update so next iteration has full context for sliding window.
         if normalizer_yielded and new_token_ids:
-            status.last_token_length = len(new_token_ids)
-            status.last_output_ids = status.output_ids
-            status.last_token_length = expand_prev_window(
-                self.tokenizer, status.last_output_ids, status.last_token_length
+            context_length = expand_prev_window(
+                self.tokenizer, status.output_ids, len(new_token_ids)
             )
+            status.advance_output_cursor(context_length)
 
         if collected_deltas:
             merged_delta = self._merge_deltas(collected_deltas)
@@ -566,6 +588,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                     status.prev_token_id, new_token_ids
                 ):
                     normalizer_yielded = True
+                    finish_reason_before_token = status.finish_reason
                     token_delta = await self._process_single_token_delta(
                         status,
                         delta_text,
@@ -576,6 +599,11 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                     )
                     if token_delta is not None:
                         collected_deltas.append(token_delta)
+                    if (
+                        status.finish_reason == FinisheReason.stop
+                        and finish_reason_before_token != FinisheReason.stop
+                    ):
+                        break
                 self._validate_parallel_tool_boundary(status)
             except Exception:
                 if policy_state is not None:
@@ -675,7 +703,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
             ),
             logprobs=await self._generate_log_probs(status, output),
             input_length=output.aux_info.input_len,
-            output_length=output.aux_info.output_len,
+            output_length=status.reported_output_length(output.aux_info.output_len),
             reuse_length=output.aux_info.reuse_len,
         )
 
