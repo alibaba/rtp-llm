@@ -913,13 +913,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
-        fprintf(stderr, "[K3_FORWARD_DIAG] Python error: %s\n", e.what());
-        fflush(stderr);
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {
-        fprintf(stderr, "[K3_FORWARD_DIAG] C++ error: %s\n", e.what());
-        fflush(stderr);
         RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {

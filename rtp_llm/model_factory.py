@@ -385,14 +385,18 @@ class ModelFactory:
         if not sp_config.checkpoint_path:
             return None
 
-        # Current SP engine only supports MTP and EAGLE
-        if sp_config.type not in [SpeculativeType.MTP, SpeculativeType.EAGLE]:
+        # Learned draft models share the same propose-model construction path.
+        if sp_config.type not in [
+            SpeculativeType.MTP,
+            SpeculativeType.EAGLE,
+            SpeculativeType.EAGLE3,
+        ]:
             logging.error(
-                "Speculative engine only supports MTP and EAGLE, but got %s",
+                "Speculative engine only supports MTP, EAGLE and EAGLE3, but got %s",
                 sp_config.type.name,
             )
             raise ValueError(
-                "Speculative engine only supports MTP and EAGLE, but got %s"
+                "Speculative engine only supports MTP, EAGLE and EAGLE3, but got %s"
                 % sp_config.type.name
             )
 

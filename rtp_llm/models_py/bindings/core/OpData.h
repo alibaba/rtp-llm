@@ -98,6 +98,9 @@ struct GptModelInputs {
     bool need_moe_gating        = false;
     bool warmup                 = false;
     bool skip_run               = false;
+    // Request-level switch for target-only decoding. This is synchronized
+    // through tpSyncModelInputs so every TP rank selects the same path.
+    bool force_disable_sp_run   = false;
     bool is_fake_stream         = false;
 
     // Linear attention target verify should write draft tokens mamba states

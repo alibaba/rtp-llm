@@ -30,6 +30,9 @@ from rtp_llm.model_loader.weight_module import (
     CustomAtomicWeight,
     WeightModule,
 )
+from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
+    DeepseekV3RotaryEmbedding,
+)
 from rtp_llm.ops import HybridAttentionType, MlaOpsType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -725,4 +728,80 @@ class KimiK3Weight(ModelDeployWeightInfo):
         )
 
 
-__all__ = ["KimiK3Weight", "KimiK3WeightNames"]
+class KimiK3Eagle3Weight(KimiK3Weight):
+    """Weight manifest for the standalone Kimi K3 EAGLE-3 checkpoint."""
+
+    MODEL_PREFIX = ""
+    LAYER_PREFIX = "layers.{i}."
+
+    def _global_weights(self) -> List[WeightModule]:
+        return [
+            AtomicWeight(W.embedding, [CkptWeightInfo("embed_tokens.weight", identity)]),
+            AtomicWeight(W.lm_head, [CkptWeightInfo("lm_head.weight", identity)]),
+            AtomicWeight(W.final_ln_gamma, [CkptWeightInfo("norm.weight", identity)]),
+        ]
+
+    def _common_layer_weights(self) -> List[WeightModule]:
+        return [
+            AtomicWeight(
+                W.pre_ln_gamma,
+                [CkptWeightInfo(self._layer_ckpt("input_layernorm.weight"), identity)],
+            ),
+            AtomicWeight(
+                W.post_ln_gamma,
+                [
+                    CkptWeightInfo(
+                        self._layer_ckpt("post_attention_layernorm.weight"), identity
+                    )
+                ],
+            ),
+            AtomicWeight(
+                W.eagle3_input_norm_gamma,
+                [CkptWeightInfo(self._layer_ckpt("input_layernorm.weight"), identity)],
+            ),
+            AtomicWeight(
+                W.eagle3_fc_norm_gamma,
+                [CkptWeightInfo(self._layer_ckpt("hidden_norm.weight"), identity)],
+            ),
+            CustomAtomicWeight(
+                W.eagle3_fc_proj,
+                [CkptWeightInfo("fc.weight", identity)],
+                process_fun=transpose,
+            ),
+        ]
+
+    def _dense_weights(self) -> List[WeightModule]:
+        return [
+            self._linear(W.ffn_w1, "mlp.gate_proj.weight", split_func=ffn_sp_neg1),
+            self._linear(W.ffn_w3, "mlp.up_proj.weight", split_func=ffn_sp_neg1),
+            self._linear(W.ffn_w2, "mlp.down_proj.weight", split_func=ffn_sp_0),
+        ]
+
+    def _create_rope_w(self) -> Optional[AtomicWeight]:
+        config = self.model_config
+
+        def _rope_cache(_: List[torch.Tensor]) -> torch.Tensor:
+            rotary = DeepseekV3RotaryEmbedding(
+                dim=config.attn_config.rope_config.dim,
+                max_position_embeddings=config.max_seq_len,
+                base=config.attn_config.rope_config.base,
+                device="cuda",
+            )
+            half_dim = config.attn_config.rope_config.dim // 2
+            return torch.cat(
+                [
+                    rotary.cos_cached[:, :half_dim],
+                    rotary.sin_cached[:, :half_dim],
+                ],
+                dim=-1,
+            ).float().contiguous()
+
+        return AtomicWeight(
+            W.rope_cos_sin_cache,
+            [],
+            process_fun=_rope_cache,
+            data_type=torch.float32,
+        )
+
+
+__all__ = ["KimiK3Weight", "KimiK3WeightNames", "KimiK3Eagle3Weight"]

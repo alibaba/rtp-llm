@@ -9,7 +9,7 @@ import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
-from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Weight
+from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3Weight
 from rtp_llm.ops import HybridAttentionType
 
 
@@ -291,12 +291,11 @@ class KimiK3(BaseModel):
             )
 
         config.hybrid_attention_config.enable_hybrid_attention = True
-        # K3 uses the shared HybridCache allocator.  The physical block stride
-        # is selected from the MLA group and the smaller KDA recurrent/conv
-        # state occupies the prefix of that block; the unused suffix is
-        # padding.  KDA and MLA keep separate logical block tables while
-        # competing for capacity in one BlockPool.
-        config.hybrid_attention_config.enable_independent_kv_cache_pools = False
+        # MLA and KDA have different cache shapes and lifetimes.  Keep them in
+        # independent physical pools; speculative models append their own
+        # third pool in CacheConfigCreator instead of sharing either target
+        # pool.
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         layer_types: List[HybridAttentionType] = []
         for layer_1based in range(1, config.num_layers + 1):
             layer_types.append(
@@ -391,8 +390,125 @@ class KimiK3(BaseModel):
         return KimiK3Weight
 
 
+class KimiK3Eagle3(KimiK3):
+    """One-layer MLA/SWA EAGLE-3 draft model for Kimi K3."""
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str) -> KimiK3ModelConfig:
+        config_path = os.path.join(ckpt_path, "config.json")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"config.json not found in {ckpt_path}")
+        with open(config_path, encoding="utf-8") as reader:
+            raw = json.load(reader)
+
+        if raw.get("model_type") != "deepseek_v3_swa":
+            raise ValueError(
+                "Kimi K3 EAGLE-3 expects model_type='deepseek_v3_swa', got "
+                f"{raw.get('model_type')!r}"
+            )
+        if int(raw.get("num_hidden_layers", 0)) != 1:
+            raise ValueError("Kimi K3 EAGLE-3 currently requires exactly one layer")
+
+        config = KimiK3ModelConfig()
+        config.ckpt_path = ckpt_path
+        config.tokenizer_path = ckpt_path
+        config.model_type = "kimi_k3_mla_swa_eagle3"
+        config.num_layers = 1
+        config.hidden_size = int(cls._required(raw, "hidden_size"))
+        config.vocab_size = int(cls._required(raw, "vocab_size"))
+        config.input_vocab_size = config.vocab_size
+        config.max_seq_len = int(cls._required(raw, "max_position_embeddings"))
+        config.inter_size = int(cls._required(raw, "intermediate_size"))
+        config.layernorm_eps = float(raw.get("rms_norm_eps", 1e-5))
+        config.norm_type = "rmsnorm"
+        config.activation_type = "SiGLU"
+        config.has_pre_decoder_layernorm = False
+        config.has_post_decoder_layernorm = True
+        config.has_lm_head = True
+        config.tie_word_embeddings = bool(raw.get("tie_word_embeddings", False))
+        config.config_dtype = raw.get("torch_dtype", "bfloat16")
+        config.has_positional_encoding = False
+        config.position_ids_style = 0
+        config.qk_norm = False
+        config.moe_layer_index = []
+        config.expert_num = 0
+        config.moe_k = 0
+
+        head_num = int(cls._required(raw, "num_attention_heads"))
+        config.attn_config.head_num = head_num
+        config.attn_config.kv_head_num = int(raw.get("num_key_value_heads", head_num))
+        config.attn_config.nope_head_dim = int(cls._required(raw, "qk_nope_head_dim"))
+        config.attn_config.rope_head_dim = int(cls._required(raw, "qk_rope_head_dim"))
+        config.attn_config.size_per_head = (
+            config.attn_config.nope_head_dim + config.attn_config.rope_head_dim
+        )
+        config.attn_config.v_head_dim = int(cls._required(raw, "v_head_dim"))
+        config.attn_config.q_lora_rank = int(cls._required(raw, "q_lora_rank"))
+        config.attn_config.kv_lora_rank = int(cls._required(raw, "kv_lora_rank"))
+        config.attn_config.sliding_window = int(cls._required(raw, "sliding_window"))
+        config.attn_config.use_mla = True
+        config.attn_config.is_causal = True
+        config.attn_config.rope_config.style = 0
+        config.attn_config.rope_config.base = int(raw.get("rope_theta", 10000))
+        config.attn_config.rope_config.dim = config.attn_config.rope_head_dim
+        config.attn_config.rope_config.offset = config.attn_config.nope_head_dim
+        config.attn_config.rope_config.is_neox_style = False
+
+        config.hybrid_attention_config.enable_hybrid_attention = True
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
+        config.hybrid_attention_config.hybrid_attention_types = [
+            HybridAttentionType.SLIDING_WINDOW
+        ]
+        config.k3_runtime_config = KimiK3RuntimeConfig(
+            dense_intermediate_size=config.inter_size,
+            routed_expert_hidden_size=0,
+            num_shared_experts=0,
+            activation_situ_beta=0.0,
+            activation_situ_linear_beta=None,
+            attn_res_block_size=1,
+            latent_moe_use_norm=False,
+            mla_use_nope=bool(raw.get("mla_use_nope", False)),
+            mla_use_output_gate=bool(raw.get("mla_use_output_gate", True)),
+            kda_gate_lower_bound=None,
+            kda_use_full_rank_gate=False,
+        )
+        config.special_tokens.bos_token_id = int(raw.get("bos_token_id", -1))
+        config.special_tokens.eos_token_id = int(raw.get("eos_token_id", 0))
+        config.special_tokens.pad_token_id = int(raw.get("pad_token_id", 0))
+        config.special_tokens.stop_words_id_list = [
+            [config.special_tokens.eos_token_id]
+        ]
+        return config
+
+    def support_cuda_graph(self) -> bool:
+        return False
+
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.kimi_k3_eagle3 import KimiK3Eagle3Model
+
+        self.py_model = KimiK3Eagle3Model(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+        return self.py_model
+
+    @staticmethod
+    def get_weight_cls():
+        return KimiK3Eagle3Weight
+
+
 register_model(
     "kimi_k3",
     KimiK3,
     ["KimiK3ForConditionalGeneration"],
+)
+register_model(
+    "kimi_k3_mla_swa_eagle3",
+    KimiK3Eagle3,
+    ["Eagle3DeepseekV2SWAForCausalLM"],
 )

@@ -621,14 +621,15 @@ bool NormalEngine::isTimelineProfilingEnabled() const {
 
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE;
+        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
+               || propose_params_->sp_type == SP_TYPE_EAGLE3;
     }
     return false;
 }
 
 bool NormalEngine::isEagle() {
     if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_EAGLE;
+        return propose_params_->sp_type == SP_TYPE_EAGLE || propose_params_->sp_type == SP_TYPE_EAGLE3;
     }
     return false;
 }

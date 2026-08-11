@@ -290,9 +290,18 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         auto      effective_size = [&](const CacheConfig& cfg) -> size_t {
             return effectivePagedBlockBytes(cfg, joint_step);
         };
-        block_num =
-            paged_budget
-            / (effective_size(score_config) + effective_size(propose_config) * static_cast<size_t>(num_mtp_modules));
+        const size_t score_effective_bytes   = effective_size(score_config);
+        const size_t propose_effective_bytes = effective_size(propose_config);
+        const size_t joint_block_bytes =
+            score_effective_bytes + propose_effective_bytes * static_cast<size_t>(num_mtp_modules);
+        RTP_LLM_LOG_INFO(
+            "sp kv cache sizing: paged budget=%zu MiB, score effective block=%zu MiB, propose effective block=%zu MiB x %d, joint block=%zu MiB",
+            paged_budget / 1024 / 1024,
+            score_effective_bytes / 1024 / 1024,
+            propose_effective_bytes / 1024 / 1024,
+            num_mtp_modules,
+            joint_block_bytes / 1024 / 1024);
+        block_num = paged_budget / joint_block_bytes;
     }
 
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
@@ -307,6 +316,47 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
+
+    // Kimi K3 uses independent target pools (FULL/MLA and LINEAR/KDA).  An
+    // EAGLE draft layer must not alias either pool: its local layer id starts
+    // at zero, but its cache has an independent lifetime and is addressed as
+    // a global layer after the target model.  Materialize the propose groups
+    // as additional physical pools before wiring global layer ids below.
+    const bool   independent_eagle_pool = is_eagle && config.use_independent_block_pools;
+    const size_t propose_group_offset   = config.group_types.size();
+    if (independent_eagle_pool) {
+        for (size_t g = 0; g < propose_config.group_types.size(); ++g) {
+            config.cache_specs.push_back(propose_config.cache_specs[g]);
+            config.global_layer_ids.emplace_back();
+            config.layer_ids.emplace_back();
+            config.group_types.push_back(propose_config.group_types[g]);
+            config.group_region_names.push_back(
+                g < propose_config.group_region_names.size() ? propose_config.group_region_names[g]
+                                                             : KVCacheRegionName::DEFAULT);
+            config.group_seq_size_per_block.push_back(
+                g < propose_config.group_seq_size_per_block.size() ? propose_config.group_seq_size_per_block[g]
+                                                                   : propose_config.seq_size_per_block);
+            config.group_kv_block_stride_bytes.push_back(
+                g < propose_config.group_kv_block_stride_bytes.size()
+                    ? propose_config.group_kv_block_stride_bytes[g]
+                    : propose_config.kv_block_stride_bytes);
+            config.group_kv_scale_stride_bytes.push_back(
+                g < propose_config.group_kv_scale_stride_bytes.size()
+                    ? propose_config.group_kv_scale_stride_bytes[g]
+                    : propose_config.kv_scale_stride_bytes);
+            config.group_block_size_bytes.push_back(
+                g < propose_config.group_block_size_bytes.size() ? propose_config.group_block_size_bytes[g]
+                                                                 : propose_config.block_size_bytes);
+            config.group_block_nums.push_back(0);
+            if (propose_config.group_types[g] == CacheGroupType::FULL) {
+                ++config.full_group_num;
+            } else if (propose_config.group_types[g] == CacheGroupType::SWA) {
+                ++config.swa_group_num;
+            } else {
+                ++config.linear_group_num;
+            }
+        }
+    }
 
     size_t full_gid = 0;
     if (config.group_types.size() > 1) {
@@ -372,11 +422,16 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 // Keep the propose model's group placement. DSV4 MTP is
                 // SWA-only and lives in the SWA typed pool, not the first FULL
                 // pool. Non-typed hybrid configs fall back to the full group.
-                const int target_gid =
-                    (g < config.global_layer_ids.size()) ? static_cast<int>(g) : static_cast<int>(full_gid);
+                const int target_gid = independent_eagle_pool
+                                           ? static_cast<int>(propose_group_offset + g)
+                                           : ((g < config.global_layer_ids.size()) ? static_cast<int>(g)
+                                                                                  : static_cast<int>(full_gid));
                 config.layer_to_group_id[global_layer_id] = target_gid;
                 if (target_gid >= 0 && target_gid < static_cast<int>(config.global_layer_ids.size())) {
                     config.global_layer_ids[static_cast<size_t>(target_gid)].push_back(global_layer_id);
+                    if (static_cast<size_t>(target_gid) < config.layer_ids.size()) {
+                        config.layer_ids[static_cast<size_t>(target_gid)].push_back(global_layer_id);
+                    }
                 }
                 if (!config.layer_to_group_ids.empty()
                     && static_cast<size_t>(global_layer_id) < config.layer_to_group_ids.size()) {
@@ -390,7 +445,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                         config.layer_region_to_group_id[static_cast<size_t>(global_layer_id)][region] = target_gid;
                     }
                 }
-                if (target_gid >= 0 && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
+                if (!independent_eagle_pool && target_gid >= 0
+                    && static_cast<size_t>(target_gid) < config.group_block_size_bytes.size()) {
                     size_t stride_bytes = 0;
                     if (g < propose_config.group_kv_block_stride_bytes.size()) {
                         stride_bytes += propose_config.group_kv_block_stride_bytes[g];

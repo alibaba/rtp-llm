@@ -75,6 +75,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] =
         inputs.last_hidden_states.defined() ? (std::uint8_t)torchDTypeToDataType(inputs.last_hidden_states.dtype()) : 0;
     shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
+    shape_hints_ptr[GptModelInputIndex::forceDisableSpRun] = inputs.force_disable_sp_run;
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::pdSeparation] = inputs.pd_separation;
@@ -170,6 +171,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states          = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
     inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.force_disable_sp_run            = shape_hints_ptr[GptModelInputIndex::forceDisableSpRun];
+    inputs.pd_separation                   = shape_hints_ptr[GptModelInputIndex::pdSeparation];
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;

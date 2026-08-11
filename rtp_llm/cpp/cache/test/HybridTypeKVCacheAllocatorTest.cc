@@ -128,6 +128,57 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig() {
                                               /*is_eagle=*/false);
 }
 
+TEST(CacheConfigCreatorTest, IndependentHybridEagleUsesDedicatedThirdPool) {
+    auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/4);
+    auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
+    score_model_cfg.hybrid_attention_config.enable_hybrid_attention           = true;
+    score_model_cfg.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    score_model_cfg.hybrid_attention_config.hybrid_attention_types            = {
+        HybridAttentionType::NONE,
+        HybridAttentionType::LINEAR,
+        HybridAttentionType::NONE,
+        HybridAttentionType::LINEAR};
+    propose_model_cfg.hybrid_attention_config.enable_hybrid_attention           = true;
+    propose_model_cfg.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    propose_model_cfg.hybrid_attention_config.hybrid_attention_types            = {
+        HybridAttentionType::SLIDING_WINDOW};
+    propose_model_cfg.attn_config.sliding_window = 2048;
+    score_model_cfg.linear_attention_config.linear_conv_kernel_dim = 2;
+    score_model_cfg.linear_attention_config.linear_key_head_dim    = 8;
+    score_model_cfg.linear_attention_config.linear_value_head_dim  = 8;
+    score_model_cfg.linear_attention_config.linear_num_key_heads   = 2;
+    score_model_cfg.linear_attention_config.linear_num_value_heads = 2;
+
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+    RuntimeConfig runtime_cfg;
+    KVCacheConfig kv_cache_cfg;
+    kv_cache_cfg.test_block_num = 8;
+    SpeculativeExecutionConfig sp_cfg;
+    sp_cfg.type              = SP_TYPE_EAGLE3;
+    sp_cfg.gen_num_per_cycle = 3;
+
+    auto config = CacheConfigCreator::createSpConfig(score_model_cfg,
+                                                     propose_model_cfg,
+                                                     parallelism_cfg,
+                                                     runtime_cfg,
+                                                     kv_cache_cfg,
+                                                     sp_cfg,
+                                                     /*warm_up_result=*/std::nullopt,
+                                                     /*is_mtp=*/true,
+                                                     /*is_eagle=*/true);
+    ASSERT_TRUE(config.use_independent_block_pools);
+    ASSERT_EQ(config.group_types.size(), 3u);
+    EXPECT_EQ(config.group_types[0], CacheGroupType::FULL);
+    EXPECT_EQ(config.group_types[1], CacheGroupType::LINEAR);
+    EXPECT_EQ(config.group_types[2], CacheGroupType::SWA);
+    ASSERT_EQ(config.layer_to_group_id.size(), 5u);
+    EXPECT_EQ(config.layer_to_group_id[4], 2);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    ASSERT_EQ(config.mtp_sub_configs[0]->global_layer_ids.size(), 1u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->global_layer_ids[0], std::vector<int>({4}));
+}
+
 static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block) {
     auto complete_token_ids =
         std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_length + 64, seq_size_per_block);

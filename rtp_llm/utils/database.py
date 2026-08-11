@@ -291,13 +291,16 @@ class CkptDatabase(BaseDatabase):
             # native helper (e.g. dev environments where torch ABI does not
             # match the prebuilt fast_safetensors).
             use_nogds = os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
+            disable_shm = (
+                os.environ.get("FASTSAFETENSORS_NO_SHM", "0") == "1"
+            )
             loader_kwargs: Dict[str, Any] = dict(
                 pg=pg,
                 hf_weights_files=hf_weights_files,
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
                 bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=not use_nogds,
+                use_shm=not (use_nogds or disable_shm),
                 nogds=use_nogds,
             )
             if stacked_key_config:

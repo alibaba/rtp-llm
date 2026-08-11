@@ -95,6 +95,10 @@ protected:
                              int64_t                             schedule_time_us);
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
+    absl::Status decodeStepTargetOnly(const std::list<GenerateStreamPtr>& streams,
+                                      StreamGroups&                       stream_groups,
+                                      GptModelInputs&                     model_input,
+                                      MtpMetricsCollector&                metrics_collector);
 
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (sync, prepare, forward, broadcast, dispatch) and

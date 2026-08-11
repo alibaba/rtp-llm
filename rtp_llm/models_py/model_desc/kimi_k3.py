@@ -71,6 +71,7 @@ from rtp_llm.models_py.modules.kimi_k3.reference.kda_reference import (
     kimi_kda,
     prepare_kimi_kda_inputs,
 )
+from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
     fused_recurrent_kda,
@@ -689,7 +690,9 @@ def _attention_residual(
         or block_residual.shape[2] != prefix_sum.shape[1]
     ):
         raise ValueError(
-            "AttnRes block_residual must have shape [tokens, blocks, hidden]"
+            "AttnRes block_residual must have shape [tokens, blocks, hidden]: "
+            f"prefix_sum={tuple(prefix_sum.shape)}, "
+            f"block_residual={tuple(block_residual.shape)}"
         )
     if _perf_fusions_enabled() and prefix_sum.is_cuda and block_residual.shape[1] == 1:
         return kimi_k3_two_way_attn_res(
@@ -1312,6 +1315,57 @@ class KimiK3LinearCacheAdapter:
         )
         return True
 
+    def store_block_position(
+        self,
+        state: KimiKDAState,
+        state_index: int,
+        kv_cache: LayerKVCache,
+        attention_inputs: PyAttentionInputs,
+        sequence_idx: int,
+        block_position: int,
+        *,
+        block_map: Optional[list[list[int]]] = None,
+        recurrent_v_first: bool = False,
+    ) -> bool:
+        """Store a state checkpoint into an explicit linear-cache table slot.
+
+        Target verification cannot use the normal ``token // page_size``
+        mapping: every speculative token needs its own rollback-free state
+        checkpoint even when all of them fall inside one ordinary token page.
+        This mirrors qwen3-next's linear kernels, which publish token ``i`` to
+        ``cal_block_idx(sequence_length) + i`` and let ``specUpdate`` commit an
+        accepted checkpoint by swapping block-table entries.
+        """
+
+        if block_position < 0:
+            raise ValueError("KDA cache block position must be non-negative")
+        if self._is_fake_stream(attention_inputs):
+            return False
+        ssm_cache, conv_cache = self._views(kv_cache)
+        block_map = (
+            self._block_map(attention_inputs) if block_map is None else block_map
+        )
+        if block_position >= len(block_map[sequence_idx]):
+            raise ValueError(
+                "linear cache block map is too short for target-verify slot "
+                f"{block_position}"
+            )
+        block_id = block_map[sequence_idx][block_position]
+        if block_id <= 0:
+            raise ValueError(
+                "linear cache target-verify slot is not materialized: "
+                f"sequence={sequence_idx} slot={block_position} block={block_id}"
+            )
+        self._copy_state_to_block(
+            state,
+            state_index,
+            block_id,
+            ssm_cache,
+            conv_cache,
+            recurrent_v_first=recurrent_v_first,
+        )
+        return True
+
     @staticmethod
     def _copy_state_to_block(
         state: KimiKDAState,
@@ -1667,23 +1721,28 @@ class KimiK3KDA(nn.Module):
         attention_inputs: Optional[PyAttentionInputs],
         *,
         mode: KDAExecutionMode,
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]]:
-        """Return device-resident paged KDA state for the batched decode path.
+    ) -> Optional[
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]
+    ]:
+        """Return device-resident paged KDA state for indexed recurrence.
 
-        The optimized path is deliberately isolated behind an environment flag
-        and falls back to the canonical gather/compute/scatter implementation
-        whenever its one-token CUDA contract is not satisfied.
+        Regular decode uses one token per sequence.  Target verification uses
+        multiple speculative tokens per sequence and writes every intermediate
+        state directly to its reserve page.
         """
 
+        is_target_verify = bool(
+            attention_inputs is not None
+            and getattr(attention_inputs, "is_target_verify", False)
+        )
         if (
-            not _batched_kda_decode_enabled()
-            or mode != "decode"
+            (not _batched_kda_decode_enabled() and not is_target_verify)
+            or (mode != "decode" and not is_target_verify)
             or kv_cache is None
             or attention_inputs is None
             or not hidden_states.is_cuda
             or _accuracy_trace_enabled()
             or self._kda_backend != "kernel"
-            or bool(getattr(attention_inputs, "is_target_verify", False))
         ):
             return None
 
@@ -1698,8 +1757,8 @@ class KimiK3KDA(nn.Module):
             or not block_map.is_cuda
             or sequence_lengths_plus_one.ndim != 1
             or block_map.ndim != 2
-            or sequence_lengths_plus_one.numel() != hidden_states.shape[0]
-            or block_map.shape[0] != hidden_states.shape[0]
+            or sequence_lengths_plus_one.numel() != block_map.shape[0]
+            or hidden_states.shape[0] % block_map.shape[0] != 0
             or block_map.shape[1] == 0
         ):
             return None
@@ -1743,13 +1802,24 @@ class KimiK3KDA(nn.Module):
         """Run one indexed recurrent launch and update physical SSM pages."""
 
         token_count = q.shape[0]
-        head_shape = (1, token_count, self.local_heads, self.head_dim)
+        batch = block_map.shape[0]
+        if token_count % batch != 0:
+            raise ValueError(
+                f"KDA indexed token count {token_count} is not divisible by batch {batch}"
+            )
+        sequence_length = token_count // batch
+        indexed_shape = (
+            batch,
+            sequence_length,
+            self.local_heads,
+            self.head_dim,
+        )
         output, _ = fused_recurrent_kda(
-            q.reshape(head_shape),
-            k.reshape(head_shape),
-            v.reshape(head_shape),
-            raw_gate.reshape(head_shape),
-            raw_beta.float().reshape(1, token_count, self.local_heads),
+            q.reshape(indexed_shape),
+            k.reshape(indexed_shape),
+            v.reshape(indexed_shape),
+            raw_gate.reshape(indexed_shape),
+            raw_beta.float().reshape(batch, sequence_length, self.local_heads),
             initial_state=ssm_cache,
             A_log=self.weights[W.linear_attn_alog],
             dt_bias=self.weights[W.linear_attn_dt_b_kda],
@@ -1767,7 +1837,9 @@ class KimiK3KDA(nn.Module):
             seq_size_per_block=page_size,
             sequence_lengths=sequence_lengths_plus_one,
         )
-        return output.reshape(head_shape).to(dtype=q.dtype)
+        return output.reshape(
+            1, token_count, self.local_heads, self.head_dim
+        ).to(dtype=q.dtype)
 
     def _kda_core(
         self,
@@ -1786,6 +1858,7 @@ class KimiK3KDA(nn.Module):
         output_target: Optional[torch.Tensor] = None,
         checkpoint_interval: Optional[int] = None,
         checkpoint_states: Optional[torch.Tensor] = None,
+        backend_override: Optional[str] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the KDA delta-net core (l2norm + decay gate + scan).
 
@@ -1797,16 +1870,24 @@ class KimiK3KDA(nn.Module):
         non-zero initial-state prefill/decode seams.
         """
 
+        kda_backend = self._kda_backend if backend_override is None else backend_override
+        if kda_backend not in (
+            "kernel",
+            "reference",
+            "reference_recurrent",
+            "cula",
+        ):
+            raise ValueError(f"unsupported KDA backend override {kda_backend!r}")
         if checkpoint_interval is None and checkpoint_states is not None:
             raise ValueError("checkpoint_states requires checkpoint_interval")
         if checkpoint_interval is not None and (
-            mode != "prefill" or self._kda_backend != "cula"
+            mode != "prefill" or kda_backend != "cula"
         ):
             raise ValueError(
                 "FP32 checkpoint states are supported only by cuLA prefill"
             )
 
-        if not q.is_cuda:
+        if kda_backend in ("reference", "reference_recurrent") or not q.is_cuda:
             return kimi_kda(
                 q,
                 k,
@@ -1816,14 +1897,14 @@ class KimiK3KDA(nn.Module):
                 a_log,
                 dt_bias,
                 recurrent_state,
-                mode=mode,
+                mode=("decode" if kda_backend == "reference_recurrent" else mode),
                 lower_bound=self.gate_lower_bound,
                 cu_seqlens=cu_seqlens,
             )
 
         copy_free_backend_prefill = (
             _perf_fusions_enabled()
-            and self._kda_backend == "cula"
+            and kda_backend == "cula"
             and mode == "prefill"
         )
         if copy_free_backend_prefill:
@@ -1833,7 +1914,7 @@ class KimiK3KDA(nn.Module):
             ):
                 raise ValueError(
                     "K3 fused state must be contiguous FP32 in the "
-                    f"{self._kda_backend} native layout"
+                    f"{kda_backend} native layout"
                 )
         else:
             # Accuracy/recurrent kernels may mutate initial_state. Feed a
@@ -1844,7 +1925,7 @@ class KimiK3KDA(nn.Module):
                 else recurrent_state.float().contiguous().clone()
             )
         if mode == "prefill":
-            if self._kda_backend == "cula":
+            if kda_backend == "cula":
                 try:
                     import cula
                     from cula.kda import chunk_kda as cula_chunk_kda
@@ -2174,6 +2255,15 @@ class KimiK3KDA(nn.Module):
         """Run chunk form page-by-page and persist every reusable boundary."""
 
         trace_enabled = _accuracy_trace_enabled()
+        is_target_verify = bool(
+            getattr(attention_inputs, "is_target_verify", False)
+        )
+        target_verify_backend = (
+            os.environ.get("KIMI_K3_TARGET_VERIFY_KDA_BACKEND")
+            if is_target_verify
+            else None
+        )
+        effective_backend = target_verify_backend or self._kda_backend
         ranges = _sequence_offsets(
             cu_seqlens,
             q_projected.shape[0],
@@ -2192,7 +2282,9 @@ class KimiK3KDA(nn.Module):
             raise ValueError("linear cache seq_size_per_block must be positive")
         if (
             _perf_fusions_enabled()
-            and self._kda_backend == "cula"
+            and not is_target_verify
+            and target_verify_backend is None
+            and effective_backend == "cula"
             and len(ranges) == 1
             and past_lengths[0] % page_size == 0
         ):
@@ -2241,9 +2333,20 @@ class KimiK3KDA(nn.Module):
             ]
             cursor = start
             absolute_position = past_length
+            target_verify_write_base = past_length // page_size
             while cursor < end:
-                tokens_to_page_end = page_size - (absolute_position % page_size)
-                segment_end = min(end, cursor + tokens_to_page_end)
+                # qwen3-next persists every target-verify intermediate state
+                # into a separate reserve block.  Keep KDA's convolution and
+                # recurrent scans cumulative, but cut the verify chunk into
+                # one-token segments so both pieces of state form the same
+                # checkpoint.
+                if is_target_verify:
+                    segment_end = cursor + 1
+                else:
+                    tokens_to_page_end = page_size - (
+                        absolute_position % page_size
+                    )
+                    segment_end = min(end, cursor + tokens_to_page_end)
                 segment_length = segment_end - cursor
                 device_index = (
                     cu_seqlens.device.index
@@ -2273,7 +2376,12 @@ class KimiK3KDA(nn.Module):
                         self.kda_q_conv,
                         segment_cu_seqlens,
                         q_state,
-                        mode="prefill",
+                        # Target verify is deliberately segmented one token at
+                        # a time above.  Use the exact recurrent decode path so
+                        # row 0 is numerically identical to target-only decode;
+                        # chunk-prefill arithmetic drifts from the first KDA
+                        # layer and can flip rejection fallback tokens.
+                        mode="decode" if is_target_verify else "prefill",
                         use_initial_state=absolute_position > 0,
                         sequence_ranges=segment_ranges,
                     )
@@ -2282,7 +2390,7 @@ class KimiK3KDA(nn.Module):
                         self.kda_k_conv,
                         segment_cu_seqlens,
                         k_state,
-                        mode="prefill",
+                        mode="decode" if is_target_verify else "prefill",
                         use_initial_state=absolute_position > 0,
                         sequence_ranges=segment_ranges,
                     )
@@ -2291,7 +2399,7 @@ class KimiK3KDA(nn.Module):
                         self.kda_v_conv,
                         segment_cu_seqlens,
                         v_state,
-                        mode="prefill",
+                        mode="decode" if is_target_verify else "prefill",
                         use_initial_state=absolute_position > 0,
                         sequence_ranges=segment_ranges,
                     )
@@ -2323,13 +2431,16 @@ class KimiK3KDA(nn.Module):
                 beta_for_core = raw_beta[cursor:segment_end].reshape(
                     1, segment_length, self.local_heads
                 )
-                if not (_perf_fusions_enabled() and self._kda_backend == "cula"):
+                if not (
+                    _perf_fusions_enabled()
+                    and effective_backend == "cula"
+                ):
                     beta_for_core = beta_for_core.float()
                 with _perf_profile(
-                    f"{page_prefix}.{self._kda_backend}_recurrence_and_output"
+                    f"{page_prefix}.{effective_backend}_recurrence_and_output"
                 ):
                     segment_cu_seqlens_cpu = None
-                    if self._kda_backend == "cula":
+                    if effective_backend == "cula":
                         segment_cu_seqlens_cpu = self._segment_cu_seqlens_cpu.get(
                             segment_length
                         )
@@ -2349,7 +2460,7 @@ class KimiK3KDA(nn.Module):
                         self.weights[W.linear_attn_alog],
                         self.weights[W.linear_attn_dt_b_kda],
                         recurrent_state,
-                        mode="prefill",
+                        mode="decode" if is_target_verify else "prefill",
                         cu_seqlens=segment_cu_seqlens,
                         cu_seqlens_cpu=segment_cu_seqlens_cpu,
                         output_target=(
@@ -2357,6 +2468,7 @@ class KimiK3KDA(nn.Module):
                             if fused_output is None
                             else fused_output[:, cursor:segment_end]
                         ),
+                        backend_override=target_verify_backend,
                     )
                 if fused_output is None:
                     packed_outputs.append(segment_output.squeeze(0))
@@ -2369,16 +2481,29 @@ class KimiK3KDA(nn.Module):
                 with _perf_profile(
                     f"{page_prefix}.linear_cache_update_ssm_plus_3xqkv_history"
                 ):
-                    self.cache_adapter.store_position(
-                        segment_state,
-                        0,
-                        kv_cache,
-                        attention_inputs,
-                        sequence_idx,
-                        absolute_position + segment_length - 1,
-                        block_map=block_map,
-                        recurrent_v_first=False,
-                    )
+                    if is_target_verify:
+                        verify_step = cursor - start
+                        self.cache_adapter.store_block_position(
+                            segment_state,
+                            0,
+                            kv_cache,
+                            attention_inputs,
+                            sequence_idx,
+                            target_verify_write_base + verify_step,
+                            block_map=block_map,
+                            recurrent_v_first=False,
+                        )
+                    else:
+                        self.cache_adapter.store_position(
+                            segment_state,
+                            0,
+                            kv_cache,
+                            attention_inputs,
+                            sequence_idx,
+                            absolute_position + segment_length - 1,
+                            block_map=block_map,
+                            recurrent_v_first=False,
+                        )
                 cursor = segment_end
                 absolute_position += segment_length
 
@@ -2541,7 +2666,14 @@ class KimiK3KDA(nn.Module):
             record_accuracy_tensor(
                 f"{self.trace_prefix}.raw_beta", raw_beta, token_dim=0
             )
-        stored_page_states = mode == "prefill" and kv_cache is not None
+        # Target verification owns multiple reserve blocks.  Its indexed
+        # kernels update those physical pages directly, just like
+        # qwen3-next; do not enter the gather/one-token/scatter prefill path.
+        stored_page_states = (
+            mode == "prefill"
+            and kv_cache is not None
+            and paged_decode_cache is None
+        )
         if stored_page_states:
             assert state is not None and attention_inputs is not None
             output, final_state = self._cached_chunk_prefill(
@@ -2568,29 +2700,88 @@ class KimiK3KDA(nn.Module):
                     sequence_lengths_plus_one,
                     page_size,
                 ) = paged_decode_cache
-                if not is_kimi_kda_short_conv_paged_decode_supported(
-                    q_projected,
-                    k_projected,
-                    v_projected,
-                    self.kda_conv,
-                    conv_cache,
-                    block_map,
-                    sequence_lengths_plus_one,
-                    page_size,
-                ):
-                    raise RuntimeError(
-                        "KDA batched decode support changed after cache selection"
-                    )
-                q, k, v = kimi_kda_short_conv_paged_decode(
-                    q_projected,
-                    k_projected,
-                    v_projected,
-                    self.kda_conv,
-                    conv_cache,
-                    block_map,
-                    sequence_lengths_plus_one,
-                    page_size,
+                is_target_verify = bool(
+                    getattr(attention_inputs, "is_target_verify", False)
                 )
+                if is_target_verify:
+                    batch = block_map.shape[0]
+                    if token_count % batch != 0:
+                        raise ValueError(
+                            f"KDA target token count {token_count} is not "
+                            f"divisible by batch {batch}"
+                        )
+                    sequence_length = token_count // batch
+                    # Verify must be numerically identical to repeated target
+                    # decode.  The generic multi-token causal_conv1d_update
+                    # is not equivalent to Kimi's paged single-token kernel
+                    # (including its physical state update).  Replay each
+                    # speculative position through the exact decode kernel.
+                    q_steps = q_projected.reshape(batch, sequence_length, -1)
+                    k_steps = k_projected.reshape(batch, sequence_length, -1)
+                    v_steps = v_projected.reshape(batch, sequence_length, -1)
+                    conv_steps = []
+                    for step in range(sequence_length):
+                        reserve_base = torch.div(
+                            sequence_lengths_plus_one - 2,
+                            page_size,
+                            rounding_mode="floor",
+                        ).to(torch.long)
+                        reserve_col = reserve_base + step
+                        logical_col = torch.div(
+                            sequence_lengths_plus_one + step - 2,
+                            page_size,
+                            rounding_mode="floor",
+                        ).to(torch.long)
+                        batch_idx = torch.arange(batch, device=block_map.device)
+                        dest_ids = block_map[batch_idx, reserve_col].to(torch.long)
+                        if step > 0:
+                            src_ids = block_map[
+                                batch_idx, reserve_col - 1
+                            ].to(torch.long)
+                            conv_cache[dest_ids] = conv_cache[src_ids]
+                        step_block_map = block_map.clone()
+                        step_block_map[batch_idx, logical_col] = dest_ids.to(
+                            step_block_map.dtype
+                        )
+                        q_step, k_step, v_step = kimi_kda_short_conv_paged_decode(
+                            q_steps[:, step, :].contiguous(),
+                            k_steps[:, step, :].contiguous(),
+                            v_steps[:, step, :].contiguous(),
+                            self.kda_conv,
+                            conv_cache,
+                            step_block_map,
+                            sequence_lengths_plus_one + step,
+                            page_size,
+                        )
+                        conv_steps.append(torch.cat((q_step, k_step, v_step), dim=-1))
+                    conv_output = torch.stack(conv_steps, dim=1).reshape(
+                        token_count, -1
+                    )
+                    q, k, v = torch.split(conv_output, self.projection_size, dim=-1)
+                else:
+                    if not is_kimi_kda_short_conv_paged_decode_supported(
+                        q_projected,
+                        k_projected,
+                        v_projected,
+                        self.kda_conv,
+                        conv_cache,
+                        block_map,
+                        sequence_lengths_plus_one,
+                        page_size,
+                    ):
+                        raise RuntimeError(
+                            "KDA batched decode support changed after cache selection"
+                        )
+                    q, k, v = kimi_kda_short_conv_paged_decode(
+                        q_projected,
+                        k_projected,
+                        v_projected,
+                        self.kda_conv,
+                        conv_cache,
+                        block_map,
+                        sequence_lengths_plus_one,
+                        page_size,
+                    )
                 q_final = k_final = v_final = None
             else:
                 sequence_ranges = _sequence_offsets(
@@ -2648,18 +2839,73 @@ class KimiK3KDA(nn.Module):
                         f"{self.trace_prefix}.prepared_beta", beta, token_dim=1
                     )
             if paged_decode_cache is not None:
-                output = self._paged_decode_core(
-                    q,
-                    k,
-                    v,
-                    raw_gate,
-                    raw_beta,
-                    cu_seqlens,
-                    ssm_cache,
-                    block_map,
-                    sequence_lengths_plus_one,
-                    page_size,
+                is_target_verify = bool(
+                    getattr(attention_inputs, "is_target_verify", False)
                 )
+                if is_target_verify and token_count > block_map.shape[0]:
+                    batch = block_map.shape[0]
+                    sequence_length = token_count // batch
+                    q_seq = q.reshape(batch, sequence_length, -1)
+                    k_seq = k.reshape(batch, sequence_length, -1)
+                    v_seq = v.reshape(batch, sequence_length, -1)
+                    gate_seq = raw_gate.reshape(batch, sequence_length, -1)
+                    beta_seq = raw_beta.reshape(batch, sequence_length, -1)
+                    one_token_cu = torch.arange(
+                        batch + 1, device=cu_seqlens.device, dtype=cu_seqlens.dtype
+                    )
+                    output_steps = []
+                    for step in range(sequence_length):
+                        reserve_base = torch.div(
+                            sequence_lengths_plus_one - 2,
+                            page_size,
+                            rounding_mode="floor",
+                        ).to(torch.long)
+                        reserve_col = reserve_base + step
+                        logical_col = torch.div(
+                            sequence_lengths_plus_one + step - 2,
+                            page_size,
+                            rounding_mode="floor",
+                        ).to(torch.long)
+                        batch_idx = torch.arange(batch, device=block_map.device)
+                        dest_ids = block_map[batch_idx, reserve_col].to(torch.long)
+                        if step > 0:
+                            src_ids = block_map[
+                                batch_idx, reserve_col - 1
+                            ].to(torch.long)
+                            ssm_cache[dest_ids] = ssm_cache[src_ids]
+                        step_block_map = block_map.clone()
+                        step_block_map[batch_idx, logical_col] = dest_ids.to(
+                            step_block_map.dtype
+                        )
+                        step_output = self._paged_decode_core(
+                            q_seq[:, step, :].reshape(batch, -1),
+                            k_seq[:, step, :].reshape(batch, -1),
+                            v_seq[:, step, :].reshape(batch, -1),
+                            gate_seq[:, step, :].reshape(batch, -1),
+                            beta_seq[:, step, :].reshape(batch, -1),
+                            one_token_cu,
+                            ssm_cache,
+                            step_block_map,
+                            sequence_lengths_plus_one + step,
+                            page_size,
+                        )
+                        output_steps.append(step_output.squeeze(0))
+                    output = torch.stack(output_steps, dim=1).reshape(
+                        1, token_count, self.local_heads, self.head_dim
+                    )
+                else:
+                    output = self._paged_decode_core(
+                        q,
+                        k,
+                        v,
+                        raw_gate,
+                        raw_beta,
+                        cu_seqlens,
+                        ssm_cache,
+                        block_map,
+                        sequence_lengths_plus_one,
+                        page_size,
+                    )
                 # Both physical state pools were updated in place.  The model
                 # caller ignores this auxiliary return when LayerKVCache owns
                 # state, so avoid gathering it back into canonical tensors.
@@ -2786,12 +3032,29 @@ class KimiK3KDA(nn.Module):
             with _perf_profile(
                 f"{self.trace_prefix}.rmsnorm_sigmoid_output_gate", output
             ):
-                output = kimi_kda_rms_norm_sigmoid_gate(
-                    output,
-                    output_gate,
-                    self.weights[W.linear_attn_norm_w],
-                    self.eps,
-                )
+                if bool(getattr(attention_inputs, "is_target_verify", False)):
+                    # Target verification has only a handful of rows and can
+                    # start from a non-zero recurrent state.  Keep this narrow
+                    # path in explicit FP32 arithmetic: the production Triton
+                    # fusion is tuned for regular prefill/decode shapes and
+                    # can produce NaNs for these short speculative batches.
+                    output_float = output.float()
+                    output = (
+                        output_float
+                        * torch.rsqrt(
+                            output_float.square().mean(dim=-1, keepdim=True)
+                            + self.eps
+                        )
+                        * self.weights[W.linear_attn_norm_w].float()
+                        * torch.sigmoid(output_gate.float())
+                    ).to(dtype=output.dtype)
+                else:
+                    output = kimi_kda_rms_norm_sigmoid_gate(
+                        output,
+                        output_gate,
+                        self.weights[W.linear_attn_norm_w],
+                        self.eps,
+                    )
             if trace_enabled:
                 record_accuracy_tensor(
                     f"{self.trace_prefix}.gated_output", output, token_dim=1
@@ -2800,23 +3063,45 @@ class KimiK3KDA(nn.Module):
                 f"{self.trace_prefix}.o_projection_then_token_reduce_scatter",
                 output,
             ):
-                output = _row_parallel_linear(
-                    output.reshape(token_count, self.projection_size),
-                    self.weights[W.linear_attn_out_w],
-                    self.parallelism_config.get_attn_tp_size(),
-                    reduce_scatter_tokens=(
-                        sequence_parallel
-                        and self.attn_tp_size > 1
-                        and hidden_states.is_cuda
-                    ),
-                    pad_reduce_scatter_tokens=(
-                        sequence_parallel
-                        and self.attn_tp_size > 1
-                        and hidden_states.is_cuda
-                        and (mode == "decode" or token_count % self.attn_tp_size != 0)
-                    ),
-                    use_input_dtype_reduce_scatter=(mode == "prefill"),
+                projection_input = output.reshape(
+                    token_count, self.projection_size
                 )
+                if bool(getattr(attention_inputs, "is_target_verify", False)):
+                    # Match qwen3-next's verify projection boundary.  The
+                    # generic K3 row-parallel helper requests an FP32-output
+                    # CUDA GEMM before the collective; on tiny speculative
+                    # batches that path has produced non-finite partials on
+                    # SM100 even though the recurrent state and gated output
+                    # are finite.  Verify is not sequence-parallel, so a BF16
+                    # local projection followed by the ordinary TP reduction
+                    # is sufficient and numerically stable.
+                    output = _linear(
+                        projection_input,
+                        self.weights[W.linear_attn_out_w],
+                    )
+                    if self.parallelism_config.get_attn_tp_size() > 1:
+                        output = all_reduce(output, group=Group.TP)
+                else:
+                    output = _row_parallel_linear(
+                        projection_input,
+                        self.weights[W.linear_attn_out_w],
+                        self.parallelism_config.get_attn_tp_size(),
+                        reduce_scatter_tokens=(
+                            sequence_parallel
+                            and self.attn_tp_size > 1
+                            and hidden_states.is_cuda
+                        ),
+                        pad_reduce_scatter_tokens=(
+                            sequence_parallel
+                            and self.attn_tp_size > 1
+                            and hidden_states.is_cuda
+                            and (
+                                mode == "decode"
+                                or token_count % self.attn_tp_size != 0
+                            )
+                        ),
+                        use_input_dtype_reduce_scatter=(mode == "prefill"),
+                    )
         if trace_enabled:
             record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
         if (
@@ -4520,7 +4805,10 @@ class KimiK3LatentMoE(nn.Module):
             if valid_token_count < hidden_states.shape[0]:
                 expert_ids = expert_ids.clone()
                 routing_weights = routing_weights.clone()
-                expert_ids[valid_token_count:] = -1
+                # DeepGEMM validates every expert id before applying its
+                # routing weight. Padding rows still need an in-range id;
+                # zero weights and the output clear below keep them inert.
+                expert_ids[valid_token_count:] = 0
                 routing_weights[valid_token_count:] = 0
         if trace_enabled:
             router_token_dim = None if tensor_dump_full_router() else 0
@@ -4787,13 +5075,6 @@ class KimiK3DecoderLayer(nn.Module):
                     sequence_parallel=sequence_parallel,
                     prefill_sp_layout=prefill_sp_layout,
                 )
-        if decode_sp_debug:
-            logging.info(
-                "[K3_DECODE_SP_DEBUG] rank=%d layer=%d attention_done output=%s",
-                tp_rank,
-                self.layer_idx,
-                tuple(attention_output.shape),
-            )
         if decode_sp:
             # Attention consumes only real decode tokens. Its row-parallel
             # output projection pads immediately before ReduceScatter; shard
@@ -4818,13 +5099,6 @@ class KimiK3DecoderLayer(nn.Module):
                 raise RuntimeError(
                     "K3 Decode token-SP residual shards disagree on valid rows"
                 )
-        if decode_sp_debug:
-            logging.info(
-                "[K3_DECODE_SP_DEBUG] rank=%d layer=%d residual_shard_done valid=%s",
-                tp_rank,
-                self.layer_idx,
-                local_valid_tokens,
-            )
         with _perf_profile(f"{trace_prefix}.attention_prefix_sum", attention_output):
             prefix_sum = (
                 attention_output
@@ -4860,13 +5134,6 @@ class KimiK3DecoderLayer(nn.Module):
                 sequence_parallel=sequence_parallel,
                 valid_token_count=local_valid_tokens,
             )
-        if decode_sp_debug:
-            logging.info(
-                "[K3_DECODE_SP_DEBUG] rank=%d layer=%d mlp_done output=%s",
-                tp_rank,
-                self.layer_idx,
-                tuple(mlp_output.shape),
-            )
         with _perf_profile(f"{trace_prefix}.residual_add", mlp_output):
             output = prefix_sum + mlp_output
         if decode_sp:
@@ -4880,14 +5147,6 @@ class KimiK3DecoderLayer(nn.Module):
                     logical_tokens,
                     group=Group.TP,
                 )
-        if decode_sp_debug:
-            logging.info(
-                "[K3_DECODE_SP_DEBUG] rank=%d layer=%d exit output=%s block=%s",
-                tp_rank,
-                self.layer_idx,
-                tuple(output.shape),
-                tuple(block_residual.shape),
-            )
         if trace_enabled:
             record_accuracy_tensor(f"{trace_prefix}.output", output, token_dim=0)
             record_accuracy_tensor(
@@ -4936,6 +5195,8 @@ class KimiK3Model(GptModelBase):
         self._layer_group_ids: Optional[tuple[int, ...]] = None
         self._kda_a2a_weights_materialized = False
         self._fused_ag_gemm_workspace_ready = False
+        self._mtp_hidden_buffer: Optional[torch.Tensor] = None
+        self._mtp_hidden_valid_tokens = 0
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         """Bind runtime resources and reserve the largest Prefill AG workspace."""
@@ -4974,6 +5235,19 @@ class KimiK3Model(GptModelBase):
             tp_size,
         )
         return True
+
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
+        if self._mtp_hidden_buffer is None:
+            return None
+        rows = (
+            self._mtp_hidden_valid_tokens if int(num_tokens) < 0 else int(num_tokens)
+        )
+        if rows < 0 or rows > self._mtp_hidden_buffer.size(0):
+            raise ValueError(
+                f"Kimi K3 EAGLE hidden rows {rows} exceed buffered "
+                f"rows {self._mtp_hidden_buffer.size(0)}"
+            )
+        return self._mtp_hidden_buffer.narrow(0, 0, rows)
 
     # ``prepare_fmha_impl`` is inherited from ``GptModelBase``: it builds the
     # framework MLA impl via ``AttnImplFactory.get_fmha_impl`` (identical to the
@@ -5124,10 +5398,6 @@ class KimiK3Model(GptModelBase):
         attention_inputs = inputs.attention_inputs
         if attention_inputs is None:
             raise ValueError("Kimi K3 requires PyAttentionInputs")
-        if attention_inputs.is_target_verify:
-            raise RuntimeError(
-                "Kimi K3 target-verify cache semantics are not connected yet"
-            )
         if not attention_inputs.is_prefill and self.kv_cache is None:
             raise RuntimeError("Kimi K3 decode requires an initialized hybrid cache")
         input_ids = inputs.input_ids.reshape(-1)
@@ -5137,13 +5407,31 @@ class KimiK3Model(GptModelBase):
         # 不走 SP 就在启动时 die,Prefill 侧生产配置同样一直是 SP。
         tp_rank = int(self.parallelism_config.get_attn_tp_rank())
         sp_requested = tp_size > 1
-        prefill_sp = sp_requested and attention_inputs.is_prefill
+        is_target_verify = bool(
+            getattr(attention_inputs, "is_target_verify", False)
+        )
+        # The engine represents the multi-token target verification pass with
+        # Prefill-shaped metadata, but the verify kernels replay every draft
+        # position on every TP rank.  It must therefore stay replicated and
+        # must not enter either token-SP path.
+        prefill_sp = (
+            sp_requested and attention_inputs.is_prefill and not is_target_verify
+        )
         prefill_sp_layout = (
             _token_shard_layout(int(input_ids.numel()), tp_size, tp_rank)
             if prefill_sp
             else None
         )
-        decode_sp = sp_requested and not attention_inputs.is_prefill
+        # Target verify replays multiple speculative positions on every TP
+        # rank and its KDA projection performs an ordinary TP all-reduce.  Its
+        # token rows are therefore replicated, unlike normal single-token
+        # Decode.  Applying Decode token-SP here shards only the residual side
+        # and produces incompatible full-token/sharded-token shapes.
+        decode_sp = (
+            sp_requested
+            and not attention_inputs.is_prefill
+            and not is_target_verify
+        )
         sp_active = prefill_sp or decode_sp
         if not attention_inputs.is_prefill and not getattr(
             self, "_decode_sp_startup_logged", False
@@ -5236,6 +5524,25 @@ class KimiK3Model(GptModelBase):
                 self._layer_group_ids = tuple(
                     int(value) for value in layer_map_host.tolist()
                 )
+        eagle3_enabled = os.environ.get("SP_TYPE", "").lower() == "eagle3"
+        eagle3_hidden_states = []
+        if eagle3_enabled:
+            raw_aux_layers = os.environ.get("KIMI_K3_EAGLE3_AUX_LAYER_IDS")
+            if raw_aux_layers:
+                aux_layers = [int(value) for value in raw_aux_layers.split(",")]
+            else:
+                aux_layers = [0, max(0, self.layer_num // 2), self.layer_num - 1]
+            if len(aux_layers) != 3 or any(
+                layer_id < 0 or layer_id >= self.layer_num for layer_id in aux_layers
+            ):
+                raise ValueError(
+                    "KIMI_K3_EAGLE3_AUX_LAYER_IDS must contain three valid "
+                    f"zero-based layer ids for {self.layer_num} target layers"
+                )
+            aux_layer_set = set(aux_layers)
+        else:
+            aux_layers = []
+            aux_layer_set = set()
         for layer_idx, layer in enumerate(self.layers):
             static_group_id = (
                 self._layer_group_ids[layer_idx]
@@ -5314,6 +5621,8 @@ class KimiK3Model(GptModelBase):
                     sequence_parallel=sp_active,
                     prefill_sp_layout=prefill_sp_layout,
                 )
+            if layer_idx in aux_layer_set:
+                eagle3_hidden_states.append((layer_idx, hidden_states))
             # Loop-level cache-store is only for KDA layers. MLA publishes
             # from its wrapper immediately after concat_and_cache_mla.
             if (
@@ -5333,6 +5642,24 @@ class KimiK3Model(GptModelBase):
                     f"layer.{layer_idx}.pd_cache_store_publish_kda_segments"
                 ):
                     write_cache_store_impl(layer_cache)
+        if eagle3_enabled:
+            by_layer = dict(eagle3_hidden_states)
+            mtp_hidden_buffer = torch.cat(
+                [by_layer[layer_id] for layer_id in aux_layers], dim=-1
+            ).contiguous()
+            if prefill_sp:
+                assert prefill_sp_layout is not None
+                # Auxiliary hidden states are captured while Prefill token
+                # sequence parallelism is active.  Eagle3 consumes them next
+                # to the replicated full-prompt embedding, so restore the
+                # framework's global token layout just like final_hidden below.
+                mtp_hidden_buffer = all_gather_trim(
+                    mtp_hidden_buffer,
+                    prefill_sp_layout.logical_tokens,
+                    group=Group.TP,
+                )
+            self._mtp_hidden_buffer = mtp_hidden_buffer
+            self._mtp_hidden_valid_tokens = self._mtp_hidden_buffer.size(0)
         with _perf_profile("model.output_attn_residual_mix", hidden_states):
             hidden_states = _attention_residual(
                 hidden_states,

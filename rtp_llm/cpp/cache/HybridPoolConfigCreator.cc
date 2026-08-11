@@ -210,8 +210,11 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.state_block_size_bytes  = state_kv_block_bytes + state_scale_block_bytes;
     const size_t paged_block_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     if (paged_block_bytes == 0) {
-        RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,
-                                "hybrid-pool paged groups produced zero block bytes");
+        // A proposal model may consist entirely of SWA layers.  Its bytes are
+        // accounted through swa_block_size_bytes and later materialized as the
+        // proposal's independent group in createSpConfig, so a one-byte paged
+        // sentinel is sufficient for the intermediate CacheConfig.
+        RTP_LLM_CHECK_WITH_INFO(is_mtp, "hybrid-pool paged groups produced zero block bytes");
         config.kv_block_size_bytes = 1;
         config.kv_scale_size_bytes = 0;
         config.block_size_bytes    = 1;
@@ -233,21 +236,27 @@ void populateHybridAttentionGroups(CacheConfig&             config,
     config.group_types.clear();
     config.group_region_names.clear();
 
-    appendGroup(config,
-                layers.full_layers,
-                CacheGroupType::FULL,
-                createFullAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.full_layers.size())));
-    appendGroup(config,
-                layers.swa_layers,
-                CacheGroupType::SWA,
-                createFullAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.swa_layers.size())));
-    appendGroup(config,
-                layers.linear_layers,
-                CacheGroupType::LINEAR,
-                createLinearAttentionSpec(
-                    model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size())));
+    if (!layers.full_layers.empty()) {
+        appendGroup(config,
+                    layers.full_layers,
+                    CacheGroupType::FULL,
+                    createFullAttentionSpec(
+                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.full_layers.size())));
+    }
+    if (!layers.swa_layers.empty()) {
+        appendGroup(config,
+                    layers.swa_layers,
+                    CacheGroupType::SWA,
+                    createFullAttentionSpec(
+                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.swa_layers.size())));
+    }
+    if (!layers.linear_layers.empty()) {
+        appendGroup(config,
+                    layers.linear_layers,
+                    CacheGroupType::LINEAR,
+                    createLinearAttentionSpec(
+                        model_config, parallelism_config, dtype, static_cast<uint32_t>(layers.linear_layers.size())));
+    }
 }
 
 void setupGroupCounts(CacheConfig& config) {
@@ -289,6 +298,12 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     } else {
         RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_hybrid_attention,
                                 "HybridPoolConfigCreator requires DSV4 layer_compress_ratios or hybrid attention");
+        // Kimi hybrid cache specs are already sized for one complete physical
+        // block (tokens_per_block).  setupIndependentPoolSizes uses the
+        // kernel/physical ratio only for specs that are kernel-block sized;
+        // leaving the default value 1 here would multiply Kimi FULL/MLA bytes
+        // by tokens_per_block a second time.
+        config.kernel_seq_size_per_block = config.seq_size_per_block;
         populateHybridAttentionGroups(config, model_config, parallelism_config);
     }
 

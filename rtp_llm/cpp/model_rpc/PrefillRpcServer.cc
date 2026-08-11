@@ -201,11 +201,15 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         input->generate_config->gen_timeline = true;
     }
     input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle()) {
-        input->generate_config->force_disable_sp_run = false;
-    } else {
+    // Preserve the request-level SP opt-out for MTP/Eagle. Non-SP engines
+    // still force the flag because they cannot execute speculative decoding.
+    if (!engine_->isMTPEagle()) {
         input->generate_config->force_disable_sp_run = true;
     }
+    RTP_LLM_LOG_INFO("[pd_request_sp] request_id=%ld force_disable_sp_run=%d is_mtp_eagle=%d",
+                     prefill_context.request_id,
+                     input->generate_config->force_disable_sp_run,
+                     engine_->isMTPEagle());
     prefill_context.generate_input = input;
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
