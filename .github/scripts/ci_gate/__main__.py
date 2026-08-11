@@ -10,8 +10,13 @@ from typing import List
 
 from .common import GateError, log
 from .review import check_review_qualified, resolve_context
-from .merge import check_merge_conflicts, trigger_merge, wait_merge
-from .ci import pre_check_status, wait_status, trigger_ci
+from .merge import (
+    check_merge_conflicts,
+    check_merge_done,
+    trigger_merge,
+    wait_merge,
+)
+from .ci import pre_check_status, trigger_ci, wait_status
 from .comment import sync_comment
 from .rerun import rerun_pr_build
 
@@ -27,6 +32,11 @@ def main(argv):
     check_review.add_argument("head_sha")
     check_review.add_argument("--github-token", required=True)
     check_review.add_argument("--lgtm-user", default="LLLLKKKK")
+    check_review.add_argument("--require-approved", action="store_true",
+                              help="Require fresh APPROVED review; reject LGTM-only paths")
+    check_review.add_argument("--verify-current-head", action="store_true",
+                              help="Fail if PR's current head.sha differs from the provided head_sha "
+                                   "(guards against acting on a stale commit in a long-running gate run)")
 
     resolve = subparsers.add_parser("resolve-context")
     resolve.add_argument("--github-token", required=True)
@@ -87,7 +97,8 @@ def main(argv):
 
     rerun = subparsers.add_parser("rerun-pr-build")
     rerun.add_argument("--repository", required=True)
-    rerun.add_argument("--pr-number", required=True)
+    rerun.add_argument("--pr-number", default="",
+                       help="Optional. When omitted (workflow_run helper), resolved from head-sha.")
     rerun.add_argument("--head-sha", required=True)
     rerun.add_argument("--workflow-file", default="CI-request-trigger.yml")
     rerun.add_argument("--github-token", required=True)
@@ -109,6 +120,13 @@ def main(argv):
     merge_wait.add_argument("repository")
     merge_wait.add_argument("--max-wait-time", type=int, default=7200)
 
+    merge_done = subparsers.add_parser("check-merge-done")
+    merge_done.add_argument("commit_id")
+    merge_done.add_argument("security")
+    merge_done.add_argument("repository")
+    merge_done.add_argument("--output-file", default="",
+                            help="Write `merge_action=done|wait|trigger` to this file (typically $GITHUB_OUTPUT)")
+
     args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()
@@ -116,7 +134,8 @@ def main(argv):
     try:
         if args.command == "check-review":
             return 0 if check_review_qualified(
-                args.pr_number, args.repository, args.head_sha, args.github_token, args.lgtm_user
+                args.pr_number, args.repository, args.head_sha, args.github_token,
+                args.lgtm_user, args.require_approved, args.verify_current_head,
             ) else 1
         if args.command == "resolve-context":
             return resolve_context(args)
@@ -136,6 +155,8 @@ def main(argv):
             return trigger_merge(args)
         if args.command == "wait-merge":
             return wait_merge(args)
+        if args.command == "check-merge-done":
+            return check_merge_done(args)
     except GateError as exc:
         log(str(exc))
         return exc.exit_code

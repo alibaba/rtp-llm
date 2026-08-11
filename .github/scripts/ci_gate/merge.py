@@ -3,8 +3,9 @@
 import argparse
 import json
 import time
+from typing import Any
 
-from .common import BRANCH_REF, CI_TRIGGER_URL, PROJECT_ID, GateError, log
+from .common import BRANCH_REF, CI_TRIGGER_URL, PROJECT_ID, GateError, log, write_output
 from .ci_service import ci_service_request
 from .github import github_get
 
@@ -77,6 +78,93 @@ def trigger_merge(args):
     if status in {"FAILED", "ERROR"}:
         raise GateError("::error::Merge trigger failed: %s" % body)
     return 0
+
+
+def _write_merge_action(args, action):
+    # type: (argparse.Namespace, str) -> None
+    write_output("merge_action", action, getattr(args, "output_file", "") or "")
+
+
+def check_merge_done(args):
+    # type: (argparse.Namespace) -> int
+    """Single-shot internal merge status query — three-way dedup.
+
+    Writes `merge_action` to `--output-file` (GITHUB_OUTPUT) and uses the
+    same exit convention as `pre-check-status`:
+      - done    → exit 0 (gate skips trigger and wait, green directly)
+      - wait    → exit 0 (task already PENDING; skip trigger, just wait)
+      - trigger → exit 1 (no record / explicit failure-with-response;
+                          gate must run trigger + wait)
+
+    Conflating PENDING with "not done" would re-issue a MERGE-TASK for a
+    commit whose internal merge is already running — breaking the same-
+    commit dedup invariant. Keep the three states distinct.
+
+    Failure mode: if the status query itself fails (network/protocol),
+    we fail CLOSED — raise GateError instead of writing `trigger`. A
+    transient query failure must never turn into a duplicate MERGE-TASK
+    for an already-in-flight commit. Operators can re-run the gate.
+    """
+    max_attempts = 3
+    backoff = 5
+    last_error = None  # type: Any
+    body = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            body = ci_service_request(
+                {
+                    "type": "RETRIEVE-MERGE-STATUS",
+                    "repositoryUrl": args.repository,
+                    "commitId": args.commit_id,
+                },
+                args.security,
+                "checking merge done (attempt %d/%d)" % (attempt, max_attempts),
+            )
+            if isinstance(body, dict):
+                break
+            last_error = "non-dict response: %s" % body
+            log("::warning::Merge status response is not a JSON object (attempt %d/%d): %s"
+                % (attempt, max_attempts, body))
+        except GateError as exc:
+            last_error = exc
+            log("Internal merge status query failed (attempt %d/%d): %s" % (attempt, max_attempts, exc))
+        if attempt < max_attempts:
+            time.sleep(backoff)
+            backoff *= 2
+
+    if not isinstance(body, dict):
+        raise GateError(
+            "::error::Could not determine internal merge status for commit %s after %d attempts; "
+            "refusing to trigger to avoid duplicate MERGE-TASK. Last error: %s"
+            % (args.commit_id, max_attempts, last_error),
+            2,
+        )
+
+    status = body.get("status")
+    if status == "PENDING":
+        log("[WAIT] Internal merge is PENDING for commit %s — will wait, not retrigger" % args.commit_id)
+        _write_merge_action(args, "wait")
+        return 0
+
+    if isinstance(status, dict):
+        success = status.get("success")
+    elif isinstance(status, str):
+        try:
+            parsed = json.loads(status)
+            success = parsed.get("success") if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            success = None
+    else:
+        success = None
+
+    if success is True or str(success).lower() == "true":
+        log("[OK] Internal merge ALREADY DONE for commit %s" % args.commit_id)
+        _write_merge_action(args, "done")
+        return 0
+
+    log("[GO] Internal merge NOT YET DONE for commit %s (status=%s) — will trigger" % (args.commit_id, status))
+    _write_merge_action(args, "trigger")
+    return 1
 
 
 def wait_merge(args):

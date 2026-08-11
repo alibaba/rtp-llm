@@ -109,3 +109,24 @@ def post_pr_comment(repo, pr_number, body_text, github_token):
         "posting comment on PR #%s" % pr_number,
         github_token, payload={"body": body_text},
     )
+
+
+def find_pr_for_commit(repo, head_sha, github_token):
+    # type: (str, str, str) -> str
+    """Return the open PR number whose HEAD is `head_sha`, or "" if none.
+
+    Used by the workflow_run fork-helper, which only has head_sha (the
+    workflow_run event's pull_requests array is empty for fork PRs).
+    """
+    status, body, _ = http_json(
+        "%s/repos/%s/commits/%s/pulls" % (GITHUB_API, repo, head_sha),
+        headers=github_headers(github_token),
+        context="finding PR for commit %s" % head_sha[:8],
+    )
+    if status != 200 or not isinstance(body, list):
+        return ""
+    open_prs = [p for p in body if isinstance(p, dict) and p.get("state") == "open"
+                and (p.get("head") or {}).get("sha") == head_sha]
+    if len(open_prs) != 1:
+        return ""
+    return str(open_prs[0].get("number") or "")

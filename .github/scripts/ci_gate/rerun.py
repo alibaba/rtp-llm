@@ -4,7 +4,7 @@ import argparse
 import time
 
 from .common import GateError, log, short_sha
-from .github import list_workflow_runs, post_pr_comment, rerun_workflow_run
+from .github import find_pr_for_commit, list_workflow_runs, post_pr_comment, rerun_workflow_run
 
 ACTIVE_STATUSES = frozenset([
     "queued", "in_progress", "waiting", "pending", "requested",
@@ -28,6 +28,19 @@ EXPIRED_RUN_COMMENT = (
 )
 
 
+def _maybe_comment(repo, pr_number, body, token):
+    # type: (str, str, str, str) -> None
+    """Post `body` on the PR only when we have a pr_number.
+
+    The fork-helper invokes rerun-pr-build with head_sha only; without a
+    PR number we cannot post, so we just log. The log is the audit trail.
+    """
+    if pr_number:
+        post_pr_comment(repo, pr_number, body, token)
+    else:
+        log("(no pr_number — comment skipped; helper context):\n%s" % body)
+
+
 def rerun_pr_build(args):
     # type: (argparse.Namespace) -> int
     """Find the native pull_request build run for PR HEAD and rerun it.
@@ -38,18 +51,23 @@ def rerun_pr_build(args):
       2 - API error (retries exhausted)
     """
     repo = args.repository
-    pr_number = args.pr_number
+    pr_number = args.pr_number or ""
     head_sha = args.head_sha
     workflow_file = args.workflow_file
     token = args.github_token
     max_retries = args.max_retries
     retry_backoff = args.retry_backoff
 
+    if not pr_number:
+        pr_number = find_pr_for_commit(repo, head_sha, token)
+        if pr_number:
+            log("Resolved PR #%s from HEAD %s" % (pr_number, short_sha(head_sha)))
+
     runs = list_workflow_runs(repo, workflow_file, "pull_request", head_sha, token)
 
     if not runs:
         log("No native pull_request run found for HEAD %s — posting PR comment" % short_sha(head_sha))
-        post_pr_comment(repo, pr_number, NO_RUN_COMMENT % short_sha(head_sha), token)
+        _maybe_comment(repo, pr_number, NO_RUN_COMMENT % short_sha(head_sha), token)
         return 0
 
     run = runs[0]
@@ -79,7 +97,7 @@ def rerun_pr_build(args):
 
         if http_status == 422:
             log("Run %s too old to rerun (HTTP 422) — posting PR comment" % run_id)
-            post_pr_comment(
+            _maybe_comment(
                 repo, pr_number,
                 EXPIRED_RUN_COMMENT % (run_id, short_sha(head_sha)),
                 token,
