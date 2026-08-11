@@ -292,8 +292,7 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
     if (running_streams_.size() + admitted_count + 1 > max_generate_batch_size_) {
         return false;
     }
-    if (admitted_count == 0
-        && new_stream->contextLength() + running_streams_.size() < int(max_seq_len_)) {
+    if (admitted_count == 0 && new_stream->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
     int max_token_size = new_stream->contextLength();
@@ -410,8 +409,8 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
 
     // Build group info statistics for force_batch streams
     for (const auto& stream : waiting_streams) {
-        if (stream->forceBatch() && stream->batchGroupId() != -1) {
-            auto& info = request_group_info[stream->batchGroupId()];
+        if (stream->isGroup()) {
+            auto& info = request_group_info[stream->groupId()];
             if (info.count == 0) {
                 info.first_arrival_time = stream->enqueueTime() / 1000;
             }
@@ -424,7 +423,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
         auto  current     = it++;
         auto& stream      = *current;
-        bool  force_batch = stream->forceBatch();
+        bool  force_batch = stream->isGroup();
 
         if (stream->hasError()) {
             auto state     = stream->getStatus();
@@ -444,17 +443,17 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
         }
 
         // Check if this stream can be scheduled based on batch group rules
-        if (force_batch && stream->batchGroupId() != -1) {
-            const auto group_id                 = stream->batchGroupId();
+        if (force_batch) {
+            const auto group_id                 = stream->groupId();
             const bool group_partially_admitted = partially_admitted_force_batch_group_ids_.find(group_id)
                                                   != partially_admitted_force_batch_group_ids_.end();
             auto& info = request_group_info[group_id];
             // A partially admitted group remains complete even though its residual
             // member count is smaller than the original batch_group_size.
             if (!group_partially_admitted) {
-                if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
+                if (now - info.first_arrival_time > stream->groupTimeout()) {
                     force_batch = false;
-                } else if (info.count < stream->batchGroupSize()) {
+                } else if (info.count < stream->groupSize()) {
                     // Group incomplete, skip this stream.
                     continue;
                 }
@@ -466,7 +465,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
         if (schedule_runtime.batch_type_selected) {
             if (schedule_runtime.force_batch_group_id != -1) {
                 // Already in force_batch mode, only accept same group
-                if (!force_batch || stream->batchGroupId() != schedule_runtime.force_batch_group_id) {
+                if (!force_batch || stream->groupId() != schedule_runtime.force_batch_group_id) {
                     continue;
                 }
             } else {
@@ -509,8 +508,8 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
             if (!schedule_runtime.batch_type_selected) {
                 schedule_runtime.batch_type_selected = true;
             }
-            if (schedule_runtime.force_batch_group_id == -1 && force_batch && stream->batchGroupId() != -1) {
-                schedule_runtime.force_batch_group_id = stream->batchGroupId();
+            if (schedule_runtime.force_batch_group_id == -1 && force_batch) {
+                schedule_runtime.force_batch_group_id = stream->groupId();
                 partially_admitted_force_batch_group_ids_.insert(schedule_runtime.force_batch_group_id);
             }
 
@@ -539,7 +538,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>&       waitin
         const auto group_id = *group_it;
         const bool still_waiting =
             std::any_of(waiting_streams.begin(), waiting_streams.end(), [group_id](const auto& stream) {
-                return stream->forceBatch() && stream->batchGroupId() == group_id;
+                return stream->isGroup() && stream->groupId() == group_id;
             });
         if (still_waiting) {
             ++group_it;

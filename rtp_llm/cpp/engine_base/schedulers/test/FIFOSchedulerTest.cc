@@ -717,14 +717,13 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsForceBatchResidualToProgress) {
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     auto make_group_stream = [&](int group_size) {
-        auto query                                  = std::make_shared<GenerateInput>();
-        query->input_ids                            = torch::ones({1}, torch::kInt32);
-        query->generate_config                      = std::make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 60000;
-        query->batch_group_id                       = 1001;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto query                            = std::make_shared<GenerateInput>();
+        query->input_ids                      = torch::ones({1}, torch::kInt32);
+        query->generate_config                = std::make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 60000;
+        query->group_id                       = 1001;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     };
 
@@ -783,10 +782,9 @@ TEST_F(FIFOSchedulerTest, retryableForceBatchDoesNotBlockFollowingNormalStream) 
         query->generate_config = std::make_shared<GenerateConfig>();
         query->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         if (force_batch) {
-            query->generate_config->force_batch         = true;
-            query->generate_config->batch_group_timeout = 60000;
-            query->batch_group_id                       = 1001;
-            query->batch_group_size                     = 2;
+            query->generate_config->group_timeout = 60000;
+            query->group_id                       = 1001;
+            query->group_size                     = 2;
         }
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     };
@@ -830,14 +828,13 @@ TEST_F(FIFOSchedulerTest, retryableForceBatchResidualPrecedesFollowingGroup) {
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
     auto make_group_stream = [&](std::vector<int> tokens, int64_t group_id, int group_size) {
-        auto query                                  = std::make_shared<GenerateInput>();
-        query->input_ids                            = torch::tensor(tokens, torch::kInt32);
-        query->generate_config                      = std::make_shared<GenerateConfig>();
-        query->generate_config->force_batch         = true;
-        query->generate_config->batch_group_timeout = 60000;
-        query->batch_group_id                       = group_id;
-        query->batch_group_size                     = group_size;
-        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        auto query                            = std::make_shared<GenerateInput>();
+        query->input_ids                      = torch::tensor(tokens, torch::kInt32);
+        query->generate_config                = std::make_shared<GenerateConfig>();
+        query->generate_config->group_timeout = 60000;
+        query->group_id                       = group_id;
+        query->group_size                     = group_size;
+        query->begin_time_us                  = autil::TimeUtility::currentTimeInMicroSeconds();
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     };
 
