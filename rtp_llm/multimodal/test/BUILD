@@ -104,6 +104,7 @@ py_test(
 
 py_test(
     name = "qwen3_vl_newloader_routing_test",
+    exec_properties = {"gpu": "H20"},
     srcs = ["qwen3_vl_newloader_routing_test.py"],
     deps = [
         "//rtp_llm:config",

@@ -26,6 +26,7 @@ deepseek_gpu_test_deps = [
 
 py_test(
     name = "test_deepseek_newloader",
+    exec_properties = {"gpu": "H20"},
     srcs = ["test_deepseek_newloader.py"],
     data = [
         "//:rtp_compute_ops",
