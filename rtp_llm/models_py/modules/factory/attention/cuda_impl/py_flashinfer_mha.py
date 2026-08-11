@@ -1,3 +1,4 @@
+import os
 from typing import Any, Optional
 
 import torch
@@ -37,11 +38,22 @@ from rtp_llm.ops.compute_ops import (
 )
 
 # Constants
-DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = int(
+    os.environ.get("RTP_LLM_PY_FLASHINFER_WORKSPACE_MB", "128")
+)
 
 # Global workspace buffer pool
 _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
 _g_py_flashinfer_pool_lock = __import__("threading").Lock()
+
+
+def _allow_sm100_py_flashinfer_prefill() -> bool:
+    return os.environ.get("RTP_LLM_ENABLE_PY_FLASHINFER_PREFILL_SM100", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
 
 
 def get_py_flashinfer_workspace_buffer(device: str = "cuda") -> torch.Tensor:
@@ -560,11 +572,13 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if paged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on SM 10.0 (Blackwell) architecture
+        1. SM 10.0 support is explicitly enabled, or the GPU is another architecture
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
+        return (
+            not is_sm_100() or _allow_sm100_py_flashinfer_prefill()
+        ) and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
 
     def support_cuda_graph(self) -> bool:
         return True
@@ -616,12 +630,14 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if ragged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on SM 10.0 (Blackwell) architecture
+        1. SM 10.0 support is explicitly enabled, or the GPU is another architecture
         2. The underlying ragged FMHA op supports the inputs
            (requires prefix_lengths to be empty or zero)
         3. MhaRotaryEmbeddingOp supports the inputs
         """
-        return not is_sm_100() and PyFlashinferPrefillAttnOp.support(attn_inputs)
+        return (
+            not is_sm_100() or _allow_sm100_py_flashinfer_prefill()
+        ) and PyFlashinferPrefillAttnOp.support(attn_inputs)
 
 
 def determine_use_tensor_core_from_configs(attn_configs: AttentionConfigs) -> bool:

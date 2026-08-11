@@ -10,6 +10,16 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+py_test(
+    name = "test_sm103_fallback",
+    srcs = ["test_sm103_fallback.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": [],
+    }),
+)
+
 # Library for attention reference implementation
 py_library(
     name = "atten_test_util",
@@ -188,6 +198,7 @@ py_test(
     },
 )
 
+
 # Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
 py_test(
     name = "test_mha_rotary_emb",
@@ -200,4 +211,3 @@ py_test(
         'gpu': 'H20',
     },
 )
-

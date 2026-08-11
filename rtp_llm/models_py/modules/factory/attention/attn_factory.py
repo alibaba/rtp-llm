@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -94,6 +95,21 @@ def _is_fmha_impl_disabled(
     Returns:
         True if the FMHA implementation is disabled, False otherwise
     """
+    force_py_prefill = os.environ.get(
+        "RTP_LLM_FORCE_PY_FLASHINFER_PREFILL", ""
+    ).lower() in ("1", "true", "yes", "on")
+    if force_py_prefill and impl_class_name in {
+        "HeadWiseFP8PrefillImpl",
+        "HeadWisePrefillImpl",
+        "FlashInferTRTLLMSpecDecodeImpl",
+        "FlashInferTRTLLMPrefillImpl",
+        "TRTMHAImpl",
+        "TRTPagedMHAImpl",
+        "FlashInferPrefillImpl",
+        "CPFlashInferImpl",
+    }:
+        return True
+
     if fmha_config is None:
         return False
 
@@ -108,6 +124,10 @@ def _is_fmha_impl_disabled(
     # FlashInfer TRTLLM implementations
     elif "FlashInferTRTLLM" in impl_class_name:
         return fmha_config.disable_flash_infer
+    elif impl_class_name == "FlashInferPrefillImpl" and os.environ.get(
+        "RTP_LLM_DISABLE_CPP_FLASHINFER_PREFILL", ""
+    ).lower() in ("1", "true", "yes", "on"):
+        return True
     # FlashInfer implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
         return fmha_config.disable_flash_infer

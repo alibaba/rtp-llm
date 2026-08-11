@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -9,10 +10,22 @@ from libth_transformer_config import (
     get_rope_cache_once,
 )
 from rtp_kernel.fused_rope_kvcache import (
-    convert_offset_to_block_array,
+    convert_offset_to_block_array as _rtp_convert_offset_to_block_array,
     decode_fused_rope_kvcache,
     prefill_fused_rope_kvcache,
 )
+
+
+def convert_offset_to_block_array(kv_cache_block_id: torch.Tensor) -> torch.Tensor:
+    if os.environ.get("RTP_LLM_USE_TORCH_KVCACHE_OFFSET", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        block_id = kv_cache_block_id.to(torch.int32)
+        return torch.stack((block_id * 2, block_id * 2 + 1), dim=1).unsqueeze(1)
+    return _rtp_convert_offset_to_block_array(kv_cache_block_id)
 
 
 @dataclass
