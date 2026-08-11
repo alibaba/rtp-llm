@@ -16,12 +16,13 @@ from rtp_llm.models_py.layers.linear import (
     RowParallelLinear,
 )
 from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
+from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule, copy_weight_
 from rtp_llm.models_py.modules import FakeBalanceExpert, SelectTopk
 from rtp_llm.models_py.new_models.model_base import (
     required_config_value,
-    select_block_map_for_layer,
+    select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.new_models.qwen3.language import (
     Qwen3Attention,
@@ -1938,13 +1939,20 @@ class Qwen3NextForCausalLM(GptModelBase):
         attn_meta = _build_qwen3_next_metadata(inputs, hidden_states)
         residual = torch.zeros_like(hidden_states)
         for i, layer in enumerate(self.layers):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            layer_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, i
+            )
+            layer_fmha_impl = (
+                None
+                if layer.layer_type == HybridAttentionType.LINEAR
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
+            )
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=inputs.attention_inputs,
+                attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
         hidden_states, residual = self.norm(hidden_states, residual)
@@ -2042,15 +2050,22 @@ class Qwen3NextMTPForCausalLM(Qwen3NextForCausalLM):
         # allocating linear-attention prefill state during CUDA graph capture.
         attn_meta = Qwen3NextMetadata()
         for index, layer in enumerate(self.layers):
-            select_block_map_for_layer(inputs.attention_inputs, index)
+            layer_attention_inputs = select_attention_inputs_for_layer(
+                inputs, self.kv_cache, index
+            )
+            layer_fmha_impl = (
+                None
+                if layer.layer_type == HybridAttentionType.LINEAR
+                else select_fmha_impl_for_layer(fmha_impl, self.kv_cache, index)
+            )
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=(
                     self.kv_cache.get_layer_cache(index) if self.kv_cache else None
                 ),
-                attention_inputs=inputs.attention_inputs,
+                attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
             )
         hidden_states, residual = self.norm(hidden_states, residual)

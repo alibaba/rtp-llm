@@ -865,12 +865,14 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             input_ids=input_ids,
             attention_inputs=PyAttentionInputs(),
         )
+        fmha_impl = ZeroAttention()
         with mock.patch(
             "rtp_llm.models_py.new_models.deepseek_v3.language."
-            "select_block_map_for_layer"
-        ) as select_block_map:
-            outputs = model(inputs, fmha_impl=ZeroAttention())
-        select_block_map.assert_called_once_with(inputs.attention_inputs, 0)
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
+        ) as select_fmha:
+            outputs = model(inputs, fmha_impl=fmha_impl)
+        select_fmha.assert_called_once_with(fmha_impl, model.kv_cache, 0)
 
         def rms_norm(x, weight):
             normalized = x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + 1e-6)

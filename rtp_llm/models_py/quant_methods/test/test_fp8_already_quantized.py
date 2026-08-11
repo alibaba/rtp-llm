@@ -330,6 +330,8 @@ for cuda_version in ("12.4", "12.6"):
         torch, "_scaled_mm", create=True
     ), mock.patch.object(
         fp8, "_is_hip_runtime", return_value=False
+    ), mock.patch.object(
+        fp8, "require_cuda_fp8_quant_helpers"
     ):
         assert fp8._select_fp8_runtime_backend(
             torch.device("cuda:0"), "per_tensor"
