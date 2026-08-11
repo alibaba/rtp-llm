@@ -147,24 +147,6 @@ inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const uint32_t u
     *v                              = *reinterpret_cast<const __hip_fp8x2_e4m3_fnuz*>(&raw_fp8x2);
 }
 
-inline __device__ int get_rope_position_id(const RopeConfig& rope_config,
-                                           const int*        position_ids,
-                                           const int         token_idx,
-                                           const int         rotary_pair_idx) {
-    if (position_ids == nullptr) {
-        return -1;
-    }
-    int position_axis = 0;
-    if (rope_config.style == RopeStyle::Mrope) {
-        const int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        const int pair_idx = rotary_pair_idx % rope_dim;
-        position_axis      = pair_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2 ?
-                                 2 :
-                                 (pair_idx >= rope_config.mrope_dim1 ? 1 : 0);
-    }
-    return position_ids[token_idx * rope_config.index_factor + position_axis];
-}
-
 template<typename T, typename Tcache, bool PREFIX_PROMPT, bool USE_PAGED_FMHA, RopeStyle ROPE_STYLE>
 __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                            q_buf,
                                                               T*                            k_buf,
