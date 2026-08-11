@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 import torch
+import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.kimi_k3.diagnostics.trace_artifact import (
     DEFAULT_MAX_SHARD_SIZE_BYTES,
@@ -51,6 +52,57 @@ _FORWARD_COUNTER = itertools.count()
 _SPEC_KEYS = frozenset(
     {"rank", "mode", "forward", "router", "token", "enable_file", "shard_bytes"}
 )
+
+
+def prepare_kimi_kda_trace_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    raw_gate: torch.Tensor,
+    raw_beta: torch.Tensor,
+    a_log: torch.Tensor,
+    dt_bias: Optional[torch.Tensor] = None,
+    *,
+    lower_bound: Optional[float] = None,
+    scale: Optional[float] = None,
+    norm_epsilon: float = 1e-6,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Materialize KDA's fused input transforms only for accuracy tracing."""
+
+    if q.shape != k.shape or q.shape != raw_gate.shape or q.ndim != 4:
+        raise ValueError("q, k and raw_gate must share shape [B,T,H,K]")
+    if raw_beta.shape != q.shape[:-1]:
+        raise ValueError("raw_beta must have shape [B,T,H]")
+
+    heads, key_dim = q.shape[-2:]
+    if a_log.shape != (heads,):
+        raise ValueError(
+            f"a_log must have shape {(heads,)}, got {tuple(a_log.shape)}"
+        )
+    if dt_bias is not None and dt_bias.numel() != heads * key_dim:
+        raise ValueError(f"dt_bias must contain {heads * key_dim} values")
+    if lower_bound is not None and lower_bound >= 0:
+        raise ValueError("KDA lower_bound is a negative log-decay bound")
+
+    q_float = q.float()
+    k_float = k.float()
+    q_float = q_float * torch.rsqrt(
+        q_float.square().sum(dim=-1, keepdim=True) + norm_epsilon
+    )
+    k_float = k_float * torch.rsqrt(
+        k_float.square().sum(dim=-1, keepdim=True) + norm_epsilon
+    )
+    q_float = q_float * (key_dim**-0.5 if scale is None else scale)
+
+    gate_input = raw_gate.float()
+    if dt_bias is not None:
+        gate_input = gate_input + dt_bias.float().reshape(heads, key_dim)
+    rate = a_log.float().exp().reshape(1, 1, heads, 1)
+    log_decay = (
+        -rate * F.softplus(gate_input)
+        if lower_bound is None
+        else float(lower_bound) * torch.sigmoid(rate * gate_input)
+    )
+    return q_float, k_float, log_decay.exp(), raw_beta.float().sigmoid()
 
 
 def _tensor_dump_spec() -> dict[str, str]:
@@ -303,6 +355,7 @@ __all__ = [
     "accuracy_trace_mode",
     "kimi_k3_accuracy_trace",
     "mark_accuracy_fake_stream",
+    "prepare_kimi_kda_trace_inputs",
     "record_accuracy_tensor",
     "tensor_dump_enabled",
     "tensor_dump_full_router",

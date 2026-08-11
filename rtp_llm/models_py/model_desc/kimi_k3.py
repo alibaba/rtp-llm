@@ -3,15 +3,11 @@
 The hybrid decoder interleaves KDA (linear-attention) and MLA (full-attention)
 layers. MLA reuses the framework cache and attention kernels while K3 owns its
 NoPE convention, sigmoid output gate, packed input projection and
-Sequence-Parallel projection boundary. KDA runs K3's own path (Triton kernel
-with a pure-Torch reference): packed prefill dispatches to the chunk scan and
-token decode dispatches to the recurrent update. KDA canonical states are
+Sequence-Parallel projection boundary. KDA runs K3's own optimized path:
+packed prefill dispatches to cuLA and token decode dispatches to the recurrent
+Triton kernel. KDA canonical states are
 mapped onto RTP's paged linear-cache ABI; MLA uses RTP's compressed latent
 cache layout, so the same layer caches can flow through PD transfer.
-
-Both attention modules keep a pure-Torch reference selectable via env var
-(fixed per PD role: Prefill uses cuLA, Decode the shape-generic kernel) for
-precision comparison against the framework/Triton kernels.
 """
 
 from __future__ import annotations
@@ -62,16 +58,13 @@ from rtp_llm.models_py.modules.kimi_k3.diagnostics.accuracy_trace import (
     accuracy_trace_mode,
     kimi_k3_accuracy_trace,
     mark_accuracy_fake_stream,
+    prepare_kimi_kda_trace_inputs,
     record_accuracy_tensor,
     tensor_dump_enabled,
     tensor_dump_full_router,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda_state import KDAExecutionMode, KimiKDAState
 from rtp_llm.models_py.modules.kimi_k3.mxfp4 import dequantize_mxfp4
-from rtp_llm.models_py.modules.kimi_k3.reference.kda_reference import (
-    kimi_kda,
-    prepare_kimi_kda_inputs,
-)
 from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
@@ -800,9 +793,8 @@ def _packed_causal_depthwise_conv1d(
     """Packed KDA short convolution matching Dummy/FLA arithmetic.
 
     The returned cache is ``[batch, channels, kernel_size - 1]`` in
-    chronological order.  CUDA prefill and decode deliberately use separate
-    Triton paths matching FLA's forward and cache-update kernels; CPU retains a
-    Torch reference for unit tests.
+    chronological order. Prefill and decode deliberately use separate Triton
+    paths matching FLA's forward and cache-update kernels.
     """
 
     if x.ndim != 2 or weight.ndim != 2 or x.shape[1] != weight.shape[0]:
@@ -810,6 +802,8 @@ def _packed_causal_depthwise_conv1d(
             "packed causal conv expects x=[tokens,channels] and "
             "weight=[channels,kernel]"
         )
+    if not x.is_cuda:
+        raise RuntimeError("Kimi K3 short convolution requires CUDA")
     if sequence_ranges is not None:
         ranges = sequence_ranges
     elif mode == "decode":
@@ -869,7 +863,7 @@ def _packed_causal_depthwise_conv1d(
             final_state = (
                 combined[:, -history_size:] if history_size else combined[:, :0]
             )
-        elif x.is_cuda and mode == "decode":
+        elif mode == "decode":
             if end - start != 1:
                 raise ValueError(
                     "KDA recurrent decode short convolution requires exactly "
@@ -884,7 +878,7 @@ def _packed_causal_depthwise_conv1d(
             final_state = (
                 combined[:, -history_size:] if history_size else combined[:, :0]
             )
-        elif x.is_cuda and mode == "prefill":
+        elif mode == "prefill":
             output, kernel_final_state = kimi_kda_short_conv_prefill(
                 sequence,
                 weight,
@@ -908,27 +902,8 @@ def _packed_causal_depthwise_conv1d(
                 final_state = (
                     combined[:, -history_size:] if history_size else combined[:, :0]
                 )
-        elif mode not in ("prefill", "decode"):
-            raise ValueError(f"unsupported KDA convolution mode {mode!r}")
         else:
-            # CPU-only reference.  CUDA must use the kernels above because
-            # separate Torch multiply/add kernels do not preserve FLA's FMA
-            # and reduction semantics.
-            combined = torch.cat((history, sequence.transpose(0, 1)), dim=-1)
-            token_count = end - start
-            weight_float = weight.float()
-            output_float = (
-                combined[:, :token_count].transpose(0, 1).float() * weight_float[:, 0]
-            )
-            for tap in range(1, kernel_size):
-                output_float = output_float + (
-                    combined[:, tap : tap + token_count].transpose(0, 1).float()
-                    * weight_float[:, tap]
-                )
-            output = (output_float * torch.sigmoid(output_float)).to(dtype=x.dtype)
-            final_state = (
-                combined[:, -history_size:] if history_size else combined[:, :0]
-            )
+            raise ValueError(f"unsupported KDA convolution mode {mode!r}")
         outputs.append(output)
         final_states.append(final_state)
     if len(outputs) == 1:
@@ -942,8 +917,8 @@ class KimiK3LinearCacheAdapter:
     Each linear block stores one square recurrent-state tensor followed by a
     packed ``[history,QKV]`` convolution state.  The performance path keeps the
     selected backend's native layout in that square tensor: FlashKDA uses
-    ``[H,V,K]`` while cuLA uses ``[H,K,V]``.  Accuracy/reference paths retain
-    the canonical conversion.  Cached prefill writes a state at every physical
+    ``[H,V,K]`` while cuLA uses ``[H,K,V]``. Accuracy tracing retains the
+    canonical conversion. Cached prefill writes a state at every physical
     page boundary (and at the partial tail), which makes both PD tail transfer
     and prefix reuse from an earlier page well-defined.
     """
@@ -1749,7 +1724,7 @@ class KimiK3KDA(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
         if accuracy_trace_mode() is None:
             return None
-        return prepare_kimi_kda_inputs(
+        return prepare_kimi_kda_trace_inputs(
             q,
             k,
             raw_gate,
@@ -1907,22 +1882,16 @@ class KimiK3KDA(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the KDA delta-net core (l2norm + decay gate + scan).
 
-        Drop-in for the ``kimi_kda`` reference: same ``[1,T,H,*]`` I/O and a
-        ``[N,H,K,V]`` fp32 final state.  Defaults to the ported Triton kernel
-        (``chunk_kda``/``fused_recurrent_kda``); the
-        pure-Torch reference is no longer selectable
-        for precision verification. Kernel/reference agreement covers the
-        non-zero initial-state prefill/decode seams.
+        Uses the same ``[1,T,H,*]`` I/O and returns a ``[N,H,K,V]`` fp32 final
+        state. Prefill dispatches to cuLA and decode to the ported recurrent
+        Triton kernel.
         """
 
         kda_backend = self._kda_backend if backend_override is None else backend_override
-        if kda_backend not in (
-            "kernel",
-            "reference",
-            "reference_recurrent",
-            "cula",
-        ):
+        if kda_backend not in ("kernel", "cula"):
             raise ValueError(f"unsupported KDA backend override {kda_backend!r}")
+        if not q.is_cuda:
+            raise RuntimeError("Kimi K3 KDA requires CUDA")
         if checkpoint_interval is None and checkpoint_states is not None:
             raise ValueError("checkpoint_states requires checkpoint_interval")
         if checkpoint_interval is not None and (
@@ -1930,21 +1899,6 @@ class KimiK3KDA(nn.Module):
         ):
             raise ValueError(
                 "FP32 checkpoint states are supported only by cuLA prefill"
-            )
-
-        if kda_backend in ("reference", "reference_recurrent") or not q.is_cuda:
-            return kimi_kda(
-                q,
-                k,
-                v,
-                raw_gate,
-                raw_beta,
-                a_log,
-                dt_bias,
-                recurrent_state,
-                mode=("decode" if kda_backend == "reference_recurrent" else mode),
-                lower_bound=self.gate_lower_bound,
-                cu_seqlens=cu_seqlens,
             )
 
         copy_free_backend_prefill = (
@@ -2115,7 +2069,7 @@ class KimiK3KDA(nn.Module):
             final_state = final_state_v_first.transpose(-1, -2).contiguous()
         else:
             raise ValueError(f"unsupported KDA execution mode {mode!r}")
-        # Normalize to the reference's [1,T,H,V] / q.dtype output contract.
+        # Normalize both backends to the [1,T,H,V] / q.dtype KDA contract.
         output = output.reshape(q.shape[0], q.shape[1], v.shape[2], v.shape[3]).to(
             dtype=q.dtype
         )
@@ -3168,11 +3122,9 @@ class KimiK3KDA(nn.Module):
 class KimiK3MLA(MlaAttention):
     """K3 NoPE MLA over RTP's packed-token and compressed-cache layouts.
 
-    The production path reuses the framework MLA kernels and executes one
-    packed Q-A/KV-A/output-gate projection. Accuracy and reference paths keep
-    the source model's independent projection boundaries. The pure-Torch
-    attention implementation remains selectable with
-    a pure-Torch reference is no longer selectable.
+    The serving path reuses the framework MLA kernels and executes one packed
+    Q-A/KV-A/output-gate projection. Accuracy tracing keeps the source model's
+    independent projection boundaries so it can record comparable tensors.
     """
 
     def __init__(
@@ -3246,8 +3198,8 @@ class KimiK3MLA(MlaAttention):
     def _use_source_projection_boundaries(self) -> bool:
         return (
             not _perf_fusions_enabled()
-            # canonical / local-eager 与 MLA reference 后端都已删除,只剩 trace
-            # 需要源实现的投影边界。
+            # Only accuracy tracing needs the source implementation's
+            # independent projection boundaries.
             or _accuracy_trace_requested()
         )
 
@@ -3321,7 +3273,7 @@ class KimiK3MLA(MlaAttention):
         ``attn_output`` is the framework context flattened to
         ``[tokens, local_heads * v_head_dim]`` (head-major), matching the flat
         layout of the rank-local gate projection, so the gate multiplies element
-        wise per (head, value) exactly as the reference path does before o_proj.
+        wise per (head, value) exactly as K3 requires before o_proj.
         This runs before o_proj's TP all_reduce, so each rank gates only its
         local heads.
         """
@@ -3401,28 +3353,8 @@ class KimiK3MLA(MlaAttention):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> torch.Tensor:
-        if self._mla_backend == "reference" or not hidden_states.is_cuda:
-            # ``PyModelInputs.attention_inputs`` and the instance captured by
-            # the shared FMHA wrapper can be distinct pybind views.  K3 updates
-            # the explicit view's singular block table for every HybridCache
-            # group, while the wrapper-captured view may still point at group
-            # zero.  Always prefer the layer-current explicit view.
-            attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
-            if attn_inputs is None:
-                raise ValueError("MLA reference path requires PyAttentionInputs")
-            is_prefill = bool(attn_inputs.is_prefill)
-            fused_qkv, output_gate = self._project_qkv_a_input(hidden_states)
-            cu_seqlens = self._reference_cu_seqlens(
-                attn_inputs, fused_qkv.shape[0], is_prefill, fused_qkv.device
-            )
-            return self._reference_forward(
-                fused_qkv,
-                output_gate,
-                cu_seqlens,
-                is_prefill=is_prefill,
-                kv_cache=kv_cache,
-                attention_inputs=attn_inputs,
-            )
+        if not hidden_states.is_cuda:
+            raise RuntimeError("Kimi K3 MLA requires CUDA")
         if accuracy_trace_mode() is None:
             return super().forward(hidden_states, fmha_impl, kv_cache)
 
@@ -3489,7 +3421,7 @@ class KimiK3MLA(MlaAttention):
         attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
         if attn_inputs is None:
             raise ValueError("MLA kernel trace requires PyAttentionInputs")
-        cu_seqlens = self._reference_cu_seqlens(
+        cu_seqlens = self._trace_cu_seqlens(
             attn_inputs,
             fused_qkv.shape[0],
             bool(attn_inputs.is_prefill),
@@ -3636,7 +3568,7 @@ class KimiK3MLA(MlaAttention):
         return cached[:past_length], cached
 
     @staticmethod
-    def _reference_cu_seqlens(
+    def _trace_cu_seqlens(
         attention_inputs: PyAttentionInputs,
         token_count: int,
         is_prefill: bool,
@@ -3654,260 +3586,6 @@ class KimiK3MLA(MlaAttention):
                 else torch.arange(token_count + 1, dtype=torch.int32, device=device)
             )
         return cu_seqlens
-
-    def _reference_forward(
-        self,
-        fused_qkv: torch.Tensor,
-        output_gate: Optional[torch.Tensor],
-        cu_seqlens: torch.Tensor,
-        *,
-        is_prefill: bool,
-        kv_cache: Optional[LayerKVCache] = None,
-        attention_inputs: Optional[PyAttentionInputs] = None,
-    ) -> torch.Tensor:
-        token_count = fused_qkv.shape[0]
-        ranges = _sequence_offsets(cu_seqlens, token_count)
-        if attention_inputs is None:
-            if not is_prefill or kv_cache is not None:
-                raise ValueError("MLA cache/decode requires PyAttentionInputs")
-            past_lengths = [0] * len(ranges)
-        else:
-            length_tensor = (
-                attention_inputs.prefix_lengths
-                if is_prefill
-                else attention_inputs.sequence_lengths
-            )
-            if length_tensor is None or length_tensor.numel() == 0:
-                past_lengths = [0] * len(ranges)
-            else:
-                past_lengths = [
-                    int(value) for value in length_tensor.detach().cpu().tolist()
-                ]
-            if len(past_lengths) != len(ranges):
-                raise ValueError("MLA cache batch does not match packed sequences")
-        if (not is_prefill or any(past_lengths)) and kv_cache is None:
-            raise RuntimeError("MLA decode/prefix reuse requires a LayerKVCache")
-
-        q_a, compressed = torch.split(
-            fused_qkv,
-            [
-                self.q_lora_rank,
-                self.kv_lora_rank + self.suffix_dim,
-            ],
-            dim=-1,
-        )
-        query_latent = _rms_norm(q_a.contiguous(), self._q_a_norm, self.eps)
-        query = _linear(query_latent, self._q_b_w).reshape(
-            token_count, self.local_heads, self.q_head_dim
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.query_latent", query_latent, token_dim=0
-        )
-        record_accuracy_tensor(f"{self.trace_prefix}.query", query, token_dim=0)
-        compressed_kv, key_suffix = torch.split(
-            compressed, [self.kv_lora_rank, self.suffix_dim], dim=-1
-        )
-        compressed_kv = _rms_norm(compressed_kv, self._kv_a_norm, self.eps)
-        canonical_current = torch.cat((compressed_kv, key_suffix), dim=-1)
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.compressed_current",
-            canonical_current,
-            token_dim=0,
-        )
-        cache_view: Optional[torch.Tensor] = None
-        block_map: Optional[list[list[int]]] = None
-        page_size = 0
-        if kv_cache is not None:
-            page_size = int(kv_cache.seq_size_per_block)
-            if page_size <= 0:
-                raise ValueError("MLA cache seq_size_per_block must be positive")
-            width = self.kv_lora_rank + self.suffix_dim
-            base = kv_cache.kv_cache_base
-            if base is None or base.numel() == 0:
-                raise ValueError("MLA LayerKVCache has no backing tensor")
-            if base.ndim == 3 and base.shape[-1] == width:
-                cache_view = base
-            else:
-                if base.numel() % (base.shape[0] * width):
-                    raise ValueError(
-                        "MLA cache storage is not divisible by latent width"
-                    )
-                cache_view = base.reshape(base.shape[0], -1, width)
-            if cache_view.shape[1] < page_size:
-                raise ValueError("MLA cache block is smaller than seq_size_per_block")
-            block_map = KimiK3LinearCacheAdapter._block_map(attention_inputs)
-        is_fake_stream = (
-            attention_inputs is not None
-            and KimiK3LinearCacheAdapter._is_fake_stream(attention_inputs)
-        )
-
-        def read_prefix(sequence_idx: int, length: int) -> torch.Tensor:
-            if length == 0:
-                return compressed_kv.new_empty(0, self.kv_lora_rank + self.suffix_dim)
-            assert cache_view is not None and block_map is not None
-            cached_tokens = []
-            for position in range(length):
-                block_id = KimiK3LinearCacheAdapter._block_id(
-                    block_map, sequence_idx, position, page_size
-                )
-                cached_tokens.append(cache_view[block_id, position % page_size])
-            return torch.stack(cached_tokens)
-
-        def write_tokens(
-            sequence_idx: int,
-            prefix_length: int,
-            values: torch.Tensor,
-        ) -> None:
-            if cache_view is None:
-                return
-            assert block_map is not None
-            if is_fake_stream or KimiK3LinearCacheAdapter._is_fake_block_row(
-                block_map[sequence_idx]
-            ):
-                return
-            for token_idx in range(values.shape[0]):
-                position = prefix_length + token_idx
-                block_id = KimiK3LinearCacheAdapter._block_id(
-                    block_map, sequence_idx, position, page_size
-                )
-                cache_view[block_id, position % page_size].copy_(
-                    values[token_idx].to(dtype=cache_view.dtype)
-                )
-
-        outputs: list[torch.Tensor] = []
-        canonical_cache_input: list[torch.Tensor] = []
-        canonical_cache: list[torch.Tensor] = []
-        trace_mode = accuracy_trace_mode()
-        trace_scores: list[torch.Tensor] = []
-        trace_probabilities: list[torch.Tensor] = []
-        trace_context: list[torch.Tensor] = []
-        for sequence_idx, ((start, end), prefix_length) in enumerate(
-            zip(ranges, past_lengths)
-        ):
-            if start == end:
-                outputs.append(
-                    fused_qkv.new_empty((0, self.local_heads, self.value_dim))
-                )
-                continue
-            fake_cache_row = is_fake_stream or (
-                block_map is not None
-                and KimiK3LinearCacheAdapter._is_fake_block_row(block_map[sequence_idx])
-            )
-            effective_prefix_length = 0 if fake_cache_row else prefix_length
-            current_compressed = torch.cat(
-                (compressed_kv[start:end], key_suffix[start:end]), dim=-1
-            )
-            cached = read_prefix(sequence_idx, effective_prefix_length)
-            canonical_cache_input.append(cached)
-            all_compressed = torch.cat((cached, current_compressed), dim=0)
-            canonical_cache.append(all_compressed)
-            all_latent, all_suffix = torch.split(
-                all_compressed, [self.kv_lora_rank, self.suffix_dim], dim=-1
-            )
-            all_latent = all_latent.to(dtype=self._kv_b_w.dtype)
-            expanded = _linear(all_latent, self._kv_b_w).reshape(
-                all_latent.shape[0],
-                self.local_heads,
-                self.nope_dim + self.value_dim,
-            )
-            key_nope, value = torch.split(
-                expanded, [self.nope_dim, self.value_dim], dim=-1
-            )
-            expanded_suffix = all_suffix.unsqueeze(1).expand(-1, self.local_heads, -1)
-            key = torch.cat((key_nope, expanded_suffix), dim=-1)
-            scores = (
-                torch.einsum("thd,shd->hts", query[start:end], key) * self.softmax_scale
-            )
-            query_positions = effective_prefix_length + torch.arange(
-                end - start, device=fused_qkv.device
-            )
-            key_positions = torch.arange(
-                effective_prefix_length + end - start,
-                device=fused_qkv.device,
-            )
-            causal_mask = key_positions.unsqueeze(0) <= query_positions.unsqueeze(1)
-            scores = scores.masked_fill(
-                ~causal_mask.unsqueeze(0), torch.finfo(scores.dtype).min
-            )
-            probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(
-                dtype=query.dtype
-            )
-            context = torch.einsum("hts,shv->thv", probabilities, value).to(
-                dtype=fused_qkv.dtype
-            )
-            outputs.append(context)
-            if trace_mode is not None:
-                record_accuracy_tensor(
-                    f"{self.trace_prefix}.scores_last_query",
-                    scores[:, -1:, :],
-                )
-                record_accuracy_tensor(
-                    f"{self.trace_prefix}.probabilities_last_query",
-                    probabilities[:, -1:, :],
-                )
-                record_accuracy_tensor(
-                    f"{self.trace_prefix}.context_last_query",
-                    context[-1:, :, :],
-                    token_dim=0,
-                )
-                if trace_mode == "semantic_full" and end - start <= 256:
-                    trace_scores.append(scores)
-                    trace_probabilities.append(probabilities)
-                    trace_context.append(context)
-            write_tokens(sequence_idx, effective_prefix_length, current_compressed)
-        output = torch.cat(outputs, dim=0)
-        if trace_scores:
-            if len(trace_scores) != 1:
-                raise RuntimeError(
-                    "quadratic K3 accuracy trace currently requires one sequence"
-                )
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.scores", trace_scores[0], token_dim=1
-            )
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.probabilities",
-                trace_probabilities[0],
-                token_dim=1,
-            )
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.context", trace_context[0], token_dim=0
-            )
-        if not is_prefill and canonical_cache_input:
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.cache_input",
-                torch.cat(canonical_cache_input, dim=0),
-            )
-        if canonical_cache:
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.cache", torch.cat(canonical_cache, dim=0)
-            )
-        if self.use_output_gate:
-            assert output_gate is not None
-            output_gate = output_gate.reshape_as(output)
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.output_gate", output_gate, token_dim=0
-            )
-            output = output * torch.sigmoid(output_gate)
-        tp_size = self.parallelism_config.get_attn_tp_size()
-        output = _row_parallel_linear(
-            output.reshape(token_count, -1),
-            self._o_w,
-            tp_size,
-            reduce_scatter_tokens=self._sp_active_for_forward,
-            pad_reduce_scatter_tokens=(
-                self._sp_active_for_forward
-                and (
-                    self._sp_padded_for_forward
-                    or (
-                        self._sp_prefill_input_is_sharded and token_count % tp_size != 0
-                    )
-                )
-            ),
-            use_input_dtype_reduce_scatter=(self._sp_prefill_input_is_sharded),
-        )
-        record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
-        return output
-
 
 class KimiK3DenseMLP(nn.Module):
     def __init__(
