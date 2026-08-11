@@ -52,6 +52,9 @@ _USE_V2_CP_PREFILL = os.environ.get("M3_MSA_USE_V2_CP_PREFILL", "1") != "0"
 # Fused CP paged write removes the unpack tensors plus mha_kv_write_cache
 # for cold/sharded v2 prefill. Set to 0 to fall back to the two-kernel path.
 _USE_FUSED_CP_PAGED_WRITE = os.environ.get("M3_MSA_FUSED_CP_PAGED_WRITE", "1") != "0"
+# Fused paged->scratch main-K/V gather (one pass instead of torch's
+# index -> cast -> index_put). Set M3_MSA_FUSED_KV_GATHER=0 for the torch path.
+_FUSED_KV_GATHER = os.environ.get("M3_MSA_FUSED_KV_GATHER", "1") != "0"
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -995,6 +998,184 @@ def _write_main_kv_to_paged(
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
     rtp_llm_ops.mha_kv_write_cache(k.contiguous(), v.contiguous(), base, slot_mapping)
+
+
+@triton.jit
+def _gather_paged_kv_to_scratch_kernel(
+    base_ptr,
+    gf_ptr,
+    dst_ptr,
+    out_k_ptr,
+    out_v_ptr,
+    N,
+    PAGE_SIZE: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BASE_S0: tl.constexpr,
+    BASE_S1: tl.constexpr,
+    BASE_S2: tl.constexpr,
+    BASE_S3: tl.constexpr,
+    BASE_S4: tl.constexpr,
+    OUT_S0: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_HD: tl.constexpr,
+):
+    """One pass: read paged K/V at physical slot gf[t], cast, write scratch[dst[t]].
+
+    Replaces ``scratch[dst] = pool[gf // p, gf % p].to(bf16)``, which torch
+    lowers to three full passes over the whole active history (index -> cast ->
+    index_put) per K and per V per layer.
+    """
+    # Every term that scales with the scratch or the pool is promoted to int64
+    # before it is multiplied. The scratch is sized from the *historical* maxima
+    # of batch size and sequence length (see _ensure_gather_scratch), so dst can
+    # be far larger than the current request implies, and int32 offsets would
+    # wrap into unrelated tensors -- cf. the _kv_flat_to_paged_kernel INT32 fix.
+    pid = tl.program_id(0).to(tl.int64)
+    t = pid * BLOCK_T + tl.arange(0, BLOCK_T).to(tl.int64)
+    t_ok = t < N
+    gf = tl.load(gf_ptr + t, mask=t_ok, other=-1).to(tl.int64)
+    dst = tl.load(dst_ptr + t, mask=t_ok, other=0).to(tl.int64)
+    # gf < 0 marks a non-owned token under CP page-RR sharding; skip it rather
+    # than letting a negative index wrap into unrelated pool rows.
+    row_ok = t_ok & (gf >= 0)
+    blk = gf // PAGE_SIZE
+    off = gf % PAGE_SIZE
+
+    hd = tl.arange(0, BLOCK_HD)
+    head = hd // HEAD_DIM
+    dim = hd % HEAD_DIM
+    m = row_ok[:, None] & (hd < NUM_KV_HEADS * HEAD_DIM)[None, :]
+
+    src = (
+        blk[:, None] * BASE_S0
+        + head[None, :] * BASE_S2
+        + off[:, None] * BASE_S3
+        + dim[None, :] * BASE_S4
+    )
+    k_vals = tl.load(base_ptr + src, mask=m, other=0.0)
+    v_vals = tl.load(base_ptr + src + BASE_S1, mask=m, other=0.0)
+    # out is [slots, head, dim] contiguous, so hd == head * HEAD_DIM + dim.
+    dof = dst[:, None] * OUT_S0 + hd[None, :]
+    tl.store(out_k_ptr + dof, k_vals.to(out_k_ptr.dtype.element_ty), mask=m)
+    tl.store(out_v_ptr + dof, v_vals.to(out_v_ptr.dtype.element_ty), mask=m)
+
+
+def _gather_paged_main_kv_to_scratch(
+    base: torch.Tensor,
+    gf: torch.Tensor,
+    dst_full: torch.Tensor,
+    scratch_k: torch.Tensor,
+    scratch_v: torch.Tensor,
+    page_size: int,
+) -> None:
+    """Fused paged->scratch gather+cast+scatter for the full active history."""
+    n = int(dst_full.numel())
+    if n == 0:
+        return
+    if base.dim() != 5:
+        raise RuntimeError(
+            f"fused KV gather needs a 5-D paged base, got {tuple(base.shape)}"
+        )
+    heads = int(scratch_k.shape[1])
+    head_dim = int(scratch_k.shape[2])
+    for name, t in (("scratch_k", scratch_k), ("scratch_v", scratch_v)):
+        if t.stride(2) != 1 or t.stride(1) != head_dim:
+            raise RuntimeError(
+                f"fused KV gather needs a contiguous {name} [slots, head, dim], "
+                f"got strides {tuple(t.stride())}"
+            )
+    block_t = int(os.environ.get("M3_MSA_KV_GATHER_BLOCK_T", "8"))
+    _gather_paged_kv_to_scratch_kernel[(triton.cdiv(n, block_t),)](
+        base,
+        gf,
+        dst_full,
+        scratch_k,
+        scratch_v,
+        n,
+        PAGE_SIZE=int(page_size),
+        NUM_KV_HEADS=heads,
+        HEAD_DIM=head_dim,
+        BASE_S0=int(base.stride(0)),
+        BASE_S1=int(base.stride(1)),
+        BASE_S2=int(base.stride(2)),
+        BASE_S3=int(base.stride(3)),
+        BASE_S4=int(base.stride(4)),
+        OUT_S0=int(scratch_k.stride(0)),
+        BLOCK_T=block_t,
+        BLOCK_HD=triton.next_power_of_2(heads * head_dim),
+    )
+
+
+@triton.jit
+def _gather_flat_rows_kernel(
+    src_ptr,
+    gf_ptr,
+    dst_ptr,
+    out_ptr,
+    N,
+    ROW_DIM: tl.constexpr,
+    SRC_S0: tl.constexpr,
+    OUT_S0: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """One pass: out[dst[t], :] = src[gf[t], :] over flat rows.
+
+    The idx_K counterpart of _gather_paged_kv_to_scratch_kernel: the paged scale
+    region and the idx scratch are both flat [row, idx_dim] and share a dtype,
+    so this is a pure gather+scatter with no cast. Replaces
+    ``idx_scratch[dst_full, 0] = scale_flat[gf]``, which torch lowers to a
+    full-history ``index`` plus a full-history ``index_put`` per layer.
+    """
+    # int64 promotion before every scratch/pool multiply -- same reasoning as
+    # _gather_paged_kv_to_scratch_kernel.
+    pid = tl.program_id(0).to(tl.int64)
+    t = pid * BLOCK_T + tl.arange(0, BLOCK_T).to(tl.int64)
+    t_ok = t < N
+    gf = tl.load(gf_ptr + t, mask=t_ok, other=-1).to(tl.int64)
+    dst = tl.load(dst_ptr + t, mask=t_ok, other=0).to(tl.int64)
+    row_ok = t_ok & (gf >= 0)
+    d = tl.arange(0, BLOCK_D)
+    m = row_ok[:, None] & (d < ROW_DIM)[None, :]
+    vals = tl.load(src_ptr + gf[:, None] * SRC_S0 + d[None, :], mask=m, other=0.0)
+    tl.store(out_ptr + dst[:, None] * OUT_S0 + d[None, :], vals, mask=m)
+
+
+def _gather_flat_rows(
+    src: torch.Tensor,
+    gf: torch.Tensor,
+    dst_full: torch.Tensor,
+    out: torch.Tensor,
+) -> None:
+    """Fused row gather+scatter: out[dst_full] = src[gf], for 2-D row tensors."""
+    n = int(dst_full.numel())
+    if n == 0:
+        return
+    row_dim = int(src.shape[1])
+    if src.dim() != 2 or out.dim() != 2 or int(out.shape[1]) != row_dim:
+        raise RuntimeError(
+            f"fused row gather needs 2-D [row, dim] src/out with equal dim, got "
+            f"{tuple(src.shape)} -> {tuple(out.shape)}"
+        )
+    if src.stride(1) != 1 or out.stride(1) != 1:
+        raise RuntimeError(
+            f"fused row gather needs row-contiguous src/out, got strides "
+            f"{tuple(src.stride())} -> {tuple(out.stride())}"
+        )
+    block_t = int(os.environ.get("M3_MSA_IDX_GATHER_BLOCK_T", "8"))
+    _gather_flat_rows_kernel[(triton.cdiv(n, block_t),)](
+        src,
+        gf,
+        dst_full,
+        out,
+        n,
+        ROW_DIM=row_dim,
+        SRC_S0=int(src.stride(0)),
+        OUT_S0=int(out.stride(0)),
+        BLOCK_T=block_t,
+        BLOCK_D=triton.next_power_of_2(row_dim),
+    )
 
 
 @triton.jit
@@ -2259,6 +2440,63 @@ class MSAAttention(nn.Module):
         self._scratch_v = scratch_v
         self._scratch_idx_k = idx_scratch
 
+    def _full_history_slots(
+        self,
+        req_to_token: torch.Tensor,
+        kv_lens: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        device: torch.device,
+        graph_decode: bool,
+    ):
+        """Scratch/paged slot addressing for every token of the active history.
+
+        Returns ``(dst_full, gf)``: the flat scratch rows and their physical
+        paged slots.
+
+        These depend only on per-batch metadata (``req_to_token``, ``kv_lens``,
+        the physical block table), not on the layer, but both the main-K/V and
+        the idx_K sourcing path needed them — so they were rebuilt twice per
+        sparse layer, i.e. ~2x num_sparse_layers times per forward. Each rebuild
+        is a chain of bs*max_kv-sized int64 ops plus a ``_kernel_slots_to_paged``
+        call, and that call resolves the block table through
+        ``layer_to_group[...].item()`` — a device sync. So memoize.
+
+        The memo lives inside the shared CP ``addr`` dict, which is replaced
+        wholesale whenever the first sparse layer rebuilds metadata, so a cached
+        entry can never outlive its batch. Reuse additionally requires the very
+        same ``req_to_token``/``kv_lens`` objects, which covers the call sites
+        that run without CP metadata. Like the ``slot_mapping`` entry already in
+        that dict, this assumes all sparse layers resolve the same physical block
+        table (they share one KV cache group).
+        """
+        meta = MSAAttention._cp_shared_meta
+        addr = meta.get("addr") if isinstance(meta, dict) else None
+        key = (int(self._scratch_seq_len), int(self.page_size), bool(graph_decode))
+        if (
+            addr is not None
+            and addr.get("hist_key") == key
+            and addr.get("hist_rtt") is req_to_token
+            and addr.get("hist_lens") is kv_lens
+        ):
+            return addr["hist_dst_full"], addr["hist_gf"]
+
+        if graph_decode:
+            dst_full = req_to_token.reshape(-1).to(torch.int64)
+        else:
+            max_kv = req_to_token.shape[1]
+            ar = torch.arange(max_kv, device=device, dtype=torch.int64)
+            mask = ar[None, :] < kv_lens.to(device=device, dtype=torch.int64)[:, None]
+            dst_full = req_to_token.to(torch.int64)[mask]
+        gf = self._kernel_slots_to_paged(dst_full, attn_inputs)
+
+        if addr is not None:
+            addr["hist_key"] = key
+            addr["hist_rtt"] = req_to_token
+            addr["hist_lens"] = kv_lens
+            addr["hist_dst_full"] = dst_full
+            addr["hist_gf"] = gf
+        return dst_full, gf
+
     def _source_main_kv_from_paged(
         self,
         kv_cache: LayerKVCache,
@@ -2312,22 +2550,26 @@ class MSAAttention(nn.Module):
             scratch_k[write_slots] = k
             scratch_v[write_slots] = v
         else:
-            kpv, vpv = self._paged_main_views(kv_cache)
-            p = self.page_size
-            if (not attn_inputs.is_prefill) and self._cuda_graph_forward_active():
-                dst_full = req_to_token.reshape(-1).to(torch.int64)
-            else:
-                max_kv = req_to_token.shape[1]
-                ar = torch.arange(max_kv, device=device, dtype=torch.int64)
-                mask = (
-                    ar[None, :] < kv_lens.to(device=device, dtype=torch.int64)[:, None]
+            graph_decode = (
+                not attn_inputs.is_prefill
+            ) and self._cuda_graph_forward_active()
+            dst_full, gf = self._full_history_slots(
+                req_to_token, kv_lens, attn_inputs, device, graph_decode
+            )
+            # The paged pool holds e4m3 for fp8 KV; upconvert to the bf16 gather
+            # scratch the MSA step-3 kernel reads. One fused kernel does
+            # gather+cast+scatter in a single pass; the torch form below needs
+            # three full passes over the whole history per K and per V per layer.
+            if _FUSED_KV_GATHER:
+                _gather_paged_main_kv_to_scratch(
+                    base, gf, dst_full, scratch_k, scratch_v, self.page_size
                 )
-                dst_full = req_to_token.to(torch.int64)[mask]
-            gf = self._kernel_slots_to_paged(dst_full, attn_inputs)
-            # kpv/vpv follow the paged pool dtype (e4m3 for fp8 KV); upconvert to
-            # the bf16 gather scratch the MSA step-3 kernel reads.
-            scratch_k[dst_full] = kpv[gf // p, gf % p].to(scratch_k.dtype)
-            scratch_v[dst_full] = vpv[gf // p, gf % p].to(scratch_v.dtype)
+            else:
+                kpv, vpv = self._paged_main_views(kv_cache)
+                p = self.page_size
+                gf_blk, gf_off = gf // p, gf % p
+                scratch_k[dst_full] = kpv[gf_blk, gf_off].to(scratch_k.dtype)
+                scratch_v[dst_full] = vpv[gf_blk, gf_off].to(scratch_v.dtype)
         self._scratch_k = scratch_k
         self._scratch_v = scratch_v
 
@@ -2414,17 +2656,18 @@ class MSAAttention(nn.Module):
         if self._kv_sharded:
             idx_scratch[write_slots, 0] = idx_flat
         else:
-            if graph_decode:
-                dst_full = req_to_token.reshape(-1).to(torch.int64)
-            else:
-                max_kv = req_to_token.shape[1]
-                ar = torch.arange(max_kv, device=device, dtype=torch.int64)
-                mask = (
-                    ar[None, :] < kv_lens.to(device=device, dtype=torch.int64)[:, None]
+            dst_full, gf = self._full_history_slots(
+                req_to_token, kv_lens, attn_inputs, device, graph_decode
+            )
+            if _FUSED_KV_GATHER:
+                _gather_flat_rows(
+                    scale_flat,
+                    gf,
+                    dst_full,
+                    idx_scratch.view(-1, self.idx_head_dim),
                 )
-                dst_full = req_to_token.to(torch.int64)[mask]
-            gf = self._kernel_slots_to_paged(dst_full, attn_inputs)
-            idx_scratch[dst_full, 0] = scale_flat[gf]
+            else:
+                idx_scratch[dst_full, 0] = scale_flat[gf]
         self._scratch_idx_k = idx_scratch
 
     def _write_kv_cache_and_idx_k_for_decode(
