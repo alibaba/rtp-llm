@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/disaggregate/cache_store/LoadContext.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -149,6 +150,57 @@ TEST(LoadContextConcurrencyTest, cancelledSuccessCallbackFinalizesAsCancelled) {
     EXPECT_EQ(context->getErrorInfo().code(), ErrorCode::CANCELLED);
 }
 
+TEST(LoadContextConcurrencyTest, cancellationRequestedBeforeFinalSuccessWins) {
+    auto context   = std::make_shared<TestSyncContext>();
+    auto cancelled = std::make_shared<std::atomic_bool>(false);
+    context->preparePendingResult(CacheStoreLoadClock::now() + std::chrono::seconds(1),
+                                  [cancelled]() { return cancelled->load(std::memory_order_acquire); });
+
+    cancelled->store(true, std::memory_order_release);
+    const auto request = std::make_shared<RequestBlockBuffer>("request", "layer");
+    context->updateResult(true, CacheStoreErrorCode::None, request);
+    context->waitDone();
+
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->getErrorInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST(LoadContextConcurrencyTest, completionWakeRechecksCancellationBeforeSuccess) {
+    auto context   = std::make_shared<TestSyncContext>();
+    auto cancelled = std::make_shared<std::atomic_bool>(false);
+    std::mutex              observation_mutex;
+    std::condition_variable observation_cond;
+    bool                    observed_not_cancelled = false;
+    context->preparePendingResult(CacheStoreLoadClock::now() + std::chrono::seconds(5), [&]() {
+        const bool current = cancelled->load(std::memory_order_acquire);
+        if (!current) {
+            {
+                std::lock_guard<std::mutex> lock(observation_mutex);
+                observed_not_cancelled = true;
+            }
+            observation_cond.notify_all();
+        }
+        return current;
+    });
+
+    std::thread waiter([&]() { context->waitDone(); });
+    bool        observed = false;
+    {
+        std::unique_lock<std::mutex> lock(observation_mutex);
+        observed = observation_cond.wait_for(
+            lock, std::chrono::seconds(5), [&]() { return observed_not_cancelled; });
+    }
+
+    cancelled->store(true, std::memory_order_release);
+    const auto request = std::make_shared<RequestBlockBuffer>("request", "layer");
+    context->updateResult(true, CacheStoreErrorCode::None, request);
+    waiter.join();
+
+    ASSERT_TRUE(observed);
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->getErrorInfo().code(), ErrorCode::CANCELLED);
+}
+
 TEST(LoadContextConcurrencyTest, cancelCheckerRunsWithoutContextMutex) {
     auto context = std::make_shared<TestSyncContext>();
     auto state   = std::make_shared<ReentrantProbeState>();
@@ -224,6 +276,7 @@ TEST(LoadContextConcurrencyTest, cancelTargetDestructorRunsWithoutContextMutex) 
 
     const auto request = std::make_shared<RequestBlockBuffer>("request", "layer");
     context->updateResult(true, CacheStoreErrorCode::None, request);
+    context->waitDone();
     context_caller.join();
 
     EXPECT_TRUE(state->entered);

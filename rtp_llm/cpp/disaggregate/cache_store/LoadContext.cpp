@@ -210,7 +210,12 @@ void SyncContext::updateResult(bool                                       succes
             }
 
             if (++done_layer_cnt_ == expect_layer_cnt_) {
-                finalizeLocked(retired_check_cancel_func);
+                if (check_cancel_func_ == nullptr || !error_info_.ok()) {
+                    finalizeLocked(retired_check_cancel_func);
+                } else {
+                    // The waiter owns the cancellation-vs-success linearization point.
+                    cond_.notify_all();
+                }
             }
         }
     }
@@ -220,29 +225,45 @@ void SyncContext::updateResult(bool                                       succes
 void SyncContext::waitDone() {
     constexpr auto kCancelPollIntervalMs = int64_t{30};
     while (true) {
-        const auto check_cancel_func = getCheckCancelFuncSnapshot();
+        CheckCancelFuncHolder check_cancel_func;
+        bool                  completion_ready = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (result_finalized_ || expect_layer_cnt_ == 0) {
+                return;
+            }
+            check_cancel_func = check_cancel_func_;
+            completion_ready  = done_layer_cnt_ == expect_layer_cnt_;
+        }
         const bool cancellation_requested = check_cancel_func != nullptr && (*check_cancel_func)();
 
         CheckCancelFuncHolder retired_check_cancel_func;
         bool                  should_return = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            if (result_finalized_ || expect_layer_cnt_ == 0) {
-                return;
-            }
-
-            const auto now = CacheStoreLoadClock::now();
-            if (finalizeDeadlineOrCancellationLocked(
-                    cancellation_requested, retired_check_cancel_func, now)) {
+            if (result_finalized_) {
                 should_return = true;
             } else {
-                const auto wake_deadline = check_cancel_func_ == nullptr ?
-                                               deadline_ :
-                                               std::min(deadline_, makeCacheStoreLoadDeadline(kCancelPollIntervalMs, now));
-                cond_.wait_until(lock, wake_deadline, [this] { return result_finalized_; });
+                const auto now = CacheStoreLoadClock::now();
+                if (finalizeDeadlineOrCancellationLocked(
+                        cancellation_requested, retired_check_cancel_func, now)) {
+                    should_return = true;
+                } else if (completion_ready && done_layer_cnt_ == expect_layer_cnt_) {
+                    finalizeLocked(retired_check_cancel_func);
+                    should_return = true;
+                } else if (done_layer_cnt_ != expect_layer_cnt_) {
+                    const auto wake_deadline =
+                        check_cancel_func_ == nullptr ?
+                            deadline_ :
+                            std::min(deadline_, makeCacheStoreLoadDeadline(kCancelPollIntervalMs, now));
+                    cond_.wait_until(lock, wake_deadline, [this] {
+                        return result_finalized_ || done_layer_cnt_ == expect_layer_cnt_;
+                    });
+                }
             }
         }
 
+        check_cancel_func.reset();
         retired_check_cancel_func.reset();
         if (should_return) {
             return;
