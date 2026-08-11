@@ -21,13 +21,15 @@
 The decode PA kernel reads V pages written by prefill and decode RoPE/cache ops. A reader must use
 the layout produced by its writer: linear `head_dim × page`, or vectorized
 `page/width × head_dim × width`, where `width` is `16 // itemsize` (8 for BF16/FP16, 16 for FP8).
-`head_dim` must be a multiple of `width`; `page` must also be a multiple only when the stored V
-layout is vectorized. Linear V has no vector-width page requirement. At `page == width`, linear and
+Both `head_dim` and `page` must be a multiple of `width`: the Python CK prefill reader reshapes
+every V page into `page // width` groups for both linear and vectorized layouts, so an unaligned
+`page` fails the reshape regardless of the stored V layout. At `page == width`, linear and
 vectorized addressing coincide. `page` is `--kernel_seq_size_per_block` (falling back to
 `--seq_size_per_block`, then 16).
 
-Non-ASM decode checks `page` against the 256-token partition only when that runtime path is selected.
-BF16/FP16 requests with `head_dim ≤ 128` and `max_seq_len ≤ 16384` use the 512-token path instead.
+Non-ASM decode requires `page` to divide its runtime partition size: BF16/FP16 requests with
+`head_dim ≤ 128` and `max_seq_len ≤ 16384` use the 512-token path, all others use the 256-token
+path, and both raise (pointing at `--use_triton_pa 1`) when `page` does not divide that partition.
 Only full-attention MHA with a RoPE KV cache is checked; MLA uses another factory. This matrix does
 not cover PD-disaggregated role coordination.
 
