@@ -100,6 +100,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("input"),
                   py::arg("bias"));
 
+    rtp_ops_m.def("fused_bias_gelu_quant_fp8",
+                  &fused_bias_gelu_quant_fp8,
+                  "Fused bias add, exact GELU, and per-block FP8 UE8M0 quantization",
+                  py::arg("input"),
+                  py::arg("bias"),
+                  py::arg("output"),
+                  py::arg("scales"));
+
     rtp_ops_m.def("per_token_group_quant_int8",
                   &per_token_group_quant_int8,
                   "Int8 Gemm Per Token Group",

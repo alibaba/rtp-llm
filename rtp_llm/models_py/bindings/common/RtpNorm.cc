@@ -29,6 +29,46 @@ void fused_bias_gelu(at::Tensor& input, at::Tensor& bias) {
     });
 }
 
+void fused_bias_gelu_quant_fp8(at::Tensor& input, at::Tensor& bias, at::Tensor& output, at::Tensor& scales) {
+#if USING_CUDA
+    CHECK_INPUT(input);
+    CHECK_INPUT(bias);
+    CHECK_INPUT(output);
+    CHECK_CUDA(scales);
+    CHECK_DIM(2, input);
+    CHECK_DIM(1, bias);
+    CHECK_DIM(2, output);
+    CHECK_DIM(2, scales);
+    CHECK_EQ(input.device(), bias.device());
+    CHECK_EQ(input.device(), output.device());
+    CHECK_EQ(input.device(), scales.device());
+    CHECK_EQ(input.scalar_type(), bias.scalar_type());
+    CHECK_EQ(input.size(0), output.size(0));
+    CHECK_EQ(input.size(1), output.size(1));
+    CHECK_EQ(input.size(1), bias.numel());
+    TORCH_CHECK(input.size(1) % 128 == 0, "hidden size must be divisible by 128");
+    TORCH_CHECK(output.scalar_type() == at::ScalarType::Float8_e4m3fn, "output must be float8_e4m3fn");
+    TORCH_CHECK(scales.scalar_type() == at::ScalarType::Int, "scales must be int32 UE8M0 packs");
+    TORCH_CHECK(scales.stride(0) == 1, "scales must use column-major TMA layout");
+    TORCH_CHECK(scales.size(0) == input.size(0), "scale row count mismatch");
+    TORCH_CHECK(scales.size(1) * 4 >= input.size(1) / 128, "scale column count mismatch");
+    StreamType stream = GET_CURRENT_STREAM();
+    DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(input.scalar_type(), c_type, [&] {
+        invokeAddBiasGeluQuantFp8(static_cast<c_type*>(input.data_ptr()),
+                                  static_cast<c_type*>(bias.data_ptr()),
+                                  output.data_ptr(),
+                                  static_cast<uint32_t*>(scales.data_ptr()),
+                                  input.size(0),
+                                  input.size(1),
+                                  scales.stride(1),
+                                  stream);
+        return true;
+    });
+#else
+    TORCH_CHECK(false, "fused_bias_gelu_quant_fp8 is CUDA-only");
+#endif
+}
+
 void layernorm(at::Tensor& output, at::Tensor& input, at::Tensor& weight, at::Tensor& beta, double eps) {
     CHECK_INPUT(input);
     CHECK_INPUT(weight);
