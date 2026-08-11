@@ -20,6 +20,7 @@
 
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#include <cuda_fp8.h>
 #endif
 
 #if USING_ROCM
@@ -41,6 +42,70 @@ __global__ void addBiasGelu(T* output, const T* bias, size_t numel, size_t hidde
 #if USING_CUDA
 __device__ __forceinline__ float exactGelu(float x) {
     return 0.5f * x * (1.0f + erff(x * 0.7071067811865475f));
+}
+
+template<typename T>
+__global__ void addBiasGeluQuantFp8Kernel(const T* __restrict__ input,
+                                          const T* __restrict__ bias,
+                                          __nv_fp8_e4m3* __restrict__ output,
+                                          uint32_t* __restrict__ scales,
+                                          size_t hidden_size,
+                                          size_t scale_stride) {
+    constexpr int    group_size = 128;
+    constexpr int    threads    = 32;
+    __shared__ float values[group_size];
+
+    const size_t groups_per_row = hidden_size / group_size;
+    const size_t group_id       = blockIdx.x;
+    const size_t row            = group_id / groups_per_row;
+    const size_t group_col      = group_id % groups_per_row;
+    const size_t offset         = row * hidden_size + group_col * group_size;
+
+    float local_absmax = 1e-4f;
+#pragma unroll
+    for (int i = threadIdx.x; i < group_size; i += threads) {
+        const float value =
+            exactGelu(static_cast<float>(input[offset + i]) + static_cast<float>(bias[group_col * group_size + i]));
+        const T rounded_value = static_cast<T>(value);
+        values[i]             = static_cast<float>(rounded_value);
+        local_absmax          = fmaxf(local_absmax, fabsf(values[i]));
+    }
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+        local_absmax = fmaxf(local_absmax, __shfl_xor_sync(0xffffffff, local_absmax, delta));
+    }
+
+    const float scale = exp2f(ceilf(log2f(fmaxf(local_absmax / 448.0f, 1e-10f))));
+    if (threadIdx.x == 0) {
+        const size_t packed_col = group_col / 4;
+        const size_t pack_idx   = group_col % 4;
+        reinterpret_cast<uint8_t*>(scales)[packed_col * scale_stride * 4 + row * 4 + pack_idx] =
+            static_cast<uint8_t>(static_cast<int>(log2f(scale)) + 127);
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int i = threadIdx.x; i < group_size; i += threads) {
+        output[offset + i] = __nv_fp8_e4m3(fminf(fmaxf(values[i] / scale, -448.0f), 448.0f));
+    }
+}
+
+template<typename T>
+void invokeAddBiasGeluQuantFp8(const T*     input,
+                               const T*     bias,
+                               void*        output,
+                               uint32_t*    scales,
+                               size_t       rows,
+                               size_t       hidden_size,
+                               size_t       scale_stride,
+                               cudaStream_t stream) {
+    constexpr size_t group_size = 128;
+    if (rows == 0) {
+        return;
+    }
+    const size_t groups_per_row = hidden_size / group_size;
+    addBiasGeluQuantFp8Kernel<<<rows * groups_per_row, 32, 0, stream>>>(
+        input, bias, static_cast<__nv_fp8_e4m3*>(output), scales, hidden_size, scale_stride);
 }
 
 template<typename T>
@@ -166,6 +231,25 @@ template void invokeAddBiasGelu(half* output, const half* bias, size_t numel, si
 
 template void invokeAddBiasGelu(
     __nv_bfloat16* output, const __nv_bfloat16* bias, size_t numel, size_t hidden_size, cudaStream_t stream);
+
+#if USING_CUDA
+template void invokeAddBiasGeluQuantFp8(const half*  input,
+                                        const half*  bias,
+                                        void*        output,
+                                        uint32_t*    scales,
+                                        size_t       rows,
+                                        size_t       hidden_size,
+                                        size_t       scale_stride,
+                                        cudaStream_t stream);
+template void invokeAddBiasGeluQuantFp8(const __nv_bfloat16* input,
+                                        const __nv_bfloat16* bias,
+                                        void*                output,
+                                        uint32_t*            scales,
+                                        size_t               rows,
+                                        size_t               hidden_size,
+                                        size_t               scale_stride,
+                                        cudaStream_t         stream);
+#endif
 
 template void invokeAddBiasSoftMax(half*        logits,
                                    const half*  bias,
