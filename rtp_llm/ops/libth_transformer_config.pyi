@@ -494,6 +494,7 @@ class EplbMode:
 
 class FIFOSchedulerConfig:
     max_inited_kv_cache_streams: int
+    max_batch_tokens_without_cache: int
     max_batch_tokens_size: int
     max_context_batch_size: int
 

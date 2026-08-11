@@ -52,17 +52,18 @@ public:
 
 private:
     struct ScheduleRuntime {
-        bool    batch_type_selected           = false;
-        size_t  admitted_running_stream_count = 0;
-        size_t  admitted_prefill_token_size   = 0;
-        size_t  newly_inited_kv_streams       = 0;
-        int64_t force_batch_group_id          = -1;
+        bool    batch_type_selected                       = false;
+        size_t  admitted_running_stream_count             = 0;
+        size_t  admitted_prefill_token_size_with_cache    = 0;
+        size_t  admitted_prefill_token_size_without_cache = 0;
+        size_t  newly_inited_kv_streams                   = 0;
+        int64_t force_batch_group_id                      = -1;
     };
 
     int64_t lastScheduleTime() override;
     bool    evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
-    size_t  prefillTokenCost(size_t token_count, size_t batch_size) const;
-    size_t  prefillTokenCost(const GenerateStreamPtr& stream) const;
+    size_t  prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
+    size_t  prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
     size_t  countInitedKVCacheStreams() const;
     void    accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool    waitPredicate();
@@ -83,12 +84,13 @@ protected:
     std::list<GenerateStreamPtr>    new_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_                 = 0;
-    size_t                          max_batch_tokens_size_       = 0;
-    size_t                          max_generate_batch_size_     = 1;
-    size_t                          max_inited_kv_cache_streams_ = 0;
-    const bool                      need_fill_fake_stream_       = false;
-    const size_t                    prefill_cp_size_             = 1;
+    size_t                          max_seq_len_                    = 0;
+    size_t                          max_batch_tokens_size_          = 0;
+    size_t                          max_batch_tokens_without_cache_ = 0;
+    size_t                          max_generate_batch_size_        = 1;
+    size_t                          max_inited_kv_cache_streams_    = 0;
+    const bool                      need_fill_fake_stream_          = false;
+    const size_t                    prefill_cp_size_                = 1;
     std::atomic<bool>            stop_                    = false;
     bool                         schedule_trigger_        = false;
     std::mutex                   lock_;

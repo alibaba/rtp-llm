@@ -473,7 +473,7 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageDoesNotConsumeBatchTokenBudget) {
     EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
 }
 
-TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesPostAllocationContextLength) {
+TEST_F(FIFOSchedulerTest, batchTokenQuotaIncludesPostAllocationPrefixLength) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -513,13 +513,13 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesPostAllocationContextLength) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result->size(), 2);
+    EXPECT_EQ(result->size(), 1);
     EXPECT_EQ(cached_stream->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(new_stream->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_EQ(new_stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
 }
 
-TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesSharedZigzagPaddingCost) {
+TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndStopsTail) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -531,8 +531,69 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesSharedZigzagPaddingCost) {
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
     RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                     = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 10;
+    runtime_config.max_generate_batch_size                              = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 1;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_stream = [&](int token_count) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::ones({token_count}, torch::kInt32);
+        query->generate_config = std::make_shared<GenerateConfig>();
+        return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    };
+
+    auto cached_stream = make_stream(8);
+    cached_stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(cached_stream->moveToNext(), StreamState::RUNNING);
+    cached_stream->setReuseLength(7);
+    cached_stream->generate_status_->status.store(StreamState::WAITING);
+    ASSERT_EQ(cached_stream->contextLength(), 1);
+
+    auto threshold_crossing_stream = make_stream(1);
+    auto tail_stream               = make_stream(1);
+    auto errored_tail_stream       = make_stream(1);
+    errored_tail_stream->reportError(ErrorCode::CANCELLED, "cancelled before admission");
+    ASSERT_EQ(
+        scheduler.batchEnqueue({cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}).size(), 4);
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result->size(), 2);
+    EXPECT_EQ(cached_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(threshold_crossing_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(tail_stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(errored_tail_stream->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+
+    cached_stream->reportEvent(StreamEvents::GenerateDone);
+    threshold_crossing_stream->reportEvent(StreamEvents::GenerateDone);
+    auto next_result = scheduler.schedule();
+    ASSERT_TRUE(next_result.ok());
+    ASSERT_EQ(next_result->size(), 1);
+    EXPECT_EQ(tail_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = false;
+    resource_context.role_type     = RoleType::PREFILL;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                              = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 10;
     PDSepConfig         pd_sep_config;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;
@@ -550,17 +611,19 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesSharedZigzagPaddingCost) {
 
     auto first_stream  = make_stream(5);
     auto second_stream = make_stream(1);
-    ASSERT_EQ(scheduler.batchEnqueue({first_stream, second_stream}).size(), 2);
+    auto tail_stream   = make_stream(1);
+    ASSERT_EQ(scheduler.batchEnqueue({first_stream, second_stream, tail_stream}).size(), 3);
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    EXPECT_EQ(result->size(), 1);
+    EXPECT_EQ(result->size(), 2);
     EXPECT_EQ(first_stream->getStatus(), StreamState::RUNNING);
-    EXPECT_EQ(second_stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(second_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(tail_stream->getStatus(), StreamState::WAITING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
 }
 
-TEST_F(FIFOSchedulerTest, rejectsInputWhoseZigzagPaddingExceedsBatchTokenQuota) {
+TEST_F(FIFOSchedulerTest, batchTokenQuotaUsesUnpaddedFullInputLength) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -587,12 +650,9 @@ TEST_F(FIFOSchedulerTest, rejectsInputWhoseZigzagPaddingExceedsBatchTokenQuota) 
     auto stream =
         std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 
-    EXPECT_FALSE(scheduler.enqueue(stream).ok());
-    EXPECT_TRUE(stream->hasError());
-    EXPECT_EQ(stream->stopReason(),
-              "padded input token cost [16] (input len [9], batch size [1], cp size [4]) > "
-              "max_batch_tokens_size [10]");
-    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+    EXPECT_TRUE(scheduler.enqueue(stream).ok());
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
 }
 
 TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
@@ -633,6 +693,68 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
     EXPECT_EQ(batched_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(single_stream->getStatus(), StreamState::WAITING);
     EXPECT_EQ(scheduler.waitingStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsForceBatchResidualToProgress) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = false;
+    resource_context.role_type     = RoleType::PREFILL;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                              = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 1;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_group_stream = [&](int group_size) {
+        auto query                                  = std::make_shared<GenerateInput>();
+        query->input_ids                            = torch::ones({1}, torch::kInt32);
+        query->generate_config                      = std::make_shared<GenerateConfig>();
+        query->generate_config->force_batch         = true;
+        query->generate_config->batch_group_timeout = 60000;
+        query->batch_group_id                       = 1001;
+        query->batch_group_size                     = group_size;
+        query->begin_time_us                        = autil::TimeUtility::currentTimeInMicroSeconds();
+        return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    };
+
+    auto first_stream    = make_group_stream(3);
+    auto crossing_stream = make_group_stream(3);
+    auto residual_stream = make_group_stream(3);
+    ASSERT_EQ(scheduler.batchEnqueue({first_stream, crossing_stream, residual_stream}).size(), 3);
+
+    auto first_result = scheduler.schedule();
+    ASSERT_TRUE(first_result.ok());
+    ASSERT_EQ(first_result->size(), 2);
+    EXPECT_EQ(first_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(crossing_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(residual_stream->getStatus(), StreamState::WAITING);
+
+    first_stream->reportEvent(StreamEvents::GenerateDone);
+    crossing_stream->reportEvent(StreamEvents::GenerateDone);
+    auto second_result = scheduler.schedule();
+    ASSERT_TRUE(second_result.ok());
+    ASSERT_EQ(second_result->size(), 1);
+    EXPECT_EQ(residual_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+
+    auto new_incomplete_group = make_group_stream(2);
+    ASSERT_TRUE(scheduler.enqueue(new_incomplete_group).ok());
+    residual_stream->reportEvent(StreamEvents::GenerateDone);
+    auto third_result = scheduler.schedule();
+    ASSERT_TRUE(third_result.ok());
+    EXPECT_TRUE(third_result->empty());
+    EXPECT_EQ(new_incomplete_group->getStatus(), StreamState::WAITING);
 }
 
 TEST_F(FIFOSchedulerTest, retryableForceBatchDoesNotBlockFollowingNormalStream) {

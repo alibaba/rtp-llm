@@ -27,6 +27,8 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     cache_manager_(cache_manager),
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
+    max_batch_tokens_without_cache_(
+        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0)),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
     max_inited_kv_cache_streams_(
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
@@ -36,9 +38,11 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                          1),
     metrics_reporter_(metrics_reporter) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
-                     "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu]",
+                     "max_batch_tokens_without_cache is [%zu], prefill_cp_size is [%zu], "
+                     "max_inited_kv_cache_streams is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
+                     max_batch_tokens_without_cache_,
                      prefill_cp_size_,
                      max_inited_kv_cache_streams_);
 }
@@ -103,22 +107,13 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
         return false;  // Input length exceeds max available tokens
     }
 
-    const auto input_token_cost = prefillTokenCost(input_length, static_cast<size_t>(stream->currentBatchSize()));
+    const auto input_token_cost = input_length * static_cast<size_t>(stream->currentBatchSize());
     if (input_token_cost > max_batch_tokens_size_) {
         auto error_info =
-            prefill_cp_size_ > 1 ?
-                autil::StringUtil::formatString(
-                    "padded input token cost [%zu] (input len [%d], batch size [%d], cp size [%zu]) > "
-                    "max_batch_tokens_size [%zu]",
-                    input_token_cost,
-                    stream->inputLength(),
-                    stream->currentBatchSize(),
-                    prefill_cp_size_,
-                    max_batch_tokens_size_) :
-                autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%zu]",
-                                                stream->inputLength(),
-                                                stream->currentBatchSize(),
-                                                max_batch_tokens_size_);
+            autil::StringUtil::formatString("input len [%d] * batch size [%d] > max_batch_tokens_size [%zu]",
+                                            stream->inputLength(),
+                                            stream->currentBatchSize(),
+                                            max_batch_tokens_size_);
         stream->reportError(ErrorCode::MALLOC_FAILED, error_info);
         return false;
     }
@@ -185,20 +180,26 @@ bool FIFOScheduler::evaluateRunningBatch(const ScheduleRuntime&   schedule_runti
         && new_stream->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
-    return schedule_runtime.admitted_prefill_token_size + prefillTokenCost(new_stream) + running_streams_.size()
+    return schedule_runtime.admitted_prefill_token_size_with_cache + prefillTokenCostWithCache(new_stream)
+               + running_streams_.size()
            < max_batch_tokens_size_;
 }
 
-size_t FIFOScheduler::prefillTokenCost(size_t token_count, size_t batch_size) const {
+size_t FIFOScheduler::prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const {
+    // Match the token count that CP presents to the model after per-sequence padding.
+    auto token_count = static_cast<size_t>(std::max(stream->contextLength(), 0));
     if (prefill_cp_size_ > 1) {
         token_count = makeZigzagTokenLayout(token_count, prefill_cp_size_).padded_token_count;
     }
-    return token_count * batch_size;
+    return token_count * static_cast<size_t>(stream->currentBatchSize());
 }
 
-size_t FIFOScheduler::prefillTokenCost(const GenerateStreamPtr& stream) const {
-    return prefillTokenCost(static_cast<size_t>(std::max(stream->contextLength(), 0)),
-                            static_cast<size_t>(stream->currentBatchSize()));
+size_t FIFOScheduler::prefillTokenCostWithCache(const GenerateStreamPtr& stream) const {
+    // max_batch_tokens_size bounds the full logical sequence. Unlike the compute-only
+    // quota, this count includes the reused prefix and therefore does not apply CP padding.
+    const auto input_length  = static_cast<size_t>(std::max(stream->contextLength(), 0));
+    const auto prefix_length = static_cast<size_t>(std::max(stream->prefixLength(), 0));
+    return (input_length + prefix_length) * static_cast<size_t>(stream->currentBatchSize());
 }
 
 size_t FIFOScheduler::countInitedKVCacheStreams() const {
@@ -301,6 +302,13 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             continue;
         }
 
+        // A stream that crosses the soft quota is already admitted. Keep scanning so
+        // errored streams behind it can be finalized, but skip further admission.
+        if (max_batch_tokens_without_cache_ > 0
+            && schedule_runtime.admitted_prefill_token_size_without_cache >= max_batch_tokens_without_cache_) {
+            continue;
+        }
+
         // Check if this stream can be scheduled based on batch group rules
         if (force_batch && stream->batchGroupId() != -1) {
             const auto group_id                 = stream->batchGroupId();
@@ -374,7 +382,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
 
             if (new_state == StreamState::RUNNING) {
                 ++schedule_runtime.admitted_running_stream_count;
-                schedule_runtime.admitted_prefill_token_size += prefillTokenCost(stream);
+                schedule_runtime.admitted_prefill_token_size_with_cache += prefillTokenCostWithCache(stream);
             }
             if (kv_initialized) {
                 ++schedule_runtime.newly_inited_kv_streams;
@@ -382,6 +390,7 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
             if (stream->isContextStream()) {
                 ++last_admitted_context_batch_size_;
                 last_admitted_context_token_size_ += stream->contextLength();
+                schedule_runtime.admitted_prefill_token_size_without_cache += prefillTokenCostWithoutCache(stream);
             }
         }
 

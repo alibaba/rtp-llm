@@ -312,6 +312,46 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreamsSupportBatchedCpPrefi
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
 }
 
+TEST_F(FIFOSchedulerAsyncCacheTest, testWithoutCacheQuotaStopsAfterLoadingStreamCrossesLimit) {
+    setupMockCoordinator();
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                              = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 8192;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 1;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    auto                scheduler = std::make_shared<FIFOScheduler>(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
+
+    auto pending_ctx = createPendingAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillRepeatedly(Return(std::static_pointer_cast<AsyncContext>(pending_ctx)));
+
+    auto stream1 = createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto stream2 = createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    auto stream3 = createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
+    ASSERT_EQ(scheduler->batchEnqueue({stream1, stream2, stream3}).size(), 3);
+
+    auto result = scheduler->schedule();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result->empty());
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 2u);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+    EXPECT_EQ(stream3->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(stream3->curBlocksNum(), 0);
+
+    auto next_result = scheduler->schedule();
+    ASSERT_TRUE(next_result.ok());
+    EXPECT_TRUE(next_result->empty());
+    EXPECT_EQ(scheduler->loading_cache_streams_.size(), 3u);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
+    EXPECT_EQ(stream3->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_GT(stream3->curBlocksNum(), 0);
+}
+
 TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_RespectInitializedKVCacheQuota) {
     setupMockCoordinator();
 

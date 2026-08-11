@@ -377,6 +377,7 @@ std::string FIFOSchedulerConfig::to_string() const {
     std::ostringstream oss;
     oss << "max_context_batch_size: " << max_context_batch_size << "\n"
         << "max_batch_tokens_size: " << max_batch_tokens_size << "\n"
+        << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams;
     return oss.str();
 }

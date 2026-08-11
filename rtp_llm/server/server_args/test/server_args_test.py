@@ -1,5 +1,6 @@
 import importlib
 import os
+import pickle
 import sys
 from unittest import TestCase, main
 
@@ -30,6 +31,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
+        os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
@@ -60,6 +62,21 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
         )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
+            2048,
+        )
+        restored_fifo_config = pickle.loads(
+            pickle.dumps(py_env_configs.runtime_config.fifo_scheduler_config)
+        )
+        self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
+        fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
+        legacy_fifo_config = fifo_config_type.__new__(fifo_config_type)
+        legacy_fifo_config.__setstate__((32, 8192, False, 16))
+        self.assertEqual(legacy_fifo_config.max_context_batch_size, 32)
+        self.assertEqual(legacy_fifo_config.max_batch_tokens_size, 8192)
+        self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 16)
+        self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
@@ -90,6 +107,8 @@ class ServerArgsSetTest(TestCase):
             "128",
             "--max_context_batch_size",
             "64",
+            "--max_batch_tokens_without_cache",
+            "4096",
             "--max_inited_kv_cache_streams",
             "16",
             "--warm_up",
@@ -127,6 +146,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             64,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
+            4096,
         )
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams,
