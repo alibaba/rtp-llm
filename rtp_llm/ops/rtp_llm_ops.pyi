@@ -14,6 +14,7 @@ __all__ = [
     "embedding",
     "fused_add_layernorm",
     "fused_bias_gelu",
+    "fused_bias_gelu_quant_fp8",
     "fused_qk_rmsnorm",
     "FlashInferMlaAttnParams",
     "layernorm",
@@ -64,6 +65,14 @@ def fused_add_layernorm(
 
 def fused_bias_gelu(input: torch.Tensor, bias: torch.Tensor) -> None:
     """In-place fused bias add and exact GELU kernel."""
+
+def fused_bias_gelu_quant_fp8(
+    input: torch.Tensor,
+    bias: torch.Tensor,
+    output: torch.Tensor,
+    scales: torch.Tensor,
+) -> None:
+    """Fused bias, exact GELU, and per-block FP8 UE8M0 quantization."""
 
 def fused_qk_rmsnorm(
     IO: torch.Tensor,
