@@ -8,6 +8,7 @@ from .fp8_kernel import (
     get_best_config_swap_ab,
     per_block_cast_to_fp8,
     per_token_cast_to_fp8,
+    quant_weight_ue8m0_packed,
     requant_weight_ue8m0,
     scaled_fp8_per_tensor_quant,
     scaled_fp8_per_token_quant,
@@ -22,6 +23,7 @@ __all__ = [
     "get_best_config_swap_ab",
     "per_token_cast_to_fp8",
     "per_block_cast_to_fp8",
+    "quant_weight_ue8m0_packed",
     "requant_weight_ue8m0",
     "create_per_token_group_quant_fp8_output_scale",
 ]
