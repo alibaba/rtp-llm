@@ -17,6 +17,7 @@ class DeepSeekNewloaderGpuTest(unittest.TestCase):
     pass
 
 
+_exported_test_count = 0
 for _name in dir(_SharedTests):
     if _name.startswith("_gpu_"):
         setattr(
@@ -24,9 +25,13 @@ for _name in dir(_SharedTests):
             _name.replace("_gpu_", "test_", 1),
             getattr(_SharedTests, _name),
         )
+        _exported_test_count += 1
+
+if _exported_test_count == 0:
+    raise RuntimeError("DeepSeek newloader GPU suite exported no tests")
 
 
-del _SharedTests
+del _SharedTests, _exported_test_count
 
 
 if __name__ == "__main__":
