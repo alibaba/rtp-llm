@@ -1,17 +1,19 @@
 #pragma once
 
-#include <queue>
-#include <tuple>
-#include <vector>
 #include <atomic>
+#include <list>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
-#include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include <vector>
+
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+
 namespace rtp_llm {
 
 class FIFOScheduler: public SchedulerBase {
@@ -27,15 +29,9 @@ public:
 
     ~FIFOScheduler() override;
 
-    // Enqueue a single stream. Returns OkStatus on success, InvalidArgumentError if checkInputLength fails.
-    // On failure, the stream's error is reported via reportError() but the stream is NOT queued.
-    // Caller must check the return status to know whether the stream was actually enqueued.
     absl::Status enqueue(const GenerateStreamPtr& stream) override;
-
-    // Enqueue multiple streams. Silently filters out streams that fail checkInputLength (their errors
-    // are reported via reportError()). Returns only the streams that were successfully enqueued.
-    // Caller should compare the returned vector size with the input size to detect dropped streams.
-    std::vector<std::shared_ptr<GenerateStream>> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override;
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+                                                 enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
     absl::Status                                 stop() override;
     bool                                         empty() override;
@@ -43,7 +39,6 @@ public:
     void reportMetrics();
 
 public:
-    // for test
     int64_t                                   waitingStreamsSize();
     int64_t                                   runningStreamsSize();
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList();
@@ -51,6 +46,9 @@ public:
     int64_t                                   onflightStreams() override;
 
 private:
+    using StreamGroup      = std::list<GenerateStreamPtr>;
+    using StreamGroupQueue = std::list<StreamGroup>;
+
     struct ScheduleRuntime {
         bool    batch_type_selected                       = false;
         size_t  admitted_running_stream_count             = 0;
@@ -62,26 +60,40 @@ private:
 
     int64_t lastScheduleTime() override;
     bool    evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
+    bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     size_t  prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t  prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
     size_t  countInitedKVCacheStreams() const;
+    size_t  groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
     void    accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool    waitPredicate();
     void    addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
-    void    evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
-    void    cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool    checkInputLength(const GenerateStreamPtr& stream);
+    void    evaluateWaitingStreams(std::list<GenerateStreamPtr>&       streams,
+                                  const std::list<GenerateStreamPtr>& already_admitted_streams);
+    void   evaluateWaitingGroupQueue();
+    void   evaluateLoadingCacheGroupQueue();
+    void   advanceLoadingGroup(StreamGroup& group);
+    void   moveGroupToNewStreams(StreamGroup& group);
+    void   moveGroupToAllocatingGroup(StreamGroup& group);
+    void   dispatchPreparedGroup(StreamGroup& group);
+    void    cancelStreams(std::list<GenerateStreamPtr>& streams);
+    void    cancelGroups(StreamGroupQueue& group_queue);
+    // AutoTPM Cancel: R2/R3 checkpoints, called each schedule() round under
+    // lock_ — stop + detach streams with a matching cancel intent, then sweep
+    // expired entries.
+    void evaluateCancelIntents();
 
 protected:
-    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
-
-protected:
+    void                            evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
     PDSepConfig                     pd_sep_config_;
     ModelSpecificConfig             model_specific_config_;
     std::list<GenerateStreamPtr>    waiting_streams_;
     std::list<GenerateStreamPtr>    loading_cache_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    new_streams_;
+    StreamGroupQueue                waiting_group_queue_;
+    StreamGroupQueue                loading_cache_group_queue_;
     std::shared_ptr<KVCacheManager> cache_manager_;
     std::atomic<int64_t>            last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
     size_t                          max_seq_len_                    = 0;
@@ -91,20 +103,19 @@ protected:
     size_t                          max_inited_kv_cache_streams_    = 0;
     const bool                      need_fill_fake_stream_          = false;
     const size_t                    prefill_cp_size_                = 1;
-    std::atomic<bool>            stop_                    = false;
-    bool                         schedule_trigger_        = false;
-    std::mutex                   lock_;
-    std::condition_variable      cond_;
-    kmonitor::MetricsReporterPtr metrics_reporter_                 = nullptr;
-    int64_t                      last_admitted_context_batch_size_ = 0;
-    int64_t                      last_admitted_context_token_size_ = 0;
-    int64_t                      last_waiting_oldest_age_us_       = 0;
-    std::unordered_set<int64_t>  partially_admitted_force_batch_group_ids_;
+    std::atomic<bool>               stop_                        = false;
+    bool                            schedule_trigger_            = false;
+    std::mutex                      lock_;
+    std::condition_variable         cond_;
+    kmonitor::MetricsReporterPtr    metrics_reporter_                 = nullptr;
+    int64_t                         last_admitted_context_batch_size_ = 0;
+    int64_t                         last_admitted_context_token_size_ = 0;
+    int64_t                         last_waiting_oldest_age_us_       = 0;
+    std::unordered_set<int64_t>     partially_admitted_force_batch_group_ids_;
+    std::atomic<int64_t>            pending_group_fallback_count_     = 0;
 
     std::vector<EngineScheduleInfo::TaskInfo> waiting_task_list_;
     std::vector<EngineScheduleInfo::TaskInfo> running_task_list_;
-
-    // TODO @wangyin support different beams run togather
 };
 
 }  // namespace rtp_llm

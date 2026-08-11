@@ -18,6 +18,17 @@ py_test(
 )
 
 py_test(
+    name = "concurrency_limit_test",
+    srcs = [
+        "concurrency_limit_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "frontend_server_test",
     srcs = [
         "frontend_server_test.py",

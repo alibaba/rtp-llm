@@ -32,6 +32,7 @@ from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
+    DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
@@ -108,7 +109,31 @@ def _capture_access_exception(access_agg: Any, e: BaseException) -> None:
 
 
 def _dash_error_spec_for_ft_exception(exc: FtRuntimeException) -> DashErrorSpec:
+    # Auto-TPM victim preemption (Master 8429): dedicated spec —
+    # ABORT(10) / 429 / Throttling.Aborted — instead of the generic
+    # category-based CAPACITY mapping (TooManyRequests).
+    if exc.exception_type == ExceptionType.PRIORITY_PREEMPTED:
+        return DASH_ERROR_AUTO_TPM_PREEMPTED
     return _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY[exc.exception_type.category]
+
+
+_TASK_LIST_FULL_MARKER = "TASK_LIST_FULL"
+
+
+def _is_engine_capacity_backpressure(e: BaseException) -> bool:
+    """Detect engine task-list-full backpressure from the exception message.
+
+    The C++ engine reports TASK_LIST_FULL via an ErrorCode that maps to
+    ExceptionType.UNKNOWN_ERROR (category=INTERNAL→500) because there is no
+    dedicated TASK_LIST_FULL entry in the ExceptionType enum.  The finish-reason
+    marker "TASK_LIST_FULL" survives in the error *message*, so a string check
+    is the only reliable signal at this layer.
+
+    Only match when the category-based spec would have returned 500 — existing
+    CAPACITY errors (8400/8515/8500 etc.) already map to 429 and must not be
+    touched.
+    """
+    return _TASK_LIST_FULL_MARKER in str(e)
 
 
 _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
@@ -440,6 +465,17 @@ def _apply_request_overrides(
         generate_config.ttft_timeout_ms = engine_timeout_ms
     if other.traffic_reject_priority is not None:
         generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
+    # Auto-TPM QoS priority from x-dashscope-inner-qos-level. Mirrors
+    # openai_endpoint.py which sets qos_priority from the HTTP header so
+    # it survives IPC to the dash_sc enqueue loop where
+    # GenerateInput.headers may be absent. Do NOT confuse with
+    # traffic_reject_priority (x-ds-request-priority) above.
+    qos_level = other.request_headers.get("x-dashscope-inner-qos-level")
+    if qos_level is not None:
+        try:
+            generate_config.qos_priority = int(str(qos_level).strip())
+        except (TypeError, ValueError):
+            pass
     if other.reasoning_effort is not None:
         kwargs = dict(getattr(generate_config, "chat_template_kwargs", None) or {})
         kwargs["reasoning_effort"] = other.reasoning_effort
@@ -948,7 +984,38 @@ async def iter_real_model_stream_infer(
     except FtRuntimeException as e:
         _capture_access_exception(access_agg, e)
         error_spec = _dash_error_spec_for_ft_exception(e)
+        # Engine task-list-full backpressure: the C++ engine reports
+        # TASK_LIST_FULL via an ErrorCode that maps to UNKNOWN_ERROR
+        # (category=INTERNAL→500).  Remap to 429 so callers see a
+        # capacity error, not an internal failure.
+        if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
+            error_spec = DASH_ERROR_CAPACITY
         status_message = str(e)
+        # autoTPM 429 响应规范：有 qos header 时按 priority 区分 status_name，
+        # 统一 status_message 为 "Too many requests."；无 qos header 的容量拒绝
+        # 返回 503 ServiceUnavailable / "Service unavailable."（塘主规范）。
+        if error_spec.status_code == 429:
+            qos_priority = (
+                getattr(locals().get("generate_config"), "qos_priority", 0) or 0
+            )
+            if qos_priority > 0:
+                if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
+                    pass  # status_name 已经是 Throttling.Aborted
+                elif qos_priority <= 40:
+                    error_spec = error_spec._replace(
+                        status_name="Throttling.ServiceOverloaded"
+                    )
+                else:
+                    error_spec = error_spec._replace(
+                        status_name="Throttling.ResourceExhausted"
+                    )
+                status_message = "Too many requests."
+            else:
+                error_spec = error_spec._replace(
+                    status_code=503,
+                    status_name="ServiceUnavailable",
+                )
+                status_message = "Service unavailable."
         if error_spec.status_code == 500:
             logging.exception("[DashScGrpc] [%s] engine error: %s", tag, e)
         elif error_spec.status_code == 499:
@@ -966,12 +1033,51 @@ async def iter_real_model_stream_infer(
     except Exception as e:
         _capture_access_exception(access_agg, e)
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
-        error_spec = DASH_ERROR_INTERNAL
+        # An FtRuntimeException that wasn't caught by the except FtRuntimeException
+        # clause above (e.g. due to async-generator exception propagation) still
+        # needs the category-based error spec for correct HTTP status mapping.
+        # Use isinstance instead of hasattr — duck-typing on "exception_type" could
+        # match unrelated exceptions that happen to expose an attribute of that name.
+        if isinstance(e, FtRuntimeException):
+            error_spec = _dash_error_spec_for_ft_exception(e)
+        else:
+            error_spec = DASH_ERROR_INTERNAL
+        # Same TASK_LIST_FULL remap as above — covers generic Exception paths
+        # (e.g. gRPC RpcError without grpc-status-details-bin metadata) where
+        # the error message still carries the TASK_LIST_FULL marker.
+        if error_spec is DASH_ERROR_INTERNAL and _is_engine_capacity_backpressure(e):
+            error_spec = DASH_ERROR_CAPACITY
+        fallback_status_message = f"{type(e).__name__}: {e}"
+        # autoTPM 429 响应规范：有 qos header 时按 priority 区分 status_name，
+        # 统一 status_message 为 "Too many requests."；无 qos header 的容量拒绝
+        # 返回 503 ServiceUnavailable / "Service unavailable."（塘主规范）。
+        if error_spec.status_code == 429:
+            qos_priority = (
+                getattr(locals().get("generate_config"), "qos_priority", 0) or 0
+            )
+            if qos_priority > 0:
+                if error_spec is DASH_ERROR_AUTO_TPM_PREEMPTED:
+                    pass  # status_name 已经是 Throttling.Aborted
+                elif qos_priority <= 40:
+                    error_spec = error_spec._replace(
+                        status_name="Throttling.ServiceOverloaded"
+                    )
+                else:
+                    error_spec = error_spec._replace(
+                        status_name="Throttling.ResourceExhausted"
+                    )
+                fallback_status_message = "Too many requests."
+            else:
+                error_spec = error_spec._replace(
+                    status_code=503,
+                    status_name="ServiceUnavailable",
+                )
+                fallback_status_message = "Service unavailable."
         response = build_dash_error_response(
             str(request.id),
             request.model_name,
             error_spec=error_spec,
-            status_message=f"{type(e).__name__}: {e}",
+            status_message=fallback_status_message,
         )
         stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
         yield (response, stats) if yield_access_stats else response
@@ -1027,6 +1133,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             think_runtime if think_runtime is not None else _ThinkRuntime()
         )
         self._seq_counter = AtomicCounter()
+        set_request_id_factory = getattr(
+            self._backend_visitor, "set_request_id_factory", None
+        )
+        if set_request_id_factory is not None:
+            set_request_id_factory(self._next_rtp_llm_request_id)
         # Access-log identity, injected at construction (``DashScApp`` /
         # ``__main__`` own the rank/server identity). The two ids are the only
         # state the log + metric projections need; ``server_id`` arrives as the

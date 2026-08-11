@@ -11,6 +11,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import ExceptionCategory, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -260,6 +261,13 @@ class FrontendServer(object):
                 sequence,
             )
             request_headers = extract_request_headers(raw_request.headers)
+            logging.info(
+                "request_arrival: trace_id=%s request_id=%s model=%s prompt_len=%d",
+                req.get("trace_id", "-"),
+                req.get(request_id_field_name),
+                self.py_env_configs.model_args.model_type,
+                len(req.get("prompt", "")),
+            )
         except Exception as e:
             return self._handle_exception(req, e)
 
@@ -295,7 +303,12 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        sequence = self._global_controller.increment() % 4096  # 12 bits
+        try:
+            sequence = self._global_controller.increment() % 4096  # 12 bits
+        except ConcurrencyException as e:
+            # Map concurrency-limit overflow to 429 (409_CONCURRENCY_LIMIT_ERROR)
+            # instead of leaking through ASGI as an opaque 500.
+            return self._handle_exception({}, e)
         request_id = generate_request_id(
             self.py_env_configs.server_config.ip,
             self.py_env_configs.server_config.server_port,
@@ -362,7 +375,15 @@ class FrontendServer(object):
                 },
             )
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        status_code = 500
+        if isinstance(e, FtRuntimeException):
+            if e.exception_type.category == ExceptionCategory.CAPACITY:
+                status_code = 429
+        elif isinstance(e, ConcurrencyException):
+            # ConcurrencyException maps to CONCURRENCY_LIMIT_ERROR (CAPACITY)
+            status_code = 429
+
+        rep = ORJSONResponse(exception_json, status_code=status_code)
         return rep
 
     async def _call_generate_with_report(
@@ -439,6 +460,11 @@ class FrontendServer(object):
             else complete_response
         )
         self._access_logger.log_success_access(req, complete_response)
+        logging.info(
+            "request_completion: trace_id=%s request_id=%s status=success",
+            req.get("trace_id", "-"),
+            req.get(request_id_field_name, "unknown"),
+        )
 
         return complete_response
 

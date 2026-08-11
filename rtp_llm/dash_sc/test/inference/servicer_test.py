@@ -19,7 +19,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
@@ -45,7 +45,13 @@ from rtp_llm.dash_sc.inference.servicer import (
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.ops import RoleType
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.server.master_client import MasterClient
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateInput,
+    GenerateOutput,
+    GenerateOutputs,
+)
 
 
 def _add_input_tensor(
@@ -234,6 +240,14 @@ def _assert_parameter_error_response(
     testcase.assertIn(
         expected_message_part,
         payload["status_message"],
+    )
+    testcase.assertEqual(infer.parameters["status_code"].int64_param, 400)
+    testcase.assertEqual(
+        infer.parameters["status_name"].string_param, "InvalidParameter"
+    )
+    testcase.assertIn(
+        expected_message_part,
+        infer.parameters["status_message"].string_param,
     )
     testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
     testcase.assertEqual(_gen_ids(resp), [])
@@ -446,9 +460,11 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(chunks[0].error_message)
         error_no, payload = _dash_error_payload(chunks[0])
         self.assertEqual(error_no, 5)
-        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_code"], 429)
         self.assertIn("route failed", payload["status_message"])
-        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
         self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
         self.assertEqual(
             access_agg.aux_info,
@@ -458,6 +474,215 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 "remote_reuse_len": 1,
                 "aux_string": "route-diagnostic",
             },
+        )
+
+    async def test_auto_tpm_preempted_maps_to_throttling_aborted(self) -> None:
+        """Master 8429 PRIORITY_PREEMPTED (Auto-TPM victim) must surface as
+        ABORT(10) / 429 / Throttling.Aborted with status_message unified to
+        "Too many requests." when qos header is present."""
+        req = self._minimal_request()
+
+        class _PreemptedVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.PRIORITY_PREEMPTED,
+                    "preempted by higher-priority request 77",
+                )
+
+        access_agg = GrpcAccessRecord(
+            method="ModelStreamInfer",
+            stream_type="bidi_stream",
+            peer="",
+            start_ts=0.0,
+            raw_mode=False,
+        )
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(request_headers={"x-dashscope-inner-qos-level": "40"}),
+                _PreemptedVisitor(),
+                rtp_llm_request_id=1,
+                access_agg=access_agg,
+            )
+        )
+
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, LLMFinishReason.ABORT)
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "Throttling.Aborted")
+        self.assertEqual(payload["status_message"], "Too many requests.")
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+        self.assertEqual(access_agg.backend_error_code, "8429_PRIORITY_PREEMPTED")
+
+    async def test_auto_tpm_low_priority_capacity_service_overloaded(self) -> None:
+        """autoTPM 场景：低优(priority<=40) CAPACITY 拒绝 →
+        status_name=Throttling.ServiceOverloaded, status_message="Too many requests."
+        """
+        req = self._minimal_request()
+
+        class _CapacityVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "traffic limit exceeded",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(request_headers={"x-dashscope-inner-qos-level": "40"}),
+                _CapacityVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "Throttling.ServiceOverloaded")
+        self.assertEqual(payload["status_message"], "Too many requests.")
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+
+    async def test_auto_tpm_high_priority_capacity_resource_exhausted(self) -> None:
+        """autoTPM 场景：高优(priority>40) CAPACITY 拒绝 →
+        status_name=Throttling.ResourceExhausted, status_message="Too many requests."
+        """
+        req = self._minimal_request()
+
+        class _CapacityVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "traffic limit exceeded",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(request_headers={"x-dashscope-inner-qos-level": "50"}),
+                _CapacityVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "Throttling.ResourceExhausted")
+        self.assertEqual(payload["status_message"], "Too many requests.")
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+
+    async def test_no_qos_capacity_keeps_legacy_too_many_requests(self) -> None:
+        """无 qos header 的 CAPACITY 拒绝：返回 503 ServiceUnavailable，
+        status_message="Service unavailable."（塘主规范）。"""
+        req = self._minimal_request()
+
+        class _CapacityVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.TRAFFIC_LIMIT_ERROR,
+                    "traffic limit exceeded",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _CapacityVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(payload["status_code"], 503)
+        self.assertEqual(payload["status_name"], "ServiceUnavailable")
+        self.assertEqual(payload["status_message"], "Service unavailable.")
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+
+    async def test_engine_task_list_full_ft_exception_mapped_to_429(self) -> None:
+        """Engine abort with TASK_LIST_FULL arrives as FtRuntimeException(UNKNOWN_ERROR)
+        which would normally map to 500 (INTERNAL). The error message carries the
+        TASK_LIST_FULL marker, so the servicer should remap to 429 (CAPACITY)."""
+        req = self._minimal_request()
+
+        class _TaskListFullVisitor:
+            async def enqueue(self, _gi):
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    "Inference engine abort. Finish reason: [TASK_LIST_FULL].",
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _TaskListFullVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "TooManyRequests")
+        self.assertIn("TASK_LIST_FULL", payload["status_message"])
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
+
+    async def test_engine_task_list_full_generic_exception_mapped_to_429(self) -> None:
+        """Engine abort with TASK_LIST_FULL arriving as a generic Exception
+        (e.g. gRPC RpcError without grpc-status-details-bin) should also map
+        to 429, not 500."""
+        req = self._minimal_request()
+
+        class _TaskListFullGenericVisitor:
+            async def enqueue(self, _gi):
+                raise RuntimeError(
+                    "Inference engine abort. Finish reason: [TASK_LIST_FULL]."
+                )
+
+        chunks = await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                OtherParams(),
+                _TaskListFullGenericVisitor(),
+                rtp_llm_request_id=1,
+            )
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertFalse(chunks[0].error_message)
+        error_no, payload = _dash_error_payload(chunks[0])
+        self.assertEqual(error_no, LLMFinishReason.TASK_LIST_FULL)
+        self.assertEqual(payload["status_code"], 429)
+        self.assertEqual(payload["status_name"], "TooManyRequests")
+        self.assertIn("TASK_LIST_FULL", payload["status_message"])
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
         )
 
     async def test_stream_exception_yields_error_message(self) -> None:
@@ -2384,12 +2609,18 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         captured: list[int] = []
 
         class _CaptureVisitor:
+            request_id_factory = None
+
+            def set_request_id_factory(self, factory):
+                self.request_id_factory = factory
+
             async def enqueue(self, gi):
                 captured.append(gi.request_id)
                 return _FakeAsyncStream([])
 
+        visitor = _CaptureVisitor()
         servicer = DashScInferenceServicer(
-            backend_visitor=_CaptureVisitor(),
+            backend_visitor=visitor,
             ip="10.0.0.1",
             port=12345,
             server_id="srv-xyz",
@@ -2401,9 +2632,12 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
             expected = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 1)
+            retry_id = visitor.request_id_factory()
+            expected_retry_id = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 2)
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0], expected)
+        self.assertEqual(retry_id, expected_retry_id)
 
     async def test_real_mode_passes_invocation_metadata_to_generate_input(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -2460,6 +2694,72 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             visitor.last_generate_input.headers,
             {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
         )
+        # qos_priority must NOT be set when x-dashscope-inner-qos-level
+        # is absent from the request.
+        self.assertIsNone(generate_config.qos_priority)
+
+    async def test_qos_priority_set_from_ds_header_attributes(self) -> None:
+        """dash_sc path must set generate_config.qos_priority from
+        x-dashscope-inner-qos-level, mirroring openai_endpoint.py."""
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = ()
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-dashscope-inner-qos-level": "77",
+                "x-ds-request-priority": "10",
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        generate_config = visitor.last_generate_input.generate_config
+        # Channel 2: qos_priority set by _apply_request_overrides
+        self.assertEqual(generate_config.qos_priority, 77)
+        # traffic_reject_priority still comes from x-ds-request-priority
+        self.assertEqual(generate_config.traffic_reject_priority, 10)
+        # Channel 1: headers also carry the qos level
+        self.assertEqual(
+            visitor.last_generate_input.headers.get("x-dashscope-inner-qos-level"),
+            "77",
+        )
+        # _extract_priority returns 77 via either channel
+        self.assertEqual(
+            MasterClient._extract_priority(visitor.last_generate_input), 77
+        )
+
+    async def test_extract_priority_fallback_to_qos_priority(self) -> None:
+        """When GenerateInput.headers is empty (e.g. after IPC),
+        _extract_priority must fall back to generate_config.qos_priority."""
+        gc = GenerateConfig()
+        gc.qos_priority = 77
+        input_no_headers = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2], dtype=torch.int),
+            mm_inputs=[],
+            generate_config=gc,
+            headers={},
+        )
+        self.assertEqual(MasterClient._extract_priority(input_no_headers), 77)
+
+    async def test_extract_priority_returns_50_when_no_priority(self) -> None:
+        """When neither headers nor qos_priority carry a value,
+        _extract_priority returns the default 50."""
+        gc = GenerateConfig()
+        self.assertIsNone(gc.qos_priority)
+        input_no_priority = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2], dtype=torch.int),
+            mm_inputs=[],
+            generate_config=gc,
+            headers={},
+        )
+        self.assertEqual(MasterClient._extract_priority(input_no_priority), 50)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["DP_SIZE"] = "2"
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
+        os.environ["PREFILL_PREPARE_RESOURCE_POOL_SIZE"] = "256"
+        os.environ["PREFILL_WORKER_RUN_POOL_SIZE"] = "2048"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
         os.environ["WARM_UP"] = "1"
@@ -56,6 +58,21 @@ class ServerArgsSetTest(TestCase):
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
+
+        # Verify prefill thread-pool configuration
+        self.assertEqual(
+            py_env_configs.pd_separation_config.prefill_prepare_resource_pool_size,
+            256,
+        )
+        self.assertEqual(
+            py_env_configs.pd_separation_config.prefill_worker_run_pool_size,
+            2048,
+        )
+        restored_pd_config = pickle.loads(
+            pickle.dumps(py_env_configs.pd_separation_config)
+        )
+        self.assertEqual(restored_pd_config.prefill_prepare_resource_pool_size, 256)
+        self.assertEqual(restored_pd_config.prefill_worker_run_pool_size, 2048)
 
         # Verify fifo_scheduler_config
         self.assertEqual(
@@ -105,6 +122,10 @@ class ServerArgsSetTest(TestCase):
             "32",
             "--concurrency_limit",
             "128",
+            "--prefill_prepare_resource_pool_size",
+            "384",
+            "--prefill_worker_run_pool_size",
+            "1536",
             "--max_context_batch_size",
             "64",
             "--max_batch_tokens_without_cache",
@@ -141,6 +162,16 @@ class ServerArgsSetTest(TestCase):
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)
+
+        # Verify prefill thread-pool configuration
+        self.assertEqual(
+            py_env_configs.pd_separation_config.prefill_prepare_resource_pool_size,
+            384,
+        )
+        self.assertEqual(
+            py_env_configs.pd_separation_config.prefill_worker_run_pool_size,
+            1536,
+        )
 
         # Verify fifo_scheduler_config
         self.assertEqual(

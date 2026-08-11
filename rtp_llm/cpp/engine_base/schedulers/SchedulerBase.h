@@ -1,13 +1,15 @@
 #pragma once
 
 #include <list>
-#include <vector>
 #include <memory>
+#include <utility>
+#include <vector>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
+#include "rtp_llm/cpp/engine_base/schedulers/CancelIntentMap.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
 
 namespace rtp_llm {
@@ -15,9 +17,10 @@ namespace rtp_llm {
 class SchedulerBase {
 public:
     virtual ~SchedulerBase() {}
-    virtual absl::Status                   enqueue(const GenerateStreamPtr& stream)                    = 0;
-    virtual std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) = 0;
-    virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule()                                    = 0;
+    virtual absl::Status enqueue(const GenerateStreamPtr& stream) = 0;
+    virtual std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueGroup(const std::vector<GenerateStreamPtr>& streams)     = 0;
+    virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule() = 0;
 
     // Conservative-KV scheduling variant for async execution. The async path
     // schedules step N+1 before step N's specUpdate has run, so seq_len is not
@@ -39,6 +42,16 @@ public:
         return {};
     }
     virtual void updateSchedulerInfo(const std::string& scheduler_info) {}
+
+    // AutoTPM Cancel: cancel-intent map shared with the RPC layer. The Cancel
+    // RPC handler writes intents; schedule() consumes them cooperatively (R2)
+    // and sweeps expired entries (R3).
+    const std::shared_ptr<CancelIntentMap>& cancelIntentMap() const {
+        return cancel_intent_map_;
+    }
+
+protected:
+    std::shared_ptr<CancelIntentMap> cancel_intent_map_ = std::make_shared<CancelIntentMap>();
 };
 
 }  // namespace rtp_llm

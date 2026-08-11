@@ -1,5 +1,6 @@
 package org.flexlb.balance.resource;
 
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
@@ -15,12 +16,15 @@ import java.util.Map;
 public interface ResourceMeasure {
 
     /**
-     * Check if specified worker has available resources
-     *
-     * @param workerStatus Individual worker status
-     * @return true if worker has available resources, false otherwise
+     * Check if specified endpoint has available resources.
+     * Concrete implementations should override with type-specific logic.
      */
-    boolean isResourceAvailable(WorkerStatus workerStatus);
+    default boolean isResourceAvailable(WorkerEndpoint endpoint) {
+        if (endpoint == null) {
+            return false;
+        }
+        return endpoint.getStatus().isAlive();
+    }
 
     /**
      * Get resource evaluation indicator

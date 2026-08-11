@@ -13,10 +13,10 @@ flexlb-sync is the core load balancing module of FlexLB. It handles:
 
 ## Key Architecture Concepts
 
-### Router and LoadBalancer Pattern
+### Router and LoadBalanceStrategy Pattern
 - `Router` interface defines routing contract for incoming requests
 - `DefaultRouter` orchestrates routing across multiple role types (e.g., PREFILL → DECODE)
-- `LoadBalancer` interface handles worker selection for a single role type
+- `LoadBalanceStrategy` interface handles worker selection for a single role type
 - Each role type can use different load balancing strategies
 
 ### Role-Based Routing
@@ -82,7 +82,7 @@ flexlb-sync/
 │   │   ├── Router.java              # Core routing interface
 │   │   └── DefaultRouter.java       # Multi-role router implementation
 │   └── strategy/
-│       ├── LoadBalancer.java        # Load balancing interface
+│       ├── LoadBalanceStrategy.java        # Load balancing interface
 │       ├── RandomStrategy.java      # Random selection strategy
 │       ├── ShortestTTFTStrategy.java   # TTFT-based strategy
 │       └── WeightedCacheLoadBalancer.java  # Cache-aware strategy
@@ -122,7 +122,7 @@ External dependencies:
 When routing fails for a later role type (e.g., PREFILL succeeds but DECODE fails), the system must rollback local state updates for previously selected workers. See `DefaultRouter.roolBackRoutingFailure()`.
 
 ### Load Balancer Registration
-All LoadBalancer implementations must register themselves with `LoadBalanceStrategyFactory` to be accessible. See Spring bean configuration with `@DependsOn` annotation in DefaultRouter.
+All LoadBalanceStrategy implementations must register themselves with `LoadBalanceStrategyFactory` to be accessible. See Spring bean configuration with `@DependsOn` annotation in DefaultRouter.
 
 ### Worker Status Updates
 Worker status is updated asynchronously by scheduled runners. The routing logic reads from shared `EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS_MAP` which is concurrently modified.

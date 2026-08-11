@@ -1,0 +1,49 @@
+spring:
+  application:
+    name: flexlb-api
+  profiles:
+    active: default
+  main:
+    web-application-type: reactive
+  codec:
+    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:5MB}
+logging:
+  level:
+    root: info
+    io.grpc: info
+    com.google.protobuf: info
+    org.flexlb.utils.LoggingUtils: trace
+server:
+  port: 7001
+
+management:
+  server:
+    port: 7002
+  endpoints:
+    web:
+      base-path: /
+      exposure:
+        include: "*"
+  metrics:
+    tags:
+      application: flexlb-api
+
+trace:
+  otel:
+    web:
+      filter-order: 0x7fffffff
+      skip-pattern: ${OTEL_TRACE_SKIP_PATTERN}
+    config:
+      service-name: flexlb
+      instrumentation-name: trace
+    exporter:
+      otlp:
+        enabled: true
+        endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      logging:
+        enabled: true
+        format: json
+otel:
+  exporter:
+    otlp:
+      endpoint: none

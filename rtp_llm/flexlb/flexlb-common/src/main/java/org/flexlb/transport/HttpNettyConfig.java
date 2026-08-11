@@ -14,6 +14,8 @@ import io.netty.util.concurrent.DefaultEventExecutorGroup;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.EventExecutorGroup;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.CommonConstants;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -25,17 +27,21 @@ public class HttpNettyConfig {
 
     private final int responseTimeoutMs = 500;
     private final int nettyMaxChunkSize = 8192;
-    private final int eventExecuteThreads = 10 * Runtime.getRuntime().availableProcessors();
+    private final FlexlbConfig config;
+
+    public HttpNettyConfig(ConfigService configService) {
+        this.config = configService.loadBalanceConfig();
+    }
 
     @Bean(name = "nettyClient")
     public HttpNettyClientHandler createNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
-        EventLoopGroup group = new NioEventLoopGroup(Runtime.getRuntime().availableProcessors());
+        EventLoopGroup group = new NioEventLoopGroup(config.getHttpNettyEventLoopThreads());
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
-        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(eventExecuteThreads,
+        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(config.getHttpNettyEventExecutorThreads(),
                 new DefaultThreadFactory("default-custom-executor"),
-                // Use bounded queue with capacity of 1000
-                1000, RejectedExecutionHandlers.reject());
+                // Use bounded queue with configurable capacity
+                config.getHttpNettyEventExecutorQueueSize(), RejectedExecutionHandlers.reject());
         int requestTimeoutMillis = 500;
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
@@ -63,12 +69,12 @@ public class HttpNettyConfig {
     @Bean(name = "syncNettyClient")
     public HttpNettyClientHandler createSyncNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
-        EventLoopGroup group = new NioEventLoopGroup(Runtime.getRuntime().availableProcessors());
+        EventLoopGroup group = new NioEventLoopGroup(config.getHttpNettyEventLoopThreads());
         HttpNettyClientHandler handler = new HttpNettyClientHandler(bootstrap);
-        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(eventExecuteThreads,
+        EventExecutorGroup defaultEventExecutorGroup = new DefaultEventExecutorGroup(config.getHttpNettyEventExecutorThreads(),
                 new DefaultThreadFactory("default-custom-executor-sync"),
-                // Use bounded queue with capacity of 1000
-                1000, RejectedExecutionHandlers.reject());
+                // Use bounded queue with configurable capacity
+                config.getHttpNettyEventExecutorQueueSize(), RejectedExecutionHandlers.reject());
         bootstrap.group(group)
                 .channel(NioSocketChannel.class)
                 .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1000)

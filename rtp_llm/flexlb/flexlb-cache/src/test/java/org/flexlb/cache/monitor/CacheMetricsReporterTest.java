@@ -12,6 +12,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
 
+import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
+import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
@@ -56,6 +58,15 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
+    }
+
+    @Test
+    void should_report_engine_local_metrics_without_engine_ip_port() {
+        reporter.reportEngineLocalMetrics("10.0.0.1", "PREFILL", 2);
+
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", "10.0.0.1", "role", "PREFILL");
+        verify(monitor).report(CACHE_ENGINE_LOCAL_COUNT, tags, 2);
+        verify(monitor).report(CACHE_ENGINE_LOCAL_BYTES, tags, 272L);
     }
 
     @Test
