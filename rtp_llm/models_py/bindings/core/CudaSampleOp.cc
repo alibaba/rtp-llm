@@ -162,15 +162,18 @@ void processLogits(const GreedyParams&  params,
             if (params.buffer_holder) {
                 params.buffer_holder->hold_host(output_ids_ptrs);
             }
-            auto output_ids_ptrs_gpu  = output_ids_ptrs.to(torch::kCUDA, true);
-            auto sequence_lengths_gpu = params.sequence_lengths.to(torch::kCUDA, true);
+            auto output_ids_ptrs_gpu = output_ids_ptrs.to(torch::kCUDA, true);
+            // SamplerInputs stores real sequence lengths, while the imported
+            // TensorRT-LLM no-repeat kernel still expects the last valid
+            // token index and adds one internally.
+            auto sequence_last_indexes_gpu = params.sequence_lengths.to(torch::kCUDA, true).sub(1);
 
             tensorrt_llm::kernels::invokeBanRepeatNgram(params.logits.data_ptr<float>(),
                                                         (int32_t const**)(output_ids_ptrs_gpu.data_ptr()),
                                                         nullptr,  // finished_buf
                                                         nullptr,  // parent_ids_buf
                                                         nullptr,  // batch_slot
-                                                        sequence_lengths_gpu.data_ptr<int32_t>(),
+                                                        sequence_last_indexes_gpu.data_ptr<int32_t>(),
                                                         decoder_batch_size,
                                                         1,  // beam_width
                                                         step + 1,

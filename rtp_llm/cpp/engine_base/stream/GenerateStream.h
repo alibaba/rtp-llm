@@ -55,6 +55,11 @@ struct StreamSpecUpdateInfo {
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
+
+    // Rejection-sampling result for this speculative decode round. Prefill
+    // updates leave speculative_propose_step at zero and are not counted.
+    int speculative_propose_step = 0;
+    int accepted_draft_tokens    = 0;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -271,6 +276,10 @@ public:
     size_t iterCount() const;
     size_t spIterCount() const;
     void   setSpIterCount(int sp_iter_count);
+
+    const std::vector<int32_t>& speculativeAcceptedTokensPerPos() const {
+        return speculative_accepted_tokens_per_pos_;
+    }
 
     const ResourceContext&      resourceContext() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
@@ -715,8 +724,9 @@ protected:
     int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
-    size_t                                iter_count_           = 0;
-    size_t                                sp_iter_count_        = 0;
+    size_t                                iter_count_    = 0;
+    size_t                                sp_iter_count_ = 0;
+    std::vector<int32_t>                  speculative_accepted_tokens_per_pos_;
     size_t                                last_output_pos_      = 0;
     int                                   initial_reuse_length_ = 0;
     int                                   reuse_length_         = 0;

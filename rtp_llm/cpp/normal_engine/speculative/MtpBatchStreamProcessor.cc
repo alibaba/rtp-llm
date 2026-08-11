@@ -404,7 +404,8 @@ absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherDecodeModelInput(c
 absl::StatusOr<SamplerInputs>
 MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                                                 const GptModelOutputs&                      model_output,
-                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result) const {
+                                                const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
+                                                const torch::Tensor&                        draft_token_ids) const {
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams      = stream_groups.allStreams();
@@ -438,6 +439,12 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
         copyScoreSamplerTokenIds(
             sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
+        RTP_LLM_CHECK_WITH_INFO(
+            seq_len + static_cast<int64_t>(propose_step_) <= static_cast<int64_t>(sampler_inputs.step + 1),
+            "MTP verify sampler history exceeds its allocated width: seq_len=%ld gamma=%zu step=%zu",
+            seq_len,
+            propose_step_,
+            sampler_inputs.step);
         batch_idx += static_cast<int64_t>(score_len);
         RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
                           stream->streamLogTag().c_str(),
@@ -451,6 +458,35 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
+    if (draft_token_ids.defined()) {
+        const auto batch_size = static_cast<int64_t>(stream_groups.size());
+        const auto gamma      = static_cast<int64_t>(propose_step_);
+        const auto rows       = static_cast<int64_t>(score_len);
+        RTP_LLM_CHECK_WITH_INFO(draft_token_ids.scalar_type() == torch::kInt32
+                                    && draft_token_ids.numel() == batch_size * gamma,
+                                "MTP verify draft tokens must be int32 [B,gamma]");
+
+        // The sampler already needs token history on device. Fill every
+        // proposal slot once for all score rows, then let the per-row real
+        // sequence length expose exactly proposals [0, score_position).
+        auto token_ids_gpu = sampler_inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
+        auto histories     = token_ids_gpu.view({batch_size, rows, static_cast<int64_t>(sampler_inputs.step + 1)});
+        auto proposals     = draft_token_ids.to(torch::kCUDA, /*non_blocking=*/true)
+                             .contiguous()
+                             .view({batch_size, 1, gamma})
+                             .expand({batch_size, rows, gamma});
+        auto base_lengths = sampler_inputs.sequence_lengths.view({batch_size, rows})
+                                .select(1, 0)
+                                .to(torch::Device(torch::kCUDA), torch::kLong, /*non_blocking=*/true)
+                                .view({batch_size, 1, 1});
+        auto proposal_offsets =
+            torch::arange(gamma, torch::TensorOptions().dtype(torch::kLong).device(torch::Device(torch::kCUDA)))
+                .view({1, 1, gamma});
+        auto proposal_columns = (base_lengths + proposal_offsets).expand({batch_size, rows, gamma});
+        histories.scatter_(2, proposal_columns, proposals);
+        sampler_inputs.token_ids = std::move(token_ids_gpu);
+    }
+
     sampler_inputs.logits = model_output.logits.clone();
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
@@ -460,6 +496,50 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     RTP_LLM_LOG_DEBUG("gatherSamplerInput done");
     return std::move(sampler_inputs);
+}
+
+SamplerInputs MtpBatchStreamProcessor::gatherDSparkDraftSamplerInput(const StreamGroups& stream_groups,
+                                                                     size_t              vocab_size) const {
+    RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_dspark_draft_sampler_input");
+    RTP_LLM_CHECK(!stream_groups.empty());
+    auto all_streams = stream_groups.allStreams();
+
+    // The draft sampler has exactly one row per request. Reject beam/tiled
+    // requests before fillSamplerCommonInputs(), which expands those requests
+    // to multiple rows and would otherwise write past the allocation below.
+    for (const auto& stream : all_streams) {
+        RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->needTilingForSampling(),
+                                "DSpARK does not support tiled or beam sampling");
+    }
+
+    const size_t batch_size     = stream_groups.size();
+    auto         sampler_inputs = allocateSamplerInputs(stream_groups, batch_size, batch_size, propose_step_);
+    fillSamplerCommonInputs(sampler_inputs, all_streams);
+    sampler_inputs.vocab_size = vocab_size;
+    sampler_inputs.finished_mask.zero_();
+
+    int64_t row                 = 0;
+    bool    needs_probabilities = false;
+    for (const auto& stream : all_streams) {
+        const auto complete_token_ids = stream->completeTokenIds();
+        const auto seq_len            = static_cast<int64_t>(stream->seqLength());
+        RTP_LLM_CHECK_WITH_INFO(seq_len <= static_cast<int64_t>(sampler_inputs.step),
+                                "DSpARK sampler history exceeds its allocated width: seq_len=%ld, step=%zu",
+                                seq_len,
+                                sampler_inputs.step);
+        std::memcpy(sampler_inputs.token_ids.data_ptr<int32_t>() + row * (sampler_inputs.step + 1),
+                    complete_token_ids.data_ptr<int32_t>(),
+                    seq_len * sizeof(int32_t));
+        sampler_inputs.finished_mask.data_ptr<bool>()[row] = stream->isSubGenerateDoneWithoutLock(0);
+        needs_probabilities |= stream->generateConfig()->stochastic();
+        ++row;
+    }
+
+    if (needs_probabilities) {
+        sampler_inputs.all_probs = torch::empty({static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)},
+                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    }
+    return sampler_inputs;
 }
 
 void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&                stream_groups,
@@ -763,11 +843,11 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDraftInputLengths(int64_t batch_siz
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkDraftLmIndexes(int64_t batch_size) {
-    const int64_t draft_width = propose_step_;
-    if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < batch_size) {
-        dspark_lm_indexes_cache_ = torch::arange(0, batch_size * draft_width, draft_width, cudaInt32Options());
+    const int64_t token_count = batch_size * propose_step_;
+    if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < token_count) {
+        dspark_lm_indexes_cache_ = torch::arange(token_count, cudaInt32Options());
     }
-    return dspark_lm_indexes_cache_.narrow(0, 0, batch_size);
+    return dspark_lm_indexes_cache_.narrow(0, 0, token_count);
 }
 
 void MtpBatchStreamProcessor::validatePrefillDSparkCommitInput(const GptModelInputs& model_input) const {
@@ -1069,6 +1149,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
         spec_update_infos.push_back(
             {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        auto& update_info                    = spec_update_infos.back();
+        update_info.speculative_propose_step = propose_step_;
+        update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
 
         token_offset += propose_step_ + 1;
         batch_idx_out += next_batch_size;

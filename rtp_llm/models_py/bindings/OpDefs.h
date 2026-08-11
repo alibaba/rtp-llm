@@ -344,10 +344,10 @@ struct BertEmbeddingInputs {
 };
 
 struct PyModelInputs {
-    torch::Tensor             input_ids;
-    torch::Tensor             input_hiddens;
-    PyAttentionInputs         attention_inputs;
-    BertEmbeddingInputs       bert_embedding_inputs;
+    torch::Tensor            input_ids;
+    torch::Tensor            input_hiddens;
+    PyAttentionInputs        attention_inputs;
+    BertEmbeddingInputs      bert_embedding_inputs;
     rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
 
     PyModelInputs() = default;
@@ -367,7 +367,6 @@ struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
-    torch::Tensor          draft_tokens;
 
     PyModelOutputs() = default;
 

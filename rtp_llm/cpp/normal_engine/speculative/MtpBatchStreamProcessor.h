@@ -39,7 +39,10 @@ public:
     absl::StatusOr<SamplerInputs>
     gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
                            const GptModelOutputs&                      model_output,
-                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {}) const;
+                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result = {},
+                           const torch::Tensor&                        draft_token_ids    = {}) const;
+
+    SamplerInputs gatherDSparkDraftSamplerInput(const StreamGroups& stream_groups, size_t vocab_size) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,

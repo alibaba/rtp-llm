@@ -781,26 +781,27 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // downstream Sampler::forward fail with a narrow OOB.  Detect
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
-        const bool has_context_request  = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        auto       attach_draft_outputs = [&py_model_outputs](GptModelOutputs outputs) {
-            outputs.draft_tokens = py_model_outputs.draft_tokens;
-            return outputs;
-        };
+        const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (is_dspark_draft_) {
-            // DSpARK already applies its full-vocabulary lm_head and Markov
-            // head in Python. Running the generic C++ post-layers path would
-            // apply lm_head a second time and, under prefill CP, all-gather
-            // the replicated logits as though they were vocabulary shards.
+            if (inputs.dspark_call_phase == DSparkCallPhase::PROPOSE) {
+                // Python returns normalized [B*gamma, hidden_dim]. Reuse the
+                // regular C++ lm_head and TP logits gather for every proposal
+                // row; the speculative executor owns only Markov sampling.
+                return callForwardPostLayers(hidden_states, inputs, true);
+            }
+            // Commit only updates the draft KV cache and has no logits
+            // consumer. Preserve its row-aligned hidden output for the common
+            // CUDA graph contract without running lm_head.
             GptModelOutputs outputs;
             outputs.hidden_states     = hidden_states;
             outputs.all_hidden_states = hidden_states;
-            return attach_draft_outputs(std::move(outputs));
+            return outputs;
         }
         if (enable_prefill_cp_ && has_context_request) {
             context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-            return attach_draft_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
+            return forwardPostLayersLastHidden(hidden_states, inputs);
         }
-        return attach_draft_outputs(callForwardPostLayers(hidden_states, inputs, true));
+        return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

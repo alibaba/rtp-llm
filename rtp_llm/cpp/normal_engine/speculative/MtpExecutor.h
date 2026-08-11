@@ -83,6 +83,7 @@ protected:
 
     static bool dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type);
     static DraftPrefillGraphPolicy draftPrefillGraphPolicy(bool enable_cuda_graph, bool is_dspark, RoleType role_type);
+    static bool shouldSyncBookkeepingBeforePrepare(bool stream_async, bool drop_broad_sync, bool is_dspark);
 
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
@@ -111,6 +112,9 @@ protected:
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
     GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
+    SamplerOutput   sampleDSparkDraft(const StreamGroups&  stream_groups,
+                                      const torch::Tensor& base_logits,
+                                      const torch::Tensor& anchors);
     GptModelOutputs runDraftCommitForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -206,6 +210,8 @@ private:
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool                       is_dspark_ = false;
     size_t                     draft_vocab_size_;
+    torch::Tensor              dspark_markov_w1_;
+    torch::Tensor              dspark_markov_w2_;
     std::shared_ptr<ModelBase> draft_model_;
     // DSpARK uses two prefill-shaped graph contracts: gamma query rows for
     // proposal and gamma+1 verified rows for commit. They must not share one

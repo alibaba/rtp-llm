@@ -6,6 +6,7 @@ import torch
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.utils.multimodal_util import MultimodalInput
 
+
 class EmbeddingOutput:
     text_embedding: torch.Tensor
     extra_input: Optional[torch.Tensor]
@@ -44,7 +45,9 @@ class GenerateInput:
     prefix_length: int = 0
     token_type_ids: List[int] = field(default_factory=list)
     batch_group_size: int = 1
-    batch_group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
+    batch_group_id: int = (
+        -1
+    )  # Batch group ID for force batch grouping, -1 means not set
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
 
@@ -93,6 +96,9 @@ class AuxInfo:
     decode_local_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
     decode_memory_reuse_len: int = 0
+
+    speculative_draft_rounds: int = 0
+    speculative_accepted_tokens_per_pos: List[int] = field(default_factory=list)
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""

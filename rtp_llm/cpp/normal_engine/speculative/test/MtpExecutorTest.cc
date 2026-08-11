@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <chrono>
 #include <mutex>
@@ -56,6 +57,17 @@ TEST(MtpExecutorPolicyTest, DSparkSeparatesPrefillCPFromDecodeGraphs) {
     decode_cp_config.method = CPRotateMethod::ALL_GATHER;
     EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
     EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::PDFUSION));
+}
+
+TEST(MtpExecutorPolicyTest, DSparkSynchronizesHostHistoryBeforePrepareWithDropBroadSync) {
+    EXPECT_FALSE(MtpExecutor::shouldSyncBookkeepingBeforePrepare(
+        /*stream_async=*/false, /*drop_broad_sync=*/true, /*is_dspark=*/true));
+    EXPECT_FALSE(MtpExecutor::shouldSyncBookkeepingBeforePrepare(
+        /*stream_async=*/true, /*drop_broad_sync=*/true, /*is_dspark=*/false));
+    EXPECT_TRUE(MtpExecutor::shouldSyncBookkeepingBeforePrepare(
+        /*stream_async=*/true, /*drop_broad_sync=*/false, /*is_dspark=*/false));
+    EXPECT_TRUE(MtpExecutor::shouldSyncBookkeepingBeforePrepare(
+        /*stream_async=*/true, /*drop_broad_sync=*/true, /*is_dspark=*/true));
 }
 
 struct MtpExecutorTestConfig {
@@ -506,6 +518,13 @@ public:
         auto mtp_model_params   = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
         auto mtp_params         = std::make_unique<EngineInitParams>(params);
         mtp_params->py_sp_model = py::none();
+        if (test_config.sp_type == SP_TYPE_DSPARK) {
+            auto markov_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+            mtp_params->gpt_weights.dspark_markov_w1 =
+                torch::zeros({static_cast<int64_t>(test_config.vocab_size), 1}, markov_options);
+            mtp_params->gpt_weights.dspark_markov_w2 =
+                torch::zeros({static_cast<int64_t>(test_config.vocab_size), 1}, markov_options);
+        }
 
         mtp_model_params->push_back(std::move(mtp_params));
 
@@ -1039,8 +1058,6 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
     SamplerOutput target_sampler_output{torch::tensor({1, 2, 1, 0}, torch::kInt32).reshape({gamma + 1, 1})};
     target_sampler_output.all_probs = torch::eye(vocab_size, torch::kFloat32).to(torch::kCUDA);
-    components.fake_sampler->setInputs({sampler_input});
-    components.fake_sampler->setOutputs({target_sampler_output});
 
     speculative::SpeculativeSamplerOutput speculative_sampler_output;
     speculative_sampler_output.accept_tokens_cpu = torch::tensor({{1, 0, 0, 0}}, torch::kInt32);
@@ -1056,7 +1073,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     draft_input.combo_tokens      = torch::tensor({2, 0, 0}, torch::kInt32);
     draft_input.input_lengths     = torch::tensor({gamma}, torch::kInt32);
     draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
-    draft_input.lm_output_indexes = torch::tensor({0}, torch::kInt32);
+    draft_input.lm_output_indexes = torch::arange(0, gamma, torch::kInt32);
 
     // Commit call: dense verify rows at the old prefix (accept-independent).
     GptModelInputs commit_input;
@@ -1070,9 +1087,29 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     commit_output.hidden_states = torch::zeros({gamma + 1, 2}, torch::kFloat32).to(torch::kCUDA);
 
     GptModelOutputs draft_output;
-    draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);
+    draft_output.logits = torch::tensor({0.1f, 0.2f, 0.9f, 0.3f, 0.1f, 0.8f, 0.2f, 0.3f, 0.1f, 0.2f, 0.3f, 0.9f})
+                              .reshape({gamma, vocab_size})
+                              .to(torch::kCUDA);
     components.fake_draft_model->setInputs({draft_input, commit_input});
     components.fake_draft_model->setOutputs({draft_output, commit_output});
+
+    std::vector<SamplerInputs>       draft_sampler_inputs;
+    std::vector<SamplerOutput>       draft_sampler_outputs;
+    const std::array<int32_t, gamma> sampled_draft_tokens{2, 1, 3};
+    for (int64_t step = 0; step < gamma; ++step) {
+        draft_sampler_inputs.emplace_back(SamplerInputs{draft_output.logits.select(0, step).unsqueeze(0)});
+        auto token_history  = torch::zeros({1, 7}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        token_history[0][6] = sampled_draft_tokens[step];
+        SamplerOutput step_output{token_history};
+        step_output.all_probs =
+            torch::zeros({1, vocab_size}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        step_output.all_probs[0][sampled_draft_tokens[step]] = 1.0f;
+        draft_sampler_outputs.push_back(std::move(step_output));
+    }
+    draft_sampler_inputs.push_back(sampler_input);
+    draft_sampler_outputs.push_back(target_sampler_output);
+    components.fake_sampler->setInputs(draft_sampler_inputs);
+    components.fake_sampler->setOutputs(draft_sampler_outputs);
 
     setupFakeModels(components.executor.get(),
                     std::move(components.fake_target_model),
@@ -1086,6 +1123,111 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_NE(std::thread::id(), processor->invocationThreadId());
     EXPECT_NE(main_thread_id, processor->invocationThreadId());
     EXPECT_EQ((std::vector<int32_t>{2, 1, 3}), processor->observedDraftTokens());
+}
+
+TEST_F(MtpExecutorTest, testDSparkDraftUsesFrameworkSamplerAndReturnsExactQ) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample   = true;
+    stream->generateConfig()->top_k       = 0;
+    stream->generateConfig()->top_p       = 1.0f;
+    stream->generateConfig()->temperature = 0.5f;
+    StreamGroups stream_groups({stream});
+
+    auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
+                           .reshape({1, gamma, vocab_size})
+                           .to(torch::kCUDA);
+    auto anchors       = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto padded_logits = torch::cat(
+        {base_logits.reshape({gamma, vocab_size}),
+         torch::full({gamma, 3}, 1000.0f, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))},
+        1);
+
+    auto output = components.executor->sampleDSparkDraft(stream_groups, padded_logits, anchors);
+
+    ASSERT_TRUE(output.token_ids.is_cuda());
+    ASSERT_EQ((std::vector<int64_t>{1, gamma}), output.token_ids.sizes().vec());
+    ASSERT_TRUE(output.all_probs.is_cuda());
+    ASSERT_EQ((std::vector<int64_t>{1, gamma, vocab_size}), output.all_probs.sizes().vec());
+    EXPECT_FALSE(output.token_ids_are_point_mass);
+    EXPECT_TRUE(torch::allclose(output.all_probs, torch::softmax(base_logits / 0.5f, -1), 1e-5, 1e-6));
+    auto sampled_q = output.all_probs.gather(2, output.token_ids.to(torch::kLong).unsqueeze(-1));
+    EXPECT_TRUE(sampled_q.gt(0).all().item<bool>());
+}
+
+TEST_F(MtpExecutorTest, testDSparkDraftAppliesTopPToSequentialMarkovLogits) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 4;
+    constexpr float   top_p      = 0.7f;
+
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample   = true;
+    stream->generateConfig()->top_k       = 0;
+    stream->generateConfig()->top_p       = top_p;
+    stream->generateConfig()->temperature = 1.0f;
+    StreamGroups stream_groups({stream});
+
+    auto cuda_options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto markov_w1 = torch::tensor({0.0f, 0.4f, 0.8f, 1.2f}, torch::kFloat32).reshape({vocab_size, 1}).to(torch::kCUDA);
+    auto markov_w2 =
+        torch::tensor({-0.5f, -0.1f, 0.3f, 0.7f}, torch::kFloat32).reshape({vocab_size, 1}).to(torch::kCUDA);
+    components.executor->dspark_markov_w1_ = markov_w1;
+    components.executor->dspark_markov_w2_ = markov_w2;
+
+    auto base_logits = torch::tensor({-10.0f, -10.0f, -10.0f, 10.0f, 0.1f, 0.4f, 0.3f, 0.2f, 0.2f, 0.1f, 0.4f, 0.3f})
+                           .reshape({1, gamma, vocab_size})
+                           .to(cuda_options);
+    auto anchors = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto output =
+        components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
+
+    ASSERT_EQ((std::vector<int64_t>{1, gamma, vocab_size}), output.all_probs.sizes().vec());
+    ASSERT_EQ(output.token_ids[0][0].item<int32_t>(), 3);
+    auto previous_tokens = anchors.to(torch::kLong);
+    for (int64_t step = 0; step < gamma; ++step) {
+        auto markov_bias = torch::mm(markov_w1.index_select(0, previous_tokens), markov_w2.transpose(0, 1));
+        auto raw_probs   = torch::softmax(base_logits.select(1, step) + markov_bias, -1);
+        if (step == 1) {
+            auto anchor_bias =
+                torch::mm(markov_w1.index_select(0, anchors.to(torch::kLong)), markov_w2.transpose(0, 1));
+            EXPECT_FALSE(torch::allclose(raw_probs, torch::softmax(base_logits.select(1, step) + anchor_bias, -1)));
+        }
+        auto sorted       = raw_probs.sort(-1, /*descending=*/true);
+        auto sorted_probs = std::get<0>(sorted);
+        auto sorted_ids   = std::get<1>(sorted);
+        auto keep         = (sorted_probs.cumsum(-1) - sorted_probs).lt(top_p);
+        auto kept         = sorted_probs * keep.to(sorted_probs.scalar_type());
+        auto expected_q   = torch::zeros_like(raw_probs).scatter(1, sorted_ids, kept);
+        expected_q.div_(expected_q.sum(-1, /*keepdim=*/true));
+
+        auto actual_q = output.all_probs.select(1, step);
+        EXPECT_TRUE(torch::allclose(actual_q, expected_q, 1e-5, 1e-6));
+        EXPECT_LT(actual_q.gt(0).sum().item<int64_t>(), vocab_size);
+        auto sampled_token = output.token_ids.select(1, step).to(torch::kLong);
+        EXPECT_TRUE(actual_q.gather(1, sampled_token.unsqueeze(1)).gt(0).all().item<bool>());
+        previous_tokens = std::move(sampled_token);
+    }
 }
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
@@ -1346,6 +1488,39 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
 }
 
+TEST_F(MtpExecutorTest, testDSparkDraftNoRepeatNgramUsesOnlyInitializedHistory) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 6;
+
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->do_sample            = true;
+    stream->generateConfig()->top_k                = 1;
+    stream->generateConfig()->top_p                = 1.0f;
+    stream->generateConfig()->temperature          = 1.0f;
+    stream->generateConfig()->no_repeat_ngram_size = 1;
+    StreamGroups stream_groups({stream});
+
+    // Every step prefers the same vocabulary order. Unigram blocking must
+    // consume exactly the initialized prefix plus prior DSpARK selections,
+    // yielding the next unseen token each time.
+    auto base_logits =
+        torch::tensor({6.0f, 5.0f, 4.0f, 3.0f, 2.0f, 1.0f}, torch::kFloat32).repeat({gamma, 1}).to(torch::kCUDA);
+    auto anchors = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto output = components.executor->sampleDSparkDraft(stream_groups, base_logits, anchors);
+
+    EXPECT_TRUE(torch::equal(output.token_ids.cpu(), torch::tensor({2, 3, 4}, torch::kInt32).reshape({1, gamma})));
+}
+
 TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 16;
@@ -1369,10 +1544,14 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
 
     StreamSpecUpdateInfo update_info{
         torch::tensor({7}, torch::kInt32).reshape({1, 1}), 1, -1, torch::Tensor(), torch::Tensor()};
+    update_info.speculative_propose_step = 3;
+    update_info.accepted_draft_tokens    = 2;
     stream->specUpdate(update_info);
 
     EXPECT_EQ((std::vector<int32_t>{7}), toVec<int32_t>(sp_buffer->tokens));
     EXPECT_TRUE(stream->getProposeToken().empty());
+    EXPECT_EQ(stream->spIterCount(), 1);
+    EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
 }
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {

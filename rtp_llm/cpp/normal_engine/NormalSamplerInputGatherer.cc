@@ -176,7 +176,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
             input_lengths[batch_idx]      = stream->inputLength();
-            sequence_lengths[batch_idx]   = stream->seqLength() + propose_step;
+            sequence_lengths[batch_idx]   = stream->seqLength() + (score_batch ? i : propose_step);
             num_beams_in[batch_idx]       = stream->currentNumBeams();
             num_beams_out[batch_idx]      = stream->nextNumBeams();
             top_k[batch_idx]              = stream->generateConfig()->top_k;
@@ -205,7 +205,7 @@ void NormalSamplerInputGatherer::setLogitsProcessorInputs(SamplerInputs&        
     std::for_each(all_streams.begin(), all_streams.end(), [&state_ptr, score_batch, idx = 0](auto& stream) mutable {
         const auto stream_id = static_cast<uint64_t>(stream->streamId());
         if (score_batch) {
-            const int score_len = static_cast<int>(stream->scoreLen());
+            const int score_len     = static_cast<int>(stream->scoreLen());
             size_t    processor_idx = 0;
             for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
                 if (processor->isStateful()) {
