@@ -168,6 +168,7 @@ py_library(
 py_library(
     name = "new_weight_loader",
     srcs = [
+        "model_desc/block_map.py",
         "model_desc/module_base.py",
     ] + glob([
         "layers/*.py",
