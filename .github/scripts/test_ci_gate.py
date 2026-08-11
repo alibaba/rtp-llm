@@ -318,6 +318,23 @@ class TestCheckIssueCommentsQualified(unittest.TestCase):
         result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertTrue(result)
 
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_multi_lgtm_users_second_user_qualifies(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = [self._comment(login="netaddi")]
+        result = _check_issue_comments_qualified("1", "repo", "sha1", "token", "LLLLKKKK,netaddi")
+        self.assertTrue(result)
+
+    @patch("ci_gate.review.github_get_pages")
+    @patch("ci_gate.review.github_get")
+    def test_pr_author_self_lgtm_rejected(self, mock_get, mock_pages):
+        mock_get.return_value = self.COMMIT_RESPONSE
+        mock_pages.return_value = [self._comment(login="netaddi")]
+        result = _check_issue_comments_qualified(
+            "1", "repo", "sha1", "token", "LLLLKKKK,netaddi", pr_author="netaddi")
+        self.assertFalse(result)
+
 
 # ---------------------------------------------------------------------------
 # review.check_review_qualified — issue comment fallback
@@ -334,7 +351,7 @@ class TestCheckReviewQualifiedWithIssueComments(unittest.TestCase):
         mock_issue.return_value = True
         result = check_review_qualified("1", "repo", "sha1", "token", "LLLLKKKK")
         self.assertTrue(result)
-        mock_issue.assert_called_once_with("1", "repo", "sha1", "token", "LLLLKKKK")
+        mock_issue.assert_called_once_with("1", "repo", "sha1", "token", "LLLLKKKK", "author")
 
     @patch("ci_gate.review._check_issue_comments_qualified")
     @patch("ci_gate.review.github_get_pages")
