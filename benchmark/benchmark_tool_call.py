@@ -406,7 +406,7 @@ async def run_request(
     response_holder: list[aiohttp.ClientResponse] = []
     response_ready = asyncio.Event()
     protocol_done = asyncio.Event()
-    start = time.perf_counter()
+    start: float
 
     async def consume_response() -> None:
         try:
@@ -542,6 +542,7 @@ async def run_request(
             result.structural_errors.append(type(error).__name__ + ": " + str(error))
 
     async with semaphore:
+        start = time.perf_counter()
         request_task = asyncio.create_task(consume_response())
         response_ready_task: Optional[asyncio.Task[bool]] = None
         protocol_done_task: Optional[asyncio.Task[bool]] = None

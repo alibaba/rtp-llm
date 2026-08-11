@@ -66,5 +66,7 @@ python3 benchmark/benchmark_tool_call.py \
 Structural and semantic failures return a non-zero exit code by default. The
 reported `throughput_rps` and latency percentiles include only fully successful
 non-cancelled requests; `attempted_rps` includes the complete offered workload.
+Per-request latency and TTFT start after the local concurrency slot is acquired,
+while wall time and throughput include the complete workload and its client queue.
 `--allow-semantic-errors` is available only when semantic mismatches should be
 reported without failing the process.

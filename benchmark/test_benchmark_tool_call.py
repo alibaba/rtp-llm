@@ -7,6 +7,7 @@ import json
 import re
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
 
@@ -86,6 +87,18 @@ class FakeSession:
     def post(self, endpoint: str, json: dict):
         self.payload = json
         return self.response
+
+
+class AdvancingSemaphore:
+    def __init__(self, clock: list[float], queue_wait_s: float):
+        self.clock = clock
+        self.queue_wait_s = queue_wait_s
+
+    async def __aenter__(self):
+        self.clock[0] += self.queue_wait_s
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return False
 
 
 class BuildPayloadTest(unittest.TestCase):
@@ -732,6 +745,25 @@ class RunRequestTextValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.done_count, 1)
         self.assertEqual(result.structural_errors, [])
         self.assertEqual(result.semantic_errors, [])
+
+    async def test_latency_excludes_client_semaphore_queue_wait(self):
+        clock = [100.0]
+        with patch(
+            "benchmark_tool_call.time.perf_counter",
+            side_effect=lambda: clock[0],
+        ):
+            result = await run_request(
+                FakeSession([self.make_tool_chunk()]),
+                "http://unused/chat/completions",
+                "fake-model",
+                self.REQUEST_INDEX,
+                32,
+                False,
+                AdvancingSemaphore(clock, queue_wait_s=30.0),
+            )
+
+        self.assertEqual(result.ttft_s, 0.0)
+        self.assertEqual(result.elapsed_s, 0.0)
 
     async def test_duplicate_done_sentinel_fails(self):
         tool_chunk = json.dumps(self.make_tool_chunk()).encode("utf-8")
