@@ -469,27 +469,6 @@ message WorkerStatusPB {
     int32 cache_match_rollback_blocks = 23;
 }
 
-message KvCacheGroupMetadataPB {
-    int32 group_idx = 1;
-    string kind = 2;
-    int32 block_size = 3;
-    // -1 means that the group does not use a sliding window.
-    int32 sliding_window = 4;
-}
-
-enum KvCacheGroupMetadataErrorCode {
-    KV_CACHE_GROUP_METADATA_OK = 0;
-    KV_CACHE_GROUP_METADATA_UNAVAILABLE = 1;
-}
-
-message KvCacheGroupListPB {
-    repeated KvCacheGroupMetadataPB items = 1;
-    KvCacheGroupMetadataErrorCode err_code = 2;
-    string err_msg = 3;
-}
-
-message KvCacheGroupsRequestPB {}
-
 message EmbeddingInputPB {
     repeated int32 token_ids = 1;
     repeated int32 token_type_ids = 2;
@@ -674,7 +653,6 @@ message BatchGenerateOutputsPB {
 
 service RpcService {
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
-    rpc GetKvCacheGroupsMetadata(KvCacheGroupsRequestPB) returns (KvCacheGroupListPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
