@@ -172,6 +172,15 @@ class BaseModel(object):
         """Get device string from parallelism_config."""
         return f"cuda:{self.parallelism_config.local_rank}"
 
+    @staticmethod
+    def _configure_deep_gemm_remote_cache() -> None:
+        remote_jit_dir = os.environ.get("REMOTE_JIT_DIR")
+        logging.info("python model remote_jit_dir for deep_gemm: %s", remote_jit_dir)
+        if remote_jit_dir:
+            os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
+                remote_jit_dir, "deep_gemm_python"
+            )
+
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):
         if (
@@ -179,6 +188,8 @@ class BaseModel(object):
             and self.support_cuda_graph() is False
         ):
             raise Exception("current model can't support cuda graph in py model mode")
+
+        self._configure_deep_gemm_remote_cache()
 
         if self._use_new_loader():
             if skip_python_model:

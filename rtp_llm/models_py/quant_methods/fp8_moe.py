@@ -355,6 +355,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def dispatch_scale(self, layer, local_id, proj, param_name, tensor):
         qf = layer._quant_family
 
+        if param_name == "input_scale":
+            raise RuntimeError(
+                "Static-activation FP8 MoE checkpoints are not supported by "
+                "NewLoader; remove input_scale or use a dynamic-activation "
+                "FP8 checkpoint"
+            )
+
         # Online families consume floating-point weights and must not receive
         # prequantized checkpoint scales.
         if param_name in ("weight_scale", "weight_scale_inv") and qf in (
