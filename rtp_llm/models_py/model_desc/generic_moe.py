@@ -1,4 +1,3 @@
-import logging
 import os
 from typing import Any, Dict, Optional
 
@@ -20,7 +19,6 @@ from rtp_llm.models_py.modules import (
     GroupTopK,
     LinearFactory,
     MlaAttention,
-    RMSNorm,
     RMSResNorm,
     SelectTopk,
     SigmoidGateScaleAdd,
@@ -29,6 +27,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
+from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
+    Glm5Cmp,
+    resolve_glm5_cmp_enabled,
+    should_enable_glm5_cmp,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
@@ -274,6 +277,18 @@ class GenericMoeLayer(nn.Module):
         clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
         return clone
 
+    def forward_prepacked(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Consume router/quant resources already prepared by GLM5 CMP."""
+        if self.fake_balance_expert is not None:
+            self.fake_balance_expert(topk_ids, topk_weights)
+        experts_output = self.fused_moe.forward_prepacked(hidden_states)
+        return experts_output + self.shared_expert(hidden_states)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -466,6 +481,19 @@ class GenericMoeDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
+        self.cmp = (
+            Glm5Cmp(
+                layer_idx=layer_idx,
+                config=config,
+                parallelism_config=parallelism_config,
+                self_attn=self.self_attn,
+                input_layernorm=self.input_layernorm,
+                mlp=self.mlp,
+                post_attention_layernorm=self.post_attention_layernorm,
+            )
+            if resolve_glm5_cmp_enabled()
+            else None
+        )
 
         # Fuse input_layernorm + fp8_quant → pass fp8 directly to first linear,
         # AND emit a bf16 normed output so downstream consumers (e.g. Indexer)
@@ -510,7 +538,9 @@ class GenericMoeDecoderLayer(nn.Module):
             and self.mlp.shared_expert.accepts_fp8_input
         )
 
-    def clone_for_cuda_graph(self) -> "GenericMoeDecoderLayer":
+    def clone_for_cuda_graph(
+        self, *, draft_prefill: bool = False
+    ) -> "GenericMoeDecoderLayer":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
         clone.layer_idx = self.layer_idx
@@ -525,7 +555,72 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_input_scale_ue8m0 = self._fuse_input_scale_ue8m0
         clone._fuse_post_norm_quant = self._fuse_post_norm_quant
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
+        clone.cmp = (
+            None
+            if self.cmp is None
+            else self.cmp.clone_for_cuda_graph(
+                mlp=clone.mlp,
+                draft_prefill=draft_prefill,
+            )
+        )
         return clone
+
+    def _forward_cmp(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        prev_topk_indices: Optional[torch.Tensor],
+    ) -> DecodeLayerOutput:
+        """Run the GLM5 CMP attention and MoE preparation path."""
+        cmp = self.cmp
+        if cmp is None:
+            raise RuntimeError("GLM5 CMP execution was not initialized")
+        # Prepare MLA inputs with internal streams and PDL.
+        output_residual, mla_query, topk_indices = cmp.mla_prologue(
+            hidden_states,
+            residual,
+            fmha_impl,
+            kv_cache,
+            prev_topk_indices,
+        )
+
+        # Run RTP's existing FlashMLA interface explicitly.
+        mla_output = cmp.sparse_mla(
+            mla_query,
+            topk_indices,
+            fmha_impl,
+            kv_cache,
+        )
+
+        # Project attention output and optionally prepare routed MoE input.
+        mla_post = cmp.mla_post_moe_pre(
+            mla_output, output_residual, fmha_impl
+        )
+        if cmp.has_moe:
+            moe_hidden_states, output_residual, routed_indices, routed_weights = (
+                mla_post
+            )
+            hidden_states = self.mlp.forward_prepacked(
+                moe_hidden_states,
+                routed_indices,
+                routed_weights,
+            )
+        else:
+            # Dense layers preserve the existing post-attention norm + MLP.
+            hidden_states, output_residual = mla_post
+            output_residual, _, hidden_fp8, hidden_scale = cmp.add_norm_quant(
+                hidden_states,
+                output_residual,
+            )
+            hidden_states = self.mlp(
+                hidden_states,
+                x_fp8=hidden_fp8,
+                x_scale=hidden_scale,
+            )
+
+        return DecodeLayerOutput(hidden_states, output_residual, topk_indices)
 
     def forward(
         self,
@@ -534,7 +629,17 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
+        enable_cmp: bool = False,
     ) -> DecodeLayerOutput:
+        if enable_cmp:
+            return self._forward_cmp(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                prev_topk_indices,
+            )
+
         topk_indices = None
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
@@ -686,6 +791,13 @@ class GenericMoeModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         prev_topk_indices = None
+        enable_cmp = should_enable_glm5_cmp(
+            self.layers,
+            self.layer_num,
+            hidden_states,
+            fmha_impl,
+            self.kv_cache,
+        )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
@@ -694,6 +806,7 @@ class GenericMoeModel(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
+                enable_cmp=enable_cmp,
             )
             hidden_states = output.hidden_states
             residual = output.residual

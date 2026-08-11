@@ -255,6 +255,14 @@ class MegaMoeWrapper(nn.Module):
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int64
 
+    def prepacked_input_views(
+        self, tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.mega_moe.prepacked_input_views(tokens)
+
+    def forward_prepacked(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.mega_moe.forward_prepacked(hidden_states)
+
     def forward(
         self,
         hidden_states: torch.Tensor,

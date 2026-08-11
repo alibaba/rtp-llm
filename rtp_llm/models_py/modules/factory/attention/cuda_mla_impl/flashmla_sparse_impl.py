@@ -479,6 +479,7 @@ class SparseMlaImpl(MlaImplBase):
         )
         self._cos_sin_cache = cos_sin_cache
         self._is_neox_style = attn_configs.rope_config.is_neox_style
+        self._cuda_dag_indexer_metadata = None
 
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -608,12 +609,11 @@ class SparseMlaImpl(MlaImplBase):
             )
             self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
             self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
-            return
         # Decode fast path (draft model): SparseMlaImpl handles decode for sparse
         # configs because MlaFlashInferDecodeImpl rejects when is_sparse=True.
         # fillParams' 3 toHostContiguousI32 D2H syncs go away by delegating to
         # the device-only fillDecodeCudaGraphParams kernel.
-        if (
+        elif (
             not getattr(attn_inputs, "is_prefill", True)
             and isinstance(self.fmha_impl, SparseMlaOp)
             and attn_inputs.sequence_lengths_plus_1_d is not None
@@ -629,8 +629,7 @@ class SparseMlaImpl(MlaImplBase):
             )
             self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
             self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
-            return
-        if (
+        elif (
             getattr(attn_inputs, "is_prefill", False)
             and not _is_multi_token_decode(attn_inputs)
             and isinstance(self.fmha_impl, SparseMlaFp8Op)
@@ -648,8 +647,11 @@ class SparseMlaImpl(MlaImplBase):
             )
             self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
             self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
-            return
-        self.prepare(attn_inputs, forbid_realloc=True)
+        else:
+            self.prepare(attn_inputs, forbid_realloc=True)
+
+        if self._cuda_dag_indexer_metadata is not None:
+            self._cuda_dag_indexer_metadata.prepare()
 
     # -- BMMs ----------------------------------------------------------------
 
