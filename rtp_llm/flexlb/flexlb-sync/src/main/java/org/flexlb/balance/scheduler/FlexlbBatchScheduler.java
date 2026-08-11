@@ -28,6 +28,7 @@ import javax.annotation.PreDestroy;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -604,9 +605,19 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
 
         // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
-        long waitMs = System.currentTimeMillis() - items.get(0).enqueuedAtMs();
-        reporter.reportBatchWaitTimeMs(
-                RoleType.PREFILL.name(), prefillEp != null ? prefillEp.getIp() : "", waitMs);
+        long nowMs = System.currentTimeMillis();
+        long waitMs = nowMs - items.get(0).enqueuedAtMs();
+        // Batch wait tagged by normalized priority: one report per priority
+        // present in the batch, using that priority's oldest enqueue time.
+        Map<Integer, Long> oldestEnqueueByPriority = new HashMap<>();
+        for (BatchItem item : dispatchable) {
+            oldestEnqueueByPriority.merge(item.priority(), item.enqueuedAtMs(), Math::min);
+        }
+        String engineIp = prefillEp != null ? prefillEp.getIp() : "";
+        for (Map.Entry<Integer, Long> waitEntry : oldestEnqueueByPriority.entrySet()) {
+            reporter.reportBatchWaitTimeMs(
+                    RoleType.PREFILL.name(), engineIp, nowMs - waitEntry.getValue(), waitEntry.getKey());
+        }
         FlexlbConfig config = configService.loadBalanceConfig();
         Logger.info("flexlb_batch_dispatch batch_id={} reason={} batch_size={} wait_ms={} "
                         + "predicted_ms={} threshold_ms={} fixed_wait_ms={} batch_size_max={} "

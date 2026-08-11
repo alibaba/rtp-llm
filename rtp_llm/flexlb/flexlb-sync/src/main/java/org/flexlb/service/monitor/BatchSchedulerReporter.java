@@ -128,10 +128,13 @@ public class BatchSchedulerReporter {
 
     /**
      * Report batch wait time (enqueue to dispatch) via {@code routing.queue.wait.time.ms}.
+     * <p>Tagged by the normalized Auto-TPM priority (raw 1-100 value, "0" for
+     * legacy items without a budget — same convention as the auto_tpm.* family).
      */
-    public void reportBatchWaitTimeMs(String role, String engineIp, long waitMs) {
+    public void reportBatchWaitTimeMs(String role, String engineIp, long waitMs, int priority) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
-                "role", role);
+                "role", role,
+                "priority", String.valueOf(priority));
         monitor.report(ROUTING_QUEUE_WAIT_TIME_MS, tags, waitMs);
     }
 
