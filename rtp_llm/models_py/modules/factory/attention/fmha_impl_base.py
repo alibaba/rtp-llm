@@ -102,17 +102,7 @@ class FMHAImplBase(ABC):
     所有具体的实现类都应该继承此类并实现这些方法。
     """
 
-    @classmethod
-    def create(
-        cls,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
-        parallelism_config: Optional[ParallelismConfig],
-        fmha_config: Optional[FMHAConfig],
-    ) -> "FMHAImplBase":
-        """Factory entry point. Override to consume fmha_config, which is not
-        part of the constructor signature every implementation shares."""
-        return cls(attn_configs, attn_inputs, parallelism_config)
+    accepts_fmha_config = False
 
     @abstractmethod
     def forward(

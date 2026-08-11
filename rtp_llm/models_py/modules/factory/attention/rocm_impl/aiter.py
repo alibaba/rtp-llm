@@ -43,16 +43,13 @@ def _is_mrope_interleaved_supported(attn_configs: AttentionConfigs) -> bool:
 ASM_DECODE_HEAD_SIZES = {128}
 
 
-def _kv_cache_torch_dtype(kv_cache_dtype, base_dtype: torch.dtype) -> torch.dtype:
-    if kv_cache_dtype == KvCacheDataType.FP8:
-        return torch.float8_e4m3fn
-    return base_dtype
-
-
 def _kv_vector_width(attn_configs: AttentionConfigs) -> int:
-    """Elements per 16-byte group in the vectorized V layout."""
-    dtype = _kv_cache_torch_dtype(attn_configs.kv_cache_dtype, attn_configs.dtype)
-    return 16 // dtype.itemsize
+    itemsize = (
+        1
+        if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        else attn_configs.dtype.itemsize
+    )
+    return 16 // itemsize
 
 
 def prefill_writes_vectorized_v(
@@ -77,26 +74,23 @@ def validate_v_layout(
     page = attn_configs.kernel_tokens_per_block
     head = attn_configs.size_per_head
     width = _kv_vector_width(attn_configs)
-    # The CK prefill reader reshapes every V page into page//width groups for
-    # both linear and vectorized V, so page must always be a multiple of width.
-    prefill_vec = prefill_writes_vectorized_v(attn_configs, fmha_config)
     if head % width or page <= 0 or page % width:
         raise ValueError(f"invalid V geometry: {head=}, {page=}, {width=}")
-    if attn_inputs.is_prefill:
+    if attn_inputs.is_prefill or fmha_config is None:
         return
-    # None means the factory does not filter implementations.
-    if fmha_config is None:
-        return
-    triton = fmha_config.use_triton_pa
-    # Triton reads whichever layout its own writer produced; the other two decode
-    # impls are fixed: ASM vectorized, non-ASM linear.
+    prefill_vec = prefill_writes_vectorized_v(attn_configs, fmha_config)
     decode_vec = (
         prefill_vec
-        if triton
+        if fmha_config.use_triton_pa
         else (fmha_config.use_asm_pa and head in ASM_DECODE_HEAD_SIZES)
     )
     if prefill_vec != decode_vec and page != width:
-        raise ValueError("ROCm KV-cache V layout mismatch; enable Triton PA")
+        raise ValueError(
+            f"ROCm KV-cache V layout mismatch: {fmha_config.use_asm_pa=}, "
+            f"{fmha_config.use_triton_pa=}, "
+            f"{head=}, {page=}, {width=}, {prefill_vec=}, {decode_vec=}; "
+            "enable Triton PA or select matching prefill/decode implementations"
+        )
 
 
 # Pure Python implementation of FMHAParams
@@ -249,7 +243,7 @@ class AiterPrefillAttnOp:
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         self.is_causal = attn_configs.is_causal
-        self.kv_cache_torch_dtype = _kv_cache_torch_dtype(
+        self.kv_cache_torch_dtype = self._get_kv_cache_torch_dtype(
             attn_configs.kv_cache_dtype, attn_configs.dtype
         )
         self.v1_kv_layout = v1_kv_layout
@@ -258,6 +252,12 @@ class AiterPrefillAttnOp:
         )
         self._block_positions: Optional[torch.Tensor] = None
         self._compact_arange: Optional[torch.Tensor] = None
+
+    @staticmethod
+    def _get_kv_cache_torch_dtype(kv_cache_dtype, base_dtype):
+        if kv_cache_dtype == KvCacheDataType.FP8:
+            return torch.float8_e4m3fn
+        return base_dtype
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         return True
@@ -956,7 +956,7 @@ def _run_triton_paged_attention(
     num_kv_heads: int,
     context_partition_size: int,
     *,
-    linear_v: bool = False,
+    linear_v: bool,
     kv_scale_buf: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     key_cache = paged_kv_cache.select(1, 0)
@@ -1143,6 +1143,7 @@ class AiterPrefillAttnOpTriton:
             fmha_params.max_seqlen_k,
             self.head_num_kv,
             self.context_partition_size,
+            linear_v=False,
             kv_scale_buf=fmha_params.kv_scale,
         )
 
@@ -1866,15 +1867,7 @@ class AiterDecodeImplNonAsm(AiterDecodeImplBase):
 class AiterDecodeImplTriton(AiterDecodeImplBase):
     """Aiter decode attention implementation using Triton."""
 
-    @classmethod
-    def create(
-        cls,
-        attn_configs: AttentionConfigs,
-        attn_inputs: PyAttentionInputs,
-        parallelism_config: Optional[ParallelismConfig],
-        fmha_config: Optional[FMHAConfig],
-    ) -> "AiterDecodeImplTriton":
-        return cls(attn_configs, attn_inputs, parallelism_config, fmha_config)
+    accepts_fmha_config = True
 
     def __init__(
         self,

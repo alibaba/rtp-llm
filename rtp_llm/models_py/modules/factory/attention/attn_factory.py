@@ -25,8 +25,7 @@ DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
 
-# Backend hook raising when attn_configs and fmha_config select a KV-cache layout
-# no prefill/decode pair can serve. Installed by rocm_impl; unset elsewhere.
+# ROCm installs this hook to reject incompatible prefill/decode V layouts.
 VALIDATE_FMHA_CONFIG: Optional[
     Callable[[AttentionConfigs, PyAttentionInputs, Optional[FMHAConfig]], None]
 ] = None
@@ -183,9 +182,8 @@ def get_fmha_impl(
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
             continue
-        instance = impl.create(
-            attn_configs, attn_inputs, parallelism_config, fmha_config
-        )
+        kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
+        instance = impl(attn_configs, attn_inputs, parallelism_config, **kwargs)
         if not is_cuda_graph or instance.support_cuda_graph():
             return instance
     if (

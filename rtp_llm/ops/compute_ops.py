@@ -3,7 +3,7 @@ import logging
 from librtp_compute_ops import *
 from librtp_compute_ops.rtp_llm_ops import *
 
-from rtp_llm.device.device_type import is_cuda, is_hip
+from rtp_llm.device.device_type import is_cuda
 
 if is_cuda():
     logging.info("Use rtp_kernel FusedRopeKVCacheOp on CUDA device.")
@@ -12,15 +12,6 @@ if is_cuda():
         FusedRopeKVCacheDecodeOp,
         FusedRopeKVCachePrefillOpQKVOut,
         FusedRopeKVCachePrefillOpQOut,
-    )
-elif is_hip():
-    logging.info("Use ROCm FusedRopeKVCacheOp bindings.")
-
-    from librtp_compute_ops.rtp_llm_ops import (
-        FusedRopeKVCacheDecodeOpAsm,
-        FusedRopeKVCacheDecodeOpNonAsm,
-        FusedRopeKVCachePrefillOpAsm,
-        FusedRopeKVCachePrefillOpNonAsm,
     )
 else:
     logging.info(

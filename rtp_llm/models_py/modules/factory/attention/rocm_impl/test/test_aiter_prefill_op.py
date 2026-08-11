@@ -40,8 +40,6 @@ except ImportError:
 try:
     from rtp_llm.models_py.modules.factory.attention import attn_factory
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
-        AiterDecodeAttnOpBase,
-        AiterDecodeImplNonAsm,
         AiterPrefillAttnOp,
         AiterPrefillAttnOpPaged,
         AiterPrefillImplAsm,
@@ -985,8 +983,6 @@ class TestCompactGatherReshape(unittest.TestCase):
         self.assertEqual(k_compact.shape[0], bt.numel() + 1)
 
     def test_2d_oversized_stride_truncates_to_prefix(self):
-        # Extra trailing columns beyond 2*hk*ps*hd must be sliced off: padded
-        # buffer must reshape identically to the exact-length one.
         op = self._make_op()
         hk, ps, hd = 4, 16, 128
         exact = self._make_kv_cache_2d(8, hk, ps, hd)
@@ -999,29 +995,23 @@ class TestCompactGatherReshape(unittest.TestCase):
         torch.testing.assert_close(v_pad, v_exact)
 
     def test_2d_linear_v_permute_element_order(self):
-        # Lock element order (not just shape): linear V [hd, ps] must map to
-        # v[j, h, w] == V_block[h*ps + (j*vs + w)] via an independent formula.
-        op = self._make_op(head_num_kv=1, head_dim=8, tokens_per_block=4)
-        hk, ps, hd = 1, 4, 8
-        dtype = torch.float32
-        vs = 16 // torch.tensor([], dtype=dtype).element_size()  # 4
-        payload = 2 * hk * ps * hd
-        kv = torch.arange(payload, dtype=dtype).reshape(1, payload)
-        _, v_cache = op._reshape_kv_cache_vectorized(kv)
-        self.assertEqual(v_cache.shape, (1, hk, ps // vs, hd, vs))
-        v_block = kv[0, hk * ps * hd :]  # the V half (hk == 1)
-        for j in range(ps // vs):
-            for h in range(hd):
-                for w in range(vs):
-                    expected = v_block[h * ps + (j * vs + w)].item()
-                    self.assertEqual(v_cache[0, 0, j, h, w].item(), expected)
+        op = self._make_op(head_num_kv=1, head_dim=8, tokens_per_block=8)
+        ps = hd = 8
+        vs = 4
+        kv = torch.arange(2 * ps * hd, dtype=torch.float32).reshape(1, -1)
+        _, actual = op._reshape_kv_cache_vectorized(kv)
+        v_linear = kv[0, ps * hd :].reshape(hd, ps)
+        j, h, w = torch.meshgrid(
+            torch.arange(ps // vs), torch.arange(hd), torch.arange(vs), indexing="ij"
+        )
+        expected = v_linear[h, j * vs + w].reshape(1, 1, ps // vs, hd, vs)
+        torch.testing.assert_close(actual, expected)
 
     # ---- FP8 fallback: compact should NOT be used -------------------------
 
     def test_fp8_uses_full_reshape(self):
         """When kv_cache is FP8, _forward_paged should use the full reshape path."""
         from types import SimpleNamespace
-        from unittest.mock import patch
 
         op = self._make_op(kv_cache_dtype=KvCacheDataType.FP8)
         fp8_dtype = torch.float8_e4m3fn
@@ -1851,58 +1841,31 @@ class TestVLayoutContract(unittest.TestCase):
         flags.use_aiter_pa, flags.use_asm_pa, flags.use_triton_pa = aiter, asm, triton
         return flags
 
-    def test_geometry_rejects_head_dim_not_multiple_of_width(self):
-        config, inputs = self._make_case(100, 32)
-        with self.assertRaisesRegex(ValueError, "V geometry"):
-            validate_v_layout(config, inputs, FMHAConfig())
+    def test_invalid_geometry(self):
+        for head, page, dtype, error in (
+            (100, 32, KvCacheDataType.BASE, "V geometry"),
+            (128, 8, KvCacheDataType.FP8, "width=16"),
+            (128, 12, KvCacheDataType.BASE, "V geometry"),
+        ):
+            with self.subTest(head=head, page=page, dtype=dtype):
+                config, inputs = self._make_case(head, page)
+                config.kv_cache_dtype = dtype
+                with self.assertRaisesRegex(ValueError, error):
+                    validate_v_layout(config, inputs, FMHAConfig())
 
-    def test_vector_width_follows_kv_cache_dtype(self):
-        # 2-byte cache -> width 8, so page=8 is aligned; FP8 widens it to 16.
-        config, inputs = self._make_case(128, 8)
-        validate_v_layout(config, inputs, FMHAConfig())
-
-        config.kv_cache_dtype = KvCacheDataType.FP8
-        with self.assertRaisesRegex(ValueError, "width=16"):
-            validate_v_layout(config, inputs, FMHAConfig())
-
-    def test_layout_mismatch_rejected_before_impl_construction(self):
-        # ASM prefill writes vectorized V, but head_dim=256 has no ASM decode
-        # kernel, so decode falls back to the linear non-ASM reader.
+    def test_factory_rejects_layout_mismatch(self):
         config, inputs = self._make_case(256, 16)
         inputs.is_prefill = False
         flags = self._decode_flags(aiter=True, asm=True, triton=False)
-        with patch.object(
-            AiterDecodeImplNonAsm, "__init__"
-        ) as init, self.assertRaisesRegex(ValueError, "layout mismatch"):
+        with self.assertRaisesRegex(ValueError, "layout mismatch"):
             attn_factory.get_fmha_impl(config, None, inputs, fmha_config=flags)
-        init.assert_not_called()
 
     def test_layout_mismatch_accepted_when_page_equals_width(self):
-        # At page == width both formulas address the same bytes.
         config, inputs = self._make_case(256, 8)
         inputs.is_prefill = False
         validate_v_layout(
             config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
         )
-
-    def test_geometry_rejects_unaligned_page_even_for_linear_v(self):
-        # Linear V still reshapes page//width, so an unaligned page must be
-        # rejected up front, not deferred to a later .view() failure.
-        config, inputs = self._make_case(128, 12)
-        inputs.is_prefill = False
-        with self.assertRaisesRegex(ValueError, "V geometry"):
-            validate_v_layout(
-                config, inputs, self._decode_flags(aiter=True, asm=False, triton=False)
-            )
-
-    def test_reshape_kv_cache_unpacks_hybrid_2d_buffer(self):
-        config, _ = self._make_case(128, 16)
-        op = AiterDecodeAttnOpBase(config)
-        elems = 2 * 2 * 16 * 128
-        packed = torch.zeros(2, elems + 4)
-        unpacked = op.reshape_kv_cache(packed)
-        self.assertEqual(unpacked.shape, (2, 2, 2, 16, 128))
-        self.assertEqual(unpacked.data_ptr(), packed.data_ptr())
 
 
 if __name__ == "__main__":

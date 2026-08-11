@@ -74,26 +74,22 @@ def make_inputs(device: torch.device) -> PyAttentionInputs:
     return inputs
 
 
-def make_impl(impl_class, op_class, config, inputs, *, linear_v=False):
+def make_impl(impl_class, op, inputs):
     # Bypass RoPE/cache insertion and test decode FMHA kernels directly.
     impl = impl_class.__new__(impl_class)
     impl.need_rope_kv_cache = False
-    impl.fmha_impl = (
-        op_class(config, linear_v=linear_v)
-        if op_class is AiterDecodeAttnOpTriton
-        else op_class(config)
-    )
+    impl.fmha_impl = op
     impl.attn_inputs = inputs
     impl.fmha_params = impl.fmha_impl.prepare(inputs)
     impl.write_cache_store_impl = None
     return impl
 
 
-def run_impl(impl_class, op_class, config, inputs, query, kv_cache, *, linear_v=False):
+def run_impl(impl_class, op, inputs, query, kv_cache):
     cache = LayerKVCache()
     cache.kv_cache_base = kv_cache.clone()
     cache.kv_scale_base = torch.empty(0, device=query.device)
-    impl = make_impl(impl_class, op_class, config, inputs, linear_v=linear_v)
+    impl = make_impl(impl_class, op, inputs)
     return impl.forward(query.clone(), cache, layer_idx=3)
 
 
@@ -158,15 +154,18 @@ class AiterDecodeLayoutParityTest(unittest.TestCase):
         ).cuda()
 
         key_phys = physical_key_for_decode(semantic_key)
-        nonasm_cache = pack_cache(key_phys, physical_value_for_nonasm(semantic_value))
-        triton_cache = pack_cache(key_phys, physical_value_for_triton(semantic_value))
+        nonasm_cache = pack_cache(
+            key_phys, physical_value_for_nonasm(semantic_value)
+        ).flatten(1)
+        triton_cache = pack_cache(
+            key_phys, physical_value_for_triton(semantic_value)
+        ).flatten(1)
 
         config = make_config()
         inputs = make_inputs(query.device)
         nonasm_output = run_impl(
             AiterDecodeImplNonAsm,
-            AiterDecodeAttnOpNonAsm,
-            config,
+            AiterDecodeAttnOpNonAsm(config),
             inputs,
             query,
             nonasm_cache,
@@ -175,12 +174,10 @@ class AiterDecodeLayoutParityTest(unittest.TestCase):
         def run_triton(cache, linear_v):
             return run_impl(
                 AiterDecodeImplTriton,
-                AiterDecodeAttnOpTriton,
-                config,
+                AiterDecodeAttnOpTriton(config, linear_v=linear_v),
                 inputs,
                 query,
                 cache,
-                linear_v=linear_v,
             )
 
         # Check both Triton V-reader contracts against the same Non-ASM reference.
@@ -203,28 +200,16 @@ class AiterDecodeLayoutParityTest(unittest.TestCase):
         )
         self.assertGreater(mismatched_l2, 0.1, f"{mismatched_l2=:.6f}")
 
-    def test_real_constructor_pairs_reader_and_writer(self):
-        config = make_config()
+    def test_factory_pairs_reader_and_writer(self):
         inputs = make_inputs(torch.device("cuda"))
-        for use_asm_pa, expected_linear_v, expected_writer in (
-            (False, True, FusedRopeKVCacheDecodeOpNonAsm),
-            (True, False, FusedRopeKVCacheDecodeOpAsm),
+        for kv_dtype, use_asm_pa, expected_linear_v, expected_writer in (
+            (KvCacheDataType.BASE, False, True, FusedRopeKVCacheDecodeOpNonAsm),
+            (KvCacheDataType.BASE, True, False, FusedRopeKVCacheDecodeOpAsm),
+            (KvCacheDataType.FP8, False, False, FusedRopeKVCacheDecodeOpAsm),
         ):
-            with self.subTest(use_asm_pa=use_asm_pa):
-                fmha_config = FMHAConfig()
-                fmha_config.use_asm_pa = use_asm_pa
-                impl = AiterDecodeImplTriton(config, inputs, fmha_config=fmha_config)
-                self.assertEqual(impl.fmha_impl.linear_v, expected_linear_v)
-                self.assertIs(type(impl.rope_kvcache_impl), expected_writer)
-
-    def test_factory_wires_linear_v_through_create(self):
-        # Full factory path: a create() that drops fmha_config would silently
-        # return the wrong V reader, so assert linear_v still flips end-to-end.
-        config = make_config()
-        inputs = make_inputs(torch.device("cuda"))
-        inputs.is_prefill = False
-        for use_asm_pa, expected_linear_v in ((False, True), (True, False)):
-            with self.subTest(use_asm_pa=use_asm_pa):
+            with self.subTest(kv_dtype=kv_dtype, use_asm_pa=use_asm_pa):
+                config = make_config()
+                config.kv_cache_dtype = kv_dtype
                 fmha_config = FMHAConfig()
                 fmha_config.use_aiter_pa = True
                 fmha_config.use_asm_pa = use_asm_pa
@@ -234,6 +219,7 @@ class AiterDecodeLayoutParityTest(unittest.TestCase):
                 )
                 self.assertIsInstance(impl, AiterDecodeImplTriton)
                 self.assertEqual(impl.fmha_impl.linear_v, expected_linear_v)
+                self.assertIs(type(impl.rope_kvcache_impl), expected_writer)
 
 
 if __name__ == "__main__":
