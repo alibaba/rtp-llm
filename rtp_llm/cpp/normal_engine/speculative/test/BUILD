@@ -57,3 +57,48 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_library(
+    name = "mtp_executor_test_support",
+    textual_hdrs = ["MtpExecutorTest.cc"],
+)
+
+cc_test(
+    name = "mtp_executor_distributed_abort_test",
+    srcs = ["MtpExecutorDistributedAbortTest.cc"],
+    args = ["--gtest_filter=MtpExecutorDistributedAbortTest.*"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/testing:device_test_utils",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "//rtp_llm/cpp/normal_engine:normal_engine",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/normal_engine/test:mock_engine",
+        ":mtp_executor_test_support",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {
+        'gpu': 'H20',
+        'gpu_count': '2',
+    },
+    size = "medium",
+    timeout = "moderate",
+)
+
+cc_test(
+    name = "speculative_config_validator_test",
+    srcs = ["SpeculativeConfigValidatorTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/engine_base:speculative_config_validator",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

@@ -33,6 +33,21 @@ cc_library(
 )
 
 cc_test(
+    name = "warm_up_test",
+    srcs = ["NormalEngineWarmUpTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "batch_stream_processor_test",
     srcs = glob([
         "NormalBatchStreamProcessorTest.cc",

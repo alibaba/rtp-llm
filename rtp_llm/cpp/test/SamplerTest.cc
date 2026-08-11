@@ -92,6 +92,14 @@ TEST_F(SamplerTest, testGeneralSampling) {
     };
 
     auto outputs = sampler_->forward(inputs);
+#if USING_CUDA
+    ASSERT_TRUE(outputs.success.defined());
+    EXPECT_TRUE(outputs.success.is_cuda());
+    EXPECT_EQ(outputs.success.scalar_type(), torch::kBool);
+    EXPECT_EQ(outputs.success.numel(), batch_size);
+#else
+    EXPECT_FALSE(outputs.success.defined());
+#endif
     std::cout << "output_token_ids: " << outputs.token_ids.cpu() << std::endl;
     std::cout << "cum_log_probs: " << outputs.cum_log_probs.cpu() << std::endl;
 
@@ -170,4 +178,14 @@ TEST_F(SamplerTest, testGeneralSampling) {
             }
         }
     }
+
+    inputs.top_k = torch::ones({static_cast<int64_t>(batch_size)}, torch::kInt32).pin_memory();
+    inputs.top_p = torch::zeros({static_cast<int64_t>(batch_size)}, torch::kFloat32).pin_memory();
+    auto deterministic_outputs = sampler_->forward(inputs);
+    EXPECT_FALSE(deterministic_outputs.success.defined());
+
+    inputs.all_probs = torch::zeros({static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)},
+                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto deterministic_outputs_with_probs = sampler_->forward(inputs);
+    EXPECT_FALSE(deterministic_outputs_with_probs.success.defined());
 }
