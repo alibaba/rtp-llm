@@ -167,6 +167,17 @@ py_test(
 )
 
 py_test(
+    name = "openai_response_metadata_test",
+    srcs = [
+        "openai_response_metadata_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "server_test",
     srcs = [
         "server_test.py",

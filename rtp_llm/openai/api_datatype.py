@@ -1,6 +1,7 @@
 import time
+import uuid
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Union
 
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
@@ -324,8 +325,24 @@ class ChatCompletionExtraOutputs(BaseModel):
     input_ids: Optional[List[List[int]]] = None
 
 
+class ChatCompletionResponseMetadata(NamedTuple):
+    id: str
+    created: int
+
+
+def create_chat_completion_response_metadata() -> ChatCompletionResponseMetadata:
+    return ChatCompletionResponseMetadata(
+        id=f"chatcmpl-{uuid.uuid4().hex}",
+        created=int(time.time()),
+    )
+
+
+def create_chat_completion_id() -> str:
+    return f"chatcmpl-{uuid.uuid4().hex}"
+
+
 class ChatCompletionResponse(BaseModel):
-    id: str = Field(default_factory=lambda: f"chat-")
+    id: str = Field(default_factory=create_chat_completion_id)
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str = ""
@@ -352,7 +369,7 @@ class ChatCompletionResponseStreamChoice(BaseModel):
 
 
 class ChatCompletionStreamResponse(BaseModel):
-    id: str = Field(default_factory=lambda: f"chat")
+    id: str = Field(default_factory=create_chat_completion_id)
     object: str = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: Optional[str] = None

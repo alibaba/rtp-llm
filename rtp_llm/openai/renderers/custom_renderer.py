@@ -17,6 +17,7 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
+    ChatCompletionResponseMetadata,
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatCompletionTokenLogprob,
@@ -30,6 +31,7 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     TopLogprob,
     UsageInfo,
+    create_chat_completion_response_metadata,
 )
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
@@ -1590,9 +1592,17 @@ class CustomChatRenderer:
         request = self.getRequest(body)
         return [StreamStatusSync(request) for _ in range(n)]
 
-    def render_stream_response_first(self, n: int, debug_info: str):
+    @staticmethod
+    def create_response_metadata() -> ChatCompletionResponseMetadata:
+        return create_chat_completion_response_metadata()
+
+    def render_stream_response_first(
+        self, n: int, debug_info: str, response_id: str, created: int
+    ):
         stream_response = self._generate_first_sync(n)
         chat_response = ChatCompletionStreamResponse(
+            id=response_id,
+            created=created,
             choices=stream_response.choices,
             usage=stream_response.usage,
             aux_info=stream_response.aux_info,
@@ -1611,6 +1621,8 @@ class CustomChatRenderer:
         max_new_tokens,  # GenerateConfig
         stop_words_str,  # GenerateConfig
         is_streaming,
+        response_id: str,
+        created: int,
     ):
         stop_word_slice_list = get_stop_word_slices(
             stop_words_str
@@ -1640,6 +1652,8 @@ class CustomChatRenderer:
             delta_list.append(delta)
         stream_response = self._generate_stream_response_sync(delta_list)
         chat_response = ChatCompletionStreamResponse(
+            id=response_id,
+            created=created,
             choices=stream_response.choices,
             usage=stream_response.usage,
             aux_info=stream_response.aux_info,
@@ -1656,6 +1670,8 @@ class CustomChatRenderer:
         output_ids_list,
         stop_words_str,
         is_streaming,
+        response_id: str,
+        created: int,
     ):
         stream_response = self._flush_buffer_sync(
             status_list,
@@ -1668,6 +1684,8 @@ class CustomChatRenderer:
             is_streaming,
         )
         chat_response = ChatCompletionStreamResponse(
+            id=response_id,
+            created=created,
             choices=stream_response.choices,
             usage=stream_response.usage,
             aux_info=stream_response.aux_info,
@@ -1675,12 +1693,20 @@ class CustomChatRenderer:
         return chat_response.model_dump_json(exclude_none=True)
 
     def render_stream_response_final(
-        self, status_list, input_len_list, output_len_list, reuse_len_list
+        self,
+        status_list,
+        input_len_list,
+        output_len_list,
+        reuse_len_list,
+        response_id: str,
+        created: int,
     ):
         stream_response = self._generate_final_sync(
             status_list, input_len_list, output_len_list, reuse_len_list
         )
         chat_response = ChatCompletionStreamResponse(
+            id=response_id,
+            created=created,
             choices=stream_response.choices,
             usage=stream_response.usage,
             aux_info=stream_response.aux_info,
@@ -1763,7 +1789,9 @@ class CustomChatRenderer:
         )
         return stream_response
 
-    def collect_complete_response(self, choice_generator):
+    def collect_complete_response(
+        self, choice_generator, response_id: str, created: int
+    ):
         all_choices = []
         usage = None
         aux_info = None
@@ -1842,6 +1870,8 @@ class CustomChatRenderer:
             logging.warning(f"No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
         chat_response = ChatCompletionResponse(
+            id=response_id,
+            created=created,
             choices=all_choices,
             usage=usage,
             aux_info=aux_info,

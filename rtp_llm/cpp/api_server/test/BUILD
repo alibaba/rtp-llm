@@ -94,6 +94,7 @@ cc_library(
         "EmbeddingServiceTest.cc",
         "InferenceDataTypeTest.cc",
         "ConcurrencyControllerTest.cc",
+        "ChatRenderMetadataTest.cc",
         "ChatServiceTest.cc",
         "TestMain.cc",
     ],

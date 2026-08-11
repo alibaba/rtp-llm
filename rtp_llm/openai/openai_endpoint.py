@@ -21,6 +21,7 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
+    ChatCompletionResponseMetadata,
     ChatCompletionStreamResponse,
     ChatMessage,
     DebugInfo,
@@ -30,6 +31,7 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
     UsageInfo,
+    create_chat_completion_response_metadata,
 )
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
@@ -311,7 +313,11 @@ class OpenaiEndpoint(object):
         debug_info: Optional[DebugInfo],
         tokenizer: Optional[Any] = None,
         model_name: str = "",
+        response_metadata: Optional[ChatCompletionResponseMetadata] = None,
     ) -> ChatCompletionResponse:
+        response_metadata = (
+            response_metadata or create_chat_completion_response_metadata()
+        )
         all_choices_by_index: Dict[int, ChatCompletionResponseChoice] = {}
         usage = None
         aux_info = None
@@ -413,6 +419,8 @@ class OpenaiEndpoint(object):
                 ]
 
         return ChatCompletionResponse(
+            id=response_metadata.id,
+            created=response_metadata.created,
             choices=all_choices,
             usage=usage,
             aux_info=aux_info,
@@ -428,6 +436,8 @@ class OpenaiEndpoint(object):
         tokenizer: Optional[Any] = None,
         model_name: str = "",
     ) -> CompleteResponseAsyncGenerator:
+        response_metadata = create_chat_completion_response_metadata()
+
         async def response_generator():
             debug_info_responded = False
 
@@ -446,6 +456,8 @@ class OpenaiEndpoint(object):
                     ]
 
                 yield ChatCompletionStreamResponse(
+                    id=response_metadata.id,
+                    created=response_metadata.created,
                     model=model_name,
                     choices=response.choices,
                     usage=response.usage,
@@ -460,6 +472,7 @@ class OpenaiEndpoint(object):
             debug_info=debug_info,
             tokenizer=tokenizer,
             model_name=model_name,
+            response_metadata=response_metadata,
         )
         return CompleteResponseAsyncGenerator(
             response_generator(), complete_response_collect_func

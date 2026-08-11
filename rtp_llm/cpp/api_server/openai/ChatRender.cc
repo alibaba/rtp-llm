@@ -16,6 +16,9 @@ void RenderContext::init(int n, std::string body, std::shared_ptr<ChatRender> ch
     auto status_list              = render.attr("_create_status_list_sync")(n, body);
     status_list_                  = std::make_shared<py::object>(status_list);
     complete_responses_           = std::make_shared<py::list>();
+    auto response_metadata        = py::cast<py::tuple>(render.attr("create_response_metadata")());
+    response_id_                  = py::cast<std::string>(response_metadata[0]);
+    response_created_             = py::cast<int64_t>(response_metadata[1]);
 }
 
 std::tuple<std::vector<int>, std::vector<int>, std::vector<int>, std::vector<th::Tensor>, std::vector<th::Tensor>>
@@ -86,7 +89,8 @@ void RenderContext::render_stream_response_final_blocking(const GenerateOutputs&
 
 std::string RenderContext::collect_complete_response() {
     py::gil_scoped_acquire acquire;
-    auto                   json_response = render_->attr("collect_complete_response")(complete_responses_.get());
+    auto json_response = render_->attr("collect_complete_response")(
+        complete_responses_.get(), response_id_, response_created_);
     auto                   res           = py::cast<std::string>(json_response);
     return res;
 }
@@ -105,14 +109,17 @@ std::string RenderContext::render_common_response(const GenerateOutputs&        
                                                       output_ids_list,
                                                       config->max_new_tokens,
                                                       config->stop_words_str,
-                                                      is_streaming);
+                                                      is_streaming,
+                                                      response_id_,
+                                                      response_created_);
     auto res           = py::cast<std::string>(json_response);
     return res;
 }
 
 std::string RenderContext::render_stream_response_first(int n, std::string debug_info) {
     py::gil_scoped_acquire acquire;
-    auto                   json_response = render_->attr("render_stream_response_first")(n, debug_info);
+    auto json_response =
+        render_->attr("render_stream_response_first")(n, debug_info, response_id_, response_created_);
     auto                   res           = py::cast<std::string>(json_response);
     return res;
 }
@@ -135,7 +142,9 @@ std::string RenderContext::render_stream_response_flush(const GenerateOutputs&  
                                                                        all_probs_list,
                                                                        output_ids_list,
                                                                        config->stop_words_str,
-                                                                       is_streaming);
+                                                                       is_streaming,
+                                                                       response_id_,
+                                                                       response_created_);
     auto res           = py::cast<std::string>(json_response);
     return res;
 }
@@ -143,8 +152,8 @@ std::string RenderContext::render_stream_response_flush(const GenerateOutputs&  
 std::string RenderContext::render_stream_response_final(const GenerateOutputs& outputs) {
     py::gil_scoped_acquire acquire;
     auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
-    auto json_response =
-        render_->attr("render_stream_response_final")(*status_list_, input_len_list, output_len_list, reuse_len_list);
+    auto json_response = render_->attr("render_stream_response_final")(
+        *status_list_, input_len_list, output_len_list, reuse_len_list, response_id_, response_created_);
     auto res = py::cast<std::string>(json_response);
     return res;
 }

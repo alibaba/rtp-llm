@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <map>
 
@@ -80,6 +81,8 @@ private:
     std::shared_ptr<py::object> status_list_;
     std::shared_ptr<py::object> render_;
     std::shared_ptr<py::list>   complete_responses_;
+    std::string                 response_id_;
+    int64_t                     response_created_ = 0;
 };
 
 }  // namespace rtp_llm
