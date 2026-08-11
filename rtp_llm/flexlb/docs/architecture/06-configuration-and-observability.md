@@ -49,7 +49,7 @@ Spring 属性/env，缺省**启动失败**。反序列化为 `ServiceRoute`：
   `heartbeat_failure_threshold=3`、`query_failure_threshold=10`、`max_query_retry_count=1`、
   `recovery_success_threshold=3`、`local_standby`。
 - `LocalStandbyConfig`：`auto_switch=true`、`block_size=0`（0=沿用引擎块大小）、
-  `entry_ttl_ms=300000`、`minimum_entry_ttl_ms=100000`、`ttl_reduction_start_ratio=0.8`、
+  `ttl_ms=300000`、`minimum_ttl_ms=100000`、`ttl_reduction_start_ratio=0.8`、
   `maximum_entries=2000000`、`capacity_multiplier=10.0`、`async_queue_capacity=100000`、
   `hash_thread_count=4`、`hash_queue_capacity=100000`。
 

@@ -38,7 +38,7 @@ public class LocalStandbyComparisonService {
                 : LocalStandbyConfig.DEFAULT_ASYNC_QUEUE_CAPACITY;
         this.pendingLocalStandbyPredictions = Caffeine.newBuilder()
                 .maximumSize(queueCapacity)
-                .expireAfterWrite(enabled ? config.getEntryTtlMs() : LocalStandbyConfig.DEFAULT_ENTRY_TTL_MS, TimeUnit.MILLISECONDS)
+                .expireAfterWrite(enabled ? config.getTtlMs() : LocalStandbyConfig.DEFAULT_TTL_MS, TimeUnit.MILLISECONDS)
                 .build();
     }
 

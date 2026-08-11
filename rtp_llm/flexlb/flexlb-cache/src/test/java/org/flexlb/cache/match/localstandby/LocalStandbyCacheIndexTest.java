@@ -100,17 +100,17 @@ class LocalStandbyCacheIndexTest {
                 worker, IntStream.range(0, 8).mapToObj(value -> (long) value).toList());
         assertEquals(
                 TimeUnit.MILLISECONDS.toNanos(300_000),
-                cacheIndex.effectiveEntryTtlNanos());
+                cacheIndex.effectiveTtlNanos());
 
         cacheIndex.addWorkerBlockMappings(worker, List.of(8L));
         long pressureTtlMs =
-                TimeUnit.NANOSECONDS.toMillis(cacheIndex.effectiveEntryTtlNanos());
+                TimeUnit.NANOSECONDS.toMillis(cacheIndex.effectiveTtlNanos());
         assertTrue(pressureTtlMs >= 199_999 && pressureTtlMs <= 200_001);
 
         cacheIndex.addWorkerBlockMappings(worker, List.of(9L));
         assertEquals(
                 TimeUnit.MILLISECONDS.toNanos(100_000),
-                cacheIndex.effectiveEntryTtlNanos());
+                cacheIndex.effectiveTtlNanos());
         cacheIndex.shutdown();
     }
 
@@ -217,13 +217,13 @@ class LocalStandbyCacheIndexTest {
     }
 
     private static LocalStandbyCacheIndex cacheIndex(
-            long entryTtlMs,
-            long minimumEntryTtlMs,
+            long ttlMs,
+            long minimumTtlMs,
             double ttlReductionStartRatio,
             long maximumEntries) {
         return new LocalStandbyCacheIndex(
-                entryTtlMs,
-                minimumEntryTtlMs,
+                ttlMs,
+                minimumTtlMs,
                 ttlReductionStartRatio,
                 maximumEntries,
                 false);

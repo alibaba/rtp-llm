@@ -99,7 +99,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `HttpLoadBalanceServer` 调 `updateFromRoutedRequest` 异步落库。master/follower 之间不复制。
 - `LocalStandbyCacheIndex`：`ConcurrentHashMap<Long blockHash, ConcurrentHashMap<worker,
   lastUpdatedNanos>>`，TTL 过期（用量超 `ttlReductionStartRatio(0.8)` 后 TTL 从
-  `entryTtlMs(300s)` 线性降至 `minimumEntryTtlMs(100s)`），容量上限
+  `ttlMs(300s)` 线性降至 `minimumTtlMs(100s)`），容量上限
   `min(存活 worker HBM 估算块数 × capacityMultiplier(10), maximumEntries(200万))`，
   达到上限拒绝新映射；daemon 清理线程每 10s 增量扫描。
 - 匹配时对每个 worker 的命中块数**减去其 `cacheMatchRollbackBlocks`**（下限 0）。

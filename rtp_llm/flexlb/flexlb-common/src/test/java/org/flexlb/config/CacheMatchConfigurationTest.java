@@ -66,8 +66,8 @@ class CacheMatchConfigurationTest {
         assertTrue(configuration.isLocalStandbyEnabled());
         assertTrue(configuration.isAutoSwitchEnabled());
         assertEquals(
-                LocalStandbyConfig.DEFAULT_ENTRY_TTL_MS,
-                configuration.getLocalStandbyConfig().getEntryTtlMs());
+                LocalStandbyConfig.DEFAULT_TTL_MS,
+                configuration.getLocalStandbyConfig().getTtlMs());
     }
 
     @Test

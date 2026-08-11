@@ -59,18 +59,18 @@ public class LocalStandbyCacheManager {
                 ? config.getCapacityMultiplier()
                 : LocalStandbyConfig.DEFAULT_CAPACITY_MULTIPLIER;
         this.configuredBlockSize = enabled ? config.getBlockSize() : 0;
-        long entryTtlMs = enabled
-                ? config.getEntryTtlMs()
-                : LocalStandbyConfig.DEFAULT_ENTRY_TTL_MS;
-        long minimumEntryTtlMs = enabled
-                ? config.getMinimumEntryTtlMs()
-                : LocalStandbyConfig.DEFAULT_MINIMUM_ENTRY_TTL_MS;
+        long ttlMs = enabled
+                ? config.getTtlMs()
+                : LocalStandbyConfig.DEFAULT_TTL_MS;
+        long minimumTtlMs = enabled
+                ? config.getMinimumTtlMs()
+                : LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS;
         double ttlReductionStartRatio = enabled
                 ? config.getTtlReductionStartRatio()
                 : LocalStandbyConfig.DEFAULT_TTL_REDUCTION_START_RATIO;
         this.cacheIndex = new LocalStandbyCacheIndex(
-                entryTtlMs,
-                minimumEntryTtlMs,
+                ttlMs,
+                minimumTtlMs,
                 ttlReductionStartRatio,
                 configuredMaximumEntries,
                 enabled);

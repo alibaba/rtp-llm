@@ -81,9 +81,9 @@ public class ModelServiceConfiguration {
         }
         if (localStandby.getBlockSize() < 0
                 || localStandby.getBlockSize() > Integer.MAX_VALUE
-                || localStandby.getEntryTtlMs() <= 0
-                || localStandby.getMinimumEntryTtlMs() <= 0
-                || localStandby.getMinimumEntryTtlMs() > localStandby.getEntryTtlMs()
+                || localStandby.getTtlMs() <= 0
+                || localStandby.getMinimumTtlMs() <= 0
+                || localStandby.getMinimumTtlMs() > localStandby.getTtlMs()
                 || !Double.isFinite(localStandby.getTtlReductionStartRatio())
                 || localStandby.getTtlReductionStartRatio() <= 0
                 || localStandby.getTtlReductionStartRatio() >= 1

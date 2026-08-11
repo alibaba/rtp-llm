@@ -137,8 +137,8 @@ object at the same level as `role_endpoints`:
     "leader_refresh_interval_ms": 10000,
     "local_standby": {
       "auto_switch": true,
-      "entry_ttl_ms": 300000,
-      "minimum_entry_ttl_ms": 100000,
+      "ttl_ms": 300000,
+      "minimum_ttl_ms": 100000,
       "ttl_reduction_start_ratio": 0.8,
       "maximum_entries": 2000000,
       "capacity_multiplier": 10
@@ -165,7 +165,7 @@ Local Standby automatically; the current request still falls back after its KVCM
 Local Standby multiplies each worker's HBM block capacity reported by `GetWorkerStatus` by
 `capacity_multiplier`, sums the results, and caps the global metadata budget at
 `maximum_entries`. The global TTL starts decreasing linearly at
-`ttl_reduction_start_ratio` utilization, from `entry_ttl_ms` to `minimum_entry_ttl_ms` at full
+`ttl_reduction_start_ratio` utilization, from `ttl_ms` to `minimum_ttl_ms` at full
 utilization. Below 80% utilization, cleanup runs every 30 seconds and scans roughly 10% of block
 hashes. Between 80% and 90%, it runs every 20 seconds and scans roughly 20%. At or above 90%, it
 runs every 10 seconds and scans the full index. The request that first raises utilization to 90%
