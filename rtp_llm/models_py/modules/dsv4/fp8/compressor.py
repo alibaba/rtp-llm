@@ -601,28 +601,37 @@ class CompressorFP8(PoolBackedModule):
         if wgate_src is None:
             wgate_src = self.wgate.weight.data
         with torch.no_grad(), weights_region():
-            fused = torch.cat(
-                [wkv_src.to(torch.bfloat16), wgate_src.to(torch.bfloat16)], dim=0
-            ).contiguous()
+            fused = self._merge_wkv_wgate(wkv_src, wgate_src)
             self._wkv_wgate_fused = fused
             out_dim = coff * self.head_dim
             self.wkv.weight = nn.Parameter(fused[:out_dim], requires_grad=False)
             self.wgate.weight = nn.Parameter(fused[out_dim:], requires_grad=False)
 
-    def reload_fused_weights(self) -> None:
-        """Level-2 wake: rebuild the fused wkv/wgate weight from the reloaded raws.
+    @staticmethod
+    def _merge_wkv_wgate(wkv: torch.Tensor, wgate: torch.Tensor) -> torch.Tensor:
+        return torch.cat(
+            [wkv.to(torch.bfloat16), wgate.to(torch.bfloat16)], dim=0
+        ).contiguous()
 
-        ``resume("weights")`` blank-remapped ``_wkv_wgate_fused`` (and the
-        wkv/wgate views into it) because it was allocated in the weights region
-        with no host backup. The raw wkv/wgate live in ModelWeights and were
-        reloaded in place by ``reload_weights_from_loader`` (data_ptr preserved),
-        so ``_raw_wkv_src`` / ``_raw_wgate_src`` now hold the correct reloaded
-        values. Drop the stale fused buffer, then re-cat + re-point the views,
-        re-tagging the fresh buffer via ``weights_region`` for the next sleep.
-        Must run OUTSIDE ``suppress_weights_region``."""
-        self._wkv_wgate_fused = None
-        torch.cuda.empty_cache()
-        self._fuse_wkv_wgate(self.coff, self._raw_wkv_src, self._raw_wgate_src)
+    def reload_fused_weights(self) -> None:
+        """Refresh the derived weight after a level-2 checkpoint reload.
+
+        CUDA graphs retain the fused weight's address, so refresh its contents
+        without replacing the storage or its Parameter views.
+        """
+        resident = self._wkv_wgate_fused
+        if resident is None:
+            raise RuntimeError("reload_fused_weights: fused weight is not initialized")
+
+        with torch.no_grad():
+            rebuilt = self._merge_wkv_wgate(self._raw_wkv_src, self._raw_wgate_src)
+            if rebuilt.shape != resident.shape or rebuilt.dtype != resident.dtype:
+                raise RuntimeError(
+                    "reload_fused_weights: rebuilt fused weight does not match "
+                    f"resident storage: rebuilt={tuple(rebuilt.shape)}/{rebuilt.dtype}, "
+                    f"resident={tuple(resident.shape)}/{resident.dtype}"
+                )
+            resident.copy_(rebuilt)
 
     # ----------------------------------------------------------------------
     # Compatibility shims (kept to match the BF16 ``Compressor`` API surface
