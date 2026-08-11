@@ -18,21 +18,23 @@
 
 ## ROCm KV-cache V layout and PA flag combinations
 
-The decode PA kernel must read the same physical V layout that the RoPE/cache op writes. BASE cache
-uses either linear `head_dim × page` or vectorized `page/width × head_dim × width`; FP8 cache is
-always vectorized. `width` is `16 // itemsize` (8 for BF16/FP16, 16 for FP8).
+The matrix uses `[prefill writer:layout] (decode reader:layout)`, where `V` is vectorized and `L` is
+linear. It assumes the default `page=16`, BF16/FP16 for BASE cache, and FP8 E4M3; FP8 has
+`width=16`, so its linear and vectorized addressing coincide when `page=width`. The rows apply to
+full-attention MHA with an interleaved RoPE KV cache, not MLA.
 
-- `--use_asm_pa 1` selects a vectorized prefill writer. With BASE cache,
-  `--use_asm_pa 0` selects the linear non-ASM writer.
-- `--use_triton_pa 1` makes Triton decode use the writer selected above. Without Triton, ASM decode
-  is vectorized and supports `size_per_head=128`; non-ASM decode is linear.
-- `head_dim` and `page` must be multiples of `width`. At `page == width`, linear and vectorized
-  addressing coincide. `page` is `--kernel_seq_size_per_block`, falling back to
-  `--seq_size_per_block`, then 16.
-- Non-ASM decode requires `page` to divide its 512-token partition for BASE cache with
-  `head_dim <= 128` and `max_seq_len <= 16384`, or its 256-token partition otherwise.
+| aiter/asm/triton | 128 BASE | 128 FP8 | 256 BASE | 256 FP8 | fix for ❌ |
+|---|---|---|---|---|---|
+| `1/1/1` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | — |
+| `1/1/0` **(default)** | ✅ `[Asm:V] (Asm:V)` | ✅ `[Asm:V] (Asm:V)` | ❌ `[Asm:V] (NonAsm:L)` | ✅ `[Asm:V] (NonAsm:L)` `page=width` | `--use_triton_pa 1`, or `--use_asm_pa 0` on BASE |
+| `1/0/1` | ✅ `[NonAsm:L] (TritonLin:L)` | ✅ `[NonAsm:V] (Triton:V)` | ✅ `[NonAsm:L] (TritonLin:L)` | ✅ `[NonAsm:V] (Triton:V)` | — |
+| `1/0/0` | ✅ `[NonAsm:L] (NonAsm:L)` | ✅ `[NonAsm:V] (NonAsm:L)` `page=width` | ✅ `[NonAsm:L] (NonAsm:L)` | ✅ `[NonAsm:V] (NonAsm:L)` `page=width` | `--use_triton_pa 1` for non-default FP8 pages |
+| `0/1/1` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | — |
+| `0/1/0` | ✅ `[Asm:V] (Asm:V)` | ✅ `[Asm:V] (Asm:V)` | ❌ `[Asm:V] (none)` | ❌ `[Asm:V] (none)` | `--use_triton_pa 1` |
+| `0/0/1` | ❌ `[none] (TritonLin:L)` | ❌ `[none] (Triton:V)` | ❌ `[none] (TritonLin:L)` | ❌ `[none] (Triton:V)` | `--use_asm_pa 1`, or `--use_aiter_pa 1` |
+| `0/0/0` | ❌ `[none] (none)` | ❌ `[none] (none)` | ❌ `[none] (none)` | ❌ `[none] (none)` | `--use_aiter_pa 1` |
 
-The factory rejects incompatible layouts before constructing an implementation. For BASE cache
-with `size_per_head=256`, enable Triton or disable ASM so prefill and decode both use linear V.
-Prefill/decode-disaggregated roles must use the same PA flags; cross-process layout negotiation is
-not provided. These checks apply to full-attention MHA with a RoPE KV cache, not MLA.
+The vector width is `16 // itemsize`; both `head_dim` and `page` must be divisible by it. Non-ASM
+decode also requires `page` to divide its selected 512- or 256-token partition. The factory rejects
+invalid geometry, missing implementations, and non-equivalent writer/reader layouts; disaggregated
+prefill and decode roles must therefore use the same PA flags because no layout negotiation exists.
