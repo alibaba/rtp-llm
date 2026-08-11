@@ -60,6 +60,13 @@ void GenerateStateMachine::handleWaiting() {
     if (!events_.has(StreamEvents::CanRun)) {
         return;
     }
+    // Async cache preparation deliberately leaves the stream in WAITING. The
+    // original FIFO admission path publishes it only after the current GPU
+    // round has completed; no allocator or connector work remains there.
+    if (events_.has(StreamEvents::CachePrepared)) {
+        status.store(StreamState::RUNNING, std::memory_order_release);
+        return;
+    }
     // LoadInitiated 未设置时，必须先执行 initKVBlock 和 asyncLoadCache
     if (!events_.has(StreamEvents::LoadInitiated)) {
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);

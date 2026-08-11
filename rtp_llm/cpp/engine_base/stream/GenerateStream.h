@@ -23,6 +23,12 @@
 
 namespace rtp_llm {
 
+enum class CachePrepareResult {
+    DONE,
+    WAIT,
+    LACK_MEM,
+};
+
 // GenerateStream-owned buffers stay on host by default; KV cache is the device-side exception.
 
 struct StreamUpdateInfo {
@@ -299,7 +305,8 @@ public:
     size_t reserveStep() const {
         return reserve_step_;
     }
-    StreamState moveToNext();
+    StreamState        moveToNext();
+    CachePrepareResult prepareCache();
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is active (no error and not finished)

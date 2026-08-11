@@ -2,6 +2,7 @@
 
 #include <queue>
 #include <tuple>
+#include <thread>
 #include <vector>
 #include <atomic>
 #include <unordered_map>
@@ -12,6 +13,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/engine_base/schedulers/EngineScheduleInfo.h"
+
 namespace rtp_llm {
 
 class FIFOScheduler: public SchedulerBase {
@@ -57,6 +59,7 @@ private:
     size_t countInitedKVCacheStreams() const;
     void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
     bool   waitPredicate();
+    void   cachePrepareLoop();
     void   addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     void   evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
@@ -87,6 +90,9 @@ protected:
     const bool                   worker_status_snapshot_enabled_ = false;
     std::atomic<bool>            stop_                           = false;
     bool                         schedule_trigger_               = false;
+    bool                         async_cache_prepare_enabled_    = false;
+    std::thread                  cache_prepare_thread_;
+    GenerateStreamPtr            cache_prepare_blocked_stream_;
     std::mutex                   lock_;
     std::condition_variable      cond_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
