@@ -3,12 +3,20 @@ Adapter to provide a unified interface from individual config objects.
 This allows Router and Executor classes to work with specific config objects.
 """
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 
-_UNSET_QUANT_CONFIG = object()
+if TYPE_CHECKING:
+    from rtp_llm.config.quant_config import QuantizationConfig
+
+
+class _UnsetQuantConfig:
+    pass
+
+
+_UNSET_QUANT_CONFIG = _UnsetQuantConfig()
 
 
 class MoEConfigAdapter:
@@ -22,7 +30,11 @@ class MoEConfigAdapter:
         model_config: ModelConfig,
         parallelism_config: ParallelismConfig,
         moe_config: Optional[MoeConfig] = None,
-        quant_config=_UNSET_QUANT_CONFIG,
+        # Omitted means inherit the model-level config; explicit None means
+        # this layer is intentionally excluded from quantization.
+        quant_config: Union["QuantizationConfig", None, _UnsetQuantConfig] = (
+            _UNSET_QUANT_CONFIG
+        ),
         enable_cuda_graph: bool = False,
     ):
         if not isinstance(enable_cuda_graph, bool):
@@ -31,7 +43,7 @@ class MoEConfigAdapter:
         self.parallelism_config = parallelism_config
         self.moe_config = moe_config if moe_config is not None else MoeConfig()
         self.quant_config = (
-            getattr(model_config, "quant_config", None)
+            model_config.quant_config
             if quant_config is _UNSET_QUANT_CONFIG
             else quant_config
         )

@@ -65,7 +65,9 @@ def _moe_config():
     )
 
 
-def _runtime_model_config(num_experts=2, quant_config=None, hidden_size=8):
+def _runtime_model_config(
+    num_experts=2, quant_config=None, hidden_size=8, activation_type="SiGLU"
+):
     return types.SimpleNamespace(
         data_type="fp32",
         quant_config=quant_config,
@@ -74,7 +76,7 @@ def _runtime_model_config(num_experts=2, quant_config=None, hidden_size=8):
         moe_k=1,
         moe_topk_group=1,
         hidden_size=hidden_size,
-        activation_type="SiGLU",
+        activation_type=activation_type,
         attn_config=types.SimpleNamespace(head_num=2),
     )
 
@@ -91,6 +93,7 @@ def _make_experts(
     dp_size=1,
     quant_config=None,
     model_quant_config=_MODEL_QUANT_UNSET,
+    activation_type="SiGLU",
 ):
     quant_config = quant_config or QuantizationConfig("none")
     if model_quant_config is _MODEL_QUANT_UNSET:
@@ -114,7 +117,7 @@ def _make_experts(
         ep_rank=ep_rank,
         params_dtype=torch.float32,
         model_config=_runtime_model_config(
-            num_experts, model_quant_config, hidden_size
+            num_experts, model_quant_config, hidden_size, activation_type
         ),
         parallelism_config=_parallelism(tp_size, tp_rank, ep_size, ep_rank, dp_size),
         moe_config=_moe_config(),
@@ -870,6 +873,23 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
         layer = _make_experts(num_experts=1, quant_config=quant)
         self.assertTrue(layer._enable_cuda_graph())
 
+    def test_unsupported_moe_activation_fails_at_construction(self):
+        with self.assertRaisesRegex(ValueError, "supports activation_type='SiGLU'"):
+            _make_experts(num_experts=1, activation_type="GELU")
+
+    def test_static_activation_fp8_scale_fails_with_explicit_error(self):
+        layer = _make_experts(
+            num_experts=1,
+            quant_config=QuantizationConfig("fp8"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "Static-activation FP8 MoE"):
+            layer._dispatch_scale(
+                0,
+                "gate_proj",
+                "input_scale",
+                torch.ones(1, dtype=torch.float32),
+            )
+
 
 class MoeRuntimeConfigTest(unittest.TestCase):
     def test_adapter_distinguishes_inherited_and_explicit_none_quant_config(self):
@@ -1034,6 +1054,69 @@ class Qwen3MoeModelTest(unittest.TestCase):
                     with self.assertRaises((TypeError, ValueError)):
                         config_cls(is_quanted=True, **kwargs)
 
+    def test_source_quant_configs_preserve_normalized_ignore_patterns(self):
+        from rtp_llm.config.quant_config import (
+            CompressedW4A8Int4PerChannelQuantConfig,
+            ModelOptFp4Config,
+            MXFp4QuarkQuantConfig,
+        )
+
+        ignored = [" model.layers.0.mlp ", "model.layers.0.mlp"]
+        for config in (
+            MXFp4QuarkQuantConfig(
+                bits=4,
+                group_size=0,
+                is_quanted=True,
+                ignored_layers=ignored,
+            ),
+            ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=True,
+                ignored_layers=ignored,
+            ),
+        ):
+            self.assertEqual(config.ignored_layers, ["model.layers.0.mlp"])
+
+        compressed = CompressedW4A8Int4PerChannelQuantConfig(
+            bits=4,
+            group_size=32,
+            is_quanted=True,
+            ignore_patterns=ignored,
+        )
+        self.assertIs(compressed.ignore_patterns, compressed.ignored_layers)
+        self.assertEqual(compressed.ignore_patterns, ["model.layers.0.mlp"])
+
+    def test_modelopt_checkpoint_preserves_ignore_and_exclude_patterns(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            with open(os.path.join(model_path, "config.json"), "w") as output:
+                json.dump(
+                    {
+                        "quantization_config": {
+                            "quant_method": "modelopt",
+                            "ignore": [" model.layers.0.mlp "],
+                            "exclude": ["lm_head"],
+                            "config_groups": {
+                                "group_0": {
+                                    "weights": {
+                                        "type": "float",
+                                        "num_bits": 4,
+                                        "group_size": 16,
+                                    },
+                                    "input_activations": {"num_bits": 4},
+                                }
+                            },
+                        }
+                    },
+                    output,
+                )
+
+            parsed = SourceQuantizationConfig.load_from_ckpt(model_path)
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.ignored_layers, ["model.layers.0.mlp"])
+        self.assertEqual(parsed.exclude_modules, {"lm_head"})
+
     def test_invalid_boolean_config_is_rejected(self):
         config = self._config()
         config.tie_word_embeddings = "true"
@@ -1074,12 +1157,12 @@ class Qwen3MoeModelTest(unittest.TestCase):
         )
         self.assertEqual((model.lm_head.tp_size, model.lm_head.tp_rank), (2, 1))
 
-    def test_router_gate_respects_fp8_ignore_rule(self):
+    def test_router_gate_stays_unquantized_for_fp8_model(self):
         source_quant = types.SimpleNamespace(
             get_runtime_method_key=lambda: "FP8_PER_BLOCK",
             get_method=lambda: "FP8_PER_BLOCK",
             weight_block_size=[128, 128],
-            modules_to_not_convert=["model.layers.{i}.mlp.gate"],
+            modules_to_not_convert=[],
         )
         config = self._config()
         config.quant_config = source_quant

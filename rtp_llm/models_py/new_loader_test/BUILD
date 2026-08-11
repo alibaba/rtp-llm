@@ -16,7 +16,7 @@ py_test(
         "gpu": "H20",
         "gpu_count": "1",
     },
-    tags = ["gpu"],
+    tags = ["H20"],
     deps = [
         "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm:numpy",
