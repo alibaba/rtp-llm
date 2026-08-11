@@ -33,6 +33,7 @@ from rtp_llm.models_py.model_desc.minimax_m3_eagle1 import MiniMaxM3Eagle1Model
 from rtp_llm.models_py.modules.hybrid.msa_attention import (
     MSAAttention,
     _build_target_verify_token_metadata,
+    _prepare_target_verify_addressing,
     _repeat_request_block_table_for_verify_tokens,
 )
 from rtp_llm.models_py.triton_kernels.sparse_msa.decode.topk_sparse import (
@@ -464,7 +465,8 @@ class TargetVerifyAttentionContractTest(unittest.TestCase):
         model = object.__new__(MiniMaxM3Model)
         torch.nn.Module.__init__(model)
         model.config = SimpleNamespace(getAttentionConfigs=lambda tp_size: tp_size)
-        model.parallelism_config = "parallelism"
+        parallelism = SimpleNamespace(get_attn_tp_size=lambda: 1)
+        model.parallelism_config = parallelism
         attn_inputs = SimpleNamespace(is_target_verify=True, is_cuda_graph=False)
         inputs = SimpleNamespace(attention_inputs=attn_inputs)
 
@@ -475,7 +477,7 @@ class TargetVerifyAttentionContractTest(unittest.TestCase):
             actual = model.prepare_fmha_impl(inputs, is_cuda_graph=True)
 
         self.assertIsInstance(actual, FakeTargetVerifyImpl)
-        self.assertEqual(calls, [(1, attn_inputs, "parallelism")])
+        self.assertEqual(calls, [(1, attn_inputs, parallelism)])
         self.assertTrue(attn_inputs.is_cuda_graph)
 
 
@@ -652,6 +654,37 @@ class TargetVerifyTokenMetadataTest(unittest.TestCase):
         )
 
         self.assertTrue(all(lhs is rhs for lhs, rhs in zip(first, later)))
+
+    def test_fused_cuda_addressing_is_explicit(self):
+        attention = self._attention(2)
+        inputs = self._inputs(torch.tensor([[1, 2], [3, 4]], dtype=torch.int32))
+
+        with patch(
+            "rtp_llm.models_py.modules.hybrid.msa_attention._prepare_target_verify_addressing",
+            wraps=_prepare_target_verify_addressing,
+        ) as prepare:
+            attention._target_verify_addressing(
+                inputs,
+                total_tokens=6,
+                device=torch.device("cpu"),
+                use_fused_cuda=True,
+            )
+
+        self.assertTrue(prepare.call_args.kwargs["use_fused_cuda"])
+
+        MSAAttention._target_verify_shared_meta = None
+        with patch(
+            "rtp_llm.models_py.modules.hybrid.msa_attention._prepare_target_verify_addressing",
+            wraps=_prepare_target_verify_addressing,
+        ) as prepare:
+            attention._target_verify_addressing(
+                inputs,
+                total_tokens=6,
+                device=torch.device("cpu"),
+                use_fused_cuda=False,
+            )
+
+        self.assertFalse(prepare.call_args.kwargs["use_fused_cuda"])
 
     def test_rebuilds_addressing_when_layer_index_rolls_back(self):
         first_layer = self._attention(2)

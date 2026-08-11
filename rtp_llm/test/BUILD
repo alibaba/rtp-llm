@@ -342,3 +342,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     timeout = "short",
 )
+
+py_test(
+    name = "minimax_m3_mtp_test",
+    srcs = ["minimax_m3_mtp_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "short",
+)

@@ -948,8 +948,9 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
 
     GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 3);
 
-    auto stream_groups = StreamGroups({stream1, stream2});
+    auto stream_groups = StreamGroups({stream1, stream2, stream3});
 
     cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
@@ -961,32 +962,52 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateDecodePostDraftModelInput) {
     auto& model_input = model_input_status.value();
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len_cpu    = torch::tensor({3, 1}, torch::kInt32);
-    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1}, {2, 0, 0}}, torch::kInt32);
+    // Cover minimum, intermediate, and full acceptance. The selected dense row
+    // is batch_base + accept_len - 1 for every request.
+    spec_decode_output.accept_len_cpu    = torch::tensor({1, 2, 3}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 0, 0}, {2, 3, 0}, {2, 3, 1}}, torch::kInt32);
     spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
     spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
     torch::Tensor hidden_states_d_t;
 
     GptModelOutputs model_output;
-    model_output.all_hidden_states =
-        torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f}, torch::kFloat32)
-            .reshape({6, 2});
+    model_output.all_hidden_states = torch::tensor({0.1f,
+                                                    0.2f,
+                                                    0.3f,
+                                                    0.4f,
+                                                    0.5f,
+                                                    0.6f,
+                                                    1.1f,
+                                                    1.2f,
+                                                    1.3f,
+                                                    1.4f,
+                                                    1.5f,
+                                                    1.6f,
+                                                    2.1f,
+                                                    2.2f,
+                                                    2.3f,
+                                                    2.4f,
+                                                    2.5f,
+                                                    2.6f},
+                                                   torch::kFloat32)
+                                         .reshape({9, 2});
 
     processor.updateDecodePostDraftModelInput(
-        model_input, model_output, spec_decode_output, 2, hidden_states_d_t, holder);
+        model_input, model_output, spec_decode_output, 3, hidden_states_d_t, holder);
 
     auto        combo_tokens        = model_input.combo_tokens.cpu();
-    vector<int> expect_combo_tokens = {2, 3, 1, 2, 0, 0};
+    vector<int> expect_combo_tokens = {2, 0, 0, 2, 3, 0, 2, 3, 1};
     EXPECT_EQ(expect_combo_tokens, toVec<int>(combo_tokens));
 
     EXPECT_TRUE(model_input.lm_output_indexes.is_cuda());
     auto        lm_output_indexes        = model_input.lm_output_indexes.cpu();
-    vector<int> expect_lm_output_indexes = {2, 3};
+    vector<int> expect_lm_output_indexes = {0, 4, 8};
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
     auto          last_hidden_states        = model_input.last_hidden_states;
-    vector<float> expect_last_hidden_states = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f};
+    vector<float> expect_last_hidden_states = {
+        0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 1.1f, 1.2f, 1.3f, 1.4f, 1.5f, 1.6f, 2.1f, 2.2f, 2.3f, 2.4f, 2.5f, 2.6f};
     EXPECT_EQ(expect_last_hidden_states, toVec<float>(last_hidden_states));
 }
 

@@ -1907,6 +1907,9 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     // main-stream mutations cannot affect draft prefill prepare.
     auto* prefill_model    = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy = model_input;
+    // Async prepare runs before runDraftPrefillForward(), so mark the copied
+    // input with the same explicit recurrent draft-prefill phase.
+    model_input_copy.is_mtp_draft_prefill      = true;
     model_input_copy.kv_block_stride_bytes     = mtp_cache_cfg.kv_block_stride_bytes;
     model_input_copy.kv_scale_stride_bytes     = mtp_cache_cfg.kv_scale_stride_bytes;
     model_input_copy.use_opaque_kv_cache_store = mtp_cache_cfg.use_opaque_kv_cache_store;
@@ -2198,8 +2201,10 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     //
     // See glm5_pd_sep_mtp_nvlink_barrier_crash_debug.md §12 for the
     // empirical trace and earlier Method 6.1 (DP AllReduce) attempt.
-    const bool use_sp_prefill_cuda_graph = sp_prefill_draft_model_ != nullptr;
-    model_input.mtp_iteration_step       = 0;
+    const bool use_sp_prefill_cuda_graph    = sp_prefill_draft_model_ != nullptr;
+    const bool previous_draft_prefill_phase = model_input.is_mtp_draft_prefill;
+    model_input.is_mtp_draft_prefill        = true;
+    model_input.mtp_iteration_step          = 0;
     RTP_LLM_PROFILE_SCOPE_DYNAMIC(
         "executor.mtp.decode_step(draft_model_forward,use_sp=%d,sp_cg=%d,sp_prefill_cg=%d,is_fake=%d)",
         static_cast<int>(use_sp_prefill_cuda_graph),
@@ -2274,7 +2279,8 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
             maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_model_);
         }
     }
-    model_input.mtp_iteration_step = -1;
+    model_input.is_mtp_draft_prefill = previous_draft_prefill_phase;
+    model_input.mtp_iteration_step   = -1;
     logMtpDecodeModelOutput("draft_prefill_forward_output", draft_prefill_model_output, model_input.is_fake_stream);
     return draft_prefill_model_output;
 }

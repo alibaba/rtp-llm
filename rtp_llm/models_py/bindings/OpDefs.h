@@ -286,6 +286,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    bool          is_mtp_draft_prefill{false};
     int           mtp_iteration_step{-1};
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;

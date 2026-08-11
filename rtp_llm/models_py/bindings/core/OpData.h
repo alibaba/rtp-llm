@@ -97,6 +97,11 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
 
+    // True only for the recurrent, decode-side MTP draft-prefill pass. The
+    // initial prompt prefill also uses mtp_iteration_step == 0, so the phase
+    // cannot be inferred safely from the iteration marker.
+    bool is_mtp_draft_prefill = false;
+
     // MTP draft iteration marker for GLM-5.2 DSA top-k sharing:
     // -1: not an MTP draft iteration or unknown
     //  0: first draft step, compute and publish top-k indices

@@ -375,7 +375,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
-        graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
+        try {
+            graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("CUDA graph runner construction failed with Python exception:\n%s", e.what());
+            throw;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("CUDA graph runner construction failed:\n%s", e.what());
+            throw;
+        }
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
@@ -401,6 +409,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_runner_->initCapture();
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
+            throw;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("Model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;
         }
     }

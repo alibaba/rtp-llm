@@ -402,13 +402,14 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     // Calculate cu_seqlens
-    int    batch_size                 = py_attn_inputs.input_lengths.size(0);
-    size_t context_batch_size         = py_attn_inputs.prefix_lengths.size(0);
-    size_t decode_batch_size          = py_attn_inputs.sequence_lengths.size(0);
-    py_attn_inputs.dtype              = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill         = !decode_batch_size;
-    py_attn_inputs.is_target_verify   = inputs.is_target_verify;
-    py_attn_inputs.mtp_iteration_step = inputs.mtp_iteration_step;
+    int    batch_size                   = py_attn_inputs.input_lengths.size(0);
+    size_t context_batch_size           = py_attn_inputs.prefix_lengths.size(0);
+    size_t decode_batch_size            = py_attn_inputs.sequence_lengths.size(0);
+    py_attn_inputs.dtype                = dataTypeToTorchType(description_.data_type);
+    py_attn_inputs.is_prefill           = !decode_batch_size;
+    py_attn_inputs.is_target_verify     = inputs.is_target_verify;
+    py_attn_inputs.is_mtp_draft_prefill = inputs.is_mtp_draft_prefill;
+    py_attn_inputs.mtp_iteration_step   = inputs.mtp_iteration_step;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",

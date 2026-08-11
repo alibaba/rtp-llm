@@ -803,17 +803,18 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     const auto& new_tokens = update_info.new_tokens;
-
-    if (isPerfTest()) {
-        const_cast<torch::Tensor&>(new_tokens).zero_();
-    }
+    // Perf tests suppress EOS/stop behavior with zero response tokens, but the
+    // speculative recurrent state must still consume the real committed token.
+    // Never mutate the caller-owned tensor: MTP also exposes a view of it as
+    // target_token_gpu for the following draft refresh.
+    auto output_tokens = isPerfTest() ? torch::zeros_like(new_tokens) : new_tokens;
 
     const int old_seq_length = seqLength();
     auto      num_new_tokens = update_info.num_new_tokens;
     int       cur_cached_len = seqLength() - 1;
 
     int error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
+    if (!complete_token_ids_->update(output_tokens,
                                      begin_time_us_,
                                      num_new_tokens,
                                      generate_input_->inputLength(),

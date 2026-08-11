@@ -142,6 +142,46 @@ def _build_target_verify_token_metadata(
     return positions_i64.to(torch.int32), sequence_lengths.to(torch.int32), valid_tokens
 
 
+def _prepare_target_verify_addressing(
+    request_block_table: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    input_lengths: torch.Tensor,
+    total_tokens: int,
+    device: torch.device,
+    use_fused_cuda: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build token-row MSA addressing, optionally using one CUDA launch."""
+    batch_size = int(prefix_lengths.numel())
+    if batch_size <= 0 or total_tokens % batch_size != 0:
+        raise RuntimeError(
+            "MSA target verify expects flat [batch * verify_tokens, hidden] input; "
+            f"got tokens={total_tokens}, batch={batch_size}"
+        )
+    verify_tokens = total_tokens // batch_size
+    if use_fused_cuda and request_block_table.is_cuda:
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        return tuple(
+            rtp_llm_ops.mtp_msa_target_verify_addressing_prepare(
+                request_block_table,
+                prefix_lengths,
+                input_lengths,
+                verify_tokens,
+            )
+        )
+
+    physical_block_table = _repeat_request_block_table_for_verify_tokens(
+        request_block_table, batch_size, total_tokens
+    )
+    positions, sequence_lengths, valid_token_mask = _build_target_verify_token_metadata(
+        prefix_lengths,
+        input_lengths,
+        total_tokens,
+        device,
+    )
+    return physical_block_table, positions, sequence_lengths, valid_token_mask
+
+
 # ----------------------------------------------------------------------------
 # Fused QKV split + RoPE(K) + pack for CP prefill.
 #
@@ -368,6 +408,8 @@ def _fused_qk_idx_norm_rope_write_paged_decode_kernel(
     KV_STRIDE_HEAD: tl.constexpr,
     KV_STRIDE_PAGE: tl.constexpr,
     KV_STRIDE_DIM: tl.constexpr,
+    MAX_PHYSICAL_BLOCKS: tl.constexpr,
+    MAX_BLOCKS_PER_ROW: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     ROTARY_DIM: tl.constexpr,
@@ -405,9 +447,12 @@ def _fused_qk_idx_norm_rope_write_paged_decode_kernel(
     token_pos = decode_kv_len - 1
     page_index = token_pos // PAGE_SIZE
     page_offset = token_pos - page_index * PAGE_SIZE
+    valid_page_index = (
+        (decode_kv_len > 0) & (page_index >= 0) & (page_index < MAX_BLOCKS_PER_ROW)
+    )
     kv_block_id = tl.load(
         block_table_ptr + token_id * BT_STRIDE_B + page_index * BT_STRIDE_BLK,
-        mask=decode_kv_len > 0,
+        mask=valid_page_index,
         other=-1,
     ).to(tl.int64)
     head_off = tl.arange(0, BLOCK_HEAD)
@@ -515,7 +560,9 @@ def _fused_qk_idx_norm_rope_write_paged_decode_kernel(
             mask=rem_mask & is_idx_q,
         )
 
-    valid_paged_slot = kv_block_id >= 0
+    valid_paged_slot = (
+        valid_page_index & (kv_block_id >= 0) & (kv_block_id < MAX_PHYSICAL_BLOCKS)
+    )
     store_block = tl.where(valid_paged_slot, kv_block_id, 0)
     store_page_offset = tl.where(valid_paged_slot, page_offset, 0)
 
@@ -649,6 +696,8 @@ def _fused_qk_idx_norm_rope_write_paged_decode(
         KV_STRIDE_HEAD=int(paged_kv_base.stride(2)),
         KV_STRIDE_PAGE=int(paged_kv_base.stride(3)),
         KV_STRIDE_DIM=int(paged_kv_base.stride(4)),
+        MAX_PHYSICAL_BLOCKS=int(paged_kv_base.shape[0]),
+        MAX_BLOCKS_PER_ROW=int(phys_block_table.shape[1]),
         PAGE_SIZE=page_size,
         HEAD_DIM=head_dim,
         ROTARY_DIM=rotary_dim,
@@ -1935,6 +1984,7 @@ class MSAAttention(nn.Module):
         attn_inputs: PyAttentionInputs,
         total_tokens: int,
         device: torch.device,
+        use_fused_cuda: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         # Sparse layers execute in increasing layer order within one target
         # forward. The MSA request block table, positions, and validity metadata
@@ -1948,15 +1998,15 @@ class MSAAttention(nn.Module):
         prefix_lengths = attn_inputs.prefix_lengths
         input_lengths = attn_inputs.input_lengths
         request_block_table = self._physical_block_table(attn_inputs)
-        batch_size = int(prefix_lengths.numel())
-        phys_block_table = _repeat_request_block_table_for_verify_tokens(
-            request_block_table, batch_size, total_tokens
-        )
-        positions, seq_lens, valid_token_mask = _build_target_verify_token_metadata(
-            prefix_lengths,
-            input_lengths,
-            total_tokens,
-            device,
+        phys_block_table, positions, seq_lens, valid_token_mask = (
+            _prepare_target_verify_addressing(
+                request_block_table,
+                prefix_lengths,
+                input_lengths,
+                total_tokens,
+                device,
+                use_fused_cuda=use_fused_cuda,
+            )
         )
         addressing = (
             request_block_table,
@@ -1977,12 +2027,30 @@ class MSAAttention(nn.Module):
             cuda_graph_capture_forward_enabled() or cuda_graph_warmup_forward_enabled()
         )
 
-    def _cuda_graph_max_kv(self, attn_inputs: PyAttentionInputs) -> int:
+    def _cuda_graph_max_kv(
+        self,
+        attn_inputs: PyAttentionInputs,
+        physical_block_table: Optional[torch.Tensor] = None,
+    ) -> int:
         max_kv = int(self._cuda_graph_max_seq_len)
-        bt = self._physical_block_table(attn_inputs)
+        bt = (
+            physical_block_table
+            if physical_block_table is not None
+            else self._physical_block_table(attn_inputs)
+        )
         if isinstance(bt, torch.Tensor) and bt.dim() >= 2:
             max_kv = min(max_kv, int(bt.shape[1]) * int(self.page_size))
         return max(max_kv, 1)
+
+    def _paged_decode_max_kv(
+        self,
+        attn_inputs: PyAttentionInputs,
+        kv_lens: torch.Tensor,
+        physical_block_table: torch.Tensor,
+    ) -> int:
+        if self._cuda_graph_forward_active():
+            return self._cuda_graph_max_kv(attn_inputs, physical_block_table)
+        return int(kv_lens.max().item())
 
     def _local_idx_heads(self) -> int:
         """Match SGLang's GQA-style sharding for sparse index-Q heads."""
@@ -3564,10 +3632,7 @@ class MSAAttention(nn.Module):
                 "conditions are not satisfied."
             )
         paged_main_k, paged_main_v, phys_block_table, paged_idx_k = paged_decode_views
-        if self._cuda_graph_forward_active():
-            max_seqlen_k = self._cuda_graph_max_kv(attn_inputs)
-        else:
-            max_seqlen_k = int(kv_lens.max().item())
+        max_seqlen_k = self._paged_decode_max_kv(attn_inputs, kv_lens, phys_block_table)
         _idx_o, o = minimax_paged_sparse_decode(
             q=q,
             sink=None,
@@ -3598,6 +3663,8 @@ class MSAAttention(nn.Module):
         kv_cache: LayerKVCache,
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
+        use_fused_addressing: bool = False,
+        use_paged_capacity_bound: bool = False,
     ) -> torch.Tensor:
         from rtp_llm.models_py.triton_kernels.sparse_msa.minimax_sparse import (
             minimax_paged_sparse_decode,
@@ -3626,6 +3693,7 @@ class MSAAttention(nn.Module):
             attn_inputs,
             total_tokens,
             device,
+            use_fused_cuda=use_fused_addressing,
         )
         request_batch_size = int(request_block_table.shape[0])
 
@@ -3692,8 +3760,8 @@ class MSAAttention(nn.Module):
             )
         paged_main_k, paged_main_v, phys_block_table, paged_idx_k = paged_decode_views
 
-        if self._cuda_graph_forward_active():
-            max_seqlen_k = self._cuda_graph_max_kv(attn_inputs)
+        if self._cuda_graph_forward_active() or use_paged_capacity_bound:
+            max_seqlen_k = self._cuda_graph_max_kv(attn_inputs, request_block_table)
         else:
             max_seqlen_k = int(seq_lens.max().item())
         _idx_o, o = minimax_paged_sparse_decode(
@@ -3726,6 +3794,55 @@ class MSAAttention(nn.Module):
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output
+
+    def forward_paged_continuation(
+        self,
+        hidden_states: torch.Tensor,
+        attn_inputs: PyAttentionInputs,
+        kv_cache: LayerKVCache,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run a fixed-width continuation directly from paged MSA state.
+
+        MiniMax-M3 MTP uses this after target verification.  Unlike prompt
+        prefill, the complete history is already in paged K/V and index-K
+        storage, so rebuilding full-history prefill scratch is unnecessary.
+        """
+        if not attn_inputs.is_prefill:
+            raise RuntimeError("paged MTP continuation must be represented as prefill")
+        request_rows = int(attn_inputs.input_lengths.numel())
+        total_tokens = int(hidden_states.shape[0])
+        if (
+            request_rows <= 0
+            or total_tokens <= 0
+            or total_tokens % request_rows != 0
+            or total_tokens // request_rows > 8
+        ):
+            raise RuntimeError(
+                "invalid recurrent MTP draft-prefill shape: "
+                f"tokens={total_tokens}, requests={request_rows}"
+            )
+        if getattr(attn_inputs, "context_parallel_info", None) is not None:
+            # CP prefill owns a different sequence-sharding contract. Preserve
+            # its existing correct fallback instead of interpreting CP metadata
+            # as fixed request rows.
+            return self.forward(
+                hidden_states,
+                attn_inputs,
+                kv_cache,
+                x_fp8=x_fp8,
+                x_scale=x_scale,
+            )
+        return self._forward_target_verify(
+            hidden_states,
+            attn_inputs,
+            kv_cache,
+            x_fp8=x_fp8,
+            x_scale=x_scale,
+            use_fused_addressing=True,
+            use_paged_capacity_bound=True,
+        )
 
     # ------------------------------------------------------------------
     def forward(

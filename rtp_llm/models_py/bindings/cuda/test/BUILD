@@ -30,3 +30,17 @@ cc_test(
     ] + torch_deps() + cuda13_torch_link_deps,
     exec_properties = {"gpu": "H20"},
 )
+
+cc_test(
+    name = "mtp_target_verify_prepare_test",
+    srcs = ["MtpTargetVerifyPrepareTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    exec_properties = {"gpu": "H20"},
+)

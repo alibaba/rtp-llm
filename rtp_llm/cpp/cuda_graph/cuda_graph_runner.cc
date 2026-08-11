@@ -884,8 +884,12 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     if (!enable_cuda_graph_) {
         return false;
     }
-    const bool target_verify_decode = is_target_verify_ || inputs.attention_inputs.is_target_verify;
-    if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_ && !target_verify_decode) {
+    // is_target_verify_ describes the graph captured by this runner, not every
+    // live input sent through the target model. Initial speculative prefill
+    // shares the target runner but must use eager prefill unless the live input
+    // is explicitly marked as target verify.
+    if (inputs.attention_inputs.is_prefill && !is_prefill_cuda_graph_mode_
+        && !inputs.attention_inputs.is_target_verify) {
         return false;
     }
 
@@ -1178,12 +1182,27 @@ void CudaGraphRunner::initCapture() {
 
         if (is_prefill_cuda_graph_mode_) {
             RTP_LLM_LOG_INFO("initCapture forward post check start for prefill");
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host[1] = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens[1]      = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = max_num_token_;
-            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths[0]   = max_num_token_;
+            // The post-check below represents one request.  Compact draft-prefill
+            // graphs store ``num_tokens_per_bs_`` rows per request, so using the
+            // full ``max_bs_ * num_tokens_per_bs_`` capture capacity here would
+            // reinterpret all request rows as one over-wide MTP continuation.
+            // Keep the legacy full-capacity check for embedding prefill and for
+            // models which explicitly opt into that layout.
+            const bool compact_draft_prefill =
+                num_tokens_per_bs_ != max_seq_len_ && !draft_prefill_requires_full_token_capacity_;
+            const int post_check_tokens = compact_draft_prefill ? num_tokens_per_bs_ : max_num_token_;
+            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host[1] = post_check_tokens;
+            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens[1]      = post_check_tokens;
+            capture_mem_hold_.py_model_inputs_.attention_inputs.cu_kv_seqlens[1]   = post_check_tokens;
+            capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths[0]   = post_check_tokens;
 
             PyModelInputs inputs = capture_mem_hold_.py_model_inputs_;
+            if (compact_draft_prefill) {
+                inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, post_check_tokens);
+                inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, post_check_tokens);
+                inputs.attention_inputs.padding_offset =
+                    capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, post_check_tokens);
+            }
             inputs.attention_inputs.cu_seqlens_host =
                 capture_mem_hold_.py_model_inputs_.attention_inputs.cu_seqlens_host.slice(0, 0, 2);
             inputs.attention_inputs.cu_seqlens =
@@ -1219,6 +1238,9 @@ void CudaGraphRunner::initCapture() {
                 ScopedCudaGraphForwardFlag cuda_graph_warmup(ScopedCudaGraphForwardFlag::Type::Warmup);
                 py_forward_method_(inputs);
             } catch (const py::error_already_set& e) {
+                RTP_LLM_LOG_ERROR("initCapture prefill post-check forward failed: %s", e.what());
+                throw;
+            } catch (const std::exception& e) {
                 RTP_LLM_LOG_ERROR("initCapture prefill post-check forward failed: %s", e.what());
                 throw;
             }

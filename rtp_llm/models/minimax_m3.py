@@ -208,6 +208,11 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                     pass
         self._sparse_layer_set = sparse
 
+    def _should_load_msa_index(self, layer_id: int) -> bool:
+        """Whether this checkpoint layer must materialize the MSA index branch."""
+        sparse_set = self._sparse_layer_set or set()
+        return _env_flag("M3_LOAD_MSA_INDEX", "false") and layer_id in sparse_set
+
     # ------------------------------------------------------------------
     # Per-layer attention weights
     # ------------------------------------------------------------------
@@ -343,7 +348,7 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
         # main GQA chain is loaded and every layer runs dense FlashInfer
         # attention (numerically equivalent to MSA for kv_len <= topk*block);
         # when on, sparse layers load the index weights and route to MSAAttention.
-        load_msa_index = _env_flag("M3_LOAD_MSA_INDEX", "false")
+        load_msa_index = self._should_load_msa_index(layer_id)
         if load_msa_index and layer_id in sparse_set:
             idx_prefix = self.prefix + "model.layers.{i}.self_attn."
             # Always keep BF16-dequantized idx weights for the original/F.linear
@@ -523,6 +528,11 @@ class MiniMaxM3Weight(ModelDeployWeightInfo):
                             W.moe_gate,
                             [CkptWeightInfo(moe_root + "gate.weight", identity)],
                             transpose,
+                            # MiniMax-M3 stores and evaluates the router in
+                            # FP32.  Preserving only the checkpoint dtype is
+                            # not enough: GenericMoeLayer also upcasts the
+                            # router input when it sees this FP32 weight.
+                            data_type=torch.float32,
                             config=moe_config,
                         ),
                         MoeAtomicWeight(

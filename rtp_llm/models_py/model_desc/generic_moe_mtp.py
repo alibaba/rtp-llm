@@ -15,6 +15,8 @@ from rtp_llm.utils.model_weight import W
 
 
 class GenericMoeMTPModel(GptModelBase):
+    decoder_layer_cls = GenericMoeDecoderLayer
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -50,8 +52,25 @@ class GenericMoeMTPModel(GptModelBase):
             eps=model_config.layernorm_eps,
         )
         self.fc = LinearFactory.create_linear_from_weights(
-            weights.global_weights, W.multi_tokens_predict_eh_proj
+            weights.global_weights,
+            W.multi_tokens_predict_eh_proj,
+            W.multi_tokens_predict_eh_proj_s,
+            quant_config=model_config.quant_config,
+            hw_kernel_config=py_hw_kernel_config,
         )
+        fc_input_width = getattr(self.fc, "K", None)
+        if fc_input_width is None:
+            fc_weight = getattr(self.fc, "weight", None)
+            if fc_weight is None:
+                raise RuntimeError("MTP eh_proj does not expose its input width")
+            fc_input_width = fc_weight.shape[-1]
+        fc_input_width = int(fc_input_width)
+        expected_fc_input_width = int(model_config.hidden_size) * 2
+        if fc_input_width != expected_fc_input_width:
+            raise RuntimeError(
+                "MTP eh_proj input width must be 2x hidden size, "
+                f"got {fc_input_width} for hidden size {model_config.hidden_size}"
+            )
 
         enable_cuda_graph = (
             py_hw_kernel_config.enable_cuda_graph
@@ -60,7 +79,7 @@ class GenericMoeMTPModel(GptModelBase):
         )
         self.layers = nn.ModuleList(
             [
-                GenericMoeDecoderLayer(
+                self.decoder_layer_cls(
                     model_config,
                     parallelism_config,
                     weights.weights[idx],
@@ -85,7 +104,7 @@ class GenericMoeMTPModel(GptModelBase):
         self._mtp_iteration_topk_buffers = [None for _ in range(self.layer_num)]
         self._mtp_iteration_topk_valid_tokens = [0 for _ in range(self.layer_num)]
         self._mtp_iteration_topk_indices = [None for _ in range(self.layer_num)]
-
+        self._mtp_recurrent_hidden_states = None
 
     def clone_for_cuda_graph(self) -> "GenericMoeMTPModel":
         clone = object.__new__(type(self))
@@ -125,6 +144,7 @@ class GenericMoeMTPModel(GptModelBase):
         clone._mtp_iteration_topk_buffers = self._mtp_iteration_topk_buffers
         clone._mtp_iteration_topk_valid_tokens = self._mtp_iteration_topk_valid_tokens
         clone._mtp_iteration_topk_indices = self._mtp_iteration_topk_indices
+        clone._mtp_recurrent_hidden_states = None
 
         return clone
 
@@ -133,13 +153,12 @@ class GenericMoeMTPModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         inputs_embeds = self.embed_tokens(input_ids)
-        inputs_embeds = self._mask_position_zero_embeddings(inputs_embeds, fmha_impl)
+        inputs_embeds = self._mask_position_zero_embeddings(
+            inputs_embeds, fmha_impl, inputs.attention_inputs
+        )
         last_hidden_states = inputs.input_hiddens
 
-        e_norm = self.pre_fc_norm_embedding(inputs_embeds)
-        h_norm = self.pre_fc_norm_hidden(last_hidden_states)
-        cat_hidden_states = torch.cat([e_norm, h_norm], -1)
-        hidden_states = self.fc(cat_hidden_states)
+        hidden_states = self._build_fc_input(inputs_embeds, last_hidden_states)
 
         self._reset_mtp_iteration_topk_if_needed(inputs)
         reuse_mtp_iteration_topk = self._should_reuse_mtp_iteration_topk(inputs)
@@ -168,14 +187,38 @@ class GenericMoeMTPModel(GptModelBase):
                     cached_topk if force_reuse_topk else prev_topk_indices
                 ),
                 force_reuse_topk_indices=force_reuse_topk,
+                attn_inputs=inputs.attention_inputs,
             )
             hidden_states = output.hidden_states
             residual = output.residual
             prev_topk_indices = output.topk_indices
             self._set_mtp_iteration_topk(i, output.topk_indices)
 
+        # The MTP block's pre-final-norm output is the recurrent state for the
+        # next proposal step. The final norm is only part of the logits path.
+        # Expose both through the existing model-owned hidden-state hook so the
+        # executor does not have to know this model-specific boundary.
+        self._mtp_recurrent_hidden_states = hidden_states + residual
         hidden_states, _ = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+
+    def get_mtp_target_hidden_states(self, num_tokens: int):
+        hidden_states = self._mtp_recurrent_hidden_states
+        if hidden_states is None or num_tokens < 0:
+            return hidden_states
+        if num_tokens > hidden_states.size(0):
+            raise RuntimeError(
+                "requested more MTP recurrent hidden rows than produced: "
+                f"requested={num_tokens}, available={hidden_states.size(0)}"
+            )
+        return hidden_states.narrow(0, 0, num_tokens)
+
+    def _build_fc_input(
+        self, inputs_embeds: torch.Tensor, last_hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        e_norm = self.pre_fc_norm_embedding(inputs_embeds)
+        h_norm = self.pre_fc_norm_hidden(last_hidden_states)
+        return self.fc(torch.cat([e_norm, h_norm], dim=-1))
 
     def _reset_mtp_iteration_topk_if_needed(self, inputs: PyModelInputs) -> None:
         if not self._share_mtp_topk_indices:
@@ -319,7 +362,10 @@ class GenericMoeMTPModel(GptModelBase):
         self._mtp_iteration_topk_valid_tokens.extend([0 for _ in range(extend_num)])
 
     def _mask_position_zero_embeddings(
-        self, inputs_embeds: torch.Tensor, fmha_impl: Any
+        self,
+        inputs_embeds: torch.Tensor,
+        fmha_impl: Any,
+        attention_inputs: Any = None,
     ) -> torch.Tensor:
         fmha_params = getattr(fmha_impl, "fmha_params", None)
         positions = getattr(fmha_params, "positions_d", None)
@@ -334,4 +380,6 @@ class GenericMoeMTPModel(GptModelBase):
             return inputs_embeds
         if positions.device != inputs_embeds.device:
             positions = positions.to(device=inputs_embeds.device)
-        return torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
+        zero_mask = positions == 0
+
+        return torch.where(zero_mask.unsqueeze(-1), 0, inputs_embeds)

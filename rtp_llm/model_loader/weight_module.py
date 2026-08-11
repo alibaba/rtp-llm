@@ -41,6 +41,7 @@ class WeightModule(ABC):
         self.lora_a: Optional["WeightModule"] = None
         self.lora_b: Optional["WeightModule"] = None
         self.is_lora = kwargs.pop("is_lora", False)
+        self.disable_quantization = kwargs.pop("disable_quantization", False)
 
     def __init_subclass__(cls, **kwargs: Any):
         super().__init_subclass__(**kwargs)
@@ -61,6 +62,9 @@ class WeightModule(ABC):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> "WeightModule":
         if quant_config is None:
+            return weight_info
+
+        if weight_info.disable_quantization:
             return weight_info
 
         if isinstance(weight_info, QuantWeight):
