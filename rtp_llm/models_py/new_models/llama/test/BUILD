@@ -1,5 +1,6 @@
 py_test(
     name = "test_llama_load",
+    exec_properties = {"gpu": "H20"},
     srcs = ["test_llama_load.py"],
     deps = [
         "//rtp_llm:safetensors",

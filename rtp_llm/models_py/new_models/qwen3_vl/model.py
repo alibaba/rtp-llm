@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import Any
 
-from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
+from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.new_models.qwen3_vl.multimodal import Qwen3VLMultimodalMixin
 from rtp_llm.models_py.weight_mapper import WeightsMapper
@@ -33,10 +33,12 @@ class Qwen3VLForCausalLM(Qwen3VLMultimodalMixin, Qwen3ForCausalLM):
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         for layer_id, layer in enumerate(self.layers):
-            select_block_map_for_layer(inputs.attention_inputs, layer_id)
+            layer_fmha_impl = select_fmha_impl_for_layer(
+                fmha_impl, self.kv_cache, layer_id
+            )
             hidden_states = layer(
                 hidden_states,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=(
                     self.kv_cache.get_layer_cache(layer_id) if self.kv_cache else None
                 ),

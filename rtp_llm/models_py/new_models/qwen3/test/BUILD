@@ -1,5 +1,6 @@
 py_test(
     name = "test_qwen3_dense_load",
+    exec_properties = {"gpu": "H20"},
     srcs = ["test_qwen3_dense_load.py"],
     deps = [
         "//rtp_llm:numpy",
@@ -11,6 +12,7 @@ py_test(
 
 py_test(
     name = "test_qwen3_base_model_integration",
+    exec_properties = {"gpu": "H20"},
     srcs = ["test_qwen3_base_model_integration.py"],
     deps = [
         "//rtp_llm:async_model",

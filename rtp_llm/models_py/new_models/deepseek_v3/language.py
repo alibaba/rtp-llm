@@ -24,7 +24,7 @@ from rtp_llm.models_py.layers.embedding import ParallelLMHead, VocabParallelEmbe
 from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import AttnImplFactory
-from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
+from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.ops import MlaOpsType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
@@ -995,11 +995,13 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         for i, layer in enumerate(self.layers):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            layer_fmha_impl = select_fmha_impl_for_layer(
+                fmha_impl, self.kv_cache, i
+            )
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
         hidden_states, _ = self.norm(hidden_states, residual)

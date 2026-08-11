@@ -42,7 +42,7 @@ from rtp_llm.models_py.new_models.deepseek_v3.moe import (
     DeepSeekV32MoEBlock,
     normalize_topk_method,
 )
-from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
+from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
@@ -694,11 +694,13 @@ class DeepSeekVLV2ForCausalLM(MlaRuntimeLayoutMixin, GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
         residual = torch.zeros_like(hidden_states)
         for layer_idx, layer in enumerate(self.layers):
-            select_block_map_for_layer(inputs.attention_inputs, layer_idx)
+            layer_fmha_impl = select_fmha_impl_for_layer(
+                fmha_impl, self.kv_cache, layer_idx
+            )
             hidden_states, residual = layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=(
                     self.kv_cache.get_layer_cache(layer_idx) if self.kv_cache else None
                 ),

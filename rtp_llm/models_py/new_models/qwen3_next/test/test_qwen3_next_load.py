@@ -307,6 +307,8 @@ class Qwen3NextLoadTest(unittest.TestCase):
 
     def test_mtp_forward_projects_normalized_embedding_and_hidden_state(self):
         class PassLayer(torch.nn.Module):
+            layer_type = HybridAttentionType.NONE
+
             def forward(self, hidden_states, residual, fmha_impl, **kwargs):
                 return hidden_states, residual
 
@@ -340,7 +342,12 @@ class Qwen3NextLoadTest(unittest.TestCase):
 
         with mock.patch(
             "rtp_llm.models_py.new_models.qwen3_next.language."
-            "select_block_map_for_layer"
+            "select_fmha_impl_for_layer",
+            return_value=fmha_impl,
+        ), mock.patch(
+            "rtp_llm.models_py.new_models.qwen3_next.language."
+            "select_attention_inputs_for_layer",
+            return_value=inputs.attention_inputs,
         ):
             outputs = model.forward(inputs, fmha_impl=fmha_impl)
 

@@ -486,10 +486,11 @@ class Qwen3LoadTest(unittest.TestCase):
         fmha = QOnlyFmha(model.layers[0].self_attn.q_size)
         inputs = PyModelInputs(input_ids=input_ids)
         with patch(
-            "rtp_llm.models_py.new_models.qwen3.language.select_block_map_for_layer"
-        ) as select_block_map:
+            "rtp_llm.models_py.new_models.qwen3.language.select_fmha_impl_for_layer",
+            return_value=fmha,
+        ) as select_fmha:
             outputs = model(inputs, fmha_impl=fmha)
-        select_block_map.assert_called_once_with(inputs.attention_inputs, 0)
+        select_fmha.assert_called_once_with(fmha, model.kv_cache, 0)
 
         hidden = F.embedding(input_ids.long(), weights["model.embed_tokens.weight"])
         residual = hidden
