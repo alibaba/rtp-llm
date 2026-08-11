@@ -145,7 +145,6 @@ class DSparkProposerMixin:
         aux_feature_dim: int,
         hidden_dim: int,
         vocab_size: int,
-        draft_sample_method: str = "greedy",
     ) -> None:
         if int(width) <= 0:
             raise ValueError(f"DSpark width must be positive, got {width}")
@@ -166,12 +165,6 @@ class DSparkProposerMixin:
         self._dspark_aux_feature_dim = int(aux_feature_dim)
         self._dspark_hidden_dim = int(hidden_dim)
         self._dspark_vocab_size = int(vocab_size)
-        self._dspark_draft_sample_method = str(draft_sample_method).lower()
-        if self._dspark_draft_sample_method not in ("greedy", "probabilistic"):
-            raise ValueError(
-                "DSpark draft_sample_method must be 'greedy' or "
-                f"'probabilistic', got {draft_sample_method!r}"
-            )
         self.markov_head: Optional[DSparkMarkovHead] = None
 
     # ------------------------------------------------------------------

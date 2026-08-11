@@ -13,16 +13,13 @@ from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
 class _TinyProposer(DSparkProposerMixin):
     """Smallest possible DSparkProposerMixin subclass for the sampling tail."""
 
-    def __init__(
-        self, *, width: int, vocab: int, rank: int, sample_method: str = "greedy"
-    ):
+    def __init__(self, *, width: int, vocab: int, rank: int):
         self.init_dspark_proposer(
             width=width,
             noise_token_id=1,
             aux_feature_dim=8,
             hidden_dim=4,
             vocab_size=vocab,
-            draft_sample_method=sample_method,
         )
         torch.manual_seed(7)
         self.w1 = torch.randn(vocab, rank)
@@ -246,13 +243,7 @@ class _ProposeProposer(_TinyProposer):
         self.seen_base = None
 
     def forward_query_block(
-        self,
-        query_ids,
-        query_positions,
-        prefix_lengths,
-        active_requests,
-        inputs,
-        fmha_impl,
+        self, query_ids, query_positions, prefix_lengths, active_requests, inputs, fmha_impl
     ):
         self.query_call = (query_ids, query_positions, prefix_lengths, active_requests)
         return torch.zeros(query_ids.numel(), 4)
@@ -290,9 +281,7 @@ class ProposeStepTest(unittest.TestCase):
             torch.tensor([7, 0], dtype=torch.int32),
         )
 
-        outputs = self.proposer.run_propose_step(
-            inputs, fmha_impl=None, device=self.device
-        )
+        outputs = self.proposer.run_propose_step(inputs, fmha_impl=None, device=self.device)
 
         query_ids, positions, prefix, active = self.proposer.query_call
         self.assertEqual(query_ids[:, 0].tolist(), anchors.tolist())
@@ -328,9 +317,7 @@ class ProposeStepTest(unittest.TestCase):
             torch.zeros(0, dtype=torch.int32),
         )
 
-        outputs = self.proposer.run_propose_step(
-            inputs, fmha_impl=None, device=self.device
-        )
+        outputs = self.proposer.run_propose_step(inputs, fmha_impl=None, device=self.device)
 
         # Empty DP ranks must still execute the collective attention layers.
         self.assertIsNotNone(self.proposer.query_call)

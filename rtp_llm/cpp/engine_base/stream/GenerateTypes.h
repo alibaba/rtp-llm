@@ -103,8 +103,6 @@ struct AuxInfo {
     int32_t                      decode_local_reuse_len   = 0;
     int32_t                      decode_remote_reuse_len  = 0;
     int32_t                      decode_memory_reuse_len  = 0;
-    int32_t                      speculative_draft_rounds = 0;
-    std::vector<int32_t>         speculative_accepted_tokens_per_pos;
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;

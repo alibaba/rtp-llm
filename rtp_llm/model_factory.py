@@ -485,18 +485,6 @@ class ModelFactory:
                 f"dspark requires a positive gen_num_per_cycle, got {gamma}"
             )
 
-        configured_draft_sample_method = getattr(
-            sp_config, "draft_sample_method", "greedy"
-        )
-        draft_sample_method = str(configured_draft_sample_method).lower()
-        if draft_sample_method not in ("greedy", "probabilistic"):
-            raise ValueError(
-                "dspark draft_sample_method must be 'greedy' or "
-                f"'probabilistic', got {configured_draft_sample_method!r}"
-            )
-        sp_config.draft_sample_method = draft_sample_method
-        propose_model_config.dspark_draft_sample_method = draft_sample_method
-
         noise_token_id = int(propose_model_config.dspark_noise_token_id)
         if noise_token_id < 0 or noise_token_id >= propose_model_config.vocab_size:
             raise ValueError(
@@ -532,10 +520,9 @@ class ModelFactory:
         propose_model_config.capture_aux_hidden_layer_ids = target_layer_ids
         logging.info(
             "DSpARK fixed-width wiring: gamma=%d, noise_token_id=%d, "
-            "target capture layer ids=%s, markov_rank=%d, draft_sample_method=%s",
+            "target capture layer ids=%s, markov_rank=%d",
             gamma,
             noise_token_id,
             target_layer_ids,
             markov_rank,
-            draft_sample_method,
         )

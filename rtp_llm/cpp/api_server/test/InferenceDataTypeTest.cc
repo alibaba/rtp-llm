@@ -108,9 +108,7 @@ TEST(InferenceDataTypeTest, RawRequest_Prompt) {
 
 TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     AuxInfo aux_info;
-    aux_info.cost_time_us                        = 1000;
-    aux_info.speculative_draft_rounds            = 4;
-    aux_info.speculative_accepted_tokens_per_pos = {3, 2, 1};
+    aux_info.cost_time_us = 1000;
     AuxInfoAdapter aux_info_adapter(aux_info);
     std::string    jsonStr = ToJsonString(aux_info_adapter, true);
     ASSERT_TRUE(jsonStr.find(R"("cost_time":1)") != std::string::npos);
@@ -121,8 +119,6 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("pd_sep":false)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("step_output_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("beam_responses":[])") != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("speculative_draft_rounds":4)") != std::string::npos);
-    ASSERT_TRUE(jsonStr.find(R"("speculative_accepted_tokens_per_pos":[3,2,1])") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
 }
 

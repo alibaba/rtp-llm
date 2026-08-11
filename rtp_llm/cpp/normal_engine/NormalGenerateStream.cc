@@ -100,15 +100,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.input_len                = generate_input_->promptLength();
             generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
             // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-            generate_output.aux_info.output_len                          = seqLength() - generate_input_->inputLength();
-            generate_output.aux_info.step_output_len                     = output_len;
-            generate_output.aux_info.reuse_len                           = initial_reuse_length_;
-            generate_output.aux_info.pd_sep                              = queryPdSep();
-            generate_output.aux_info.local_reuse_len                     = local_reuse_length_;
-            generate_output.aux_info.remote_reuse_len                    = remote_reuse_length_;
-            generate_output.aux_info.memory_reuse_len                    = memory_reuse_length_;
-            generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
-            generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
+            generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
+            generate_output.aux_info.step_output_len  = output_len;
+            generate_output.aux_info.reuse_len        = initial_reuse_length_;
+            generate_output.aux_info.pd_sep           = queryPdSep();
+            generate_output.aux_info.local_reuse_len  = local_reuse_length_;
+            generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
+            generate_output.aux_info.memory_reuse_len = memory_reuse_length_;
             if (generate_input_->generate_config->return_softmax_probs && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();

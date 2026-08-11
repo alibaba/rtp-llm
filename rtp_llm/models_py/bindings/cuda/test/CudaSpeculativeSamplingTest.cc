@@ -140,49 +140,6 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImmediateReject) {
     EXPECT_EQ(out_ids_h[0][3].item<int>(), -1);
 }
 
-TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_GreedyTargetUsesDirectFallbackWithFullQ) {
-    const int batch_size    = 1;
-    const int num_spec      = 1;
-    const int vocab_size    = 16;
-    const int target_stride = 1;
-
-    auto draft_probs  = torch::zeros({batch_size, num_spec, vocab_size}, floatCuda());
-    auto target_probs = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
-    draft_probs.index_put_({0, 0, 3}, 0.4f);
-    draft_probs.index_put_({0, 0, 7}, 0.6f);
-    target_probs.index_put_({0, 0, 7}, 0.51f);
-    target_probs.index_put_({0, 0, 8}, 0.49f);
-
-    auto draft_token_ids     = torch::full({batch_size, num_spec}, 3, intCuda());
-    auto target_token_ids    = torch::full({batch_size, num_spec + 1, target_stride}, 7, intCuda());
-    auto uniform_samples     = torch::full({batch_size, num_spec + 1}, 0.99f, floatCuda());
-    auto output_token_ids    = torch::full({batch_size, num_spec + 1}, -1, intCuda());
-    auto output_accepted_num = torch::zeros({batch_size}, intCuda());
-    auto do_sample           = torch::zeros({batch_size}, boolCuda());
-
-    auto status = rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
-                                                               draft_token_ids.data_ptr<int>(),
-                                                               uniform_samples.data_ptr<float>(),
-                                                               target_probs.data_ptr<float>(),
-                                                               target_token_ids.data_ptr<int>(),
-                                                               target_stride,
-                                                               output_token_ids.data_ptr<int>(),
-                                                               output_accepted_num.data_ptr<int>(),
-                                                               do_sample.data_ptr<bool>(),
-                                                               batch_size,
-                                                               num_spec,
-                                                               vocab_size,
-                                                               stream_);
-    ASSERT_EQ(status, cudaSuccess);
-    cudaStreamSynchronize(stream_);
-
-    // Greedy verification must emit its exact argmax token, not sample the
-    // stochastic residual target-draft distribution.
-    EXPECT_EQ(output_accepted_num.cpu()[0].item<int>(), 1);
-    EXPECT_EQ(output_token_ids.cpu()[0][0].item<int>(), 7);
-    EXPECT_EQ(output_token_ids.cpu()[0][1].item<int>(), -1);
-}
-
 TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
     const int batch_size    = 1;
     const int num_spec      = 3;

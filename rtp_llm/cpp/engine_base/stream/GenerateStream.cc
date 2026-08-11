@@ -899,16 +899,6 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         return;
     }
 
-    if (update_info.speculative_propose_step > 0) {
-        sp_iter_count_++;
-        speculative_accepted_tokens_per_pos_.resize(update_info.speculative_propose_step, 0);
-        const int accepted_draft_tokens =
-            std::clamp(update_info.accepted_draft_tokens, 0, update_info.speculative_propose_step);
-        for (int position = 0; position < accepted_draft_tokens; ++position) {
-            speculative_accepted_tokens_per_pos_[position]++;
-        }
-    }
-
     // update speculative output buffer
     int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();

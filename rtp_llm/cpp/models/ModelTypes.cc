@@ -65,6 +65,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
+
     uint32_t device_bits = 0;
     if (inputs.combo_tokens.defined() && inputs.combo_tokens.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitComboTokens;
@@ -168,11 +169,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto cache_keys_width = checkedHint(GptModelInputIndex::cacheKeysWidth, "cacheKeysWidth");
     const auto kv_cache_group_num = checkedHint(GptModelInputIndex::kvCacheGroupNum, "kvCacheGroupNum");
     const auto layer_to_group_len = checkedHint(GptModelInputIndex::kvCacheLayerToGroupLen, "kvCacheLayerToGroupLen");
-    const auto group_types_len           = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
-    const auto combo_position_ids_size  = checkedHint(GptModelInputIndex::comboPositionIds, "comboPositionIds");
-    const auto text_tokens_mask_size    = checkedHint(GptModelInputIndex::textTokensMask, "textTokensMask");
-    const auto mm_features_locs_size    = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
-    const auto hidden_states_size       = checkedHint(GptModelInputIndex::mtpHiddenStates, "mtpHiddenStates");
+    const auto group_types_len = checkedHint(GptModelInputIndex::kvCacheGroupTypesLen, "kvCacheGroupTypesLen");
+    const auto combo_position_ids_size = checkedHint(GptModelInputIndex::comboPositionIds, "comboPositionIds");
+    const auto text_tokens_mask_size = checkedHint(GptModelInputIndex::textTokensMask, "textTokensMask");
+    const auto mm_features_locs_size = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
+    const auto hidden_states_size = checkedHint(GptModelInputIndex::mtpHiddenStates, "mtpHiddenStates");
     const auto request_length = checkedHint(GptModelInputIndex::gptModelRequestLength, "gptModelRequestLength");
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,

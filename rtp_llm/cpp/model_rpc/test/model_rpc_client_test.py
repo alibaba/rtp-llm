@@ -38,11 +38,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateOutputsPB,
     TensorPB,
 )
-from rtp_llm.utils.base_model_datatypes import (
-    GenerateInput,
-    GenerateOutputs,
-    RequestInfo,
-)
+from rtp_llm.utils.base_model_datatypes import GenerateInput, GenerateOutputs, RequestInfo
 
 
 class FakeStub:
@@ -72,8 +68,6 @@ class FakeStub:
         aux_info2 = output_pb2.aux_info.add()
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
-        aux_info2.speculative_draft_rounds = 4
-        aux_info2.speculative_accepted_tokens_per_pos.extend([3, 2, 1])
         output_pb2.logits.data_type = TensorPB.DataType.FP32
         output_pb2.logits.shape.extend([1, 1, 2])
         output_pb2.logits.fp32_data = struct.pack("<ff", 0.1, 0.2)
@@ -93,9 +87,9 @@ class FakeModelRpcClient(ModelRpcClient):
     def __init__(self):
         # Call parent __init__ with minimal required parameters
         super().__init__(
-            [],  # addresses: empty list for fake client
-            {},  # client_config: empty dict for fake client
-            0,  # max_rpc_timeout_ms
+            [],     # addresses: empty list for fake client
+            {},     # client_config: empty dict for fake client
+            0,      # max_rpc_timeout_ms
             False,  # decode_entrance
         )
         self.stub = FakeStub()
@@ -144,8 +138,6 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(res[1].finished, False)
         self.assertEqual(res[1].aux_info.iter_count, 3)
         self.assertEqual(res[1].aux_info.output_len, 2)
-        self.assertEqual(res[1].aux_info.speculative_draft_rounds, 4)
-        self.assertEqual(res[1].aux_info.speculative_accepted_tokens_per_pos, [3, 2, 1])
 
         self.assertEqual(res[2].finished, True)
 

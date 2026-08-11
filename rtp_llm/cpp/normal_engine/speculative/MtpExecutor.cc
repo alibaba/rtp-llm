@@ -500,12 +500,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_                  = params.model_config_.data_type;
-    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_               = propose_params->gen_num_per_circle;
-    vocab_size_                 = params.model_config_.vocab_size;
-    draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
-    is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    data_type_        = params.model_config_.data_type;
+    hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    propose_step_     = propose_params->gen_num_per_circle;
+    vocab_size_       = params.model_config_.vocab_size;
+    draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    is_dspark_        = propose_params->sp_type == SP_TYPE_DSPARK;
     dspark_probabilistic_draft_ = is_dspark_ && params.sp_config.draft_sample_method == "probabilistic";
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);

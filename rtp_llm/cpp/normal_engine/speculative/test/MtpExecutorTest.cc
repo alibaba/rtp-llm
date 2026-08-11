@@ -1408,14 +1408,10 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
 
     StreamSpecUpdateInfo update_info{
         torch::tensor({7}, torch::kInt32).reshape({1, 1}), 1, -1, torch::Tensor(), torch::Tensor()};
-    update_info.speculative_propose_step = 3;
-    update_info.accepted_draft_tokens    = 2;
     stream->specUpdate(update_info);
 
     EXPECT_EQ((std::vector<int32_t>{7}), toVec<int32_t>(sp_buffer->tokens));
     EXPECT_TRUE(stream->getProposeToken().empty());
-    EXPECT_EQ(stream->spIterCount(), 1);
-    EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
 }
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {

@@ -791,7 +791,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         auto       attach_draft_outputs = [&py_model_outputs](GptModelOutputs outputs) {
-            outputs.draft_logits = py_model_outputs.draft_logits;
+            outputs.draft_logits      = py_model_outputs.draft_logits;
             return outputs;
         };
         if (is_dspark_draft_) {

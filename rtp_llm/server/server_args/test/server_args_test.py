@@ -300,21 +300,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
         self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
 
-    def test_dspark_draft_sample_method_from_env_and_cli(self):
-        import rtp_llm.server.server_args.server_args
-
-        os.environ["SP_DRAFT_SAMPLE_METHOD"] = "probabilistic"
-        sys.argv = ["prog"]
-        importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
-        self.assertEqual(py_env_configs.sp_config.draft_sample_method, "probabilistic")
-
-        os.environ["SP_DRAFT_SAMPLE_METHOD"] = "greedy"
-        sys.argv = ["prog", "--sp_draft_sample_method", "probabilistic"]
-        importlib.reload(rtp_llm.server.server_args.server_args)
-        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
-        self.assertEqual(py_env_configs.sp_config.draft_sample_method, "probabilistic")
-
 
 if __name__ == "__main__":
     main()

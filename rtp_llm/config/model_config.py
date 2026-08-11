@@ -70,7 +70,6 @@ class ModelConfig(CppModelConfig):
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
-        "dspark_draft_sample_method",
         "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
@@ -505,7 +504,6 @@ class ModelConfig(CppModelConfig):
         self.dspark_noise_token_id: Optional[int] = None
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
-        self.dspark_draft_sample_method: str = "greedy"
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False

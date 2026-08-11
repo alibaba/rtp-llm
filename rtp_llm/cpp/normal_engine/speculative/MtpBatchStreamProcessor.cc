@@ -1069,9 +1069,6 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens.narrow(0, batch_idx_out, next_batch_size).narrow(1, 0, cur_accept_len).contiguous();
         spec_update_infos.push_back(
             {accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
-        auto& update_info                    = spec_update_infos.back();
-        update_info.speculative_propose_step = propose_step_;
-        update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
 
         token_offset += propose_step_ + 1;
         batch_idx_out += next_batch_size;
