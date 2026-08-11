@@ -332,7 +332,9 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testWithoutCacheQuotaStopsAfterLoadingStream
     auto stream1 = createStream({1}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     auto stream2 = createStream({2}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
     auto stream3 = createStream({3}, /*reuse_cache=*/true, /*enable_memory_cache=*/true);
-    ASSERT_EQ(scheduler->batchEnqueue({stream1, stream2, stream3}).size(), 3);
+    for (const auto& stream : std::vector<GenerateStreamPtr>{stream1, stream2, stream3}) {
+        ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    }
 
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());

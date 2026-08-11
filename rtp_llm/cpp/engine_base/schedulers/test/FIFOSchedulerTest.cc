@@ -461,7 +461,9 @@ TEST_F(FIFOSchedulerTest, retryableKVShortageDoesNotConsumeBatchTokenBudget) {
 
     auto blocked_front_1 = make_stream({1, 2, 3, 4});
     auto blocked_front_2 = make_stream({5, 6, 7, 8});
-    ASSERT_EQ(scheduler.batchEnqueue({blocked_front_1, blocked_front_2, kv_holder}).size(), 3);
+    for (const auto& stream : std::vector<GenerateStreamPtr>{blocked_front_1, blocked_front_2, kv_holder}) {
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -509,7 +511,9 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaIncludesPostAllocationPrefixLength) {
 
     auto new_stream = make_stream(8);
     ASSERT_EQ(new_stream->prefixLength(), 0);
-    ASSERT_EQ(scheduler.batchEnqueue({cached_stream, new_stream}).size(), 2);
+    for (const auto& stream : std::vector<GenerateStreamPtr>{cached_stream, new_stream}) {
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -558,8 +562,10 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     auto tail_stream               = make_stream(1);
     auto errored_tail_stream       = make_stream(1);
     errored_tail_stream->reportError(ErrorCode::CANCELLED, "cancelled before admission");
-    ASSERT_EQ(
-        scheduler.batchEnqueue({cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}).size(), 4);
+    for (const auto& stream : std::vector<GenerateStreamPtr>{
+             cached_stream, threshold_crossing_stream, tail_stream, errored_tail_stream}) {
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -612,7 +618,9 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) 
     auto first_stream  = make_stream(5);
     auto second_stream = make_stream(1);
     auto tail_stream   = make_stream(1);
-    ASSERT_EQ(scheduler.batchEnqueue({first_stream, second_stream, tail_stream}).size(), 3);
+    for (const auto& stream : std::vector<GenerateStreamPtr>{first_stream, second_stream, tail_stream}) {
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -685,7 +693,9 @@ TEST_F(FIFOSchedulerTest, batchTokenQuotaAccountsForStreamBatchSize) {
 
     auto batched_stream = make_stream(2);
     auto single_stream  = make_stream(1);
-    ASSERT_EQ(scheduler.batchEnqueue({batched_stream, single_stream}).size(), 2);
+    for (const auto& stream : std::vector<GenerateStreamPtr>{batched_stream, single_stream}) {
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -730,7 +740,9 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaAllowsForceBatchResidualToProgress) {
     auto first_stream    = make_group_stream(3);
     auto crossing_stream = make_group_stream(3);
     auto residual_stream = make_group_stream(3);
-    ASSERT_EQ(scheduler.batchEnqueue({first_stream, crossing_stream, residual_stream}).size(), 3);
+    for (const auto& stream : std::vector<GenerateStreamPtr>{first_stream, crossing_stream, residual_stream}) {
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
 
     auto first_result = scheduler.schedule();
     ASSERT_TRUE(first_result.ok());
@@ -797,7 +809,9 @@ TEST_F(FIFOSchedulerTest, retryableForceBatchDoesNotBlockFollowingNormalStream) 
 
     auto blocked_group_1 = make_stream({1, 2, 3, 4}, true);
     auto blocked_group_2 = make_stream({5, 6, 7, 8}, true);
-    ASSERT_EQ(scheduler.batchEnqueue({blocked_group_1, blocked_group_2, kv_holder}).size(), 3);
+    for (const auto& stream : std::vector<GenerateStreamPtr>{blocked_group_1, blocked_group_2, kv_holder}) {
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
@@ -2174,7 +2188,9 @@ TEST_F(FIFOSchedulerTest, testCpPrefillBatchesMultipleStreams) {
         streams.push_back(
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr));
     }
-    scheduler.batchEnqueue(streams);
+    for (const auto& stream : streams) {
+        ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    }
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 2);
