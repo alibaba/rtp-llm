@@ -64,7 +64,9 @@ class MMPreprocessConfigPart(BaseModel):
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
     crop_positions: Optional[str] = None
-    mm_timeout_ms: int = 30000
+    # Unset values inherit MM_TIMEOUT_MS (120s by default). Set MM_TIMEOUT_MS=30000
+    # to preserve the legacy 30s timeout for requests that omit this field.
+    mm_timeout_ms: int = -1
 
 
 class IgraphInfo(BaseModel):

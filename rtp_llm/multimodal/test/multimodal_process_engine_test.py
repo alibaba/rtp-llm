@@ -1,5 +1,6 @@
 import concurrent.futures
 import os
+import pickle
 import threading
 import time
 from typing import List
@@ -11,6 +12,7 @@ import pillow_heif
 import torch
 from PIL import Image, ImageFile
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     ProfilingDebugLoggingConfig,
@@ -141,6 +143,14 @@ class MMProcessEngineTest(TestCase):
             ProfilingDebugLoggingConfig(),
         )
 
+    def setUp(self):
+        # Timeout is intentionally excluded from the embedding cache key. Keep
+        # cache hits from one test from bypassing another test's preprocess path.
+        vit_emb_cache_.resize_cache(0)
+
+    def tearDown(self):
+        vit_emb_cache_.resize_cache(0)
+
     def test_embedding(self):
         res = self.mm_process_engine.mm_embedding_cpp(
             ["./rtp_llm/multimodal/test/testdata/qwen2_vl/1.jpg"],
@@ -233,6 +243,33 @@ class MMProcessEngineTest(TestCase):
     def test_work_item_rejects_empty_inputs(self):
         with self.assertRaises(ValueError):
             MMWorkItem([])
+
+    def test_work_item_uses_global_timeout_when_request_timeout_is_unset(self):
+        preprocess_config = MMPreprocessConfig()
+        mm_input = MultimodalInput(
+            "", MMUrlType.IMAGE, torch.empty(0), preprocess_config
+        )
+
+        self.assertEqual(preprocess_config.mm_timeout_ms, -1)
+        self.assertEqual(
+            MMWorkItem([mm_input], mm_timeout_ms=123000).mm_timeout_ms, 123000
+        )
+
+    def test_work_item_uses_largest_resolved_batch_timeout(self):
+        first = MultimodalInput(
+            "", MMUrlType.IMAGE, torch.empty(0), MMPreprocessConfig(mm_timeout_ms=1000)
+        )
+        second = MultimodalInput(
+            "", MMUrlType.IMAGE, torch.empty(0), MMPreprocessConfig(mm_timeout_ms=3000)
+        )
+        inherited = MultimodalInput(
+            "", MMUrlType.IMAGE, torch.empty(0), MMPreprocessConfig()
+        )
+
+        self.assertEqual(
+            MMWorkItem([first, second, inherited], mm_timeout_ms=2000).mm_timeout_ms,
+            3000,
+        )
 
     def test_embedding_timeout_default_path(self):
         """Default (non-gpu-batch) serial path enforces an embedding-level timeout.
@@ -480,6 +517,25 @@ class MMProcessEngineGpuBatchTest(TestCase):
         self.assertEqual(r1.embeddings[0].item(), 7)
         self.assertEqual(r2.embeddings[0].item(), 7)
         self.assertEqual(part.embedding_calls, 1)
+
+
+class FtRuntimeExceptionSerializationTest(TestCase):
+    def test_pickle_round_trip_preserves_error(self):
+        error = FtRuntimeException(
+            ExceptionType.MM_DOWNLOAD_FAILED,
+            "Failed to download multimodal content",
+        )
+
+        restored = pickle.loads(pickle.dumps(error))
+
+        self.assertIsInstance(restored, FtRuntimeException)
+        self.assertEqual(restored.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
+        self.assertEqual(restored.message, error.message)
+        self.assertEqual(str(restored), error.message)
+
+    def test_remote_rpc_error_code_is_registered(self):
+        self.assertEqual(ExceptionType.from_value(907), "MM_REMOTE_RPC_FAILED")
+        self.assertEqual(ExceptionType(907), ExceptionType.MM_REMOTE_RPC_FAILED)
 
 
 if __name__ == "__main__":

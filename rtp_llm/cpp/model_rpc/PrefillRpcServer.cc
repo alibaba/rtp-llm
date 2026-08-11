@@ -145,9 +145,7 @@ void logPrefillFailureTrace(const char* event, PrefillGenerateContext& prefill_c
         if (prefill_context.getStream()) {                                                                             \
             prefill_context.getStream()->reportEvent(StreamEvents::Error, new_error_code, new_error_msg);              \
         }                                                                                                              \
-        prefill_context.error_info   = ErrorInfo(new_error_code, new_error_msg);                                       \
-        prefill_context.error_status =                                                                                 \
-            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);  \
+        setContextError(prefill_context, ErrorInfo(new_error_code, new_error_msg));                                    \
         logPrefillFailureTrace("client_grpc_error", prefill_context);                                                  \
         return;                                                                                                        \
     }
@@ -181,6 +179,12 @@ ErrorInfo PrefillRpcServer::waitStreamBeforeRun(std::shared_ptr<GenerateStream> 
         return stream->statusInfo();
     }
     return ErrorInfo::OkStatus();
+}
+
+void PrefillRpcServer::setContextError(PrefillGenerateContext& prefill_context, const ErrorInfo& error_info) {
+    prefill_context.error_info   = error_info;
+    prefill_context.error_status =
+        serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info);
 }
 
 void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context) {
@@ -224,21 +228,19 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     }
 
     if (!host || host->ip.empty()) {
-        prefill_context.error_info =
-            ErrorInfo(ErrorCode::GET_HOST_FAILED, "get host for decode cluster " + decode_cluster_name_ + " failed");
-        prefill_context.error_status =
-            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
+        setContextError(
+            prefill_context,
+            ErrorInfo(ErrorCode::GET_HOST_FAILED, "get host for decode cluster " + decode_cluster_name_ + " failed"));
         logPrefillFailureTrace("get_rpc_connection_no_decode_host", prefill_context);
         return;
     }
     auto decode_addr    = host->ip + ":" + std::to_string(host->rpc_port);
     auto connect_status = resource_.rpc_pool.getConnection(decode_addr);
     if (!connect_status.ok()) {
-        prefill_context.error_info   = ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
-                                               "get grpc connection for decode addr " + decode_addr + " failed");
-        prefill_context.error_status =
-            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
-        prefill_context.decode_addr  = decode_addr;
+        setContextError(prefill_context,
+                        ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+                                  "get grpc connection for decode addr " + decode_addr + " failed"));
+        prefill_context.decode_addr = decode_addr;
         logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
     }
@@ -248,22 +250,27 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection done", prefill_context.request_id);
 }
 
+bool PrefillRpcServer::isRetryableMultimodalError(ErrorCode error_code) {
+    switch (error_code) {
+        case ErrorCode::MM_LONG_PROMPT_ERROR:
+        case ErrorCode::MM_WRONG_FORMAT_ERROR:
+        case ErrorCode::MM_NOT_SUPPORTED_ERROR:
+            return false;
+        default:
+            return true;
+    }
+}
+
 void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     auto& input = prefill_context.generate_input;
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto result = mm_processor_->updateMultimodalFeatures(input);
         if (!result.ok()) {
+            prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
+            setContextError(prefill_context, result);
             logPrefillFailureTrace("multimodal_process_failed", prefill_context);
-        }
-        CLIENT_GRPC_RET_IF_ERROR(prefill_context, result.ok(), result.code());
-
-        auto mutable_request = const_cast<GenerateInputPB*>(prefill_context.rpc_context.request);
-        mutable_request->clear_token_ids();
-        // TODO(xinfei.sxf) optimize copy
-        auto* ids_ptr = input->input_ids.data_ptr<int32_t>();
-        for (size_t i = 0; i < input->input_ids.numel(); i++) {
-            mutable_request->add_token_ids(ids_ptr[i]);
+            return;
         }
     }
 }
@@ -289,6 +296,15 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_request_id(prefill_context.request_id);
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
+    auto&            input       = prefill_context.generate_input;
+    if (mm_processor_ != nullptr && input->multimodal_inputs) {
+        new_request->clear_token_ids();
+        // TODO(xinfei.sxf) optimize copy
+        auto* ids_ptr = input->input_ids.data_ptr<int32_t>();
+        for (size_t i = 0; i < input->input_ids.numel(); i++) {
+            new_request->add_token_ids(ids_ptr[i]);
+        }
+    }
     alloc_request.set_allocated_input(new_request);
     for (auto& addrs : prefill_context.prefill_worker_cache_store_addrs) {
         alloc_request.add_peer_addrs(addrs);
@@ -315,11 +331,10 @@ void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_cont
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
     auto start_time_us = currentTimeUs();
-    prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
+    auto wait_result = waitStreamBeforeRun(prefill_context.getStream());
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
-    if (prefill_context.error_info.hasError()) {
-        prefill_context.error_status =
-            serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, prefill_context.error_info);
+    if (wait_result.hasError()) {
+        setContextError(prefill_context, wait_result);
         logPrefillFailureTrace("wait_stream_before_run_failed", prefill_context);
         return;
     }

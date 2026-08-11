@@ -37,6 +37,7 @@ from rtp_llm.dash_sc.codec import (
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    _build_mm_inputs_from_request,
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
     build_think_runtime,
@@ -318,6 +319,88 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [3, 4])
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
+
+    async def test_multimodal_inputs_reach_backend_generate_input(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        mm_input = object()
+
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                mm_inputs=[mm_input],
+            )
+        )
+
+        self.assertEqual(visitor.last_generate_input.mm_inputs, [mm_input])
+
+    def test_builds_generic_multimodal_inputs_from_payload(self) -> None:
+        req = self._minimal_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "http://x.png"},
+                                "min_pixels": 128,
+                                "max_pixels": 4096,
+                                "fps": 3,
+                                "min_frames": 5,
+                                "max_frames": 17,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        mm_inputs = _build_mm_inputs_from_request(req)
+
+        self.assertEqual(len(mm_inputs), 1)
+        self.assertEqual(mm_inputs[0].url, "http://x.png")
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.min_pixels, 128)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.max_pixels, 4096)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.fps, 3)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.min_frames, 5)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.max_frames, 17)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.mm_timeout_ms, -1)
+
+    def test_builds_multimodal_inputs_from_nested_dashscope_payload(self) -> None:
+        req = self._minimal_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "payload": {
+                    "input": {
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [{"image": "http://nested.png"}],
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+
+        mm_inputs = _build_mm_inputs_from_request(req)
+
+        self.assertEqual(len(mm_inputs), 1)
+        self.assertEqual(mm_inputs[0].url, "http://nested.png")
 
     async def test_reasoning_effort_override_reaches_generate_config(self) -> None:
         req = self._minimal_request()
@@ -641,6 +724,17 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_deepseek_v4_token1_forces_empty_think_phase2_prompt(self) -> None:
         req = self._minimal_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"image": "http://example/phase2.png"}],
+                    }
+                ]
+            }
+        )
+        mm_inputs = _build_mm_inputs_from_request(req)
         phase1 = GenerateOutputs(
             generate_outputs=[
                 GenerateOutput(
@@ -701,12 +795,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 generate_env_config=env_cfg,
                 think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
                 phase2_request_id_factory=lambda: 200,
+                mm_inputs=mm_inputs,
             )
         )
 
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertEqual(visitor.generate_inputs[0].request_id, 100)
         self.assertEqual(visitor.generate_inputs[1].request_id, 200)
+        self.assertEqual(visitor.generate_inputs[0].mm_inputs, mm_inputs)
+        self.assertEqual(visitor.generate_inputs[1].mm_inputs, mm_inputs)
         self.assertTrue(visitor.generate_inputs[0].generate_config.in_think_mode)
         self.assertEqual(
             visitor.generate_inputs[0].generate_config.begin_think_token_ids,
@@ -1650,6 +1747,42 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         )
         return _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
 
+    async def test_model_stream_infer_passes_multimodal_payload_to_backend(
+        self,
+    ) -> None:
+        request = self._valid_infer_request()
+        request.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "http://example/image.png"},
+                                "min_pixels": 128,
+                                "max_pixels": 4096,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+        visitor = self._terminal_visitor()
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([request]), _FakeGrpcContext())
+        )
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(visitor.enqueue_called, 1)
+        mm_inputs = visitor.last_generate_input.mm_inputs
+        self.assertEqual(len(mm_inputs), 1)
+        self.assertEqual(mm_inputs[0].url, "http://example/image.png")
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.min_pixels, 128)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.max_pixels, 4096)
+
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token
         # ids, proving they travel servicer -> capture -> emit end to end.
@@ -1926,6 +2059,31 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "bad parameter")
+
+    async def test_video_frame_list_is_rejected_before_enqueue(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"video": ["http://f1.jpg", "http://f2.jpg"]}],
+                    }
+                ]
+            }
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(
+            self, responses[0], "video frame lists are not supported"
+        )
 
     async def test_openai_compat_max_new_tokens_negative_uses_default(
         self,

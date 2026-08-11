@@ -46,15 +46,15 @@ void registerMultimodal(const py::module& m) {
     pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
         .def(pybind11::
                  init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, std::vector<float>, int32_t>(),
-             py::arg("width"),
-             py::arg("height"),
-             py::arg("min_pixels"),
-             py::arg("max_pixels"),
-             py::arg("fps"),
-             py::arg("min_frames"),
-             py::arg("max_frames"),
-             py::arg("crop_positions"),
-             py::arg("mm_timeout_ms"))
+             py::arg("width")          = -1,
+             py::arg("height")         = -1,
+             py::arg("min_pixels")     = -1,
+             py::arg("max_pixels")     = -1,
+             py::arg("fps")            = -1,
+             py::arg("min_frames")     = -1,
+             py::arg("max_frames")     = -1,
+             py::arg("crop_positions") = std::vector<float>{},
+             py::arg("mm_timeout_ms")  = -1)
         .def_readwrite("width", &MMPreprocessConfig::width)
         .def_readwrite("height", &MMPreprocessConfig::height)
         .def_readwrite("min_pixels", &MMPreprocessConfig::min_pixels)

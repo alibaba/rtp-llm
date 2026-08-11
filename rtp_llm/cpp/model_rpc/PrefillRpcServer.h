@@ -22,6 +22,8 @@ public:
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
 private:
+    static bool  isRetryableMultimodalError(ErrorCode error_code);
+    void         setContextError(PrefillGenerateContext& prefill_context, const ErrorInfo& error_info);
     ErrorInfo    waitStreamBeforeRun(std::shared_ptr<GenerateStream> stream);
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     void         getRpcConnection(PrefillGenerateContext& prefill_context);

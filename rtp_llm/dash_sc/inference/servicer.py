@@ -60,6 +60,7 @@ from rtp_llm.dash_sc.codec import (
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
+    parse_multimodal_parts_from_request,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.grpc_metrics import (
@@ -103,6 +104,33 @@ _EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4"}
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 GrpcMetadata = Iterable[tuple[object, object]]
+
+
+def _build_mm_inputs_from_request(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> list:
+    """Convert DashSc message parts to the engine's generic multimodal inputs."""
+    parts = parse_multimodal_parts_from_request(request)
+    if not parts:
+        return []
+
+    from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+
+    return [
+        MultimodalInput(
+            part.url,
+            part.mm_type,
+            torch.empty(0),
+            MMPreprocessConfig(
+                min_pixels=part.min_pixels,
+                max_pixels=part.max_pixels,
+                fps=part.fps,
+                min_frames=part.min_frames,
+                max_frames=part.max_frames,
+            ),
+        )
+        for part in parts
+    ]
 
 
 def _exception_metric_code(error_code: int | ExceptionType) -> str:
@@ -459,6 +487,7 @@ def _make_generate_input(
     generate_config: GenerateConfig,
     invocation_metadata: Optional[GrpcMetadata],
     request_headers: Optional[dict[str, str]] = None,
+    mm_inputs: Optional[list] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
@@ -466,7 +495,7 @@ def _make_generate_input(
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
-        mm_inputs=[],
+        mm_inputs=list(mm_inputs) if mm_inputs else [],
         generate_config=generate_config,
         headers=headers,
         request_info=RequestInfo(
@@ -585,6 +614,7 @@ async def iter_real_model_stream_infer(
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
     access_agg: GrpcAccessRecord | None = None,
     yield_access_stats: bool = False,
+    mm_inputs: Optional[list] = None,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
 
@@ -692,6 +722,7 @@ async def iter_real_model_stream_infer(
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
             request_headers=request_controls.request_headers,
+            mm_inputs=mm_inputs,
         )
         is_streaming = bool(generate_config.is_streaming)
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
@@ -1004,6 +1035,7 @@ async def iter_real_model_stream_infer(
                 generate_config=phase2_config,
                 invocation_metadata=invocation_metadata,
                 request_headers=request_controls.request_headers,
+                mm_inputs=mm_inputs,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
@@ -1376,6 +1408,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     input_ids_list, sampling, request_controls = (
                         parse_dash_sc_grpc_request(request)
                     )
+                    mm_inputs = _build_mm_inputs_from_request(request)
                 except DashScParameterError as e:
                     if first_request:
                         record.record_request_frame(request)
@@ -1477,6 +1510,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     phase2_request_id_factory=self._next_rtp_llm_request_id,
                     access_agg=record,
                     yield_access_stats=True,
+                    mm_inputs=mm_inputs,
                 ):
                     (
                         delta_len,
