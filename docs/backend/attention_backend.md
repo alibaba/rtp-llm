@@ -15,3 +15,37 @@
 | **FlashMLA**          | ✅                | ✅                 | ✅      | ❌                 | NV Hopper ✅<br> AMD ❌ | None                            | PREFILL ❌ <br>  DECODE✅  |
 | **MMHA**              | ✅                | ❌                 | ❌      | ❌                 | NV ✅<br> AMD ✅        | None                            | PREFILL ❌ <br>  DECODE✅  |
 | **AiterPA**           | ✅                | ❌                 | ❌      | ❌                 | NV ❌<br> AMD ✅        | None                            | PREFILL ❌ <br>  DECODE✅  |
+
+## ROCm KV-cache V layout and PA flag combinations
+
+The decode PA kernel reads V pages written by prefill and decode RoPE/cache ops. A reader must use
+the layout produced by its writer: linear `head_dim × page`, or vectorized
+`page/width × head_dim × width`, where `width` is `16 // itemsize` (8 for BF16/FP16, 16 for FP8).
+`head_dim` must be a multiple of `width`; `page` must also be a multiple only when the stored V
+layout is vectorized. Linear V has no vector-width page requirement. At `page == width`, linear and
+vectorized addressing coincide. `page` is `--kernel_seq_size_per_block` (falling back to
+`--seq_size_per_block`, then 16).
+
+Non-ASM decode checks `page` against the 256-token partition only when that runtime path is selected.
+BF16/FP16 requests with `head_dim ≤ 128` and `max_seq_len ≤ 16384` use the 512-token path instead.
+Only full-attention MHA with a RoPE KV cache is checked; MLA uses another factory. This matrix does
+not cover PD-disaggregated role coordination.
+
+Rows are `--use_aiter_pa`/`--use_asm_pa`/`--use_triton_pa`; columns are `size_per_head` × KV dtype.
+Each cell shows `[prefill] (decode)` with the implementation and V layout (`V` vectorized, `L` linear)
+at `page=16`. `❌` means the factory raises instead of returning an implementation; the cell says why —
+`(none)` is no implementation for that phase, otherwise the two layouts disagree. `page=width` marks a
+pair that only agrees because the layouts coincide at that page size. ASM decode requires
+`size_per_head=128`. The table assumes no prefix reuse; with prefix reuse, `--use_asm_pa 1`
+additionally selects the capturable `AiterPrefillImplPaged` path.
+
+| aiter/asm/triton | 128 BASE | 128 FP8 | 256 BASE | 256 FP8 | fix for ❌ |
+|---|---|---|---|---|---|
+| `1/1/1` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | — |
+| `1/1/0` **(default)** | ✅ `[Asm:V] (Asm:V)` | ✅ `[Asm:V] (Asm:V)` | ❌ `[Asm:V] (NonAsm:L)` | ✅ `[Asm:V] (NonAsm:L)` `page=width` | `--use_triton_pa 1`, or `--use_asm_pa 0` on BASE |
+| `1/0/1` | ✅ `[NonAsm:L] (TritonLin:L)` | ✅ `[NonAsm:V] (Triton:V)` | ✅ `[NonAsm:L] (TritonLin:L)` | ✅ `[NonAsm:V] (Triton:V)` | — |
+| `1/0/0` | ✅ `[NonAsm:L] (NonAsm:L)` | ✅ `[NonAsm:V] (NonAsm:L)` `page=width` | ✅ `[NonAsm:L] (NonAsm:L)` | ✅ `[NonAsm:V] (NonAsm:L)` `page=width` | `--use_triton_pa 1` |
+| `0/1/1` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | ✅ `[Asm:V] (Triton:V)` | — |
+| `0/1/0` | ✅ `[Asm:V] (Asm:V)` | ✅ `[Asm:V] (Asm:V)` | ❌ `[Asm:V] (none)` | ❌ `[Asm:V] (none)` | `--use_triton_pa 1` |
+| `0/0/1` | ❌ `[none] (TritonLin:L)` | ❌ `[none] (Triton:V)` | ❌ `[none] (TritonLin:L)` | ❌ `[none] (Triton:V)` | `--use_asm_pa 1`, or `--use_aiter_pa 1` |
+| `0/0/0` | ❌ `[none] (none)` | ❌ `[none] (none)` | ❌ `[none] (none)` | ❌ `[none] (none)` | `--use_aiter_pa 1` |
