@@ -2,7 +2,7 @@ import time
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.utils.base_model_datatypes import AuxInfo
@@ -159,6 +159,7 @@ class ChatCompletionRequest(BaseModel):
     )
     master_info: Optional[Dict[str, Any]] = None
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    _force_reasoning_from_rendered_prompt: Optional[bool] = PrivateAttr(default=None)
 
     @staticmethod
     def is_openai_request(request: Dict[str, Any]):

@@ -423,6 +423,11 @@ class CustomChatRenderer:
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
         raise NotImplementedError
 
+    def _update_request_from_rendered_prompt(
+        self, request: ChatCompletionRequest, rendered_prompt: str
+    ) -> None:
+        pass
+
     async def generate_choice(
         self,
         request_id: int,

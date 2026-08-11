@@ -127,7 +127,19 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         """渲染聊天请求"""
         prompt: str = self._build_prompt(request)
         input_ids: List[int] = self.tokenizer.encode(prompt)
+        self._update_request_from_rendered_prompt(request, prompt)
         return RenderedInputs(input_ids=input_ids, rendered_prompt=prompt)
+
+    @functools.cached_property
+    def _compiled_chat_template(self):
+        env = Environment(
+            loader=BaseLoader(),
+            trim_blocks=True,
+            lstrip_blocks=True,
+            extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"],
+        )
+        self._customize_jinja_env(env)
+        return env.from_string(self.chat_template)
 
     def _build_prompt(self, request: ChatCompletionRequest) -> str:
         """
@@ -156,20 +168,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         ):
             context.update(request.extra_configs.chat_template_kwargs)
 
-        # 创建Jinja2环境
-        env = Environment(
-            loader=BaseLoader(),
-            trim_blocks=True,
-            lstrip_blocks=True,
-            extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"],
-        )
-
-        # 允许子类自定义环境
-        self._customize_jinja_env(env)
-
         try:
-            template = env.from_string(self.chat_template)
-            rendered_prompt = template.render(**context)
+            rendered_prompt = self._compiled_chat_template.render(**context)
             return rendered_prompt
         except Exception as e:
             logging.error(f"构建提示文本失败: {str(e)}")

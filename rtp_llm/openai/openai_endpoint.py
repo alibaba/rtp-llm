@@ -498,6 +498,9 @@ class OpenaiEndpoint(object):
         if prepopulate_str != "":
             rendered_input.rendered_prompt += prepopulate_str
             rendered_input.input_ids += self.tokenizer.encode(prepopulate_str)
+        renderer._update_request_from_rendered_prompt(
+            chat_request, rendered_input.rendered_prompt
+        )
         return rendered_input
 
     def chat_completion(
