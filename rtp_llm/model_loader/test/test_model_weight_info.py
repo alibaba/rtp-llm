@@ -1,12 +1,18 @@
 import unittest
+from types import SimpleNamespace
 from typing import List
 
+import torch
+
+from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
 )
+from rtp_llm.model_loader.tensor_source import TensorCollector
+from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.model_weight import CkptWeightInfo
+from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 
 class FakeCkptFileInfo:
@@ -84,9 +90,7 @@ class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
         )
 
     def test_ckpt_tensor_name_regex_escapes_literal_dots(self):
-        pattern = ModelDeployWeightInfo._ckpt_tensor_name_to_regex(
-            "lm_head.weight"
-        )
+        pattern = ModelDeployWeightInfo._ckpt_tensor_name_to_regex("lm_head.weight")
 
         self.assertIsNotNone(pattern.fullmatch("lm_head.weight"))
         self.assertIsNone(pattern.fullmatch("lm_headXweight"))
@@ -113,7 +117,9 @@ class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
         self.assertTrue(
             any(pattern.fullmatch("model.embed_tokens.weight") for pattern in patterns)
         )
-        self.assertTrue(any(pattern.fullmatch("lm_head.weight") for pattern in patterns))
+        self.assertTrue(
+            any(pattern.fullmatch("lm_head.weight") for pattern in patterns)
+        )
         self.assertTrue(
             any(
                 pattern.fullmatch("model.layers.0.self_attn.q_proj.weight")
@@ -133,6 +139,62 @@ class ModelDeployWeightInfoCkptRegexTest(unittest.TestCase):
         patterns = ModelDeployWeightInfo._collect_ckpt_tensor_name_regexes(weight_info)
 
         self.assertEqual(patterns, [])
+
+
+class AttentionOutputStaticQuantReciprocalTest(unittest.TestCase):
+    def test_reciprocal_added_only_to_layers_with_attention_output(self):
+        # layer 0 mimics a hybrid linear-attention layer: no attention output
+        # projection at all. layer 1 mimics a normal MHA layer.
+        weight_info = ModelWeightInfo(
+            weights=[],
+            layer_weights=[
+                [
+                    AtomicWeight(
+                        W.linear_attn_out_w,
+                        [CkptWeightInfo("model.layers.{i}.linear_attn.out_proj.w")],
+                    )
+                ],
+                [
+                    AtomicWeight(
+                        W.attn_o_w,
+                        [CkptWeightInfo("model.layers.{i}.self_attn.o_proj.weight")],
+                    )
+                ],
+            ],
+        )
+        deploy_info = RecordingDeployWeightInfo(make_database([]), weight_info)
+
+        result = deploy_info._add_attention_output_static_quant_reciprocal(weight_info)
+
+        linear_layer, mha_layer = result.layer_weights
+        self.assertEqual([w.name for w in linear_layer], [W.linear_attn_out_w])
+        self.assertEqual(
+            [w.name for w in mha_layer],
+            [W.attn_o_w, W.attention_output_static_quant_reciprocal],
+        )
+
+        # The scale has no ckpt dependency, so it is loaded from an empty
+        # collector and must still yield a float32 one on the target device.
+        reciprocal = mha_layer[-1]
+        self.assertEqual(reciprocal.get_tensor_names(1, None), set())
+        loaded = reciprocal.load(
+            TensorCollector(set(), make_database([])),
+            1,
+            "cpu",
+            LoadConfig.model_construct(
+                tp_size=1,
+                dp_size=1,
+                ep_size=1,
+                merge_lora=False,
+                exported_device=SimpleNamespace(
+                    maybe_rewrite_weight_by_key=lambda _, tensor: tensor
+                ),
+            ),
+        )
+        torch.testing.assert_close(
+            loaded[W.attention_output_static_quant_reciprocal],
+            torch.ones(1, dtype=torch.float32),
+        )
 
 
 class CkptDatabaseFilterTest(unittest.TestCase):
@@ -177,9 +239,7 @@ class CkptDatabaseFilterTest(unittest.TestCase):
             ["irrelevant.weight"],
         )
         database = make_database([original_file])
-        patterns = [
-            ModelDeployWeightInfo._ckpt_tensor_name_to_regex("required.weight")
-        ]
+        patterns = [ModelDeployWeightInfo._ckpt_tensor_name_to_regex("required.weight")]
 
         database.filter_by_tensor_name_regexes(patterns)
 
@@ -202,9 +262,7 @@ class CkptDatabaseFilterTest(unittest.TestCase):
             FakeCkptFileInfo("b.safetensors", ["b.weight"]),
         ]
         database = make_database(files)
-        patterns = [
-            ModelDeployWeightInfo._ckpt_tensor_name_to_regex("missing.weight")
-        ]
+        patterns = [ModelDeployWeightInfo._ckpt_tensor_name_to_regex("missing.weight")]
 
         database.filter_by_tensor_name_regexes(patterns)
 
@@ -227,9 +285,7 @@ class CreateModelWeightInfoFilterOrderTest(unittest.TestCase):
         )
         returned_weight_info = ModelWeightInfo(
             weights=[],
-            layer_weights=[
-                [FakeWeight(["mtp.layers.{i}.self_attn.q_proj.weight"])]
-            ],
+            layer_weights=[[FakeWeight(["mtp.layers.{i}.self_attn.q_proj.weight"])]],
         )
         weight_info = RecordingDeployWeightInfo(database, returned_weight_info)
 
