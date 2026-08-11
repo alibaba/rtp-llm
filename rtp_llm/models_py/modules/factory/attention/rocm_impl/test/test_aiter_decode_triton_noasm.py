@@ -14,6 +14,7 @@ import torch
 
 _IS_ROCM_BUILD = torch.version.hip is not None
 try:
+    from rtp_llm.models_py.modules.factory.attention import attn_factory
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeAttnOpNonAsm,
         AiterDecodeAttnOpTriton,
@@ -215,6 +216,24 @@ class AiterDecodeLayoutParityTest(unittest.TestCase):
                 impl = AiterDecodeImplTriton(config, inputs, fmha_config=fmha_config)
                 self.assertEqual(impl.fmha_impl.linear_v, expected_linear_v)
                 self.assertIs(type(impl.rope_kvcache_impl), expected_writer)
+
+    def test_factory_wires_linear_v_through_create(self):
+        # Full factory path: a create() that drops fmha_config would silently
+        # return the wrong V reader, so assert linear_v still flips end-to-end.
+        config = make_config()
+        inputs = make_inputs(torch.device("cuda"))
+        inputs.is_prefill = False
+        for use_asm_pa, expected_linear_v in ((False, True), (True, False)):
+            with self.subTest(use_asm_pa=use_asm_pa):
+                fmha_config = FMHAConfig()
+                fmha_config.use_aiter_pa = True
+                fmha_config.use_asm_pa = use_asm_pa
+                fmha_config.use_triton_pa = True
+                impl = attn_factory.get_fmha_impl(
+                    config, None, inputs, fmha_config=fmha_config
+                )
+                self.assertIsInstance(impl, AiterDecodeImplTriton)
+                self.assertEqual(impl.fmha_impl.linear_v, expected_linear_v)
 
 
 if __name__ == "__main__":

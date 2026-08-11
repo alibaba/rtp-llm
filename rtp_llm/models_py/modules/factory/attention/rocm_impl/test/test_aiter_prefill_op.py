@@ -984,6 +984,38 @@ class TestCompactGatherReshape(unittest.TestCase):
         )
         self.assertEqual(k_compact.shape[0], bt.numel() + 1)
 
+    def test_2d_oversized_stride_truncates_to_prefix(self):
+        # Extra trailing columns beyond 2*hk*ps*hd must be sliced off: padded
+        # buffer must reshape identically to the exact-length one.
+        op = self._make_op()
+        hk, ps, hd = 4, 16, 128
+        exact = self._make_kv_cache_2d(8, hk, ps, hd)
+        padded = torch.cat(
+            [exact, torch.full((exact.shape[0], 32), 999.0, dtype=exact.dtype)], dim=1
+        )
+        k_exact, v_exact = op._reshape_kv_cache_vectorized(exact)
+        k_pad, v_pad = op._reshape_kv_cache_vectorized(padded)
+        torch.testing.assert_close(k_pad, k_exact)
+        torch.testing.assert_close(v_pad, v_exact)
+
+    def test_2d_linear_v_permute_element_order(self):
+        # Lock element order (not just shape): linear V [hd, ps] must map to
+        # v[j, h, w] == V_block[h*ps + (j*vs + w)] via an independent formula.
+        op = self._make_op(head_num_kv=1, head_dim=8, tokens_per_block=4)
+        hk, ps, hd = 1, 4, 8
+        dtype = torch.float32
+        vs = 16 // torch.tensor([], dtype=dtype).element_size()  # 4
+        payload = 2 * hk * ps * hd
+        kv = torch.arange(payload, dtype=dtype).reshape(1, payload)
+        _, v_cache = op._reshape_kv_cache_vectorized(kv)
+        self.assertEqual(v_cache.shape, (1, hk, ps // vs, hd, vs))
+        v_block = kv[0, hk * ps * hd :]  # the V half (hk == 1)
+        for j in range(ps // vs):
+            for h in range(hd):
+                for w in range(vs):
+                    expected = v_block[h * ps + (j * vs + w)].item()
+                    self.assertEqual(v_cache[0, 0, j, h, w].item(), expected)
+
     # ---- FP8 fallback: compact should NOT be used -------------------------
 
     def test_fp8_uses_full_reshape(self):
@@ -1853,15 +1885,15 @@ class TestVLayoutContract(unittest.TestCase):
             config, inputs, self._decode_flags(aiter=False, asm=True, triton=False)
         )
 
-    def test_linear_v_allows_unaligned_page_and_defers_partition_check(self):
-        # Both phases use the linear layout. Validation must not apply the
-        # vectorized page alignment or the 256-token partition constraint here;
-        # the latter is checked by the non-ASM kernel only when that path runs.
+    def test_geometry_rejects_unaligned_page_even_for_linear_v(self):
+        # Linear V still reshapes page//width, so an unaligned page must be
+        # rejected up front, not deferred to a later .view() failure.
         config, inputs = self._make_case(128, 12)
         inputs.is_prefill = False
-        validate_v_layout(
-            config, inputs, self._decode_flags(aiter=True, asm=False, triton=False)
-        )
+        with self.assertRaisesRegex(ValueError, "V geometry"):
+            validate_v_layout(
+                config, inputs, self._decode_flags(aiter=True, asm=False, triton=False)
+            )
 
     def test_reshape_kv_cache_unpacks_hybrid_2d_buffer(self):
         config, _ = self._make_case(128, 16)
