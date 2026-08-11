@@ -228,20 +228,24 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
                     HostCacheMatch hostCacheMatch = cacheMatchResult.hostMatch(workerStatus.getIpPort());
-                    long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResult, p2pHitDiscount);
+                    long hitCacheTokens = calculatePrefixMatchLength(
+                            workerStatus, cacheMatchResult, p2pHitDiscount, seqLen);
                     long prefillTime = TaskInfo.estimatePrefillTimeMs(seqLen, hitCacheTokens);
                     long queueTime = workerStatus.getRunningQueueTime().get();
                     long newTTFT = prefillTime + queueTime;
                     long lastSelectedTime = workerStatus.getLastSelectedTime().get();
                     long localMatchTokens = matchTokens(
                             hostCacheMatch == null ? 0 : hostCacheMatch.localMatchBlocks(),
-                            cacheMatchResult.blockSize());
+                            cacheMatchResult.blockSize(),
+                            seqLen);
                     long p2pFetchTokens = matchTokens(
                             hostCacheMatch == null ? 0 : hostCacheMatch.p2pFetchBlocks(),
-                            cacheMatchResult.blockSize());
+                            cacheMatchResult.blockSize(),
+                            seqLen);
                     long p2pTotalMatchTokens = matchTokens(
                             hostCacheMatch == null ? 0 : hostCacheMatch.p2pTotalMatchBlocks(),
-                            cacheMatchResult.blockSize());
+                            cacheMatchResult.blockSize(),
+                            seqLen);
                     Logger.debug("Calculate TTFT for worker - ip: {}, port: {}, hitCacheTokens: {}, prefillTime: {}, queueTime: {}, newTTFT: {}",
                             workerStatus.getIp(),
                             workerStatus.getPort(),
@@ -261,8 +265,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 .collect(Collectors.toList());
     }
 
-    private long matchTokens(long matchBlocks, long blockSize) {
-        return Math.max(0L, matchBlocks) * Math.max(0L, blockSize);
+    private long matchTokens(long matchBlocks, long blockSize, long inputTokens) {
+        return CacheMatchResult.matchedTokens(matchBlocks, blockSize, inputTokens);
     }
 
     /**
@@ -293,9 +297,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 balanceContext.getCacheMatchSource());
         recordKvcmMatch(
                 task,
-                cacheMatchResult.source(),
+                cacheMatchResult,
                 cacheMatchResult.hostMatch(workerStatus.getIpPort()),
-                cacheMatchResult.blockSize());
+                seqLen);
         engineHealthReporter.reportKvcmSelectedMatch(
                 roleType,
                 workerStatus.getIp(),
@@ -843,24 +847,35 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * @param cacheMatchResult Cache match result
      * @return Number of tokens hit
      */
-    private long calculatePrefixMatchLength(WorkerStatus workerStatus, CacheMatchResult cacheMatchResult, double p2pHitDiscount) {
+    private long calculatePrefixMatchLength(
+            WorkerStatus workerStatus,
+            CacheMatchResult cacheMatchResult,
+            double p2pHitDiscount,
+            long inputTokens) {
         HostCacheMatch match = cacheMatchResult.hostMatch(workerStatus.getIpPort());
         if (match == null) {
             return 0L;
         }
         long p2pAddedMatchBlocks = Math.max(0L, match.p2pTotalMatchBlocks() - match.localMatchBlocks());
         double effectiveMatchBlocks = match.localMatchBlocks() + p2pAddedMatchBlocks * Math.max(0.0, p2pHitDiscount);
-        return Math.round(cacheMatchResult.blockSize() * effectiveMatchBlocks);
+        return CacheMatchResult.matchedTokens(
+                effectiveMatchBlocks, cacheMatchResult.blockSize(), inputTokens);
     }
 
-    private void recordKvcmMatch(TaskInfo task, CacheMatchSource source, HostCacheMatch match, long blockSize) {
-        if (source != CacheMatchSource.KVCM || match == null || blockSize <= 0) {
+    private void recordKvcmMatch(
+            TaskInfo task, CacheMatchResult cacheMatchResult, HostCacheMatch match, long inputTokens) {
+        if (cacheMatchResult.source() != CacheMatchSource.KVCM
+                || match == null
+                || cacheMatchResult.blockSize() <= 0) {
             return;
         }
         task.setKvcmMatchAvailable(true);
-        task.setKvcmLocalMatchTokens(blockSize * match.localMatchBlocks());
-        task.setKvcmP2pFetchTokens(blockSize * match.p2pFetchBlocks());
-        task.setKvcmP2pTotalMatchTokens(blockSize * match.p2pTotalMatchBlocks());
+        task.setKvcmLocalMatchTokens(CacheMatchResult.matchedTokens(
+                match.localMatchBlocks(), cacheMatchResult.blockSize(), inputTokens));
+        task.setKvcmP2pFetchTokens(CacheMatchResult.matchedTokens(
+                match.p2pFetchBlocks(), cacheMatchResult.blockSize(), inputTokens));
+        task.setKvcmP2pTotalMatchTokens(CacheMatchResult.matchedTokens(
+                match.p2pTotalMatchBlocks(), cacheMatchResult.blockSize(), inputTokens));
     }
 
     private CacheMatchQuery cacheMatchQuery(BalanceContext balanceContext, long blockSize,

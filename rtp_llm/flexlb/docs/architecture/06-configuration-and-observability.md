@@ -12,6 +12,7 @@
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
+| `blockHashStrategy` | `VLLM` | cache block hash 策略：`VLLM` / `SGLANG`；可由 `BLOCK_HASH_STRATEGY` 覆盖 |
 | `loadBalanceStrategy` | `SHORTEST_TTFT` | PDFUSION/PREFILL 策略 |
 | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE` | DECODE 策略 |
 | `vitLoadBalanceStrategy` | `RANDOM` | VIT 策略 |
@@ -135,4 +136,5 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
   `-Dspring.profiles.active=${FLEXLB_ACTIVE_PROFILES}` 由环境注入。
 - 其他 env：`MAX_IN_MEMORY_SIZE`（codec 默认 10MB）、`FLEXLB_LOG_LEVEL`、`FLEXLB_LOG_PATH`、
   `FLEXLB_APP_LOG_PATH`、`FLEXLB_MONITOR_PROVIDER`、
+  `BLOCK_HASH_STRATEGY`（`VLLM` / `SGLANG`）、
   `FLEXLB_BLOCK_HASH_{CORE_THREAD_COUNT,MAX_THREAD_COUNT,KEEP_ALIVE_SECONDS,QUEUE_CAPACITY}`。

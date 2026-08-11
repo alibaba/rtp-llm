@@ -9,6 +9,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 
@@ -184,6 +185,40 @@ class RequestBlockHashServiceTest {
         assertSame(calculatedKeys, request.getLocalStandbyBlockCacheKeys());
         assertEquals(2192, request.getLocalStandbyBlockSize());
         verify(localStandbyHashService, never()).submit(any(), any(), anyLong(), anyInt());
+    }
+
+    @Test
+    void reusesSglangEagleHashAndFullBigramPagesForLocalStandby() {
+        CacheMatchConfiguration configuration = configurationWithLocalStandby(4);
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        BlockHashExecutor executor =
+                new BlockHashExecutor(monitor, new SglangBlockHashStrategy(), 1, 2, 60, 4);
+        LocalStandbyHashService standbyHashService =
+                new LocalStandbyHashService(
+                        configuration, monitor, new SglangBlockHashStrategy());
+        RequestBlockHashService service = new RequestBlockHashService(
+                () -> new BlockHashConfig(4, 1),
+                executor,
+                standbyHashService,
+                configuration);
+        Request request = new Request();
+        request.setInputIds(new int[]{1, 2, 3, 4, 5, 6});
+
+        try {
+            service.prepareBlockCacheKeys(contextFor(request)).block();
+
+            assertEquals(
+                    List.of(-638950109823820341L, 3604587133525381017L),
+                    request.getBlockCacheKeys());
+            assertSame(
+                    request.getBlockCacheKeys(), request.getLocalStandbyBlockCacheKeys());
+            assertEquals(
+                    List.of(-638950109823820341L),
+                    request.getLocalStandbyCacheableBlockCacheKeys());
+        } finally {
+            executor.shutdown();
+            standbyHashService.shutdown();
+        }
     }
 
     @Test

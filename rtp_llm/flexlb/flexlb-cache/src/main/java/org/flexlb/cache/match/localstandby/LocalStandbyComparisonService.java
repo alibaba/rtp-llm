@@ -5,6 +5,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheHitFeedback;
@@ -82,7 +83,10 @@ public class LocalStandbyComparisonService {
         HostCacheMatch match = standbyPrediction.matches().get(workerIpPort);
         long localStandbyPredictedHitTokens = match == null
                 ? 0
-                : match.localMatchBlocks() * standbyPrediction.blockSize();
+                : CacheMatchResult.matchedTokens(
+                        match.localMatchBlocks(),
+                        standbyPrediction.blockSize(),
+                        feedback.inputTokens());
         return result(
                 feedback,
                 new CacheHitComparisonResult.HitComparison(

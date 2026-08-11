@@ -194,7 +194,7 @@ class WeightedCacheLoadBalancerTest {
     }
 
     @Test
-    void should_record_selected_worker_kvcm_hit_in_context() {
+    void should_record_selected_worker_kvcm_hit_capped_at_request_length() {
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(new ModelMetaConfig());
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         CacheStatus cacheStatus = new CacheStatus();
@@ -205,7 +205,7 @@ class WeightedCacheLoadBalancerTest {
 
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
                 .thenReturn(new CacheMatchResult(
-                        Map.of("127.0.0.1:8080", HostCacheMatch.local(4)), CacheMatchSource.KVCM, 321, 256));
+                        Map.of("127.0.0.1:8080", HostCacheMatch.local(9)), CacheMatchSource.KVCM, 321, 256));
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -230,12 +230,12 @@ class WeightedCacheLoadBalancerTest {
         Assertions.assertEquals(321, context.getCacheMatchQueryTimeUs());
         TaskInfo selectedTask = worker.getLocalTaskMap().get("request-kvcm");
         Assertions.assertNotNull(selectedTask);
-        Assertions.assertEquals(1024, selectedTask.getPredictedPrefixLength());
+        Assertions.assertEquals(2048, selectedTask.getPredictedPrefixLength());
         Assertions.assertEquals("KVCM", selectedTask.getCacheMatchSource());
         BalanceContext.CacheMatchSelection selection =
                 context.getCacheMatchSelectionByRole().get(RoleType.DECODE);
         Assertions.assertEquals("127.0.0.1", selection.selectedIp());
-        Assertions.assertEquals(1024, selection.hitCacheTokens());
+        Assertions.assertEquals(2048, selection.hitCacheTokens());
     }
 
     @Test

@@ -3,6 +3,7 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.BlockHashStrategyType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
 
@@ -20,6 +21,11 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 @Getter
 @Setter
 public class FlexlbConfig {
+
+    /**
+     * Block hash strategy used for cache matching.
+     */
+    private BlockHashStrategyType blockHashStrategy = BlockHashStrategyType.VLLM;
 
     /**
      * Load balancing strategy

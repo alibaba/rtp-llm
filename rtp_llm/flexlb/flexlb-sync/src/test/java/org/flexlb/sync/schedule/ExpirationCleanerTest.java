@@ -34,7 +34,7 @@ class ExpirationCleanerTest {
         cleaner.doClean(workerStatusMap(workerStatus), RoleType.PREFILL);
 
         assertTrue(workerStatus.getLocalTaskMap().containsKey("request-1"));
-        assertEquals(860, workerStatus.getRunningQueueTime().get());
+        assertEquals(800, workerStatus.getRunningQueueTime().get());
     }
 
     @Test

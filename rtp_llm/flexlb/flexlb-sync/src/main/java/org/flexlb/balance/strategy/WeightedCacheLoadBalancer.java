@@ -98,7 +98,7 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
                             roleType,
                             group));
             long prefixLength = calcPrefixMatchLength(
-                    selectedWorker, cacheMatchResult, config.getP2pHitDiscount());
+                    selectedWorker, cacheMatchResult, config.getP2pHitDiscount(), seqLen);
             balanceContext.recordCacheMatch(
                     cacheMatchResult.source().name(),
                     cacheMatchResult.queryTimeUs(),
@@ -139,7 +139,11 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
     }
 
-    private long calcPrefixMatchLength(WorkerStatus workerStatus, CacheMatchResult cacheMatchResult, double p2pHitDiscount) {
+    private long calcPrefixMatchLength(
+            WorkerStatus workerStatus,
+            CacheMatchResult cacheMatchResult,
+            double p2pHitDiscount,
+            long inputTokens) {
         // KVCM returns the host_ip_port reported by Subscriber, while WorkerStatus uses the
         // service-discovery address. No code-level normalization guarantees they are identical;
         // the end-to-end integration must keep both values aligned.
@@ -149,7 +153,8 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
         long p2pAddedMatchBlocks = Math.max(0L, match.p2pTotalMatchBlocks() - match.localMatchBlocks());
         double effectiveMatchBlocks = match.localMatchBlocks() + p2pAddedMatchBlocks * Math.max(0.0, p2pHitDiscount);
-        return Math.round(cacheMatchResult.blockSize() * effectiveMatchBlocks);
+        return CacheMatchResult.matchedTokens(
+                effectiveMatchBlocks, cacheMatchResult.blockSize(), inputTokens);
     }
 
     /**

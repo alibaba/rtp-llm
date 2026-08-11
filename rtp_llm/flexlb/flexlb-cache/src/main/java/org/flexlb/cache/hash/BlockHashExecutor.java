@@ -7,7 +7,6 @@ import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
-import org.flexlb.util.BlockCacheKeyCalculator;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -17,6 +16,7 @@ import reactor.core.scheduler.Schedulers;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.RejectedExecutionException;
@@ -39,11 +39,13 @@ public class BlockHashExecutor {
     private static final FlexMetricTags REJECTED_TAGS = FlexMetricTags.of("status", "rejected");
 
     private final FlexMonitor monitor;
+    private final BlockHashStrategy blockHashStrategy;
     private final ThreadPoolExecutor executor;
     private final Scheduler scheduler;
 
     public BlockHashExecutor(
             FlexMonitor monitor,
+            BlockHashStrategy blockHashStrategy,
             @Value("${flexlb.block-hash.core-thread-count:8}") int coreThreadCount,
             @Value("${flexlb.block-hash.max-thread-count:32}") int maxThreadCount,
             @Value("${flexlb.block-hash.keep-alive-seconds:60}") long keepAliveSeconds,
@@ -62,6 +64,7 @@ public class BlockHashExecutor {
         }
 
         this.monitor = monitor;
+        this.blockHashStrategy = blockHashStrategy;
         this.executor = new ThreadPoolExecutor(
                 coreThreadCount,
                 maxThreadCount,
@@ -86,11 +89,17 @@ public class BlockHashExecutor {
     }
 
     public Mono<BlockHashCalculationResult> calculate(int[] inputIds, long blockSize, int lookaheadTokens) {
-        return submitTimed(() -> BlockCacheKeyCalculator.calculate(inputIds, blockSize, lookaheadTokens))
+        return submitTimed(() -> blockHashStrategy.calculate(inputIds, blockSize, lookaheadTokens))
                 .map(result -> new BlockHashCalculationResult(
                         result.value(),
                         result.queueWaitTimeUs(),
                         result.executionTimeUs()));
+    }
+
+    public List<Long> cacheablePrefix(
+            List<Long> blockCacheKeys, int inputTokenCount, long blockSize, int lookaheadTokens) {
+        return blockHashStrategy.cacheablePrefix(
+                blockCacheKeys, inputTokenCount, blockSize, lookaheadTokens);
     }
 
     <T> Mono<T> submit(Callable<T> task) {
