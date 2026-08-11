@@ -716,6 +716,10 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         }
         {
             py::gil_scoped_acquire acquire;
+            if (weight_manager_.is_none()) {
+                return {grpc::StatusCode::UNIMPLEMENTED,
+                        "UpdateWeights is not supported when NewModelLoader is enabled"};
+            }
             py::dict               req;
             req["name"]   = request->name();
             req["desc"]   = request->desc();
