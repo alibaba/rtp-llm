@@ -21,6 +21,7 @@ class LinearBase(nn.Module, ABC):
     """
 
     supports_deferred_bias = False
+    supports_fused_bias_gelu_quant = False
 
     @classmethod
     @abstractmethod
@@ -103,6 +104,22 @@ class LinearBase(nn.Module, ABC):
         """Forward while deferring bias to a following fused epilogue."""
         raise NotImplementedError(
             f"{type(self).__name__} does not support deferred bias"
+        )
+
+    def forward_with_bias_gelu_quantized(
+        self, input: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        """Return fused GELU output in backend-native quantized form when supported."""
+        return None
+
+    def forward_quantized(
+        self,
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not accept pre-quantized activations"
         )
 
     def __repr__(self) -> str:
