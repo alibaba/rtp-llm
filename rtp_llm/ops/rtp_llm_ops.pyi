@@ -16,6 +16,7 @@ __all__ = [
     "embedding",
     "fused_add_layernorm",
     "fused_add_rmsnorm",
+    "fused_bias_gelu",
     "fused_qk_rmsnorm",
     "FlashInferMlaAttnParams",
     "layernorm",
@@ -89,6 +90,9 @@ def fused_add_layernorm(
     """
     Fused Add LayerNorm kernel
     """
+
+def fused_bias_gelu(input: torch.Tensor, bias: torch.Tensor) -> None:
+    """In-place fused bias add and exact GELU kernel."""
 
 def fused_add_rmsnorm(
     input: torch.Tensor,

@@ -91,3 +91,26 @@ class CausalAttention(nn.Module):
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output
+
+    def forward_without_output_bias(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        gate: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        input_shape = hidden_states.shape[:-1]
+        qkv = self.qkv_proj(hidden_states)
+        if self.qk_fuse_norm is not None:
+            qkv = self.qk_fuse_norm(qkv)
+        attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+        if gate is not None:
+            attn_output = attn_output * torch.sigmoid(gate)
+        if self.tp_size > 1 or not self.o_proj.supports_deferred_bias:
+            output = self.o_proj(attn_output)
+            if self.tp_size > 1:
+                output = all_reduce(output, group=Group.TP)
+            return output, None
+        output = self.o_proj.forward_without_bias(attn_output)
+        return output, self.o_proj.bias

@@ -20,6 +20,8 @@ class LinearBase(nn.Module, ABC):
     It inherits from nn.Module and implements forward() directly.
     """
 
+    supports_deferred_bias = False
+
     @classmethod
     @abstractmethod
     def can_handle(
@@ -96,6 +98,12 @@ class LinearBase(nn.Module, ABC):
         The default implementation preserves existing device behavior.
         """
         return F.gelu(self.forward(input))
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        """Forward while deferring bias to a following fused epilogue."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support deferred bias"
+        )
 
     def __repr__(self) -> str:
         """Return string representation of the strategy"""

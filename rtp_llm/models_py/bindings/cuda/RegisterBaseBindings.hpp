@@ -94,6 +94,12 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("beta"),
                   py::arg("eps"));
 
+    rtp_ops_m.def("fused_bias_gelu",
+                  &fused_bias_gelu,
+                  "In-place fused bias add and exact GELU kernel",
+                  py::arg("input"),
+                  py::arg("bias"));
+
     rtp_ops_m.def("per_token_group_quant_int8",
                   &per_token_group_quant_int8,
                   "Int8 Gemm Per Token Group",
