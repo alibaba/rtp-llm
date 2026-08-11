@@ -284,15 +284,14 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_DoNotConsumeRuntimeB
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
 }
 
-TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_DoNotConsumeCpPrefillQuota) {
+TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreamsSupportBatchedCpPrefill) {
     setupMockCoordinator();
 
     ModelConfig model_config;
     model_config.max_seq_len = 8192;
     RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                       = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_size   = 8192;
-    runtime_config.fifo_scheduler_config.cp_force_single_prefill = true;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
     PDSepConfig         pd_sep_config;
     ParallelismConfig   parallelism_config;
     ModelSpecificConfig model_specific_config;

@@ -30,7 +30,6 @@ class ServerArgsSetTest(TestCase):
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
-        os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
@@ -60,10 +59,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
-        )
-        self.assertEqual(
-            py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
-            False,
         )
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
@@ -95,8 +90,6 @@ class ServerArgsSetTest(TestCase):
             "128",
             "--max_context_batch_size",
             "64",
-            "--cp_force_single_prefill",
-            "false",
             "--max_inited_kv_cache_streams",
             "16",
             "--warm_up",
@@ -134,10 +127,6 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             64,
-        )
-        self.assertEqual(
-            py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
-            False,
         )
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams,

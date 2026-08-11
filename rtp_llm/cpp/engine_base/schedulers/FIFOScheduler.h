@@ -89,10 +89,6 @@ protected:
     size_t                          max_inited_kv_cache_streams_ = 0;
     const bool                      need_fill_fake_stream_       = false;
     const size_t                    prefill_cp_size_             = 1;
-    // Optional guard for Context-Parallel prefill: when enabled, force prefill
-    // to one stream per round. This remains the conservative default while
-    // newer dsv4 CP paths can opt in to batched prefill through runtime config.
-    const bool                   cp_force_single_prefill_ = false;
     std::atomic<bool>            stop_                    = false;
     bool                         schedule_trigger_        = false;
     std::mutex                   lock_;
