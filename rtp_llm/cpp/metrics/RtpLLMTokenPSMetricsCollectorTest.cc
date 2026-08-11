@@ -2,6 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <map>
+
 namespace rtp_llm {
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
@@ -201,6 +204,38 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGlobalAndPriorityMetrics) {
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter(
         nullptr);
     wall_tps_reporter.report(&collector);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, AddTokenSizeByPriorityMatchesUntaggedTotals) {
+    struct TokenCounts {
+        int64_t context            = 0;
+        int64_t context_with_cache = 0;
+        int64_t generate           = 0;
+        int64_t total              = 0;
+    };
+    // Mirrors the MTP decode path: accepted tokens bucketed per priority with
+    // generate == total and no context contribution; bucket sums must equal
+    // the untagged totals reported through addTokenSize.
+    std::map<int32_t, TokenCounts> counts_by_priority;
+    counts_by_priority[30] = {0, 0, 7, 7};
+    counts_by_priority[50] = {0, 0, 3, 3};
+
+    RtpLLMTokenPSMetricsCollector collector;
+    const int64_t                 total_accepted = 10;
+    collector.addTokenSize(0, 0, total_accepted, total_accepted, 100 * 1000);
+    collector.addTokenSizeByPriority(counts_by_priority, 100 * 1000);
+
+    auto priority_collectors = collector.priorityCollectorsForReport();
+    ASSERT_EQ(priority_collectors.size(), 2);
+    EXPECT_NEAR(priority_collectors.at(30).generateTPS(), 7.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(50).generateTPS(), 3.0, 1e-6);
+    EXPECT_NEAR(priority_collectors.at(30).generateTPS() + priority_collectors.at(50).generateTPS(),
+                collector.generateTPS(),
+                1e-6);
+    EXPECT_NEAR(
+        priority_collectors.at(30).totalTPS() + priority_collectors.at(50).totalTPS(), collector.totalTPS(), 1e-6);
+    EXPECT_FALSE(priority_collectors.at(30).hasContextTPS());
+    EXPECT_FALSE(priority_collectors.at(50).hasContextTPS());
 }
 
 }  // namespace rtp_llm
