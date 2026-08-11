@@ -72,6 +72,31 @@ class TestPackUe8m0KernelLauncher(TestCase):
         if not torch.cuda.is_available():
             raise SkipTest("CUDA is not available")
 
+    def test_transform_scale_moves_cpu_input_to_current_cuda_device(self):
+        from deep_gemm import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+        from rtp_llm.models_py.kernels.cuda.fp8_quant import (
+            _transform_scale_ue8m0,
+        )
+
+        mn = 256
+        scale_cpu = torch.tensor(
+            [[0.25, 0.5, 1.0, 2.0], [0.5, 1.0, 2.0, 4.0]],
+            dtype=torch.float32,
+        )
+
+        packed = _transform_scale_ue8m0(scale_cpu, mn)
+        current_device = torch.cuda.current_device()
+        scale_cuda = scale_cpu.to(device=current_device)
+        expanded = scale_cuda.index_select(
+            -2, torch.arange(mn, device=scale_cuda.device) // 128
+        )
+        expected = get_mn_major_tma_aligned_packed_ue8m0_tensor(expanded)
+
+        self.assertTrue(packed.is_cuda)
+        self.assertEqual(packed.device.index, current_device)
+        self.assertTrue(torch.equal(packed, expected))
+
     def test_pack_kernel_gran1_matches_reference(self):
         """
         Test pack_ue8m0_kernel_gran1 produces same packed values as reference.
