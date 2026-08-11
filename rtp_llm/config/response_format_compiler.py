@@ -1,9 +1,13 @@
+import copy
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES, GrammarConstraint
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
+
+if TYPE_CHECKING:
+    from rtp_llm.config.generate_config import ThinkingMode
 
 
 @dataclass(frozen=True)
@@ -13,24 +17,29 @@ class ReasoningFormat:
     tag_begin: Union[str, List[str], Dict[str, Any]]
     tag_end: Union[str, List[str], Dict[str, Any]]
     suffix: str = ""
+    no_think_excludes: Tuple[str, ...] = ()
 
     @classmethod
     def from_generate_env_config(cls, generate_env_config: Any) -> "ReasoningFormat":
+        raw_end_tag = generate_env_config.think_end_tag
+        normalized_end_tag = (
+            normalize_think_tag(str(raw_end_tag)) if raw_end_tag is not None else ""
+        )
         raw_token_id = generate_env_config.think_end_token_id
         token_id = -1 if raw_token_id is None else int(raw_token_id)
         if token_id != -1:
             return cls(
                 tag_begin="",
                 tag_end={"type": "token", "token": token_id},
+                no_think_excludes=(normalized_end_tag,) if normalized_end_tag else (),
             )
 
-        raw_tag = generate_env_config.think_end_tag
-        if raw_tag is None:
+        if raw_end_tag is None:
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "think_end_tag is required when think_end_token_id is not set",
             )
-        return cls(tag_begin="", tag_end=normalize_think_tag(str(raw_tag)))
+        return cls(tag_begin="", tag_end=normalized_end_tag)
 
     def prefix_format(self, max_thinking_tokens: int) -> Dict[str, Any]:
         think_tag = {
@@ -66,9 +75,12 @@ class ResponseFormatPlan:
         config: Any,
         reasoning_format: Optional[ReasoningFormat] = None,
     ) -> "ResponseFormatPlan":
-        final_constraint = _resolve_final_constraint(config)
+        from rtp_llm.config.generate_config import ThinkingMode
 
-        if config.in_think_mode:
+        final_constraint = _resolve_final_constraint(config)
+        thinking_mode = _resolved_thinking_mode(config)
+
+        if thinking_mode in (ThinkingMode.ENABLED, ThinkingMode.ADAPTIVE):
             if config.has_num_beams() or config.num_return_sequences > 1:
                 raise FtRuntimeException(
                     ExceptionType.ERROR_INPUT_FORMAT_ERROR,
@@ -79,20 +91,28 @@ class ResponseFormatPlan:
             if reasoning_format is None:
                 raise FtRuntimeException(
                     ExceptionType.ERROR_INPUT_FORMAT_ERROR,
-                    "reasoning_format is required when in_think_mode is enabled",
+                    "reasoning_format is required for enabled or adaptive thinking",
                 )
             final_format = (
                 final_constraint.final_format_node()
                 if final_constraint is not None
                 else {"type": "any_text"}
             )
-            engine_constraint = GrammarConstraint(
-                "structural_tag",
-                _reasoning_envelope(
+            if thinking_mode == ThinkingMode.ADAPTIVE:
+                envelope = _adaptive_reasoning_envelope(
                     reasoning_format,
                     config.max_thinking_tokens,
                     final_format,
-                ),
+                )
+            else:
+                envelope = _reasoning_envelope(
+                    reasoning_format,
+                    config.max_thinking_tokens,
+                    final_format,
+                )
+            engine_constraint = GrammarConstraint(
+                "structural_tag",
+                envelope,
             ).normalized()
         else:
             if final_constraint is not None and (
@@ -114,6 +134,26 @@ class ResponseFormatPlan:
         else:
             self.engine_constraint.apply_to_config(config)
         validate_engine_ready(config)
+
+
+def _resolved_thinking_mode(config: Any) -> "ThinkingMode":
+    """Resolve the legacy boolean without importing GenerateConfig at module load."""
+
+    from rtp_llm.config.generate_config import ThinkingMode
+
+    mode = config.thinking_mode
+    if mode == ThinkingMode.UNSPECIFIED:
+        mode = ThinkingMode.ENABLED if config.in_think_mode else ThinkingMode.DISABLED
+    return mode
+
+
+def _uses_reasoning_envelope(config: Any) -> bool:
+    from rtp_llm.config.generate_config import ThinkingMode
+
+    return _resolved_thinking_mode(config) in (
+        ThinkingMode.ENABLED,
+        ThinkingMode.ADAPTIVE,
+    )
 
 
 def _resolve_final_constraint(config: Any) -> Optional[GrammarConstraint]:
@@ -148,7 +188,7 @@ def _resolve_final_constraint(config: Any) -> Optional[GrammarConstraint]:
     return direct_constraints[0].normalized()
 
 
-def _reasoning_envelope(
+def _reasoning_sequence(
     reasoning_format: ReasoningFormat,
     max_thinking_tokens: int,
     final_format: Dict[str, Any],
@@ -158,11 +198,64 @@ def _reasoning_envelope(
         elements = list(reasoning_prefix["elements"]) + [final_format]
     else:
         elements = [reasoning_prefix, final_format]
+    return {"type": "sequence", "elements": elements}
+
+
+def _reasoning_envelope(
+    reasoning_format: ReasoningFormat,
+    max_thinking_tokens: int,
+    final_format: Dict[str, Any],
+) -> Dict[str, Any]:
+    return {
+        "type": "structural_tag",
+        "format": _reasoning_sequence(
+            reasoning_format, max_thinking_tokens, final_format
+        ),
+    }
+
+
+def _add_no_think_excludes(
+    final_format: Dict[str, Any], reasoning_format: ReasoningFormat
+) -> Dict[str, Any]:
+    """Keep think boundary tags out of an unconstrained no-think branch."""
+
+    result = copy.deepcopy(final_format)
+    if result.get("type") not in ("any_text", "triggered_tags"):
+        return result
+    excludes = list(result.get("excludes") or [])
+    boundaries = (
+        reasoning_format.tag_begin,
+        reasoning_format.tag_end,
+        *reasoning_format.no_think_excludes,
+    )
+    for boundary in boundaries:
+        if isinstance(boundary, str) and boundary and boundary not in excludes:
+            excludes.append(boundary)
+    if excludes:
+        result["excludes"] = excludes
+    return result
+
+
+def _adaptive_reasoning_envelope(
+    reasoning_format: ReasoningFormat,
+    max_thinking_tokens: int,
+    final_format: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not reasoning_format.tag_begin:
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            "adaptive thinking requires a non-empty think start tag",
+        )
     return {
         "type": "structural_tag",
         "format": {
-            "type": "sequence",
-            "elements": elements,
+            "type": "or",
+            "elements": [
+                _reasoning_sequence(
+                    reasoning_format, max_thinking_tokens, final_format
+                ),
+                _add_no_think_excludes(final_format, reasoning_format),
+            ],
         },
     }
 
@@ -175,7 +268,7 @@ def prepare_response_format(
 
     if config._reasoning_envelope_applied:
         final_constraint = config._reasoning_final_constraint
-        if config.in_think_mode:
+        if _uses_reasoning_envelope(config):
             validate_engine_ready(config)
             return final_constraint
         restore_final_constraint(config, final_constraint)
@@ -183,7 +276,7 @@ def prepare_response_format(
 
     plan = ResponseFormatPlan.compile(config, reasoning_format=reasoning_format)
     plan.apply_to_config(config)
-    if config.in_think_mode:
+    if _uses_reasoning_envelope(config):
         config._reasoning_envelope_applied = True
         config._reasoning_final_constraint = plan.final_constraint
     return plan.final_constraint

@@ -40,6 +40,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["MOE_PURE_TP_PRESHARD"] = "true"
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
+        os.environ["THINK_MODE"] = "adaptive"
 
         sys.argv = ["prog"]
 
@@ -91,6 +92,7 @@ class ServerArgsSetTest(TestCase):
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
         self.assertEqual(py_env_configs.vit_config.mm_video_max_file_size_kb, 4096)
+        self.assertEqual(py_env_configs.generate_env_config.think_mode, "adaptive")
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

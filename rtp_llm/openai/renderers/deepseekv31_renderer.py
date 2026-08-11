@@ -147,9 +147,10 @@ class DeepseekV31Renderer(ReasoningToolBaseRenderer):
         ):
             context.update(request.extra_configs.chat_template_kwargs)
 
-        # 兼容一下enable_thinking的行为, 让用户指定enable_thinking时, thinking也能生效
-        if context.get("enable_thinking") == True:
-            context["thinking"] = context["enable_thinking"]
+        enable_thinking = self.get_enable_thinking(request)
+        if enable_thinking is not None:
+            context["enable_thinking"] = enable_thinking
+            context["thinking"] = enable_thinking
 
         if self.tokenizer.bos_token:
             context["bos_token"] = self.tokenizer.bos_token

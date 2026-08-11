@@ -895,8 +895,11 @@ def parse_request_controls(
     """Parse non-sampling request controls.
 
     ``ds_header_attributes`` carries DashScope request-scoped controls that need
-    backend effects (thinking switch, timeout, priority, scheduler headers) even
-    though they are not ordinary sampler behavior.
+    backend effects (timeout, priority, scheduler headers) even though they are
+    not ordinary sampler behavior. Thinking is controlled by the top-level
+    ``enable_thinking`` parameter, with nested ``enable_thinking`` retained as
+    a compatibility fallback. The legacy ``x-ds-llm-thinking`` attribute is
+    intentionally ignored.
     """
     return_input_ids = False
     inp, raw = _find_input_raw(request, "return_input_ids")
@@ -913,15 +916,11 @@ def parse_request_controls(
                     return_input_ids = vf != 0.0
 
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
-    enable_thinking = _parse_optional_bool(
-        _lookup_ds_request_control(ds_attrs, "x-ds-llm-thinking")
-    )
+    enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
     if enable_thinking is None:
         enable_thinking = _parse_optional_bool(
             _lookup_ds_request_control(ds_attrs, "enable_thinking")
         )
-    if enable_thinking is None:
-        enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
 
     max_new_think_tokens = _parse_optional_scalar_int(request, "max_new_think_tokens")
     if max_new_think_tokens is None:
@@ -1051,11 +1050,19 @@ def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
     if isinstance(nested, dict):
         for key in _PER_PART_CONFIG_INT_KEYS:
             value = nested.get(key)
-            if isinstance(value, (int, float)) and value > 0:
+            if (
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and value > 0
+            ):
                 out[key] = int(value)
     for key in _PER_PART_CONFIG_INT_KEYS:
         value = part.get(key)
-        if isinstance(value, (int, float)) and value > 0:
+        if (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and value > 0
+        ):
             out[key] = int(value)
     return out
 

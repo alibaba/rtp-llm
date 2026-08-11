@@ -378,7 +378,7 @@ class GenerateEnvConfig:
     def __init__(self):
         self.think_end_tag: str = "</think>\n\n"
         self.think_end_token_id: int = -1
-        self.think_mode: int = 0
+        self.think_mode: str = "disabled"
         self.force_stop_words: bool = False
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None

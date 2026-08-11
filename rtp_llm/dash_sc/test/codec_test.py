@@ -790,6 +790,8 @@ class DashScGrpcRequestTest(TestCase):
     def test_parse_request_controls_thinking_controls(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
+            # This retired header is deliberately ignored. Clients must use
+            # request.parameters["enable_thinking"] instead.
             {
                 "x-ds-llm-thinking": "false",
                 "x-dashscope-inner-timeout": 1800,
@@ -801,13 +803,27 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
         op = parse_request_controls(req)
         self.assertFalse(op.return_input_ids)
-        self.assertIs(op.enable_thinking, False)
+        self.assertIsNone(op.enable_thinking)
         self.assertEqual(op.max_new_think_tokens, 0)
         self.assertEqual(op.timeout_ms, 1_800_000)
         self.assertEqual(op.traffic_reject_priority, 10)
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def test_parse_request_controls_enable_thinking_only_from_parameter(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "x-ds-llm-thinking": "false",
+                "parameters": {"enable_thinking": False},
+            }
+        )
+
+        op = parse_request_controls(req)
+
+        self.assertIs(op.enable_thinking, True)
 
     def test_parse_request_controls_reasoning_effort_max_alias(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -1033,6 +1049,62 @@ class DashScMultimodalRequestTest(TestCase):
                 )
             ],
         )
+
+    def test_preserves_mixed_part_order_and_filters_invalid_config(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": "http://x.png",
+                                "max_pixels": -1,
+                            },
+                            {
+                                "type": "video_url",
+                                "video_url": "http://v.mp4",
+                                "preprocess_config": {
+                                    "fps": True,
+                                    "max_frames": 0,
+                                    "min_frames": 3,
+                                },
+                            },
+                            {
+                                "image": "http://native.png",
+                                "video": "http://native.mp4",
+                            },
+                        ],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE),
+                MultimodalPart(
+                    "http://v.mp4",
+                    MMUrlType.VIDEO,
+                    min_frames=3,
+                ),
+                MultimodalPart("http://native.png", MMUrlType.IMAGE),
+                MultimodalPart("http://native.mp4", MMUrlType.VIDEO),
+            ],
+        )
+
+    def test_nested_enable_thinking_is_a_compatibility_fallback(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {"body": {"parameters": {"enable_thinking": False}}}
+        )
+
+        self.assertIs(parse_request_controls(request).enable_thinking, False)
 
     def test_missing_payload_is_text_only(self) -> None:
         request = predict_v2_pb2.ModelInferRequest()

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import RoleAddr
+from rtp_llm.config.generate_config import RoleAddr, ThinkingMode
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
@@ -172,7 +172,7 @@ class _FakeTokenizer:
 
 
 class _GenerateEnvCfg:
-    think_mode = 1
+    think_mode = "adaptive"
     think_end_token_id = -1
     think_start_tag = "<think>\n"
     think_end_tag = "</think>\n\n"
@@ -641,9 +641,11 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 1)
         gc = visitor.last_generate_input.generate_config
-        self.assertTrue(gc.in_think_mode)
+        self.assertFalse(gc.in_think_mode)
+        self.assertEqual(gc.thinking_mode, ThinkingMode.ADAPTIVE)
         self.assertEqual(gc.max_thinking_tokens, 2_147_483_647)
         self.assertEqual(gc.end_think_token_ids, [128822, 271])
+        self.assertEqual(gc.structural_tag["format"]["type"], "or")
 
     async def test_budget_zero_disables_thinking(self) -> None:
         """Request-level zero budget must still produce a full think mask config."""
@@ -875,7 +877,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens=2,
                     max_new_tokens_from_completion_alias=True,
                 ),
-                DashScRequestControls(max_new_think_tokens=10),
+                DashScRequestControls(enable_thinking=True, max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -932,7 +934,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens_from_completion_alias=True,
                     max_total_tokens=105,
                 ),
-                DashScRequestControls(max_new_think_tokens=10),
+                DashScRequestControls(enable_thinking=True, max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 tokenizer=tok,
@@ -975,7 +977,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens_from_completion_alias=True,
                     max_total_tokens=3,
                 ),
-                DashScRequestControls(max_new_think_tokens=10),
+                DashScRequestControls(enable_thinking=True, max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 tokenizer=tok,
@@ -2168,7 +2170,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     self, responses[0], "max_completion_tokens"
                 )
 
-    async def test_dash_generation_without_enable_thinking_disables_env_thinking(
+    async def test_dash_generation_without_enable_thinking_inherits_adaptive_env(
         self,
     ) -> None:
         out = GenerateOutput(
@@ -2207,7 +2209,78 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         generate_config = visitor.last_generate_input.generate_config
         self.assertEqual(generate_config.max_new_tokens, 3)
         self.assertFalse(generate_config.in_think_mode)
+        self.assertEqual(generate_config.thinking_mode, ThinkingMode.ADAPTIVE)
+        self.assertEqual(generate_config.max_thinking_tokens, 32000)
+
+    async def test_dash_generation_without_explicit_mode_defaults_to_adaptive(
+        self,
+    ) -> None:
+        for env_mode in ("disabled", "adaptive", "enabled", "0", "1"):
+            for budget in (None, 10):
+                with self.subTest(env_mode=env_mode, budget=budget):
+                    visitor = _FakeVisitor(_FakeAsyncStream([]))
+                    tok = _dsv4_tokenizer()
+                    env_cfg = _GenerateEnvCfg()
+                    env_cfg.think_mode = env_mode
+                    servicer = DashScInferenceServicer(
+                        backend_visitor=visitor,
+                        tokenizer=tok,
+                        generate_env_config=env_cfg,
+                        think_runtime=build_think_runtime(tok, env_cfg, "qwen"),
+                    )
+                    request = self._valid_infer_request()
+                    if budget is not None:
+                        request.parameters["thinking_budget"].int64_param = budget
+
+                    await _drain(
+                        servicer.ModelStreamInfer(_areq_iter([request]), MagicMock())
+                    )
+
+                    generate_config = visitor.last_generate_input.generate_config
+                    self.assertEqual(
+                        generate_config.thinking_mode, ThinkingMode.ADAPTIVE
+                    )
+                    self.assertFalse(generate_config.in_think_mode)
+                    expected_budget = budget if budget is not None else 32000
+                    self.assertEqual(
+                        generate_config.max_thinking_tokens,
+                        expected_budget,
+                    )
+                    self.assertEqual(
+                        generate_config.structural_tag["format"]["type"], "or"
+                    )
+
+    async def test_implicit_adaptive_multi_sequence_falls_back_to_disabled(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        _add_input_tensor(
+            req,
+            "num_return_sequences",
+            "INT32",
+            [1],
+            struct.pack("<i", 2),
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(generate_config.thinking_mode, ThinkingMode.DISABLED)
+        self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 0)
+        self.assertEqual(generate_config.begin_think_token_ids, [128821, 198])
+        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
+        self.assertIsNone(generate_config.structural_tag)
 
     async def test_dash_generation_enable_thinking_true_without_budget_keeps_thinking(
         self,
@@ -2230,6 +2303,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         generate_config = visitor.last_generate_input.generate_config
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 32000)
+        self.assertEqual(generate_config.structural_tag["format"]["type"], "sequence")
 
     async def test_dash_generation_response_format_is_finalized_before_enqueue(
         self,
@@ -2439,7 +2513,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(elements[0]["end"], "</think>\n\n")
         self.assertEqual(elements[1], tag["format"])
 
-    async def test_dash_generation_budget_aliases_without_enable_thinking_keep_thinking(
+    async def test_dash_generation_budget_aliases_without_enable_thinking_are_adaptive(
         self,
     ) -> None:
         for param_name in ("thinking_budget", "max_new_think_tokens"):
@@ -2455,13 +2529,25 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 )
                 req = self._valid_infer_request()
                 req.parameters[param_name].int64_param = 10
+                req.parameters["response_format"].string_param = json.dumps(
+                    {"type": "json_object"}
+                )
 
                 await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
 
                 self.assertEqual(visitor.enqueue_called, 1)
                 generate_config = visitor.last_generate_input.generate_config
-                self.assertTrue(generate_config.in_think_mode)
+                self.assertFalse(generate_config.in_think_mode)
+                self.assertEqual(generate_config.thinking_mode, ThinkingMode.ADAPTIVE)
                 self.assertEqual(generate_config.max_thinking_tokens, 10)
+                adaptive = generate_config.structural_tag["format"]
+                self.assertEqual(adaptive["type"], "or")
+                think_branch, no_think_branch = adaptive["elements"]
+                self.assertEqual(
+                    think_branch["elements"][0]["content"]["max_tokens"], 10
+                )
+                self.assertEqual(think_branch["elements"][1]["type"], "json_schema")
+                self.assertEqual(no_think_branch["type"], "json_schema")
 
     async def test_max_completion_tokens_thinking_budget_keeps_backend_limit_repro(
         self,
@@ -2565,6 +2651,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 0)
         self.assertEqual(generate_config.end_think_token_ids, [])
+        self.assertIsNone(generate_config.structural_tag)
         self.assertEqual(generate_config.timeout_ms, 1_800_000)
         self.assertEqual(generate_config.ttft_timeout_ms, 1_800_000)
         self.assertEqual(generate_config.traffic_reject_priority, 10)
